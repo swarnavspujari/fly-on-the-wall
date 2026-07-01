@@ -1,0 +1,13 @@
+# Normalize all text to LF everywhere (Windows CI runners default to
+# autocrlf=true, which would otherwise break Prettier/rustfmt checks).
+* text=auto eol=lf
+
+# binaries
+*.png binary
+*.ico binary
+*.icns binary
+*.gif binary
+*.jpg binary
+*.wav binary
+*.mp3 binary
+*.mp4 binary
