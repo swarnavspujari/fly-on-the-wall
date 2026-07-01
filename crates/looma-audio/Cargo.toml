@@ -1,0 +1,13 @@
+[package]
+name = "looma-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+looma-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+cpal.workspace = true
+hound.workspace = true

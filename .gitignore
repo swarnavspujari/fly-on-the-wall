@@ -1,0 +1,36 @@
+# secrets — never commit real keys or tokens
+.env
+.env.*
+!.env.example
+
+# rust
+/target/
+**/*.rs.bk
+
+# node
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# tauri generated
+src-tauri/gen/
+src-tauri/target/
+
+# model weights & runtime data — downloaded on first use, never committed
+models/
+*.gguf
+*.onnx
+*.bin
+
+# recordings & user data
+recordings/
+*.wav
+*.mp4
+*.mkv
+!crates/**/fixtures/**/*.wav
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "m*"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Lint, test & build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Install JS dependencies
+        run: |
+          npm ci
+          npm --prefix frontend ci
+
+      - name: Frontend lint
+        run: |
+          npm --prefix frontend run lint
+          npm --prefix frontend run format:check
+
+      - name: Frontend typecheck & build
+        run: npm --prefix frontend run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --workspace

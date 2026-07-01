@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+:root {
+  font-family:
+    "Segoe UI Variable Text",
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    sans-serif;
+}

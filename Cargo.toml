@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/looma-core",
+    "crates/looma-audio",
+    "crates/looma-asr",
+    "crates/looma-diarize",
+    "crates/looma-llm",
+    "crates/looma-calendar",
+    "crates/looma-capture-screen",
+    "crates/looma-storage",
+    "crates/looma-mcp",
+    "crates/looma-secrets",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/swarnavspujari/looma-notetaker"
+
+[workspace.dependencies]
+# internal crates
+looma-core = { path = "crates/looma-core" }
+looma-audio = { path = "crates/looma-audio" }
+looma-asr = { path = "crates/looma-asr" }
+looma-diarize = { path = "crates/looma-diarize" }
+looma-llm = { path = "crates/looma-llm" }
+looma-calendar = { path = "crates/looma-calendar" }
+looma-capture-screen = { path = "crates/looma-capture-screen" }
+looma-storage = { path = "crates/looma-storage" }
+looma-secrets = { path = "crates/looma-secrets" }
+
+# shared external deps — pinned once here so every crate agrees
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "time"] }
+tracing = "0.1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+# keyring 3.x: platform stores built in (v4 splits them into separate crates)
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
+dirs = "6"
+reqwest = { version = "0.13", features = ["json", "stream"] }
+cpal = "0.18"
+hound = "3.5"
+
+[profile.release]
+lto = "thin"
+strip = true

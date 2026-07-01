@@ -1,0 +1,31 @@
+[package]
+name = "looma-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# lib + thin main so the same code can back desktop now and mobile later
+[lib]
+name = "looma_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+looma-core.workspace = true
+looma-audio.workspace = true
+looma-asr.workspace = true
+looma-diarize.workspace = true
+looma-llm.workspace = true
+looma-calendar.workspace = true
+looma-capture-screen.workspace = true
+looma-storage.workspace = true
+looma-secrets.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs.workspace = true
