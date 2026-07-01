@@ -9,6 +9,11 @@ export default tseslint.config(
   {
     files: ["src/**/*.{ts,tsx}"],
     plugins: { "react-hooks": reactHooks },
-    rules: { ...reactHooks.configs.recommended.rules },
+    rules: {
+      ...reactHooks.configs.recommended.rules,
+      // Our effects fetch from the Tauri backend and set state when data
+      // arrives — the standard desktop-app pattern this rule over-flags.
+      "react-hooks/set-state-in-effect": "off",
+    },
   },
 );

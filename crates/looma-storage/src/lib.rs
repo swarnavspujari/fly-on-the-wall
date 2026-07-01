@@ -8,9 +8,14 @@
 //!   transcripts/<meeting_id>.json— structured transcript (words, speakers)
 //!   attachments/<note_id>/…      — attached files, referenced relatively
 //!   recordings/…                 — captured audio
-//!
-//! Note CRUD, folders, search, and attachments land in M1; this milestone
-//! establishes the schema and proves FTS5 is available in the bundled SQLite.
+
+mod attachments;
+mod folders;
+mod notes;
+mod search;
+
+pub use notes::NoteSummary;
+pub use search::{SearchHit, SearchHitKind};
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +29,8 @@ pub enum StorageError {
     Serde(#[from] serde_json::Error),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("invalid operation: {0}")]
+    Invalid(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -56,12 +63,6 @@ impl Storage {
         &self.data_dir
     }
 
-    // Used by the CRUD modules landing in M1; until then only tests touch it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn conn(&self) -> &Connection {
-        &self.conn
-    }
-
     fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             r#"
@@ -77,6 +78,7 @@ impl Storage {
                 title            TEXT NOT NULL,
                 folder_id        TEXT REFERENCES folders(id) ON DELETE SET NULL,
                 meeting_id       TEXT,
+                scratchpad       TEXT NOT NULL DEFAULT '',
                 blocks_json      TEXT NOT NULL DEFAULT '[]',
                 attachments_json TEXT NOT NULL DEFAULT '[]',
                 created_at       TEXT NOT NULL,
@@ -123,6 +125,13 @@ impl Storage {
 }
 
 #[cfg(test)]
+pub(crate) fn test_storage() -> (tempfile::TempDir, Storage) {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).unwrap();
+    (dir, storage)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -142,10 +151,9 @@ mod tests {
     /// feature rests on.
     #[test]
     fn fts5_is_available_and_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(dir.path()).unwrap();
+        let (_dir, storage) = test_storage();
         storage
-            .conn()
+            .conn
             .execute(
                 "INSERT INTO notes_fts (note_id, title, body) VALUES (?1, ?2, ?3)",
                 (
@@ -156,7 +164,7 @@ mod tests {
             )
             .unwrap();
         let hit: String = storage
-            .conn()
+            .conn
             .query_row(
                 "SELECT note_id FROM notes_fts WHERE notes_fts MATCH 'roadmap'",
                 [],

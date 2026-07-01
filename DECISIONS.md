@@ -33,3 +33,21 @@ Running log of technical decisions, newest last. Format: date — decision — w
 - **2026-07-01 — TypeScript ~5.9 (not 6.x) in the frontend.** TS 6 is weeks-old major; the
   eslint/vite toolchain is validated against 5.9. Revisit later.
 - **2026-07-01 — MIT license** (repo came initialized with it).
+
+## M1 — Notes core
+
+- **2026-07-01 — Scratchpad vs enhanced-blocks split on Note.** `scratchpad: String` holds the
+  user's raw in-meeting notes; `blocks: Vec<NoteBlock>` is the enhanced document (empty until
+  M4's Enhance). Matches the Granola mental model and keeps provenance unambiguous: the
+  scratchpad is always user text; enhanced blocks carry user/ai origin per block.
+- **2026-07-01 — FTS5 MATCH input is sanitized, never raw.** User queries are tokenized, quotes
+  stripped, each token double-quoted, last token prefix-starred. Kills FTS syntax-error crashes
+  and operator injection; hostile-input test included.
+- **2026-07-01 — Native dialogs/openers via Rust plugin APIs, not JS.** File picker
+  (tauri-plugin-dialog) and open/reveal (tauri-plugin-opener) are called inside commands, so no
+  webview capability scoping is needed and paths never round-trip through the DOM.
+- **2026-07-01 — Attachments copied, never referenced in place.** Files are copied under
+  `attachments/<note_id>/` with collision-deduped names and stored as relative paths — the data
+  dir stays self-contained and portable (spec §10).
+- **2026-07-01 — react-hooks `set-state-in-effect` rule disabled.** Our effects fetch from the
+  Tauri backend then set state — the standard desktop-app data flow the new rule over-flags.

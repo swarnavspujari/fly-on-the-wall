@@ -82,6 +82,10 @@ pub struct Note {
     pub title: String,
     pub folder_id: Option<String>,
     pub meeting_id: Option<String>,
+    /// The user's raw in-meeting notes (always user-origin, freely edited).
+    pub scratchpad: String,
+    /// The enhanced document: ordered blocks with provenance. Empty until
+    /// the first Enhance run (M4).
     pub blocks: Vec<NoteBlock>,
     pub attachments: Vec<Attachment>,
     pub created_at: DateTime<Utc>,
@@ -90,9 +94,18 @@ pub struct Note {
 
 impl Note {
     /// Flatten to plain markdown. Provenance colors are a rendering concern;
-    /// exports optionally keep sourcing as footnote-style comments.
+    /// exports optionally keep sourcing as footnote-style comments. The
+    /// enhanced document supersedes the scratchpad when it exists.
     pub fn to_markdown(&self, include_sources: bool) -> String {
         let mut out = format!("# {}\n", self.title);
+        if self.blocks.is_empty() {
+            if !self.scratchpad.is_empty() {
+                out.push('\n');
+                out.push_str(&self.scratchpad);
+                out.push('\n');
+            }
+            return out;
+        }
         for block in &self.blocks {
             out.push('\n');
             out.push_str(&block.markdown);
@@ -260,6 +273,7 @@ mod tests {
             title: "Standup".into(),
             folder_id: None,
             meeting_id: None,
+            scratchpad: "raw jotted line".into(),
             blocks: vec![
                 NoteBlock::user("my scratch line"),
                 NoteBlock::ai("ai summary", vec!["seg-9".into()]),
@@ -273,5 +287,23 @@ mod tests {
         assert!(md.contains("<!-- sources: seg-9 -->"));
         let plain = note.to_markdown(false);
         assert!(!plain.contains("sources:"));
+    }
+
+    #[test]
+    fn unenhanced_note_exports_scratchpad() {
+        let note = Note {
+            id: "n2".into(),
+            title: "Quick thoughts".into(),
+            folder_id: None,
+            meeting_id: None,
+            scratchpad: "- talk to sam\n- ship it".into(),
+            blocks: vec![],
+            attachments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let md = note.to_markdown(false);
+        assert!(md.contains("# Quick thoughts"));
+        assert!(md.contains("- talk to sam"));
     }
 }

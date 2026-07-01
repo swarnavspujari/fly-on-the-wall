@@ -8,8 +8,6 @@ use looma_storage::Storage;
 pub struct AppState {
     /// rusqlite connections are Send but not Sync; all storage access goes
     /// through this mutex. Fine for a single-user desktop app.
-    // First consumers are the M1 note/folder commands.
-    #[allow(dead_code)]
     pub storage: Mutex<Storage>,
     pub data_dir: PathBuf,
 }
