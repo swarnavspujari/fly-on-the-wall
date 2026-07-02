@@ -17,9 +17,11 @@ In the spirit of Granola, but private by default:
 - **Your calendars** — Google Calendar & Microsoft 365, one-click meeting start. *(from M5)*
 - **MCP server** — chat with your notes from Claude Desktop or any MCP client. *(from M6)*
 
-> **Status: v0.1.0.** All nine milestones (`m0`…`m8` + hardening) are in — recording,
-> local transcription + diarization, enhance with provenance, templates, Ask, calendars,
-> MCP, screen recording, and file import. See [DECISIONS.md](DECISIONS.md) for the build story.
+> **Status: v0.2.0.** Fifteen milestones (`m0`…`m14`) are in — recording, local
+> transcription + diarization, enhance with provenance, templates, Ask, calendars, MCP,
+> screen recording, file import, the warm design-system UI, live partial transcript while
+> you record, note export, installers for Windows/macOS/Linux, and Linux system-audio
+> capture. See [DECISIONS.md](DECISIONS.md) for the build story.
 
 ## A two-minute tour
 
@@ -39,8 +41,8 @@ In the spirit of Granola, but private by default:
 4. **Ask** — 💬 opens a chat grounded in this meeting ("What did I miss?", "Draft a follow-up
    email"). Insert any answer into the note with one click.
 5. **Organize & find** — folders on the left, full-text search across notes *and* transcripts
-   at the top, attachments and pasted links on any note. Everything is markdown on disk you can
-   open without Looma.
+   at the top, attachments and pasted links on any note. Everything is markdown on disk you
+   can open without Looma — or use **Export .md** / **Print → PDF** on any note.
 6. **Chat from Claude Desktop** — Settings → copy the MCP snippet, and your notes are queryable
    from any MCP client, fully locally.
 
@@ -103,7 +105,7 @@ npm run prepare-sidecars   # builds + stages looma-mcp (required once before any
 npm run tauri dev          # dev app with hot reload
 ```
 
-Production build (installer under `src-tauri/target/release/bundle/`):
+Production build (installers under the workspace `target/release/bundle/`):
 
 ```powershell
 npm run tauri build

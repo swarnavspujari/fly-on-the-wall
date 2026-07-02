@@ -28,7 +28,9 @@
 ## CI
 
 Every push: ESLint + Prettier check, `tsc` typecheck, frontend build, rustfmt check, clippy
-(`-D warnings`), `cargo test`, `cargo build` — all on `windows-latest`. `main` stays green.
+(`-D warnings`), `cargo test`, `cargo build` on `windows-latest`, plus a build-and-test
+matrix on `macos-latest` and `ubuntu-22.04`. Tag pushes (`v*`) build the three-OS
+installers and attach them to a GitHub Release. `main` stays green.
 
 ## Manual checklist (run before tagging a milestone)
 
