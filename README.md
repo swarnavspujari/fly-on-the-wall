@@ -27,7 +27,9 @@ In the spirit of Granola, but private by default:
 
 1. **Record** — open Looma, hit **Record** (or click **Start** on a calendar event). A
    recording bar shows while capturing; your mic and the meeting's system audio are captured as
-   separate channels. Jot rough notes in the scratchpad as you go. Two tips for clean captures:
+   separate channels, and a rough live transcript streams in as people talk (the full diarized
+   one replaces it when you stop). Jot rough notes in the scratchpad as you go. Two tips for
+   clean captures:
    keep the system output audible (Looma warns you live if it's muted or at 0 % — muted output
    means the other side records as silence), and prefer a headset — on open speakers the mic
    also hears the meeting audio and picks up echo fragments.
