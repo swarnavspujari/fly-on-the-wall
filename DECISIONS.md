@@ -149,3 +149,18 @@ Running log of technical decisions, newest last. Format: date — decision — w
   note + meeting with a 16 kHz mono `recording.mixed.wav` (pure-Rust for PCM WAVs; ffmpeg for
   everything else), then the exact same transcribe→diarize→align flow runs — one pipeline,
   two entry points.
+- **2026-07-02 — ffmpeg pinned to a DATED BtbN autobuild, ultrafast preset, 1080p cap.** The
+  rolling "latest" tag re-tags assets (hash drift breaks checksum pinning). Measured on this
+  laptop: x264 veryfast at native high-DPI resolution encoded only 9 frames in 4 s (timeline
+  compressed to 0.6 s); ultrafast + a 1920-wide cap records true wall-clock duration.
+
+## M9 — Hardening & packaging
+
+- **2026-07-02 — looma-mcp ships as a Tauri externalBin sidecar.** `prepare-sidecars.mjs`
+  copies the release binary with the host target-triple suffix; the installer places
+  `looma-mcp.exe` next to the app exe — exactly where the Settings MCP snippet points.
+- **2026-07-02 — Data dir stays fixed (%APPDATA%/Looma) for v0.1.** A configurable storage
+  path implies migration of recordings/models/DB; deferred rather than half-done. The dir is
+  user-visible with a reveal-in-Explorer affordance.
+- **2026-07-02 — Mic device selection is a stored setting** (`capture.mic_device_id`), applied
+  at recording start; default remains the system default microphone.

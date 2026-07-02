@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { AsrSettings, CalendarStatus, LlmSettings, ModelProgress, Template } from "../types";
+import type {
+  AsrSettings,
+  AudioDevice,
+  CalendarStatus,
+  LlmSettings,
+  ModelProgress,
+  Template,
+} from "../types";
 
 interface Props {
   modelProgress: ModelProgress | null;
@@ -47,6 +54,10 @@ export default function SettingsModal({ modelProgress, onClose }: Props) {
   // MCP state
   const [mcpJson, setMcpJson] = useState("");
   const [mcpCopied, setMcpCopied] = useState(false);
+
+  // microphone
+  const [mics, setMics] = useState<AudioDevice[]>([]);
+  const [micId, setMicId] = useState("");
 
   // calendar state
   const [cal, setCal] = useState<CalendarStatus | null>(null);
@@ -132,6 +143,11 @@ export default function SettingsModal({ modelProgress, onClose }: Props) {
     api.listTemplates().then(setTemplates).catch(console.error);
     loadCal().catch(console.error);
     api.mcpConfig().then(setMcpJson).catch(console.error);
+    api.listMicDevices().then(setMics).catch(console.error);
+    api
+      .getAppSetting("capture.mic_device_id")
+      .then((v) => setMicId(v ?? ""))
+      .catch(console.error);
   }, []);
 
   const pickProvider = (id: string) => {
@@ -255,6 +271,26 @@ export default function SettingsModal({ modelProgress, onClose }: Props) {
             </span>
           </div>
         )}
+
+        <div className="mb-4 flex items-center gap-3">
+          <div className="font-medium">Microphone</div>
+          <select
+            value={micId}
+            onChange={(e) => {
+              setMicId(e.target.value);
+              void api.setAppSetting("capture.mic_device_id", e.target.value);
+            }}
+            className="max-w-80 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs"
+          >
+            <option value="">System default</option>
+            {mics.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+                {m.is_default ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
 
         <div className="mb-4">
           <div className="mb-1 font-medium">Hardware tier</div>

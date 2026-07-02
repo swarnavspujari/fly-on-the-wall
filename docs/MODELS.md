@@ -34,7 +34,17 @@ quantization — negligible accuracy loss, big RAM/disk savings, especially on L
 Even on the Cloud tier, diarization runs locally and Groq's word timestamps are merged with the
 local speaker turns (spec §6.3): "who said what" never depends on the network.
 
+## Sidecar binaries (also downloaded on first use, checksum-pinned)
+
+| Artifact | Version | Size | Purpose |
+|---|---|---|---|
+| whisper.cpp CLI (`whisper-cli.exe`) | v1.9.1 (CPU build) | ~8 MB zip | ASR; the same zip ships `parakeet-cli.exe` for a future Parakeet engine |
+| sherpa-onnx diarization CLI | v1.13.3 | ~19 MB | speaker diarization |
+| ffmpeg | n8.1 (BtbN autobuild, dated tag) | ~79 MB zip | screen capture (gdigrab) + media import conversion |
+
 ## Model registry
 
-Exact download URLs, SHA-256 checksums, and sizes live in code
-(`crates/looma-asr` / `crates/looma-diarize`, landing M3) and are documented here as they ship.
+Exact download URLs, SHA-256 checksums (pinned from upstream release digests / HF LFS metadata
+and re-verified locally), and sizes live in `src-tauri/src/models.rs`. Everything downloads
+into `<data dir>/models` and `<data dir>/bin` with streaming progress; nothing is bundled in
+git or the installer.

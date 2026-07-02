@@ -233,3 +233,9 @@ export interface ImportResult {
   meeting: Meeting;
   note_id: string;
 }
+
+export interface AudioDevice {
+  id: string;
+  name: string;
+  is_default: boolean;
+}

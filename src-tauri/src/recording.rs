@@ -78,7 +78,7 @@ pub fn start_recording_impl(
         return Err("a recording is already in progress".into());
     }
 
-    let (note, meeting) = {
+    let (note, meeting, mic_device_id) = {
         let storage = state.storage.lock().unwrap();
         let note = match note_id {
             Some(id) => storage.get_note(&id).map_err(|e| e.to_string())?,
@@ -94,14 +94,19 @@ pub fn start_recording_impl(
         let meeting = storage
             .create_meeting(&note.title, &note.id, attendees)
             .map_err(|e| e.to_string())?;
-        (note, meeting)
+        let mic_device_id = storage
+            .get_setting("capture.mic_device_id")
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty());
+        (note, meeting, mic_device_id)
     };
 
     let out_dir = state.data_dir.join("recordings").join(&meeting.id);
     let session = state
         .audio
         .start(CaptureConfig {
-            mic_device_id: None,
+            mic_device_id,
             capture_system: true,
             out_dir,
             base_name: "recording".into(),

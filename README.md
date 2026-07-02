@@ -17,8 +17,29 @@ In the spirit of Granola, but private by default:
 - **Your calendars** — Google Calendar & Microsoft 365, one-click meeting start. *(from M5)*
 - **MCP server** — chat with your notes from Claude Desktop or any MCP client. *(from M6)*
 
-> **Status: pre-release, milestone M0 (scaffold).** The build story below works; features land
-> milestone by milestone — see [DECISIONS.md](DECISIONS.md) and the git tags (`m0`, `m1`, …).
+> **Status: v0.1.0.** All nine milestones (`m0`…`m8` + hardening) are in — recording,
+> local transcription + diarization, enhance with provenance, templates, Ask, calendars,
+> MCP, screen recording, and file import. See [DECISIONS.md](DECISIONS.md) for the build story.
+
+## A two-minute tour
+
+1. **Record** — open Looma, hit **● Record** (or click **Start** on a calendar event). A red
+   bar shows while recording; your mic and the meeting's system audio are captured as separate
+   channels. Jot rough notes in the scratchpad as you go.
+2. **Stop** — the transcript starts automatically: whisper.cpp + sherpa-onnx run *on your
+   machine* (first run downloads the models with progress + checksums). You get timestamped,
+   speaker-labeled text; click any name to rename ("Speaker 1" → "Dana").
+3. **Enhance** — pick a template (1:1, Sales discovery, Standup, Interview, General) and hit
+   **✨ Enhance**. Your own lines stay your color; AI-added lines are tinted and cite their
+   transcript segments — click 🔍 to jump to the exact source. Edit an AI line and it becomes
+   yours.
+4. **Ask** — 💬 opens a chat grounded in this meeting ("What did I miss?", "Draft a follow-up
+   email"). Insert any answer into the note with one click.
+5. **Organize & find** — folders on the left, full-text search across notes *and* transcripts
+   at the top, attachments and pasted links on any note. Everything is markdown on disk you can
+   open without Looma.
+6. **Chat from Claude Desktop** — Settings → copy the MCP snippet, and your notes are queryable
+   from any MCP client, fully locally.
 
 ## Build & run (Windows)
 

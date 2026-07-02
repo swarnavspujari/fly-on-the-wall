@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
   AskMessage,
+  AudioDevice,
   CalendarEvent,
   CalendarSettingsUpdate,
   CalendarStatus,
@@ -108,6 +109,8 @@ export const api = {
   upcomingMeetings: () => invoke<CalendarEvent[]>("upcoming_meetings"),
   startMeetingFromEvent: (title: string, attendees: string[]) =>
     invoke<RecordingStatus>("start_meeting_from_event", { title, attendees }),
+
+  listMicDevices: () => invoke<AudioDevice[]>("list_mic_devices"),
 
   // screen recording & import
   screenStatus: () => invoke<ScreenStatus>("screen_status"),

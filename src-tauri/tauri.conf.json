@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run prepare-sidecars",
     "frontendDist": "../frontend/dist"
   },
   "app": {
@@ -26,6 +26,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "externalBin": ["binaries/looma-mcp"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

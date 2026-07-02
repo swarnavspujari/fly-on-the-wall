@@ -8,6 +8,7 @@
     "build": "npm --prefix frontend run build",
     "lint": "npm --prefix frontend run lint",
     "format:check": "npm --prefix frontend run format:check",
+    "prepare-sidecars": "cargo build --release -p looma-mcp && node scripts/prepare-sidecars.mjs",
     "tauri": "tauri"
   },
   "devDependencies": {
