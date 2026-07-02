@@ -70,6 +70,13 @@ impl Storage {
     }
 
     fn migrate(conn: &Connection) -> Result<()> {
+        Self::create_baseline(conn)?;
+        Self::repair_missing_columns(conn)?;
+        conn.pragma_update(None, "user_version", 1)?;
+        Ok(())
+    }
+
+    fn create_baseline(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS folders (
@@ -133,6 +140,67 @@ impl Storage {
         )?;
         Ok(())
     }
+
+    /// `CREATE TABLE IF NOT EXISTS` never adds columns to tables made by an
+    /// older build, so upgrades would break on the first new column (seen in
+    /// the wild: a pre-`scratchpad` looma.db). Compare each table against the
+    /// baseline schema and `ALTER TABLE ADD COLUMN` whatever is missing —
+    /// idempotent, and safe for every DB regardless of the build that made it.
+    fn repair_missing_columns(conn: &Connection) -> Result<()> {
+        const EXPECTED: &[(&str, &[(&str, &str)])] = &[
+            (
+                "folders",
+                &[
+                    ("parent_id", "TEXT REFERENCES folders(id) ON DELETE CASCADE"),
+                    ("created_at", "TEXT NOT NULL DEFAULT ''"),
+                ],
+            ),
+            (
+                "notes",
+                &[
+                    (
+                        "folder_id",
+                        "TEXT REFERENCES folders(id) ON DELETE SET NULL",
+                    ),
+                    ("meeting_id", "TEXT"),
+                    ("scratchpad", "TEXT NOT NULL DEFAULT ''"),
+                    ("blocks_json", "TEXT NOT NULL DEFAULT '[]'"),
+                    ("attachments_json", "TEXT NOT NULL DEFAULT '[]'"),
+                    ("created_at", "TEXT NOT NULL DEFAULT ''"),
+                    ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+                ],
+            ),
+            (
+                "meetings",
+                &[
+                    ("attendees_json", "TEXT NOT NULL DEFAULT '[]'"),
+                    ("started_at", "TEXT NOT NULL DEFAULT ''"),
+                    ("ended_at", "TEXT"),
+                    ("recording_json", "TEXT"),
+                ],
+            ),
+            (
+                "templates",
+                &[
+                    ("system_prompt", "TEXT NOT NULL DEFAULT ''"),
+                    ("structure_hint", "TEXT NOT NULL DEFAULT ''"),
+                    ("built_in", "INTEGER NOT NULL DEFAULT 0"),
+                ],
+            ),
+        ];
+        for (table, cols) in EXPECTED {
+            let existing: std::collections::HashSet<String> = conn
+                .prepare(&format!("PRAGMA table_info({table})"))?
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<std::result::Result<_, _>>()?;
+            for (name, decl) in *cols {
+                if !existing.contains(*name) {
+                    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {decl}"))?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +224,37 @@ mod tests {
         // reopen works (migrations are idempotent)
         drop(storage);
         Storage::open(dir.path()).unwrap();
+    }
+
+    /// A looma.db created by an older build (missing later columns) must be
+    /// repaired on open, not error on first write. Regression test for the
+    /// pre-`scratchpad` DB found during real-machine validation.
+    #[test]
+    fn open_repairs_old_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join("looma.db")).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE notes (
+                    id         TEXT PRIMARY KEY,
+                    title      TEXT NOT NULL,
+                    folder_id  TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE meetings (
+                    id      TEXT PRIMARY KEY,
+                    title   TEXT NOT NULL,
+                    note_id TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+        }
+        let storage = Storage::open(dir.path()).unwrap();
+        let note = storage.create_note("upgraded", None).unwrap();
+        assert_eq!(storage.get_note(&note.id).unwrap().title, "upgraded");
     }
 
     /// Guards the "bundled SQLite has FTS5" assumption the whole search
