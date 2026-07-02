@@ -38,7 +38,7 @@
     "longDescription": "Looma records, transcribes and diarizes your meetings entirely on your machine, and merges your rough notes with the transcript into clean, structured notes with per-line provenance.",
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libasound2"]
+        "depends": ["libwebkit2gtk-4.1-0", "libasound2", "libpulse0"]
       }
     },
     "macOS": {
