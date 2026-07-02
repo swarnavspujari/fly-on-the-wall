@@ -58,3 +58,7 @@ Every push: ESLint + Prettier check, `tsc` typecheck, frontend build, rustfmt ch
       provider), not a raw network error (M11)
 - [ ] A recording with long quiet stretches produces no `[BLANK_AUDIO]`/`[ Silence]`/`>>`
       artifacts or unknown-speaker filler segments in the transcript (M11)
+- [ ] While recording, live partial passages appear in the Live transcript pane within
+      ~20 s of speech and the full diarized transcript replaces them after Stop (M14)
+- [ ] Export .md saves the note's markdown; Print / PDF prints only the note content, no
+      app chrome (M14)
