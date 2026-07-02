@@ -114,6 +114,22 @@ impl Storage {
         Ok(note)
     }
 
+    /// Edit one block's markdown; an edited AI block is reclaimed as user
+    /// text (looma-core provenance semantics).
+    pub fn edit_note_block(&self, id: &str, block_id: &str, markdown: &str) -> Result<Note> {
+        let note = self.get_note(id)?;
+        let mut blocks = note.blocks;
+        let block = blocks
+            .iter_mut()
+            .find(|b| b.id == block_id)
+            .ok_or_else(|| StorageError::NotFound(format!("block {block_id}")))?;
+        block.apply_edit(markdown);
+        if markdown.trim().is_empty() {
+            blocks.retain(|b| b.id != block_id);
+        }
+        self.update_note_blocks(id, &blocks)
+    }
+
     pub fn move_note(&self, id: &str, folder_id: Option<&str>) -> Result<()> {
         let n = self.conn.execute(
             "UPDATE notes SET folder_id = ?1, updated_at = ?2 WHERE id = ?3",

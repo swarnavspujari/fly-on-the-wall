@@ -159,3 +159,37 @@ export interface AsrSettingsUpdate {
   auto_transcribe: boolean;
   groq_key: string | null;
 }
+
+export interface Template {
+  id: string;
+  name: string;
+  system_prompt: string;
+  structure_hint: string;
+  built_in: boolean;
+}
+
+export interface LlmProviderInfo {
+  id: string;
+  default_model: string;
+  is_local: boolean;
+  has_key: boolean;
+  model: string | null;
+  base_url: string | null;
+}
+
+export interface LlmSettings {
+  provider: string;
+  providers: LlmProviderInfo[];
+}
+
+export interface LlmSettingsUpdate {
+  provider: string;
+  model: string | null;
+  base_url: string | null;
+  api_key: string | null;
+}
+
+export interface AskMessage {
+  role: "user" | "assistant";
+  content: string;
+}

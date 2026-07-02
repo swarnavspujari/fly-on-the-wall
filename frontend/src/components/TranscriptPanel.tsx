@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Meeting, ModelProgress, Transcript } from "../types";
 import { fmtElapsed } from "./RecordingBar";
 
@@ -9,6 +9,8 @@ interface Props {
   stage: string | null;
   modelProgress: ModelProgress | null;
   pipelineError: string | null;
+  /** Zoom-in: segment ids to highlight + scroll to (AI block sources). */
+  highlightIds: string[];
   onTranscribe: () => void;
   onRelabel: (speakerKey: string, label: string) => void;
 }
@@ -38,10 +40,19 @@ export default function TranscriptPanel({
   stage,
   modelProgress,
   pipelineError,
+  highlightIds,
   onTranscribe,
   onRelabel,
 }: Props) {
   const [renaming, setRenaming] = useState<{ key: string; label: string } | null>(null);
+  const segRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  // Zoom-in: scroll the first highlighted source segment into view.
+  useEffect(() => {
+    if (highlightIds.length === 0) return;
+    const el = segRefs.current.get(highlightIds[0]);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightIds]);
 
   const speakerColor = (key: string) => {
     if (key === "mic") return "text-indigo-300";
@@ -102,7 +113,18 @@ export default function TranscriptPanel({
         </span>
       </div>
       {transcript.segments.map((seg) => (
-        <div key={seg.id} className="mb-2 flex gap-3 text-sm">
+        <div
+          key={seg.id}
+          ref={(el) => {
+            if (el) segRefs.current.set(seg.id, el);
+            else segRefs.current.delete(seg.id);
+          }}
+          className={`mb-2 flex gap-3 rounded text-sm ${
+            highlightIds.includes(seg.id)
+              ? "bg-indigo-900/40 outline outline-1 outline-indigo-600/60"
+              : ""
+          }`}
+        >
           <span className="w-12 shrink-0 pt-0.5 text-right text-xs tabular-nums text-zinc-600">
             {fmtElapsed(seg.start_ms)}
           </span>

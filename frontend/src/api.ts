@@ -4,14 +4,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
+  AskMessage,
   AsrSettings,
   AsrSettingsUpdate,
   Folder,
+  LlmSettings,
+  LlmSettingsUpdate,
   Meeting,
   Note,
   NoteSummary,
   RecordingStatus,
   SearchHit,
+  Template,
   Transcript,
 } from "./types";
 
@@ -71,4 +75,18 @@ export const api = {
   getAsrSettings: () => invoke<AsrSettings>("get_asr_settings"),
   setAsrSettings: (update: AsrSettingsUpdate) => invoke<void>("set_asr_settings", { update }),
   downloadModel: (id: string) => invoke<string>("download_model", { id }),
+
+  // enhance / ask / templates / LLM settings
+  enhanceNote: (noteId: string, templateId: string) =>
+    invoke<Note>("enhance_note", { noteId, templateId }),
+  editNoteBlock: (noteId: string, blockId: string, markdown: string) =>
+    invoke<Note>("edit_note_block", { noteId, blockId, markdown }),
+  askMeeting: (noteId: string, history: AskMessage[]) =>
+    invoke<string>("ask_meeting", { noteId, history }),
+  listTemplates: () => invoke<Template[]>("list_templates"),
+  saveTemplate: (template: Template) => invoke<void>("save_template", { template }),
+  deleteTemplate: (id: string) => invoke<void>("delete_template", { id }),
+  getLlmSettings: () => invoke<LlmSettings>("get_llm_settings"),
+  setLlmSettings: (update: LlmSettingsUpdate) => invoke<void>("set_llm_settings", { update }),
+  testLlmConnection: () => invoke<string>("test_llm_connection"),
 };

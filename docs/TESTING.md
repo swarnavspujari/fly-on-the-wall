@@ -16,8 +16,10 @@
   Heavy + needs downloaded artifacts, so it's `#[ignore]`d in CI; run locally with:
   `cargo test -p looma-app --test pipeline_e2e -- --ignored --nocapture`
   (artifacts are hardlinked from `%APPDATA%/Looma`; the test skips if absent).
-- **Integration test** *(lands with M4)*: record→transcribe→diarize→enhance over a fixture
-  recording with the deterministic `MockLLMProvider` — fully offline.
+- **Integration test** (`src-tauri/tests/enhance_flow.rs`, runs in CI): the enhance flow
+  offline with the deterministic `MockLLMProvider` — note + transcript → prompt (numbered
+  segments) → canned block JSON → provenance-tagged storage, zoom-in id mapping, FTS
+  searchability, markdown mirror, and reclaim-on-edit semantics.
 - **MCP test** *(lands with M6)*: spawn the stdio server, assert `search_notes`/`get_note`
   return expected resources.
 

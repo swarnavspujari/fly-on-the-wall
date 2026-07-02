@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod anthropic;
 pub mod mock;
+pub mod openai_compat;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {

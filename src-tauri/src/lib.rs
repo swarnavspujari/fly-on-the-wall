@@ -4,6 +4,7 @@
 mod asr_commands;
 mod commands;
 pub mod hw;
+mod llm_commands;
 pub mod models;
 pub mod pipeline;
 mod recording;
@@ -62,6 +63,15 @@ pub fn run() {
             asr_commands::get_asr_settings,
             asr_commands::set_asr_settings,
             asr_commands::download_model,
+            llm_commands::enhance_note,
+            llm_commands::edit_note_block,
+            llm_commands::ask_meeting,
+            llm_commands::list_templates,
+            llm_commands::save_template,
+            llm_commands::delete_template,
+            llm_commands::get_llm_settings,
+            llm_commands::set_llm_settings,
+            llm_commands::test_llm_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Looma");

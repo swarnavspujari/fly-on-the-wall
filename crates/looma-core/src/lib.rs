@@ -5,6 +5,7 @@
 //! operating system API, a UI framework, or a network client.
 
 pub mod align;
+pub mod enhance;
 pub mod model;
 pub mod seams;
 

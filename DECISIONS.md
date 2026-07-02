@@ -96,3 +96,20 @@ Running log of technical decisions, newest last. Format: date — decision — w
   reading a scripted 27.5 s meeting — license-clear by construction, committed as a fixture.
   Measured: WER 5.4 % (whisper small-q5), 2 speakers cleanly separated, correct attribution;
   the E2E test enforces WER < 25 % and exact speaker-count/attribution.
+
+## M4 — Enhance, provenance, templates, Ask
+
+- **2026-07-01 — One OpenAI-compatible impl covers OpenAI + NIM + Ollama.** They all speak
+  `/chat/completions`; only Anthropic needs its own client (`/v1/messages`, system out-of-band).
+  Four providers, two implementations.
+- **2026-07-01 — Enhance output contract: JSON block array with per-block provenance.** The LLM
+  returns `{type: user|ai, markdown, sources: [segment numbers]}`; transcript segments are sent
+  with short numeric indices and mapped back to real segment ids after parsing (out-of-range
+  citations dropped). `user` blocks restate scratchpad lines and render as the user's text; `ai`
+  blocks carry their sources — that mapping IS the zoom-in feature. Malformed output falls back
+  to untraced AI paragraphs rather than losing the response.
+- **2026-07-01 — Ask chat is ephemeral by design** (spec §9): grounded in transcript + notes,
+  never persisted; each answer has an explicit "insert into note" affordance instead.
+- **2026-07-01 — Ollama is the default provider.** Fully local = the privacy-preserving default;
+  cloud providers (OpenAI/Anthropic/NIM) are opt-in with keys in the keychain and a clear
+  local/cloud badge in Settings.

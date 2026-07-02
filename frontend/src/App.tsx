@@ -11,6 +11,7 @@ import type {
   PipelineProgress,
   RecordingStatus,
   SearchHit,
+  Template,
   Transcript,
 } from "./types";
 import Sidebar, { type Selection } from "./components/Sidebar";
@@ -42,6 +43,7 @@ export default function App() {
   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
   const [recStatus, setRecStatus] = useState<RecordingStatus>(IDLE_STATUS);
   const [autoTranscribe, setAutoTranscribe] = useState(true);
+  const [templates, setTemplates] = useState<Template[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -74,6 +76,7 @@ export default function App() {
       .getAsrSettings()
       .then((s) => setAutoTranscribe(s.auto_transcribe))
       .catch(console.error);
+    api.listTemplates().then(setTemplates).catch(console.error);
   }, [refreshFolders]);
 
   useEffect(() => {
@@ -274,6 +277,7 @@ export default function App() {
             modelProgress={modelProgress}
             recStatus={recStatus}
             folders={folders}
+            templates={templates}
             onNoteChanged={onNoteChanged}
             onMoveNote={(folderId) => void moveOpenNote(folderId)}
             onStartRecording={() => void startRecording()}
@@ -318,6 +322,7 @@ export default function App() {
               .getAsrSettings()
               .then((s) => setAutoTranscribe(s.auto_transcribe))
               .catch(console.error);
+            api.listTemplates().then(setTemplates).catch(console.error);
           }}
         />
       )}

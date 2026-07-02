@@ -15,6 +15,7 @@ mod meetings;
 mod notes;
 mod search;
 mod settings;
+mod templates;
 mod transcripts;
 
 pub use notes::NoteSummary;
@@ -56,10 +57,12 @@ impl Storage {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Self::migrate(&conn)?;
-        Ok(Self {
+        let storage = Self {
             conn,
             data_dir: data_dir.to_path_buf(),
-        })
+        };
+        storage.seed_builtin_templates()?;
+        Ok(storage)
     }
 
     pub fn data_dir(&self) -> &Path {
