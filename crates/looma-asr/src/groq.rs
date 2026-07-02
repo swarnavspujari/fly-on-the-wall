@@ -98,14 +98,13 @@ pub fn parse_groq_verbose_json(json: &str) -> Result<RawTranscript> {
     let mut words = Vec::new();
     if let Some(entries) = v.get("words").and_then(|w| w.as_array()) {
         for entry in entries {
-            let text = entry
-                .get("word")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let raw = entry.get("word").and_then(|t| t.as_str()).unwrap_or("");
             let start = entry.get("start").and_then(|x| x.as_f64());
             let end = entry.get("end").and_then(|x| x.as_f64());
+            if crate::is_non_speech_token(raw) {
+                continue;
+            }
+            let text = crate::clean_word_text(raw);
             if text.is_empty() {
                 continue;
             }
@@ -121,7 +120,7 @@ pub fn parse_groq_verbose_json(json: &str) -> Result<RawTranscript> {
 
     Ok(RawTranscript {
         language,
-        words,
+        words: crate::drop_non_speech_spans(words),
         segments: vec![],
     })
 }

@@ -52,3 +52,9 @@ Every push: ESLint + Prettier check, `tsc` typecheck, frontend build, rustfmt ch
 - [ ] First-run consent notice appears once; recording indicator stays visible while recording
       (M9)
 - [ ] Clean-machine install from the built installer runs the full flow (M9)
+- [ ] Mute the system output while recording → a warning strip appears under the recording bar
+      within ~1 s; unmute → it disappears (M11)
+- [ ] With Ollama not running, Enhance/Ask show an actionable message (start Ollama / switch
+      provider), not a raw network error (M11)
+- [ ] A recording with long quiet stretches produces no `[BLANK_AUDIO]`/`[ Silence]`/`>>`
+      artifacts or unknown-speaker filler segments in the transcript (M11)

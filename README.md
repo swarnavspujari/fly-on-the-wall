@@ -23,9 +23,12 @@ In the spirit of Granola, but private by default:
 
 ## A two-minute tour
 
-1. **Record** — open Looma, hit **● Record** (or click **Start** on a calendar event). A red
-   bar shows while recording; your mic and the meeting's system audio are captured as separate
-   channels. Jot rough notes in the scratchpad as you go.
+1. **Record** — open Looma, hit **Record** (or click **Start** on a calendar event). A
+   recording bar shows while capturing; your mic and the meeting's system audio are captured as
+   separate channels. Jot rough notes in the scratchpad as you go. Two tips for clean captures:
+   keep the system output audible (Looma warns you live if it's muted or at 0 % — muted output
+   means the other side records as silence), and prefer a headset — on open speakers the mic
+   also hears the meeting audio and picks up echo fragments.
 2. **Stop** — the transcript starts automatically: whisper.cpp + sherpa-onnx run *on your
    machine* (first run downloads the models with progress + checksums). You get timestamped,
    speaker-labeled text; click any name to rename ("Speaker 1" → "Dana").

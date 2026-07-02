@@ -91,9 +91,10 @@ impl LLMProvider for OpenAiCompatProvider {
         if let Some(key) = &self.api_key {
             http = http.bearer_auth(key);
         }
-        let resp = http.send().await.map_err(|e| {
-            crate::transport_error(self.provider_id, self.local, &self.base_url, e)
-        })?;
+        let resp = http
+            .send()
+            .await
+            .map_err(|e| crate::transport_error(self.provider_id, self.local, &self.base_url, e))?;
         let status = resp.status();
         let text = resp
             .text()

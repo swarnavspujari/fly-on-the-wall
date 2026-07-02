@@ -199,3 +199,28 @@ Running log of technical decisions, newest last. Format: date — decision — w
   baseline DDL, then diffs each table against the expected column set and `ALTER TABLE ADD
   COLUMN`s what's missing (idempotent), then stamps `PRAGMA user_version = 1` for future
   numbered migrations. Regression test creates an old-schema DB and asserts note CRUD works.
+- **2026-07-02 — Loopback-mute warning surfaces live in the recording bar.** This machine often
+  sits at 0 % output volume, which makes WASAPI loopback record pure silence. New
+  `AudioCapture::capture_warnings` (default empty, Windows impl reads the render endpoint via
+  `IAudioEndpointVolume`) rides along `RecordingStatus`, which the UI already polls at 1 Hz —
+  mute mid-meeting and a dark warning strip appears under the recording bar within a second
+  (verified live: muted → warning shown, unmuted → gone).
+- **2026-07-02 — ASR non-speech tokens are filtered at the parser.** A real recording with
+  quiet stretches filled the transcript with whisper's `[BLANK_AUDIO]` / `[ Silence]`
+  annotations, `>>` speaker-change markers, and `spk_unknown` filler segments. Word entries
+  that are bracketed annotations are dropped (including annotations split across `-ml 1` word
+  tokens — a span pass), `>>` prefixes are stripped, and the same filter guards the Groq path.
+  Unit-tested; verified by re-transcribing the same recording (clean before/after diff).
+- **2026-07-02 — Real-meeting validation run (this machine, Windows).** Full flow driven
+  through the running app over CDP: record (TTS "meeting" through speakers → loopback), live
+  scratchpad note, stop → transcribe+diarize (~50 s for ~3 min audio, small-q5), two TTS
+  voices cleanly separated and attributed, speaker rename, Enhance via **local Ollama
+  llama3.2:3b** (12 blocks, correct user/AI interleave, 1–2 citations per AI block), zoom-in
+  from citation chip highlights the exact source segments, Ask returns a grounded answer with
+  insert-into-note, FTS search hits both note and transcript, markdown/JSON mirrors on disk.
+  Known physical limitation (not a bug): recording over laptop speakers bleeds the meeting
+  audio into the mic channel as short echo fragments — a headset avoids it; noted in README.
+- **2026-07-02 — Ollama is installed on demand, not bundled.** Validation found the default
+  provider (Ollama) produced a raw reqwest error when absent. The error path now says what to
+  do ("start Ollama / install from ollama.com / switch provider in Settings"). Bundling a
+  model runtime stays out of scope — BYO models is the product's stance.

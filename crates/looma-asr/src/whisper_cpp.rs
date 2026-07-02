@@ -93,12 +93,11 @@ pub fn parse_whisper_json(json: &str) -> Result<RawTranscript> {
     let mut words = Vec::new();
     if let Some(entries) = v.get("transcription").and_then(|t| t.as_array()) {
         for entry in entries {
-            let text = entry
-                .get("text")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let raw = entry.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            if crate::is_non_speech_token(raw) {
+                continue;
+            }
+            let text = crate::clean_word_text(raw);
             if text.is_empty() {
                 continue;
             }
@@ -116,7 +115,7 @@ pub fn parse_whisper_json(json: &str) -> Result<RawTranscript> {
 
     Ok(RawTranscript {
         language,
-        words,
+        words: crate::drop_non_speech_spans(words),
         segments: vec![],
     })
 }

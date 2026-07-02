@@ -39,6 +39,119 @@ pub struct TranscribeOptions {
     pub prompt: Option<String>,
 }
 
+/// True for tokens ASR engines emit that no person said: whisper's silence /
+/// noise annotations ("[BLANK_AUDIO]", "[ Silence]", "(coughing)", "♪") and
+/// bare ">>" speaker-change markers. Seen in every real recording with quiet
+/// stretches — they must never reach the aligner or the transcript.
+pub fn is_non_speech_token(text: &str) -> bool {
+    let t = text.trim();
+    t.is_empty()
+        || t == ">>"
+        || (t.starts_with('[') && t.ends_with(']'))
+        || (t.starts_with('(') && t.ends_with(')'))
+        || t.chars().all(|c| c == '♪' || c.is_whitespace())
+}
+
+/// Strip engine markers that prefix real words (whisper glues ">>" onto the
+/// first word after a speaker change).
+pub fn clean_word_text(text: &str) -> String {
+    text.trim().trim_start_matches(">>").trim().to_string()
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn non_speech_tokens_are_detected() {
+        for t in [
+            "[BLANK_AUDIO]",
+            "[ Silence]",
+            "[silence]",
+            "(coughing)",
+            "[Music]",
+            "♪",
+            ">>",
+            "  ",
+        ] {
+            assert!(is_non_speech_token(t), "expected non-speech: {t:?}");
+        }
+        for t in ["Thanks", "SSO", "[unfinished", "friday."] {
+            assert!(!is_non_speech_token(t), "expected speech: {t:?}");
+        }
+    }
+
+    #[test]
+    fn speaker_change_marker_is_stripped() {
+        assert_eq!(clean_word_text(">> Sounds"), "Sounds");
+        assert_eq!(clean_word_text("  hello "), "hello");
+    }
+
+    fn w(text: &str, at: u64) -> Word {
+        Word {
+            text: text.into(),
+            start_ms: at,
+            end_ms: at + 100,
+        }
+    }
+
+    #[test]
+    fn split_bracket_annotations_are_dropped() {
+        let words = vec![
+            w("[", 0),
+            w(" Silence", 100),
+            w("]", 200),
+            w("Thanks", 300),
+            w("for", 400),
+            w("joining.", 500),
+        ];
+        let out = drop_non_speech_spans(words);
+        let texts: Vec<_> = out.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts, vec!["Thanks", "for", "joining."]);
+    }
+
+    #[test]
+    fn unmatched_bracket_keeps_real_speech() {
+        let words = vec![
+            w("[", 0),
+            w("bracket", 100),
+            w("but", 200),
+            w("speech", 300),
+        ];
+        let out = drop_non_speech_spans(words.clone());
+        assert_eq!(out.len(), words.len());
+    }
+}
+
+/// Whisper's word-level mode (`-ml 1`) can split an annotation like
+/// "[ Silence]" across several word entries ("[", " Silence", "]"), which the
+/// per-token check can't see. Drop any short bracketed span; an unmatched
+/// opening bracket keeps its words (never eat real speech on a stray "[").
+pub fn drop_non_speech_spans(words: Vec<Word>) -> Vec<Word> {
+    const MAX_SPAN: usize = 8;
+    let mut out = Vec::with_capacity(words.len());
+    let mut i = 0;
+    while i < words.len() {
+        let t = words[i].text.trim();
+        let closer = match t.chars().next() {
+            Some('[') if !t.ends_with(']') => Some(']'),
+            Some('(') if !t.ends_with(')') => Some(')'),
+            _ => None,
+        };
+        if let Some(close) = closer {
+            let end = (i + 1..words.len().min(i + 1 + MAX_SPAN))
+                .find(|&j| words[j].text.trim_end().ends_with(close));
+            if let Some(end) = end {
+                i = end + 1; // whole annotation span dropped
+                continue;
+            }
+        }
+        out.push(words[i].clone());
+        i += 1;
+    }
+    out
+}
+
 /// Sentence/phrase-level chunk as emitted by the engine, before diarization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawSegment {
