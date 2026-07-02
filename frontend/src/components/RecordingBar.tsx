@@ -36,7 +36,7 @@ export default function RecordingBar({
   const paused = status.state === "paused";
 
   return (
-    <div className="flex flex-wrap items-center gap-3 border-b border-line bg-peach px-4 py-2 text-sm">
+    <div className="print:hidden flex flex-wrap items-center gap-3 border-b border-line bg-peach px-4 py-2 text-sm">
       <span
         className={`h-2.5 w-2.5 flex-none rounded-full ${paused ? "bg-spk-amber" : "bg-rec"}`}
         style={paused ? undefined : { animation: "pulse-dot 1.2s ease infinite" }}

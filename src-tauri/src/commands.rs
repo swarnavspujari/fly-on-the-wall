@@ -240,6 +240,51 @@ pub async fn attach_file(
     Ok(Some(note))
 }
 
+/// Save-as copy of the note's plain-markdown mirror (provenance flattened
+/// by the storage layer's exporter). Returns the chosen path, or None if
+/// the user cancelled.
+#[tauri::command]
+pub async fn export_note(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    note_id: String,
+) -> CmdResult<Option<String>> {
+    let (suggested, src) = {
+        let storage = state.storage.lock().unwrap();
+        let note = storage.get_note(&note_id).map_err(err_str)?;
+        let safe: String = note
+            .title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || " -_.".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        (
+            format!("{}.md", safe.trim()),
+            state.data_dir.join("notes").join(format!("{note_id}.md")),
+        )
+    };
+    if !src.exists() {
+        return Err("note has no markdown mirror yet — edit it once first".into());
+    }
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_file_name(&suggested)
+        .add_filter("Markdown", &["md"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let dest = picked.into_path().map_err(err_str)?;
+    std::fs::copy(&src, &dest).map_err(err_str)?;
+    Ok(Some(dest.display().to_string()))
+}
+
 #[tauri::command]
 pub fn remove_attachment(
     state: State<'_, AppState>,

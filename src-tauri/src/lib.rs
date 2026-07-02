@@ -6,6 +6,7 @@ mod calendar_commands;
 mod commands;
 pub mod hw;
 mod import_commands;
+mod live;
 mod llm_commands;
 pub mod models;
 pub mod pipeline;
@@ -47,6 +48,7 @@ pub fn run() {
             commands::move_note,
             commands::delete_note,
             commands::attach_file,
+            commands::export_note,
             commands::remove_attachment,
             commands::open_attachment,
             commands::reveal_attachment,

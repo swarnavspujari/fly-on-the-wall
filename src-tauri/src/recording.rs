@@ -14,6 +14,8 @@ pub struct ActiveRecording {
     pub session: Box<dyn CaptureSession>,
     pub meeting_id: String,
     pub note_id: String,
+    /// Signals the live-transcript loop (if any) to end.
+    pub live_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -65,15 +67,17 @@ pub fn recording_status(state: State<'_, AppState>) -> RecordingStatus {
 /// Captures mic + system loopback as separate channels.
 #[tauri::command]
 pub fn start_recording(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     note_id: Option<String>,
 ) -> CmdResult<RecordingStatus> {
-    start_recording_impl(&state, note_id, None, &[])
+    start_recording_impl(&app, &state, note_id, None, &[])
 }
 
 /// Shared start path — also used by the calendar one-click start, which
 /// prefills the note title and meeting attendees (spec item 9).
 pub fn start_recording_impl(
+    app: &tauri::AppHandle,
     state: &AppState,
     note_id: Option<String>,
     title: Option<String>,
@@ -119,10 +123,16 @@ pub fn start_recording_impl(
         })
         .map_err(|e| e.to_string())?;
 
+    let live_stop = Some(crate::live::spawn(
+        app.clone(),
+        meeting.id.clone(),
+        state.data_dir.join("recordings").join(&meeting.id),
+    ));
     let active = ActiveRecording {
         session,
         meeting_id: meeting.id,
         note_id: note.id,
+        live_stop,
     };
     let status = RecordingStatus::from_active(&active, state.audio.capture_warnings());
     *recording = Some(active);
@@ -161,6 +171,9 @@ pub async fn stop_recording(state: State<'_, AppState>) -> CmdResult<Meeting> {
         .unwrap()
         .take()
         .ok_or("no active recording")?;
+    if let Some(stop) = &rec.live_stop {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let meeting_id = rec.meeting_id.clone();
     let session = rec.session;
 

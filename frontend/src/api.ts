@@ -54,6 +54,7 @@ export const api = {
 
   // attachments & files
   attachFile: (noteId: string) => invoke<Note | null>("attach_file", { noteId }),
+  exportNote: (noteId: string) => invoke<string | null>("export_note", { noteId }),
   removeAttachment: (noteId: string, attachmentId: string) =>
     invoke<Note>("remove_attachment", { noteId, attachmentId }),
   openAttachment: (relPath: string) => invoke<void>("open_attachment", { relPath }),

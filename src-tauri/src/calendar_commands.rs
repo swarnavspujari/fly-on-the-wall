@@ -235,9 +235,10 @@ pub async fn upcoming_meetings(
 /// attendees prefilled, recording begins immediately.
 #[tauri::command]
 pub fn start_meeting_from_event(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     title: String,
     attendees: Vec<String>,
 ) -> CmdResult<RecordingStatus> {
-    recording::start_recording_impl(&state, None, Some(title), &attendees)
+    recording::start_recording_impl(&app, &state, None, Some(title), &attendees)
 }
