@@ -64,7 +64,7 @@ export default function NoteList({
   const searching = searchQuery.trim().length > 0;
 
   return (
-    <div className="flex h-full w-72 flex-col border-r border-line bg-cream">
+    <div className="print:hidden flex h-full w-72 flex-col border-r border-line bg-cream">
       <div className="flex flex-col gap-2 p-3">
         <input
           value={searchQuery}

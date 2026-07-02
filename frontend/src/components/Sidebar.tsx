@@ -171,7 +171,7 @@ export default function Sidebar({
   };
 
   return (
-    <div className="flex h-full w-60 flex-col border-r border-line bg-shell">
+    <div className="print:hidden flex h-full w-60 flex-col border-r border-line bg-shell">
       <div className="flex items-center gap-2.5 px-4 pb-2.5 pt-3.5">
         <span className="flex h-[30px] w-[30px] flex-none items-center justify-center rounded-[9px] bg-coral">
           <span className="h-3.5 w-3.5 rounded-full border-[3px] border-white" />

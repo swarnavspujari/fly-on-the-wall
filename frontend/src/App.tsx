@@ -385,7 +385,7 @@ export default function App() {
           </div>
         )}
       </div>
-      <footer className="flex items-center justify-between border-t border-line bg-shell px-4 py-1.5 text-xs text-mute">
+      <footer className="print:hidden flex items-center justify-between border-t border-line bg-shell px-4 py-1.5 text-xs text-mute">
         <span className={error ? "font-medium text-clay" : undefined}>
           {error ? `⚠ ${error}` : "local-first · offline capable"}
         </span>

@@ -258,3 +258,25 @@ Running log of technical decisions, newest last. Format: date — decision — w
   install → same tool on PATH → managed download → actionable error ("brew install
   whisper-cpp", "enable Groq fallback"). Linux screen capture is x11grab full-screen/region
   (Wayland needs a portal recorder — surfaced as an ffmpeg error, documented).
+
+## M14 — Feature gaps
+
+- **2026-07-02 — Live partial transcript (beta), chunked not streaming.** While recording, a
+  loop transcribes the NEW audio appended to each channel WAV every few ticks (≥8 s chunks,
+  ≤30 s, whisper small regardless of tier — live must outrun real time on laptop CPUs) and
+  streams `live:segment` events; the UI shows a design-language live pane with channel-level
+  attribution ("You" = mic, "Them" = loopback). No live diarization — the full pipeline
+  replaces everything at Stop. Verified live on this machine: TTS meeting text appeared in
+  the pane mid-recording, then the diarized transcript took over after Stop. Reading the
+  in-progress WAVs ignores their stale headers (data grows past the 44-byte header;
+  unit-tested chunk reader).
+- **2026-07-02 — Export = save-as of the existing markdown mirror; PDF = print stylesheet.**
+  The provenance-flattened `.md` mirror already exists per note, so "Export .md" is a save
+  dialog + copy (dialog opens — the copy path reuses the attach_file idiom; the dialog step
+  itself can't be driven headlessly). "Print / PDF" is `window.print()` plus `print:hidden`
+  on all chrome so only the note content prints — no PDF renderer dependency.
+- **2026-07-02 — Auto-updater and in-process whisper-rs/sherpa bindings deferred.** The
+  updater needs its own signing key management and a hosted latest.json flow — meaningful
+  work that shouldn't be rushed at the end of a session; friends can re-download installers.
+  In-process bindings remain the right endgame (they'd give macOS/Linux whisper without
+  Homebrew), noted for the next session.

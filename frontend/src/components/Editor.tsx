@@ -14,6 +14,7 @@ import { api } from "../api";
 import { fmtElapsed } from "./RecordingBar";
 import { Btn } from "./ui";
 import TranscriptPanel from "./TranscriptPanel";
+import LivePane from "./LivePane";
 import EnhancedDoc from "./EnhancedDoc";
 import AskPanel from "./AskPanel";
 
@@ -174,7 +175,7 @@ export default function Editor({
     <div className="flex h-full min-w-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col bg-surface">
         <div className="border-b border-line px-6 pb-3 pt-2.5">
-          <div className="mb-1.5 flex flex-wrap items-center justify-end gap-2">
+          <div className="print:hidden mb-1.5 flex flex-wrap items-center justify-end gap-2">
             {!recStatus.active && (
               <Btn
                 variant="record"
@@ -318,7 +319,11 @@ export default function Editor({
           </div>
         )}
 
-        {meeting && (
+        {recStatus.active && recStatus.note_id === note.id && recStatus.meeting_id ? (
+          <LivePane meetingId={recStatus.meeting_id} />
+        ) : null}
+
+        {meeting && !(recStatus.active && recStatus.note_id === note.id) && (
           <TranscriptPanel
             meeting={meeting}
             transcript={transcript}
@@ -338,7 +343,7 @@ export default function Editor({
         )}
 
         {note.blocks.length > 0 && (
-          <div className="flex gap-5 border-b border-line px-6">
+          <div className="print:hidden flex gap-5 border-b border-line px-6">
             {(
               [
                 ["scratch", "Scratchpad"],
@@ -375,10 +380,26 @@ export default function Editor({
           />
         )}
 
-        <div className="border-t border-line px-6 py-3">
+        <div className="print:hidden border-t border-line px-6 py-3">
           <div className="flex flex-wrap items-center gap-2">
             <Btn variant="outline" size="sm" onClick={() => void attach()}>
               Attach file
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
+              title="Save this note as a Markdown file"
+              onClick={() => void api.exportNote(note.id).catch((e) => alert(String(e)))}
+            >
+              Export .md
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
+              title="Print or save as PDF (only the note content prints)"
+              onClick={() => window.print()}
+            >
+              Print / PDF
             </Btn>
             {note.attachments.map((a) => (
               <span

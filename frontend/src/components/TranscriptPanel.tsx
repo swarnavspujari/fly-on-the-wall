@@ -58,7 +58,7 @@ export default function TranscriptPanel({
         ? Math.round((modelProgress.downloaded / modelProgress.total) * 100)
         : null;
     return (
-      <div className="border-b border-line bg-cream px-6 py-3">
+      <div className="print:hidden border-b border-line bg-cream px-6 py-3">
         <div className="flex items-center gap-2.5 text-[13px] font-medium text-clay">
           <span
             className="h-2 w-2 shrink-0 rounded-full bg-coral"
