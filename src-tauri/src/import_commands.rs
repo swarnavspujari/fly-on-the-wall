@@ -119,7 +119,14 @@ async fn convert_with_ffmpeg(
             let _ = app.emit("model:progress", p);
         }
     };
-    let ffmpeg = models::ensure(&on_model, &state.data_dir, "ffmpeg").await?;
+    let ffmpeg = models::ensure_tool(
+        &on_model,
+        &state.data_dir,
+        "ffmpeg",
+        &["ffmpeg"],
+        "install ffmpeg (macOS: brew install ffmpeg)",
+    )
+    .await?;
 
     let mut cmd = tokio::process::Command::new(ffmpeg);
     cmd.arg("-i")

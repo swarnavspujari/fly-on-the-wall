@@ -145,7 +145,14 @@ pub async fn run_with(
 
     // Diarization models are ALWAYS ensured — local on every tier (§6.3).
     emit_stage(state, on_stage, meeting_id, "ensuring-models", None);
-    let sherpa_exe = models::ensure(on_model, &data_dir, "sherpa-bin").await?;
+    let sherpa_exe = models::ensure_tool(
+        on_model,
+        &data_dir,
+        "sherpa-bin",
+        &["sherpa-onnx-offline-speaker-diarization"],
+        "install sherpa-onnx or report this platform in an issue",
+    )
+    .await?;
     let seg_model = models::ensure(on_model, &data_dir, "pyannote-seg").await?;
     let emb_model = models::ensure(on_model, &data_dir, "campplus-embedding").await?;
 
@@ -163,7 +170,16 @@ pub async fn run_with(
     } else {
         let model_id = model_override
             .unwrap_or_else(|| hw::default_model_for_tier(&tier, max_quality).to_string());
-        let whisper_exe = models::ensure(on_model, &data_dir, "whisper-bin").await?;
+        let whisper_exe = models::ensure_tool(
+            on_model,
+            &data_dir,
+            "whisper-bin",
+            &["whisper-cli"],
+            "install whisper.cpp (macOS: brew install whisper-cpp; Linux: build from \
+             source or use your package manager) or enable the Groq cloud fallback \
+             in Settings",
+        )
+        .await?;
         let model_path = models::ensure(on_model, &data_dir, &model_id).await?;
         Box::new(looma_asr::whisper_cpp::WhisperCppEngine {
             exe: whisper_exe,
