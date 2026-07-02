@@ -43,6 +43,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # tauri-build validates externalBin existence at compile time, so the
+      # looma-mcp sidecar must be staged before any cargo build/check
+      - name: Stage sidecar binaries
+        run: npm run prepare-sidecars
+
       - name: rustfmt
         run: cargo fmt --all --check
 

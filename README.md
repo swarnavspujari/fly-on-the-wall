@@ -55,7 +55,8 @@ git clone https://github.com/swarnavspujari/looma-notetaker.git
 cd looma-notetaker
 npm install
 npm --prefix frontend install
-npm run tauri dev      # dev app with hot reload
+npm run prepare-sidecars   # builds + stages looma-mcp (required once before any cargo build)
+npm run tauri dev          # dev app with hot reload
 ```
 
 Production build (installer under `src-tauri/target/release/bundle/`):
