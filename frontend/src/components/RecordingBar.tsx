@@ -36,7 +36,7 @@ export default function RecordingBar({
   const paused = status.state === "paused";
 
   return (
-    <div className="flex items-center gap-3 border-b border-line bg-peach px-4 py-2 text-sm">
+    <div className="flex flex-wrap items-center gap-3 border-b border-line bg-peach px-4 py-2 text-sm">
       <span
         className={`h-2.5 w-2.5 flex-none rounded-full ${paused ? "bg-spk-amber" : "bg-rec"}`}
         style={paused ? undefined : { animation: "pulse-dot 1.2s ease infinite" }}
@@ -84,6 +84,16 @@ export default function RecordingBar({
           Stop
         </Btn>
       </div>
+      {status.warnings.length > 0 && (
+        <div className="-mx-4 -mb-2 w-[calc(100%+2rem)] bg-ink px-4 py-1.5">
+          {status.warnings.map((w) => (
+            <p key={w} className="text-[12.5px] font-medium text-white">
+              <span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-spk-amber align-baseline" />
+              {w}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

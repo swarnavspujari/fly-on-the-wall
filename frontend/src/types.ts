@@ -79,6 +79,7 @@ export interface RecordingStatus {
   elapsed_ms: number;
   meeting_id: string | null;
   note_id: string | null;
+  warnings: string[];
 }
 
 export interface Word {

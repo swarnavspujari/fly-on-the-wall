@@ -76,7 +76,7 @@ impl LLMProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Network(e.to_string()))?;
+            .map_err(|e| crate::transport_error("anthropic", false, &self.base_url, e))?;
         let status = resp.status();
         let text = resp
             .text()

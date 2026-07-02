@@ -30,6 +30,7 @@ const IDLE_STATUS: RecordingStatus = {
   elapsed_ms: 0,
   meeting_id: null,
   note_id: null,
+  warnings: [],
 };
 
 export default function App() {

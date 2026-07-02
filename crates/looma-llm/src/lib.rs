@@ -20,6 +20,38 @@ pub enum LlmError {
     Provider(String),
     #[error("network error: {0}")]
     Network(String),
+    /// The provider exists but can't be reached right now — carries a
+    /// person-actionable message (verbatim shown in the UI).
+    #[error("{0}")]
+    Unavailable(String),
+}
+
+/// Turn a transport failure into something a person can act on. A local
+/// provider refusing connections almost always means "Ollama isn't running",
+/// which deserves better than a raw reqwest error with a URL in it.
+pub fn transport_error(
+    provider_id: &str,
+    is_local: bool,
+    base_url: &str,
+    e: reqwest::Error,
+) -> LlmError {
+    if e.is_connect() {
+        if is_local {
+            return LlmError::Unavailable(format!(
+                "Ollama isn't reachable at {base_url}. Start the Ollama app (or install it \
+                 from ollama.com), or switch provider in Settings."
+            ));
+        }
+        return LlmError::Unavailable(format!(
+            "Can't reach {provider_id} — check your internet connection."
+        ));
+    }
+    if e.is_timeout() {
+        return LlmError::Unavailable(format!(
+            "{provider_id} timed out. The model may still be loading — try again in a moment."
+        ));
+    }
+    LlmError::Network(e.to_string())
 }
 
 pub type Result<T> = std::result::Result<T, LlmError>;

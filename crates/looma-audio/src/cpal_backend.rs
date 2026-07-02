@@ -66,6 +66,27 @@ impl AudioCapture for CpalAudioCapture {
         cfg!(target_os = "windows")
     }
 
+    fn capture_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        #[cfg(target_os = "windows")]
+        if let Some((volume, muted)) = crate::win_volume::default_output_volume() {
+            if muted {
+                warnings.push(
+                    "System output is muted — the other participants' audio will record as \
+                     silence. Unmute your speakers."
+                        .to_string(),
+                );
+            } else if volume < 0.01 {
+                warnings.push(
+                    "System volume is at 0% — the other participants' audio will record as \
+                     silence. Raise your system volume."
+                        .to_string(),
+                );
+            }
+        }
+        warnings
+    }
+
     fn start(&self, cfg: CaptureConfig) -> Result<Box<dyn CaptureSession>> {
         std::fs::create_dir_all(&cfg.out_dir)?;
         let clock = Arc::new(Clock::new());

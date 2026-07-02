@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub mod cpal_backend;
 pub mod mix;
 pub mod null;
+#[cfg(target_os = "windows")]
+mod win_volume;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
@@ -82,4 +84,10 @@ pub trait AudioCapture: Send + Sync {
     /// Whether this backend can capture system output audio at all.
     fn supports_system_loopback(&self) -> bool;
     fn start(&self, cfg: CaptureConfig) -> Result<Box<dyn CaptureSession>>;
+    /// Human-readable conditions that will silently degrade a capture (e.g.
+    /// the system output is muted, so loopback records silence). Cheap —
+    /// polled while recording so a mid-meeting mute surfaces immediately.
+    fn capture_warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

@@ -23,6 +23,10 @@ pub struct RecordingStatus {
     pub elapsed_ms: u64,
     pub meeting_id: Option<String>,
     pub note_id: Option<String>,
+    /// Conditions that will degrade this capture (e.g. muted system output →
+    /// silent loopback). Re-checked on every status poll so mid-meeting mutes
+    /// surface while there is still time to fix them.
+    pub warnings: Vec<String>,
 }
 
 impl RecordingStatus {
@@ -33,16 +37,18 @@ impl RecordingStatus {
             elapsed_ms: 0,
             meeting_id: None,
             note_id: None,
+            warnings: Vec::new(),
         }
     }
 
-    fn from_active(rec: &ActiveRecording) -> Self {
+    fn from_active(rec: &ActiveRecording, warnings: Vec<String>) -> Self {
         Self {
             active: true,
             state: Some(rec.session.state()),
             elapsed_ms: rec.session.elapsed_ms(),
             meeting_id: Some(rec.meeting_id.clone()),
             note_id: Some(rec.note_id.clone()),
+            warnings,
         }
     }
 }
@@ -50,7 +56,7 @@ impl RecordingStatus {
 #[tauri::command]
 pub fn recording_status(state: State<'_, AppState>) -> RecordingStatus {
     match state.recording.lock().unwrap().as_ref() {
-        Some(rec) => RecordingStatus::from_active(rec),
+        Some(rec) => RecordingStatus::from_active(rec, state.audio.capture_warnings()),
         None => RecordingStatus::idle(),
     }
 }
@@ -118,7 +124,7 @@ pub fn start_recording_impl(
         meeting_id: meeting.id,
         note_id: note.id,
     };
-    let status = RecordingStatus::from_active(&active);
+    let status = RecordingStatus::from_active(&active, state.audio.capture_warnings());
     *recording = Some(active);
     Ok(status)
 }
@@ -128,7 +134,10 @@ pub fn pause_recording(state: State<'_, AppState>) -> CmdResult<RecordingStatus>
     let mut guard = state.recording.lock().unwrap();
     let rec = guard.as_mut().ok_or("no active recording")?;
     rec.session.pause().map_err(|e| e.to_string())?;
-    Ok(RecordingStatus::from_active(rec))
+    Ok(RecordingStatus::from_active(
+        rec,
+        state.audio.capture_warnings(),
+    ))
 }
 
 #[tauri::command]
@@ -136,7 +145,10 @@ pub fn resume_recording(state: State<'_, AppState>) -> CmdResult<RecordingStatus
     let mut guard = state.recording.lock().unwrap();
     let rec = guard.as_mut().ok_or("no active recording")?;
     rec.session.resume().map_err(|e| e.to_string())?;
-    Ok(RecordingStatus::from_active(rec))
+    Ok(RecordingStatus::from_active(
+        rec,
+        state.audio.capture_warnings(),
+    ))
 }
 
 /// Stop, finalize WAVs + mixdown (blocking work off the IPC thread), and
