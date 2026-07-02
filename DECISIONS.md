@@ -224,3 +224,37 @@ Running log of technical decisions, newest last. Format: date — decision — w
   provider (Ollama) produced a raw reqwest error when absent. The error path now says what to
   do ("start Ollama / install from ollama.com / switch provider in Settings"). Bundling a
   model runtime stays out of scope — BYO models is the product's stance.
+
+## M12 — Distribution
+
+- **2026-07-02 — Unsigned installers, documented honestly.** NSIS (Windows), .app/.dmg
+  (macOS arm64 + x64 runners), AppImage + .deb (Linux), built by a tag-push release workflow
+  and attached to a GitHub Release. Code signing costs real money and keys we don't have;
+  the README documents the SmartScreen/Gatekeeper bypasses and the exact signing path for
+  later instead of pretending.
+- **2026-07-02 — npm install (not ci) on non-Windows CI.** The lockfiles were regenerated on
+  Windows, and npm's optional-dependency bug (npm/cli#4828) leaves other platforms' native
+  bindings (rolldown, tauri-cli) out of the lockfile; `npm ci` then fails on macOS/Linux.
+- **2026-07-02 — App icon drawn from the design system** (coral rounded square + white ring,
+  the sidebar mark) and regenerated across every platform format with `tauri icon`.
+
+## M13 — Cross-platform capture
+
+- **2026-07-02 — Linux system audio via the Pulse/PipeWire monitor source.** A
+  `PulseRecorder` (libpulse-simple, device `@DEFAULT_MONITOR@`) records the default sink's
+  monitor on its own thread with the same pad-to-clock and pause-by-discard discipline as the
+  WASAPI loopback; `LoopbackChannel` in cpal_backend picks per OS. Works on PulseAudio and
+  PipeWire (pipewire-pulse). Builds in CI; not yet run on a Linux device.
+- **2026-07-02 — macOS Core Audio process taps DEFERRED, with cause.** docs/PORTING.md's own
+  research: tap IO callbacks return all-zero samples unless the binary is signed with the
+  audio-capture entitlement usage string honored — and this release line ships unsigned
+  (see M12). Implementing taps now would produce silent recordings for every real user, so
+  macOS records mic-only (existing graceful degrade, warning logged) until signing exists.
+  Screen capture on macOS is full-screen-only via ffmpeg avfoundation for the same
+  pragmatism; ScreenCaptureKit is the right long-term impl once signing lands.
+- **2026-07-02 — Per-OS tool registry + PATH fallback.** sherpa-onnx publishes binaries for
+  all three OSes (pinned from upstream digests); ffmpeg has BtbN builds for Windows/Linux;
+  whisper.cpp publishes no macOS/Linux CLI binaries at all. `ensure_tool` resolves: managed
+  install → same tool on PATH → managed download → actionable error ("brew install
+  whisper-cpp", "enable Groq fallback"). Linux screen capture is x11grab full-screen/region
+  (Wayland needs a portal recorder — surfaced as an ffmpeg error, documented).

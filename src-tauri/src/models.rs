@@ -33,9 +33,12 @@ pub struct Artifact {
     pub probe_rel: &'static str,
 }
 
-/// Everything Looma can download. Checksums pinned from upstream release
-/// digests / HF LFS metadata, re-verified locally on 2026-07-01.
-pub const REGISTRY: &[Artifact] = &[
+/// Platform tool binaries. Checksums pinned from upstream release digests
+/// (GitHub asset `digest` fields), same method as the original Windows pins.
+/// whisper.cpp and ffmpeg publish no macOS binaries (and whisper.cpp none for
+/// Linux either) — `ensure_tool` falls back to the same tool on PATH there.
+#[cfg(target_os = "windows")]
+const TOOLS: &[Artifact] = &[
     Artifact {
         id: "whisper-bin",
         display: "whisper.cpp CLI (CPU, v1.9.1)",
@@ -56,6 +59,57 @@ pub const REGISTRY: &[Artifact] = &[
         dest_rel: "bin/sherpa",
         probe_rel: "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe",
     },
+    Artifact {
+        id: "ffmpeg",
+        display: "ffmpeg (n8.1, screen capture + media import)",
+        url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-gpl-shared-8.1.zip",
+        sha256: "ec51253085a831b517e68cb7a1e46d13fcc8324f5e61ac0b3fd73c56af41ca21",
+        bytes: 79_279_847,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/ffmpeg",
+        probe_rel: "bin/ffmpeg/ffmpeg-n8.1.2-21-gce3c09c101-win64-gpl-shared-8.1/bin/ffmpeg.exe",
+    },
+];
+
+#[cfg(target_os = "linux")]
+const TOOLS: &[Artifact] = &[
+    Artifact {
+        id: "sherpa-bin",
+        display: "sherpa-onnx diarization CLI (v1.13.3)",
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.3/sherpa-onnx-v1.13.3-linux-x64-shared.tar.bz2",
+        sha256: "3e6aa632a30b7047f389e337e342eb08ea6c5661717645fd072e7d0ebf9d57fb",
+        bytes: 27_211_051,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/sherpa",
+        probe_rel: "bin/sherpa/sherpa-onnx-v1.13.3-linux-x64-shared/bin/sherpa-onnx-offline-speaker-diarization",
+    },
+    Artifact {
+        id: "ffmpeg",
+        display: "ffmpeg (n8.1, screen capture + media import)",
+        url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-linux64-gpl-shared-8.1.tar.xz",
+        sha256: "23f5d4c8e6fdc24fbbfcbbb8e83a727154f1ef70830b108ac7fd131856777405",
+        bytes: 62_123_996,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/ffmpeg",
+        probe_rel: "bin/ffmpeg/ffmpeg-n8.1.2-21-gce3c09c101-linux64-gpl-shared-8.1/bin/ffmpeg",
+    },
+];
+
+#[cfg(target_os = "macos")]
+const TOOLS: &[Artifact] = &[Artifact {
+    id: "sherpa-bin",
+    display: "sherpa-onnx diarization CLI (v1.13.3)",
+    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.3/sherpa-onnx-v1.13.3-osx-universal2-shared.tar.bz2",
+    sha256: "2317b975f42f5edf3e69068809dec456c068b68e48d091e6b578e7a977227361",
+    bytes: 56_024_420,
+    kind: ArtifactKind::Archive,
+    dest_rel: "bin/sherpa",
+    probe_rel: "bin/sherpa/sherpa-onnx-v1.13.3-osx-universal2-shared/bin/sherpa-onnx-offline-speaker-diarization",
+}];
+
+/// OS-independent model weights. Checksums pinned from upstream release
+/// digests / HF LFS metadata, re-verified locally on 2026-07-01.
+const MODELS: &[Artifact] = &[
     Artifact {
         id: "pyannote-seg",
         display: "pyannote segmentation 3.0 (ONNX)",
@@ -107,16 +161,6 @@ pub const REGISTRY: &[Artifact] = &[
         probe_rel: "models/asr/ggml-large-v3-turbo-q5_0.bin",
     },
     Artifact {
-        id: "ffmpeg",
-        display: "ffmpeg (n8.1, screen capture + media import)",
-        url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-gpl-shared-8.1.zip",
-        sha256: "ec51253085a831b517e68cb7a1e46d13fcc8324f5e61ac0b3fd73c56af41ca21",
-        bytes: 79_279_847,
-        kind: ArtifactKind::Archive,
-        dest_rel: "bin/ffmpeg",
-        probe_rel: "bin/ffmpeg/ffmpeg-n8.1.2-21-gce3c09c101-win64-gpl-shared-8.1/bin/ffmpeg.exe",
-    },
-    Artifact {
         id: "ggml-large-v3-q5_0",
         display: "Whisper large-v3 (Q5, ~1 GB) — maximum quality",
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
@@ -128,8 +172,53 @@ pub const REGISTRY: &[Artifact] = &[
     },
 ];
 
+/// Every artifact this OS can manage (tools first, then model weights).
+pub fn registry() -> impl Iterator<Item = &'static Artifact> {
+    TOOLS.iter().chain(MODELS.iter())
+}
+
 pub fn artifact(id: &str) -> Option<&'static Artifact> {
-    REGISTRY.iter().find(|a| a.id == id)
+    registry().find(|a| a.id == id)
+}
+
+/// Locate an executable on PATH (used where upstream publishes no binary for
+/// this OS — e.g. whisper-cli and ffmpeg on macOS, whisper-cli on Linux).
+pub fn find_on_path(names: &[&str]) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        for name in names {
+            for candidate in [dir.join(name), dir.join(format!("{name}.exe"))] {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a tool binary: an already-installed managed copy wins, then the
+/// same tool on PATH, then a managed download; otherwise fail with
+/// person-actionable guidance.
+pub async fn ensure_tool(
+    progress: ProgressSink<'_>,
+    data_dir: &Path,
+    id: &str,
+    path_names: &[&str],
+    guidance: &str,
+) -> Result<PathBuf, String> {
+    if let Some(a) = artifact(id) {
+        if let Some(installed) = installed_path(data_dir, a) {
+            return Ok(installed);
+        }
+    }
+    if let Some(found) = find_on_path(path_names) {
+        return Ok(found);
+    }
+    if artifact(id).is_some() {
+        return ensure(progress, data_dir, id).await;
+    }
+    Err(format!("{} is not installed — {}", path_names[0], guidance))
 }
 
 pub fn installed_path(data_dir: &Path, a: &Artifact) -> Option<PathBuf> {

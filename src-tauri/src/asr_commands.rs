@@ -86,8 +86,7 @@ pub fn get_asr_settings(state: State<'_, AppState>) -> CmdResult<AsrSettings> {
     let storage = state.storage.lock().unwrap();
     let get = |k: &str| storage.get_setting(k).ok().flatten();
 
-    let models = models::REGISTRY
-        .iter()
+    let models = models::registry()
         .map(|a| ModelStatus {
             id: a.id.to_string(),
             display: a.display.to_string(),

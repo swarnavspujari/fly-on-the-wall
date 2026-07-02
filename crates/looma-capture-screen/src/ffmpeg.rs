@@ -20,27 +20,62 @@ impl FfmpegScreenRecorder {
     }
 }
 
-/// Build the gdigrab input arguments for a capture target.
-pub fn gdigrab_args(target: &CaptureTarget, framerate: u32) -> Vec<String> {
+/// Which ffmpeg capture input this OS uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrabBackend {
+    /// Windows.
+    Gdigrab,
+    /// Linux/X11 (Wayland sessions need a portal-based recorder — x11grab
+    /// will fail there with an ffmpeg error the UI surfaces).
+    X11grab,
+    /// macOS.
+    AvFoundation,
+}
+
+pub fn host_backend() -> GrabBackend {
+    if cfg!(target_os = "windows") {
+        GrabBackend::Gdigrab
+    } else if cfg!(target_os = "macos") {
+        GrabBackend::AvFoundation
+    } else {
+        GrabBackend::X11grab
+    }
+}
+
+/// Build the capture-input arguments for a target on a backend. Pure and
+/// OS-independent so every mapping is unit-tested on every platform.
+pub fn grab_args(
+    backend: GrabBackend,
+    target: &CaptureTarget,
+    framerate: u32,
+    display: &str,
+) -> Result<Vec<String>> {
     let mut args: Vec<String> = vec![
         "-f".into(),
-        "gdigrab".into(),
+        match backend {
+            GrabBackend::Gdigrab => "gdigrab".into(),
+            GrabBackend::X11grab => "x11grab".into(),
+            GrabBackend::AvFoundation => "avfoundation".into(),
+        },
         "-framerate".into(),
         framerate.to_string(),
     ];
-    match target {
-        CaptureTarget::FullScreen => {
+    match (backend, target) {
+        (GrabBackend::Gdigrab, CaptureTarget::FullScreen) => {
             args.extend(["-i".into(), "desktop".into()]);
         }
-        CaptureTarget::Window { title } => {
+        (GrabBackend::Gdigrab, CaptureTarget::Window { title }) => {
             args.extend(["-i".into(), format!("title={title}")]);
         }
-        CaptureTarget::Region {
-            x,
-            y,
-            width,
-            height,
-        } => {
+        (
+            GrabBackend::Gdigrab,
+            CaptureTarget::Region {
+                x,
+                y,
+                width,
+                height,
+            },
+        ) => {
             // gdigrab requires even dimensions for yuv420p; round down
             let w = width & !1;
             let h = height & !1;
@@ -55,8 +90,49 @@ pub fn gdigrab_args(target: &CaptureTarget, framerate: u32) -> Vec<String> {
                 "desktop".into(),
             ]);
         }
+        (GrabBackend::X11grab, CaptureTarget::FullScreen) => {
+            args.extend(["-i".into(), display.to_string()]);
+        }
+        (
+            GrabBackend::X11grab,
+            CaptureTarget::Region {
+                x,
+                y,
+                width,
+                height,
+            },
+        ) => {
+            let w = width & !1;
+            let h = height & !1;
+            args.extend([
+                "-video_size".into(),
+                format!("{w}x{h}"),
+                "-i".into(),
+                format!("{display}+{x},{y}"),
+            ]);
+        }
+        (GrabBackend::X11grab, CaptureTarget::Window { .. }) => {
+            return Err(ScreenError::Unavailable(
+                "window capture is not supported on Linux yet — record the full screen or a region"
+                    .into(),
+            ));
+        }
+        (GrabBackend::AvFoundation, CaptureTarget::FullScreen) => {
+            // avfoundation matches devices by name; ":none" = no audio.
+            args.extend([
+                "-capture_cursor".into(),
+                "1".into(),
+                "-i".into(),
+                "Capture screen 0:none".into(),
+            ]);
+        }
+        (GrabBackend::AvFoundation, _) => {
+            return Err(ScreenError::Unavailable(
+                "only full-screen capture is supported on macOS yet".into(),
+            ));
+        }
     }
-    args
+    Ok(args)
 }
 
 impl ScreenRecorder for FfmpegScreenRecorder {
@@ -75,29 +151,35 @@ impl ScreenRecorder for FfmpegScreenRecorder {
             std::fs::create_dir_all(parent)?;
         }
 
+        let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
         let mut cmd = Command::new(&self.exe);
-        cmd.args(gdigrab_args(&target, self.framerate))
-            .args([
-                "-c:v",
-                "libx264",
-                // ultrafast + a 1080p cap keep encoding realtime even for
-                // high-DPI screens on laptop CPUs; x264 falling behind would
-                // silently compress the recording's timeline.
-                "-preset",
-                "ultrafast",
-                "-crf",
-                "28",
-                "-pix_fmt",
-                "yuv420p",
-                // cap width at 1920 and force even dimensions for yuv420p
-                "-vf",
-                "scale='trunc(min(1920,iw)/2)*2':-2",
-                "-y",
-            ])
-            .arg(out_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+        cmd.args(grab_args(
+            host_backend(),
+            &target,
+            self.framerate,
+            &display,
+        )?)
+        .args([
+            "-c:v",
+            "libx264",
+            // ultrafast + a 1080p cap keep encoding realtime even for
+            // high-DPI screens on laptop CPUs; x264 falling behind would
+            // silently compress the recording's timeline.
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "28",
+            "-pix_fmt",
+            "yuv420p",
+            // cap width at 1920 and force even dimensions for yuv420p
+            "-vf",
+            "scale='trunc(min(1920,iw)/2)*2':-2",
+            "-y",
+        ])
+        .arg(out_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -184,18 +266,22 @@ mod tests {
 
     #[test]
     fn gdigrab_args_for_each_target() {
-        let full = gdigrab_args(&CaptureTarget::FullScreen, 15);
+        let full = grab_args(GrabBackend::Gdigrab, &CaptureTarget::FullScreen, 15, ":0").unwrap();
         assert!(full.windows(2).any(|w| w == ["-i", "desktop"]));
 
-        let win = gdigrab_args(
+        let win = grab_args(
+            GrabBackend::Gdigrab,
             &CaptureTarget::Window {
                 title: "Budget – Zoom".into(),
             },
             15,
-        );
+            ":0",
+        )
+        .unwrap();
         assert!(win.iter().any(|a| a == "title=Budget – Zoom"));
 
-        let region = gdigrab_args(
+        let region = grab_args(
+            GrabBackend::Gdigrab,
             &CaptureTarget::Region {
                 x: 10,
                 y: 20,
@@ -203,9 +289,67 @@ mod tests {
                 height: 600,
             },
             30,
-        );
+            ":0",
+        )
+        .unwrap();
         assert!(region.windows(2).any(|w| w == ["-video_size", "800x600"]));
         assert!(region.windows(2).any(|w| w == ["-offset_x", "10"]));
         assert!(region.contains(&"30".to_string()));
+    }
+
+    #[test]
+    fn x11grab_args_full_and_region() {
+        let full = grab_args(GrabBackend::X11grab, &CaptureTarget::FullScreen, 10, ":1").unwrap();
+        assert!(full.windows(2).any(|w| w == ["-f", "x11grab"]));
+        assert!(full.windows(2).any(|w| w == ["-i", ":1"]));
+
+        let region = grab_args(
+            GrabBackend::X11grab,
+            &CaptureTarget::Region {
+                x: 100,
+                y: 50,
+                width: 1281,
+                height: 720,
+            },
+            10,
+            ":0",
+        )
+        .unwrap();
+        assert!(region.windows(2).any(|w| w == ["-video_size", "1280x720"]));
+        assert!(region.windows(2).any(|w| w == ["-i", ":0+100,50"]));
+
+        let win = grab_args(
+            GrabBackend::X11grab,
+            &CaptureTarget::Window { title: "x".into() },
+            10,
+            ":0",
+        );
+        assert!(win.is_err());
+    }
+
+    #[test]
+    fn avfoundation_args_full_screen_only() {
+        let full = grab_args(
+            GrabBackend::AvFoundation,
+            &CaptureTarget::FullScreen,
+            10,
+            "",
+        )
+        .unwrap();
+        assert!(full.windows(2).any(|w| w == ["-f", "avfoundation"]));
+        assert!(full.iter().any(|a| a == "Capture screen 0:none"));
+
+        let region = grab_args(
+            GrabBackend::AvFoundation,
+            &CaptureTarget::Region {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            10,
+            "",
+        );
+        assert!(region.is_err());
     }
 }

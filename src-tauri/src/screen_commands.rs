@@ -67,7 +67,14 @@ pub async fn start_screen_recording(
             let _ = app.emit("model:progress", p);
         }
     };
-    let ffmpeg = models::ensure(&on_model, &state.data_dir, "ffmpeg").await?;
+    let ffmpeg = models::ensure_tool(
+        &on_model,
+        &state.data_dir,
+        "ffmpeg",
+        &["ffmpeg"],
+        "install ffmpeg (macOS: brew install ffmpeg)",
+    )
+    .await?;
 
     let file_name = format!(
         "screen-{}.mp4",

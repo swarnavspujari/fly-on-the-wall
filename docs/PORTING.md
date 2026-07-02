@@ -7,6 +7,14 @@ storage, and UI are untouched.
 
 ## macOS
 
+> **Status (v0.2):** Looma builds and runs on macOS (CI-verified; not yet exercised on a
+> physical Mac). Capture is **mic-only**: process taps need a signed binary (see the third
+> trap below) and v0.2 ships unsigned, so a tap impl would record silence for every user.
+> Diarization downloads the universal2 sherpa-onnx build; whisper-cli and ffmpeg are picked
+> up from PATH (`brew install whisper-cpp ffmpeg`). Screen capture is full-screen via
+> ffmpeg avfoundation. Once releases are signed, implement the taps below and move screen
+> capture to ScreenCaptureKit.
+
 - **AudioCapture → Core Audio Process Taps** (macOS 14.2+, `CATapDescription`) — the clean
   audio-only path; preferred over ScreenCaptureKit for system audio. Known traps to encode in
   the impl:
@@ -32,6 +40,21 @@ storage, and UI are untouched.
 
 - Mic capture behind `AudioCapture`; whisper.cpp and sherpa-onnx both run on Android.
 - Tauri 2 supports Android targets; `src-tauri` is already `staticlib`/`cdylib`-ready.
+
+## Linux
+
+> **Status (v0.2):** builds in CI (ubuntu-22.04); not yet run on a Linux device.
+
+- **AudioCapture:** mic via cpal/ALSA; system audio via the default sink's **monitor
+  source** over the PulseAudio simple API (`@DEFAULT_MONITOR@`) — served natively by
+  PulseAudio and by PipeWire's pipewire-pulse. Implemented in
+  `looma-audio/src/pulse_loopback.rs` with the same pad-to-clock discipline as WASAPI.
+- **ScreenRecorder:** ffmpeg x11grab (full screen + region). Wayland sessions need an
+  xdg-desktop-portal/PipeWire recorder — not implemented; x11grab's failure is surfaced.
+- **Tools:** sherpa-onnx and ffmpeg download managed per-OS builds; whisper.cpp publishes
+  no Linux CLI binaries, so `whisper-cli` is resolved from PATH (package manager or source
+  build) with the Groq fallback as the no-install alternative.
+- **Secrets:** keyring's `sync-secret-service` feature (GNOME Keyring / KWallet over DBus).
 
 ## Rules that keep ports cheap
 

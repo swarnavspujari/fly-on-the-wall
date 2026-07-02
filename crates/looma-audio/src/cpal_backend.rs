@@ -63,7 +63,7 @@ impl AudioCapture for CpalAudioCapture {
     }
 
     fn supports_system_loopback(&self) -> bool {
-        cfg!(target_os = "windows")
+        cfg!(any(target_os = "windows", target_os = "linux"))
     }
 
     fn capture_warnings(&self) -> Vec<String> {
@@ -169,14 +169,14 @@ impl CaptureSession for CpalSession {
 }
 
 /// Pause-aware wall clock shared with the stream callbacks.
-struct Clock {
+pub(crate) struct Clock {
     accum_ms: AtomicU64,
     running: AtomicBool,
     last_resume: Mutex<Instant>,
 }
 
 impl Clock {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             accum_ms: AtomicU64::new(0),
             running: AtomicBool::new(true),
@@ -184,20 +184,20 @@ impl Clock {
         }
     }
 
-    fn pause(&self) {
+    pub(crate) fn pause(&self) {
         if self.running.swap(false, Ordering::SeqCst) {
             let since = self.last_resume.lock().unwrap().elapsed().as_millis() as u64;
             self.accum_ms.fetch_add(since, Ordering::SeqCst);
         }
     }
 
-    fn resume(&self) {
+    pub(crate) fn resume(&self) {
         if !self.running.swap(true, Ordering::SeqCst) {
             *self.last_resume.lock().unwrap() = Instant::now();
         }
     }
 
-    fn elapsed_ms(&self) -> u64 {
+    pub(crate) fn elapsed_ms(&self) -> u64 {
         let base = self.accum_ms.load(Ordering::SeqCst);
         if self.running.load(Ordering::SeqCst) {
             base + self.last_resume.lock().unwrap().elapsed().as_millis() as u64
@@ -205,9 +205,15 @@ impl Clock {
             base
         }
     }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
 }
 
-type SharedWriter = Arc<Mutex<Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>>>;
+pub(crate) type SharedWriter =
+    Arc<Mutex<Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>>>;
 
 struct ChannelRecorder {
     _stream: cpal::Stream,
@@ -235,6 +241,45 @@ impl ChannelRecorder {
     }
 }
 
+/// The system-audio channel differs per OS: WASAPI loopback rides a cpal
+/// stream; Linux records the Pulse/PipeWire monitor on its own thread.
+enum LoopbackChannel {
+    Cpal(ChannelRecorder),
+    #[cfg(target_os = "linux")]
+    Pulse(crate::pulse_loopback::PulseRecorder),
+}
+
+impl LoopbackChannel {
+    fn pad_tail_to(&self, target_ms: u64) {
+        match self {
+            LoopbackChannel::Cpal(r) => r.pad_tail_to(target_ms),
+            #[cfg(target_os = "linux")]
+            LoopbackChannel::Pulse(r) => r.pad_tail_to(target_ms),
+        }
+    }
+    fn writer(&self) -> &SharedWriter {
+        match self {
+            LoopbackChannel::Cpal(r) => &r.writer,
+            #[cfg(target_os = "linux")]
+            LoopbackChannel::Pulse(r) => &r.writer,
+        }
+    }
+    fn path(&self) -> &PathBuf {
+        match self {
+            LoopbackChannel::Cpal(r) => &r.path,
+            #[cfg(target_os = "linux")]
+            LoopbackChannel::Pulse(r) => &r.path,
+        }
+    }
+    fn cpal_stream(&self) -> Option<&cpal::Stream> {
+        match self {
+            LoopbackChannel::Cpal(r) => Some(&r._stream),
+            #[cfg(target_os = "linux")]
+            LoopbackChannel::Pulse(_) => None,
+        }
+    }
+}
+
 fn audio_thread(
     cfg: CaptureConfig,
     clock: Arc<Clock>,
@@ -255,8 +300,8 @@ fn audio_thread(
 
     // --- system loopback channel (best effort: recording proceeds mic-only
     //     if loopback can't be built, e.g. non-Windows or exotic devices) ---
-    let system = if cfg.capture_system {
-        match build_loopback_recorder(&host, &cfg, &clock) {
+    let system: Option<LoopbackChannel> = if cfg.capture_system {
+        match build_loopback_channel(&host, &cfg, &clock) {
             Ok(r) => Some(r),
             Err(e) => {
                 tracing::warn!("system loopback unavailable, recording mic only: {e}");
@@ -270,7 +315,7 @@ fn audio_thread(
     let _ = ready_tx.send(Ok(()));
 
     let streams: Vec<&cpal::Stream> = std::iter::once(&mic._stream)
-        .chain(system.iter().map(|s| &s._stream))
+        .chain(system.iter().filter_map(|s| s.cpal_stream()))
         .collect();
     for s in &streams {
         if let Err(e) = s.play() {
@@ -313,9 +358,9 @@ fn audio_thread(
         Ok(())
     };
     let mic_path = mic.path.clone();
-    let system_path = system.as_ref().map(|s| s.path.clone());
+    let system_path = system.as_ref().map(|s| s.path().clone());
     let fin = finalize(&mic.writer).and_then(|_| match &system {
-        Some(s) => finalize(&s.writer),
+        Some(s) => finalize(s.writer()),
         None => Ok(()),
     });
     drop(mic);
@@ -360,23 +405,30 @@ fn build_mic_recorder(
     build_recorder(&device, config, path, clock.clone(), false)
 }
 
-fn build_loopback_recorder(
+fn build_loopback_channel(
     host: &cpal::Host,
     cfg: &CaptureConfig,
     clock: &Arc<Clock>,
-) -> Result<ChannelRecorder> {
-    if !cfg!(target_os = "windows") {
-        return Err(AudioError::LoopbackUnsupported);
-    }
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| AudioError::DeviceNotFound("default output".into()))?;
-    // WASAPI loopback uses the OUTPUT device's render format for an input stream.
-    let config = device
-        .default_output_config()
-        .map_err(|e| AudioError::Backend(e.to_string()))?;
+) -> Result<LoopbackChannel> {
     let path = cfg.out_dir.join(format!("{}.system.wav", cfg.base_name));
-    build_recorder(&device, config, path, clock.clone(), true)
+    if cfg!(target_os = "windows") {
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| AudioError::DeviceNotFound("default output".into()))?;
+        // WASAPI loopback uses the OUTPUT device's render format for an input stream.
+        let config = device
+            .default_output_config()
+            .map_err(|e| AudioError::Backend(e.to_string()))?;
+        return build_recorder(&device, config, path, clock.clone(), true)
+            .map(LoopbackChannel::Cpal);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return crate::pulse_loopback::PulseRecorder::start(path, clock.clone())
+            .map(LoopbackChannel::Pulse);
+    }
+    #[allow(unreachable_code)]
+    Err(AudioError::LoopbackUnsupported)
 }
 
 /// Build a stream that downmixes every callback buffer to mono i16 and
