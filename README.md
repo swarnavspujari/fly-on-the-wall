@@ -44,6 +44,47 @@ In the spirit of Granola, but private by default:
 6. **Chat from Claude Desktop** — Settings → copy the MCP snippet, and your notes are queryable
    from any MCP client, fully locally.
 
+## Install Looma
+
+Grab the installer for your OS from the
+[latest release](https://github.com/swarnavspujari/looma-notetaker/releases/latest).
+The binaries are **not code-signed yet**, so each OS shows a one-time warning — that's
+expected; here's how to get past it.
+
+### Windows
+
+1. Download `Looma_…-setup-windows-x64.exe` and run it.
+2. SmartScreen will say "Windows protected your PC". Click **More info → Run anyway**.
+3. Launch Looma from the Start menu. On first transcription it downloads the speech models
+   (with progress + checksums); after that everything runs offline.
+
+### macOS
+
+1. Download the `.dmg` for your Mac — `macos-arm64` for Apple Silicon (M1 and later),
+   `macos-x64` for Intel — open it, and drag **Looma** into **Applications**.
+2. Gatekeeper will block the unsigned app on first open. Either right-click the app →
+   **Open** → **Open**, or if macOS says the app "is damaged"/"can't be checked", clear the
+   quarantine flag once: `xattr -cr /Applications/Looma.app`, then open it normally.
+3. Grant the microphone permission when asked.
+   *(Capture of the other participants' system audio is not wired up on macOS yet — Looma
+   records your mic and says so; see docs/PORTING.md.)*
+
+### Linux
+
+1. Download the `.AppImage` (any distro) or the `.deb` (Debian/Ubuntu).
+2. AppImage: `chmod +x Looma_*.AppImage && ./Looma_*.AppImage`.
+   Deb: `sudo apt install ./Looma_*.deb`.
+3. Secrets (API keys, calendar tokens) use the desktop keyring via Secret Service — on a
+   minimal install make sure `gnome-keyring` (or KWallet) is running.
+
+### Code signing (the real fix, later)
+
+The warnings above disappear once releases are signed: an OV/EV Authenticode certificate +
+`signtool` on Windows (a few hundred USD/yr), and an Apple Developer ID certificate with
+notarization (`codesign` + `notarytool`, 99 USD/yr) on macOS — both wire into
+`tauri.conf.json`/CI secrets with no code changes. Linux needs no signing. Until someone pays
+for certificates, the manual bypass is the honest path, and this README says so.
+
 ## Build & run (Windows)
 
 Prerequisites:

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Looma",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.looma.notetaker",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -31,7 +31,18 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "shortDescription": "Local-first meeting notes",
+    "longDescription": "Looma records, transcribes and diarizes your meetings entirely on your machine, and merges your rough notes with the transcript into clean, structured notes with per-line provenance.",
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libasound2"]
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
   }
 }

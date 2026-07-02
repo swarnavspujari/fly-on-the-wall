@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/swarnavspujari/looma-notetaker"
@@ -44,7 +44,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process
 tracing = "0.1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # keyring 3.x: platform stores built in (v4 splits them into separate crates)
-keyring = { version = "3", features = ["windows-native", "apple-native"] }
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 dirs = "6"
 reqwest = { version = "0.13", features = ["json", "form", "stream", "multipart"] }
 futures-util = "0.3"
