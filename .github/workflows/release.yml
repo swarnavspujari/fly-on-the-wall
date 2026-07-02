@@ -55,10 +55,12 @@ jobs:
             package-lock.json
             frontend/package-lock.json
 
+      # npm ci with a Windows-generated lockfile misses platform-specific
+      # optional native bindings (npm/cli#4828) — install resolves them.
       - name: Install JS dependencies
         run: |
-          npm ci
-          npm --prefix frontend ci
+          npm install --no-audit --no-fund
+          npm --prefix frontend install --no-audit --no-fund
 
       - uses: dtolnay/rust-toolchain@stable
 
