@@ -265,10 +265,12 @@ pub async fn run_with(
         language = language.or(sys_raw.language.clone());
 
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
-        let turns = diarizer
-            .diarize(&sys_16k, &DiarizeOptions::default())
-            .await
-            .map_err(|e| e.to_string())?;
+        let turns = looma_diarize::drop_dust_clusters(
+            diarizer
+                .diarize(&sys_16k, &DiarizeOptions::default())
+                .await
+                .map_err(|e| e.to_string())?,
+        );
 
         emit_stage(state, on_stage, meeting_id, "aligning", None);
         channels.push(segments_from_single_speaker(
@@ -298,10 +300,12 @@ pub async fn run_with(
         language = raw.language.clone();
 
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
-        let turns = diarizer
-            .diarize(&track_16k, &DiarizeOptions::default())
-            .await
-            .map_err(|e| e.to_string())?;
+        let turns = looma_diarize::drop_dust_clusters(
+            diarizer
+                .diarize(&track_16k, &DiarizeOptions::default())
+                .await
+                .map_err(|e| e.to_string())?,
+        );
 
         emit_stage(state, on_stage, meeting_id, "aligning", None);
         let segments = align_words_to_speakers(&raw.words, &turns, &align_opts);

@@ -40,22 +40,7 @@ impl DiarizationEngine for SherpaDiarizeEngine {
         }
 
         let mut cmd = tokio::process::Command::new(&self.exe);
-        cmd.arg(format!(
-            "--segmentation.pyannote-model={}",
-            self.segmentation_model.display()
-        ))
-        .arg(format!(
-            "--embedding.model={}",
-            self.embedding_model.display()
-        ))
-        .arg(format!(
-            "--segmentation.num-threads={}",
-            self.threads.max(1)
-        ))
-        .arg(format!("--embedding.num-threads={}", self.threads.max(1)));
-        if let Some(n) = opts.num_speakers {
-            cmd.arg(format!("--clustering.num-clusters={n}"));
-        }
+        cmd.args(self.cli_args(opts));
         cmd.arg(wav_path);
         #[cfg(windows)]
         {
@@ -77,6 +62,31 @@ impl DiarizationEngine for SherpaDiarizeEngine {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(parse_diarization_output(&stdout, &opts.speaker_key_prefix))
+    }
+}
+
+impl SherpaDiarizeEngine {
+    /// All CLI arguments except the trailing wav path. A user-provided
+    /// speaker count wins over the clustering threshold (sherpa ignores the
+    /// threshold when num-clusters is set; we don't pass both).
+    fn cli_args(&self, opts: &DiarizeOptions) -> Vec<String> {
+        let mut args = vec![
+            format!(
+                "--segmentation.pyannote-model={}",
+                self.segmentation_model.display()
+            ),
+            format!("--embedding.model={}", self.embedding_model.display()),
+            format!("--segmentation.num-threads={}", self.threads.max(1)),
+            format!("--embedding.num-threads={}", self.threads.max(1)),
+        ];
+        match (opts.num_speakers, opts.cluster_threshold) {
+            (Some(n), _) => args.push(format!("--clustering.num-clusters={n}")),
+            (None, Some(threshold)) => {
+                args.push(format!("--clustering.cluster-threshold={threshold}"))
+            }
+            (None, None) => {}
+        }
+        args
     }
 }
 
@@ -140,5 +150,48 @@ Started
     #[test]
     fn empty_output_gives_no_turns() {
         assert!(parse_diarization_output("no matches here", "spk").is_empty());
+    }
+
+    fn engine() -> SherpaDiarizeEngine {
+        SherpaDiarizeEngine {
+            exe: "sherpa.exe".into(),
+            segmentation_model: "seg.onnx".into(),
+            embedding_model: "emb.onnx".into(),
+            threads: 4,
+        }
+    }
+
+    #[test]
+    fn default_options_pass_the_cluster_threshold() {
+        let args = engine().cli_args(&DiarizeOptions::default());
+        assert!(args
+            .iter()
+            .any(|a| a == "--clustering.cluster-threshold=0.9"));
+        assert!(!args
+            .iter()
+            .any(|a| a.starts_with("--clustering.num-clusters")));
+    }
+
+    #[test]
+    fn known_speaker_count_wins_over_threshold() {
+        let opts = DiarizeOptions {
+            num_speakers: Some(2),
+            ..Default::default()
+        };
+        let args = engine().cli_args(&opts);
+        assert!(args.iter().any(|a| a == "--clustering.num-clusters=2"));
+        assert!(!args
+            .iter()
+            .any(|a| a.starts_with("--clustering.cluster-threshold")));
+    }
+
+    #[test]
+    fn no_threshold_means_engine_default() {
+        let opts = DiarizeOptions {
+            cluster_threshold: None,
+            ..Default::default()
+        };
+        let args = engine().cli_args(&opts);
+        assert!(!args.iter().any(|a| a.contains("cluster-threshold")));
     }
 }
