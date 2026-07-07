@@ -10,8 +10,9 @@ mod live;
 mod llm_commands;
 pub mod models;
 pub mod pipeline;
-mod recording;
+pub mod recording;
 mod screen_commands;
+pub mod scheduler;
 pub mod state;
 
 use tauri::Manager;
@@ -36,6 +37,9 @@ pub fn run() {
             }
             let app_state = state::AppState::init()?;
             app.manage(app_state);
+            // Drain queued transcriptions (incl. jobs surviving a restart)
+            // whenever no recording is active.
+            scheduler::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

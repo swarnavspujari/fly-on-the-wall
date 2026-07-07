@@ -119,10 +119,13 @@ pub async fn stop_screen_recording(state: State<'_, AppState>) -> CmdResult<Note
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
 
-    state
+    let note = state
         .storage
         .lock()
         .unwrap()
         .add_attachment_in_place(&note_id, &rel_path)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // capture over → the transcription queue may proceed
+    state.jobs_notify.notify_one();
+    Ok(note)
 }
