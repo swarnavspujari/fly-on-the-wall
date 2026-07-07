@@ -102,11 +102,7 @@ pub async fn import_media(
 
     // same pipeline as a live recording (single-track: diarize whole file),
     // queued so an active recording is never contended with
-    scheduler::enqueue(
-        &state,
-        &scheduler::stage_emitter(&app),
-        &meeting_id,
-    )?;
+    scheduler::enqueue(&state, &scheduler::stage_emitter(&app), &meeting_id)?;
 
     Ok(Some(ImportResult { meeting, note_id }))
 }
