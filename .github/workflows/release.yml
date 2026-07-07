@@ -4,6 +4,11 @@ name: Release
 # and Linux (AppImage + .deb) on every version tag and attaches them to a
 # GitHub Release. Binaries are UNSIGNED — see README "Install Looma" for the
 # SmartScreen/Gatekeeper notes shipped to users.
+#
+# The Windows leg additionally feeds the in-app auto-updater: it signs the
+# NSIS installer with the Tauri updater key (TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]
+# repo secrets) and attaches latest.json, which installed apps poll via
+# .../releases/latest/download/latest.json.
 on:
   push:
     tags: ["v*"]
@@ -21,6 +26,9 @@ jobs:
         include:
           - name: windows-x64
             os: windows-latest
+            # Updater artifacts (.sig) are opt-in via this overlay so plain
+            # local `npx tauri build` keeps working without the signing key.
+            buildArgs: --config src-tauri/tauri.updater.conf.json
             bundles: |
               target/release/bundle/nsis/*.exe
           - name: macos-arm64
@@ -28,7 +36,9 @@ jobs:
             bundles: |
               target/release/bundle/dmg/*.dmg
           - name: macos-x64
-            os: macos-13
+            # macos-13 was retired in Dec 2025 (the v0.2.0 run queued 24 h and
+            # was cancelled); macos-15-intel is GitHub's supported Intel runner.
+            os: macos-15-intel
             bundles: |
               target/release/bundle/dmg/*.dmg
           - name: linux-x64
@@ -76,9 +86,34 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # tauri build runs beforeBuildCommand (frontend build + prepare-sidecars)
+      # Fail in seconds, not after a 20-minute compile: the updater leg needs
+      # the signing secret, and a tag that disagrees with the app version would
+      # ship a latest.json that installed apps re-download forever.
+      - name: Updater preflight
+        if: matrix.name == 'windows-x64'
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not set — required to sign updater artifacts (see README 'Cutting a release')."
+            exit 1
+          fi
+          cfg_ver=$(jq -r .version src-tauri/tauri.conf.json)
+          tag_ver="${GITHUB_REF_NAME#v}"
+          if [ "$cfg_ver" != "$tag_ver" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match tauri.conf.json version ${cfg_ver} — bump the version before tagging."
+            exit 1
+          fi
+
+      # tauri build runs beforeBuildCommand (frontend build + prepare-sidecars).
+      # On windows-x64, buildArgs layers in createUpdaterArtifacts, which signs
+      # the NSIS installer into a detached .sig using the env vars below.
       - name: Build installers
-        run: npx tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build ${{ matrix.buildArgs }}
 
       - name: Rename artifacts with target suffix
         shell: bash
@@ -95,6 +130,28 @@ jobs:
             done
           done <<< "${{ matrix.bundles }}"
           ls -la dist-upload/
+
+      # The manifest installed apps poll for updates. Windows-only for now:
+      # signature is the detached .sig of the (byte-identical, pre-rename)
+      # NSIS installer; url points at the renamed release asset.
+      - name: Generate updater manifest (latest.json)
+        if: matrix.name == 'windows-x64'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          setup=(dist-upload/*-setup-windows-x64.exe)
+          sig=(target/release/bundle/nsis/*-setup.exe.sig)
+          [ -f "${setup[0]}" ] || { echo "::error::renamed NSIS installer not found in dist-upload/"; exit 1; }
+          [ -f "${sig[0]}" ] || { echo "::error::updater .sig not found — did createUpdaterArtifacts run?"; exit 1; }
+          jq -n \
+            --arg version "$version" \
+            --arg notes "Looma ${version} — full notes: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$(basename "${setup[0]}")" \
+            --arg signature "$(cat "${sig[0]}")" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"windows-x86_64": {signature: $signature, url: $url}}}' \
+            > dist-upload/latest.json
+          cat dist-upload/latest.json
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
