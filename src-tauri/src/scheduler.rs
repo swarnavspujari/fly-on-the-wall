@@ -130,22 +130,7 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 let _ = app.emit("model:progress", p);
             }
         };
-        {
-            let state = app.state::<AppState>();
-            let (reset, queued) = {
-                let storage = state.storage.lock().unwrap();
-                (
-                    storage.reset_running_transcriptions().unwrap_or(0),
-                    storage.queued_transcription_ids().unwrap_or_default(),
-                )
-            };
-            if reset > 0 {
-                tracing::info!(reset, "requeued transcriptions interrupted by shutdown");
-            }
-            for id in queued {
-                mark_waiting(&state, &on_stage, &id, None);
-            }
-        }
+        recover(&app.state::<AppState>(), &on_stage);
         loop {
             let state = app.state::<AppState>();
             match tick(&state, &on_stage, &on_model).await {
@@ -173,6 +158,24 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             }
         }
     });
+}
+
+/// Startup recovery: jobs a previous process left 'running' died with it —
+/// re-queue them, then resurface every queued job as "waiting" in the UI.
+pub fn recover(state: &AppState, on_stage: StageSink<'_>) {
+    let (reset, queued) = {
+        let storage = state.storage.lock().unwrap();
+        (
+            storage.reset_running_transcriptions().unwrap_or(0),
+            storage.queued_transcription_ids().unwrap_or_default(),
+        )
+    };
+    if reset > 0 {
+        tracing::info!(reset, "requeued transcriptions interrupted by shutdown");
+    }
+    for id in queued {
+        mark_waiting(state, on_stage, &id, None);
+    }
 }
 
 /// The `pipeline:progress` bridge shared by the worker and the enqueue
