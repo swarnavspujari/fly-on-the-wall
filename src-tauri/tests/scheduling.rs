@@ -178,3 +178,39 @@ fn failing_job_is_retried_then_parked_as_failed() {
     assert_eq!(job.status, looma_storage::JOB_QUEUED);
     assert_eq!(job.attempts, 0);
 }
+
+/// A job the app died on (or never got to) must come back schedulable and
+/// visible after a restart — reopen the same data dir with a fresh state,
+/// as app startup does, and run the worker's recovery step.
+#[test]
+fn queued_and_running_jobs_survive_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(looma_secrets::MemorySecretStore::default());
+    let (queued_id, running_id) = {
+        let state = AppState::init_with(dir.path().to_path_buf(), secrets.clone()).unwrap();
+        let queued_id = meeting_without_recording(&state);
+        let running_id = meeting_without_recording(&state);
+        let storage = state.storage.lock().unwrap();
+        storage.enqueue_transcription(&queued_id).unwrap();
+        storage.enqueue_transcription(&running_id).unwrap();
+        storage.mark_transcription_running(&running_id).unwrap();
+        (queued_id, running_id)
+        // state dropped = app gone mid-transcription
+    };
+
+    let state = AppState::init_with(dir.path().to_path_buf(), secrets).unwrap();
+    let stage = on_stage();
+    scheduler::recover(&state, &stage);
+
+    let stages = state.pipeline_stage.lock().unwrap();
+    for id in [&queued_id, &running_id] {
+        let storage = state.storage.lock().unwrap();
+        let job = storage.transcription_job(id).unwrap().unwrap();
+        assert_eq!(job.status, looma_storage::JOB_QUEUED, "job {id}");
+        assert_eq!(
+            stages.get(id.as_str()).map(String::as_str),
+            Some(scheduler::WAITING_STAGE),
+            "job {id} should be surfaced as waiting"
+        );
+    }
+}
