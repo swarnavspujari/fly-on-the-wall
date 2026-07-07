@@ -78,7 +78,12 @@ fn queue_defers_while_recording_then_attempts_after() {
     scheduler::enqueue(&state, &stage, &meeting_id).unwrap();
     // queued state is visible immediately
     assert_eq!(
-        state.pipeline_stage.lock().unwrap().get(&meeting_id).map(String::as_str),
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .get(&meeting_id)
+            .map(String::as_str),
         Some(scheduler::WAITING_STAGE)
     );
 
@@ -99,7 +104,12 @@ fn queue_defers_while_recording_then_attempts_after() {
         assert_eq!(job.attempts, 0);
     }
     assert_eq!(
-        state.pipeline_stage.lock().unwrap().get(&meeting_id).map(String::as_str),
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .get(&meeting_id)
+            .map(String::as_str),
         Some(scheduler::WAITING_STAGE)
     );
 
@@ -136,7 +146,10 @@ fn failing_job_is_retried_then_parked_as_failed() {
         }
     }
     match rt.block_on(scheduler::tick(&state, &stage, &model)) {
-        Tick::GaveUp { meeting_id: id, error } => {
+        Tick::GaveUp {
+            meeting_id: id,
+            error,
+        } => {
             assert_eq!(id, meeting_id);
             assert!(!error.is_empty());
         }
@@ -151,7 +164,12 @@ fn failing_job_is_retried_then_parked_as_failed() {
     // nothing schedulable left, and no ghost stage entry for the UI
     assert!(storage.next_transcription_job().unwrap().is_none());
     drop(storage);
-    assert!(state.pipeline_stage.lock().unwrap().get(&meeting_id).is_none());
+    assert!(state
+        .pipeline_stage
+        .lock()
+        .unwrap()
+        .get(&meeting_id)
+        .is_none());
 
     // the user asking again resets the failure
     scheduler::enqueue(&state, &stage, &meeting_id).unwrap();

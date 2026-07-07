@@ -11,8 +11,8 @@ mod llm_commands;
 pub mod models;
 pub mod pipeline;
 pub mod recording;
-mod screen_commands;
 pub mod scheduler;
+mod screen_commands;
 pub mod state;
 
 use tauri::Manager;

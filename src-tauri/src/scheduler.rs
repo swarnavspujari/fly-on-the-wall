@@ -100,7 +100,9 @@ pub async fn tick(
             state.pipeline_stage.lock().unwrap().remove(&meeting_id);
             let attempts = job.attempts + 1;
             if attempts < MAX_ATTEMPTS {
-                set_job_state(state, |s| s.requeue_transcription(&meeting_id, attempts, &error));
+                set_job_state(state, |s| {
+                    s.requeue_transcription(&meeting_id, attempts, &error)
+                });
                 Tick::Retrying {
                     meeting_id,
                     attempts,

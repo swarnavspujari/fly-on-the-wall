@@ -87,12 +87,22 @@ impl Storage {
 
     /// Failed attempt but retries remain: back to the queue with the error
     /// recorded and the attempt counted.
-    pub fn requeue_transcription(&self, meeting_id: &str, attempts: u32, error: &str) -> Result<()> {
+    pub fn requeue_transcription(
+        &self,
+        meeting_id: &str,
+        attempts: u32,
+        error: &str,
+    ) -> Result<()> {
         self.set_job(meeting_id, JOB_QUEUED, Some(attempts), Some(error))
     }
 
     /// Out of retries: keep the job (and its error) visible, stop trying.
-    pub fn mark_transcription_failed(&self, meeting_id: &str, attempts: u32, error: &str) -> Result<()> {
+    pub fn mark_transcription_failed(
+        &self,
+        meeting_id: &str,
+        attempts: u32,
+        error: &str,
+    ) -> Result<()> {
         self.set_job(meeting_id, JOB_FAILED, Some(attempts), Some(error))
     }
 
@@ -159,12 +169,18 @@ mod tests {
         let (_dir, s) = test_storage();
         s.enqueue_transcription("m1").unwrap();
         s.enqueue_transcription("m2").unwrap();
-        assert_eq!(s.next_transcription_job().unwrap().unwrap().meeting_id, "m1");
+        assert_eq!(
+            s.next_transcription_job().unwrap().unwrap().meeting_id,
+            "m1"
+        );
 
         s.mark_transcription_running("m1").unwrap();
         s.requeue_transcription("m1", 1, "boom").unwrap();
         // m1 was retried → m2 now goes first
-        assert_eq!(s.next_transcription_job().unwrap().unwrap().meeting_id, "m2");
+        assert_eq!(
+            s.next_transcription_job().unwrap().unwrap().meeting_id,
+            "m2"
+        );
         assert_eq!(s.queued_transcription_ids().unwrap(), vec!["m2", "m1"]);
 
         let m1 = s.transcription_job("m1").unwrap().unwrap();
@@ -177,7 +193,8 @@ mod tests {
         let (_dir, s) = test_storage();
         s.enqueue_transcription("m1").unwrap();
         s.mark_transcription_running("m1").unwrap();
-        s.mark_transcription_failed("m1", 3, "no recording files").unwrap();
+        s.mark_transcription_failed("m1", 3, "no recording files")
+            .unwrap();
         assert!(s.next_transcription_job().unwrap().is_none());
         let job = s.transcription_job("m1").unwrap().unwrap();
         assert_eq!(job.status, "failed");
@@ -194,6 +211,9 @@ mod tests {
         s.mark_transcription_running("m1").unwrap();
         assert!(s.next_transcription_job().unwrap().is_none());
         assert_eq!(s.reset_running_transcriptions().unwrap(), 1);
-        assert_eq!(s.next_transcription_job().unwrap().unwrap().meeting_id, "m1");
+        assert_eq!(
+            s.next_transcription_job().unwrap().unwrap().meeting_id,
+            "m1"
+        );
     }
 }
