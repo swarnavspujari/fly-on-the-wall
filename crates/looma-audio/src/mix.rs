@@ -163,7 +163,10 @@ mod tests {
     fn normalize_caps_gain_and_never_attenuates() {
         let mut quiet = vec![0.001, -0.001];
         normalize_peak(&mut quiet, 0.8, 10.0);
-        assert!((quiet[0] - 0.01).abs() < 1e-6, "gain must cap at 10x: {quiet:?}");
+        assert!(
+            (quiet[0] - 0.01).abs() < 1e-6,
+            "gain must cap at 10x: {quiet:?}"
+        );
 
         let mut loud = vec![0.9, -0.95];
         normalize_peak(&mut loud, 0.8, 10.0);

@@ -176,7 +176,7 @@ mod tests {
             "so", "before", // prefix
             "I", "think", "we're", "in", "the", "boat.", // 1
             "i", "think", "we're", "in", "the", "boat", // 2 (case/punct differ)
-            "I", "think", "we're", "in", "the", "boat.", // 3
+            "I", "think", "we're", "in", "the", "boat.",  // 3
             "anyway", // suffix
         ]);
         let (out, runs) = collapse_loops(input);

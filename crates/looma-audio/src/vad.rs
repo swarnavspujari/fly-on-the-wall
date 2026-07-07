@@ -83,8 +83,8 @@ pub fn detect_speech_spans(samples: &[f32], rate: u32, cfg: &VadConfig) -> Vec<S
         let loud = frames[i] >= threshold;
         match speech_since {
             None => {
-                let entering = loud
-                    && (0..enter).all(|k| frames.get(i + k).is_some_and(|f| *f >= threshold));
+                let entering =
+                    loud && (0..enter).all(|k| frames.get(i + k).is_some_and(|f| *f >= threshold));
                 if entering {
                     speech_since = Some(i);
                     silence_run = 0;
@@ -97,7 +97,14 @@ pub fn detect_speech_spans(samples: &[f32], rate: u32, cfg: &VadConfig) -> Vec<S
                     silence_run += 1;
                     if silence_run >= silence_frames {
                         let end = i + 1 - silence_run;
-                        push_padded(&mut spans, start, end, frame_ms, cfg.pad_ms as u64, total_ms);
+                        push_padded(
+                            &mut spans,
+                            start,
+                            end,
+                            frame_ms,
+                            cfg.pad_ms as u64,
+                            total_ms,
+                        );
                         speech_since = None;
                     }
                 }
@@ -106,7 +113,14 @@ pub fn detect_speech_spans(samples: &[f32], rate: u32, cfg: &VadConfig) -> Vec<S
     }
     if let Some(start) = speech_since {
         let end = frames.len() - silence_run;
-        push_padded(&mut spans, start, end, frame_ms, cfg.pad_ms as u64, total_ms);
+        push_padded(
+            &mut spans,
+            start,
+            end,
+            frame_ms,
+            cfg.pad_ms as u64,
+            total_ms,
+        );
     }
     spans
 }
@@ -212,7 +226,8 @@ mod tests {
     }
 
     fn push_silence(out: &mut Vec<f32>, ms: u64) {
-        out.extend(std::iter::repeat(0.0).take((RATE as u64 * ms / 1000) as usize));
+        let n = (RATE as u64 * ms / 1000) as usize;
+        out.resize(out.len() + n, 0.0);
     }
 
     fn spans_of(samples: &[f32]) -> Vec<SpeechSpan> {
@@ -236,7 +251,11 @@ mod tests {
         assert_eq!(spans.len(), 1);
         let s = spans[0];
         // starts near 5000-pad, ends near 7000+pad (frame quantization slack)
-        assert!(s.start_ms >= 4_600 && s.start_ms <= 4_900, "start={}", s.start_ms);
+        assert!(
+            s.start_ms >= 4_600 && s.start_ms <= 4_900,
+            "start={}",
+            s.start_ms
+        );
         assert!(s.end_ms >= 7_100 && s.end_ms <= 7_500, "end={}", s.end_ms);
     }
 
@@ -250,7 +269,11 @@ mod tests {
         let spans = spans_of(&audio);
         assert_eq!(spans.len(), 1, "floor must not read as speech: {spans:?}");
         let s = spans[0];
-        assert!(s.start_ms >= 7_600 && s.start_ms <= 8_000, "start={}", s.start_ms);
+        assert!(
+            s.start_ms >= 7_600 && s.start_ms <= 8_000,
+            "start={}",
+            s.start_ms
+        );
         assert!(s.end_ms >= 10_000 && s.end_ms <= 10_400, "end={}", s.end_ms);
     }
 
@@ -298,14 +321,34 @@ mod tests {
         push_silence(&mut audio, 5_000);
 
         let spans = vec![
-            SpeechSpan { start_ms: 10_000, end_ms: 12_000 },
-            SpeechSpan { start_ms: 32_000, end_ms: 35_000 },
+            SpeechSpan {
+                start_ms: 10_000,
+                end_ms: 12_000,
+            },
+            SpeechSpan {
+                start_ms: 32_000,
+                end_ms: 35_000,
+            },
         ];
         let (stitched, map) = stitch_spans(&audio, RATE, &spans).unwrap();
         assert_eq!(stitched.len(), (RATE as usize) * 5); // 2s + 3s
         assert_eq!(map.len(), 2);
-        assert_eq!(map[0], StitchMap { concat_start_ms: 0, orig_start_ms: 10_000, len_ms: 2_000 });
-        assert_eq!(map[1], StitchMap { concat_start_ms: 2_000, orig_start_ms: 32_000, len_ms: 3_000 });
+        assert_eq!(
+            map[0],
+            StitchMap {
+                concat_start_ms: 0,
+                orig_start_ms: 10_000,
+                len_ms: 2_000
+            }
+        );
+        assert_eq!(
+            map[1],
+            StitchMap {
+                concat_start_ms: 2_000,
+                orig_start_ms: 32_000,
+                len_ms: 3_000
+            }
+        );
 
         // timestamps map back into the right span
         assert_eq!(map_to_original(0, &map), 10_000);
@@ -320,7 +363,10 @@ mod tests {
     fn stitch_rejects_span_past_audio_end() {
         let mut audio = Vec::new();
         push_silence(&mut audio, 1_000);
-        let spans = vec![SpeechSpan { start_ms: 0, end_ms: 5_000 }];
+        let spans = vec![SpeechSpan {
+            start_ms: 0,
+            end_ms: 5_000,
+        }];
         assert!(stitch_spans(&audio, RATE, &spans).is_err());
     }
 }

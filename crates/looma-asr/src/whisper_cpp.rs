@@ -7,9 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use looma_audio::vad::{
-    detect_speech_spans, map_to_original, stitch_spans, SpeechSpan, VadConfig,
-};
+use looma_audio::vad::{detect_speech_spans, map_to_original, stitch_spans, SpeechSpan, VadConfig};
 use looma_core::Word;
 
 use crate::{AsrError, RawTranscript, Result, TranscribeOptions, TranscriptionEngine};

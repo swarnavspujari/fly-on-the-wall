@@ -70,8 +70,7 @@ pub fn drop_dust_clusters(mut turns: Vec<SpeakerTurn>) -> Vec<SpeakerTurn> {
 
     let mut totals: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for t in &turns {
-        *totals.entry(t.speaker_key.clone()).or_default() +=
-            t.end_ms.saturating_sub(t.start_ms);
+        *totals.entry(t.speaker_key.clone()).or_default() += t.end_ms.saturating_sub(t.start_ms);
     }
     let all: u64 = totals.values().sum();
     let floor = DUST_FLOOR_MS.min((all as f64 * DUST_FRACTION) as u64);
@@ -102,10 +101,7 @@ mod tests {
         let kept = drop_dust_clusters(turns);
         let keys: std::collections::BTreeSet<_> =
             kept.iter().map(|t| t.speaker_key.as_str()).collect();
-        assert_eq!(
-            keys.into_iter().collect::<Vec<_>>(),
-            vec!["spk_0", "spk_1"]
-        );
+        assert_eq!(keys.into_iter().collect::<Vec<_>>(), vec!["spk_0", "spk_1"]);
     }
 
     #[test]

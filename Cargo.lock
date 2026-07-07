@@ -2310,6 +2310,7 @@ name = "looma-asr"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "looma-audio",
  "looma-core",
  "reqwest",
  "serde",
