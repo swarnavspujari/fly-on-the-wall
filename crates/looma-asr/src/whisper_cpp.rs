@@ -1,12 +1,28 @@
-//! whisper.cpp sidecar engine: shells out to `whisper-cli.exe` with
-//! word-level output (`-ml 1 -sow -oj`) and parses the JSON it writes.
-//! Fully local; works on every hardware tier.
+//! whisper.cpp sidecar engine: adaptive VAD splits the recording into speech
+//! batches (long silence/noise never reaches the decoder — that is what
+//! seeded 1881×-repetition hallucination loops in real meetings), each batch
+//! is peak-normalized and transcribed by `whisper-cli` with word-level output
+//! (`-ml 1 -sow -oj`), and word timestamps are mapped back to the original
+//! timeline. Fully local; works on every hardware tier.
 
 use std::path::{Path, PathBuf};
 
+use looma_audio::vad::{
+    detect_speech_spans, map_to_original, stitch_spans, SpeechSpan, VadConfig,
+};
 use looma_core::Word;
 
 use crate::{AsrError, RawTranscript, Result, TranscribeOptions, TranscriptionEngine};
+
+/// Cap on the speech content of one whisper-cli invocation. Batching many
+/// short spans into one call amortizes model load; the cap keeps single
+/// invocations bounded.
+const MAX_BATCH_SPEECH_MS: u64 = 120_000;
+/// Batches are boosted so their peak reaches this (never attenuated) —
+/// system-loopback audio routinely peaks below −12 dBFS.
+const NORMALIZE_TARGET_PEAK: f32 = 0.85;
+/// …but a nearly-silent batch is never boosted more than this (~30 dB).
+const NORMALIZE_MAX_GAIN: f32 = 31.6;
 
 pub struct WhisperCppEngine {
     /// Path to whisper-cli(.exe).
@@ -33,13 +49,60 @@ impl TranscriptionEngine for WhisperCppEngine {
         if !wav_path.exists() {
             return Err(AsrError::BadAudio(wav_path.display().to_string()));
         }
+
+        let (samples, rate) = looma_audio::mix::read_wav_mono(wav_path)
+            .map_err(|e| AsrError::BadAudio(format!("{}: {e}", wav_path.display())))?;
+        let spans = detect_speech_spans(&samples, rate, &VadConfig::default());
+        tracing::debug!(
+            file = %wav_path.display(),
+            spans = spans.len(),
+            speech_ms = spans.iter().map(|s| s.end_ms - s.start_ms).sum::<u64>(),
+            total_ms = samples.len() as u64 * 1000 / rate.max(1) as u64,
+            "vad segmentation"
+        );
+
+        let mut words = Vec::new();
+        let mut language = None;
+        for batch in plan_batches(&spans, MAX_BATCH_SPEECH_MS) {
+            let (mut chunk, map) = stitch_spans(&samples, rate, &batch)
+                .map_err(|e| AsrError::BadAudio(e.to_string()))?;
+            looma_audio::mix::normalize_peak(&mut chunk, NORMALIZE_TARGET_PEAK, NORMALIZE_MAX_GAIN);
+            let raw = self.run_whisper_cli(&chunk, rate, opts).await?;
+            language = language.or(raw.language);
+            words.extend(raw.words.into_iter().map(|mut w| {
+                w.start_ms = map_to_original(w.start_ms, &map);
+                w.end_ms = map_to_original(w.end_ms, &map);
+                w
+            }));
+        }
+
+        Ok(RawTranscript {
+            language: language.or_else(|| opts.language.clone()),
+            words,
+            segments: vec![],
+        })
+    }
+}
+
+impl WhisperCppEngine {
+    /// One whisper-cli invocation over prepared samples; returns parsed words
+    /// with timestamps relative to the given samples.
+    async fn run_whisper_cli(
+        &self,
+        samples: &[f32],
+        rate: u32,
+        opts: &TranscribeOptions,
+    ) -> Result<RawTranscript> {
         let out_base = std::env::temp_dir().join(format!("looma-whisper-{}", uuid::Uuid::new_v4()));
+        let wav_path = PathBuf::from(format!("{}.wav", out_base.display()));
+        looma_audio::mix::write_wav_mono_16(&wav_path, samples, rate)
+            .map_err(|e| AsrError::Engine(format!("write chunk wav: {e}")))?;
 
         let mut cmd = tokio::process::Command::new(&self.exe);
         cmd.arg("-m")
             .arg(&self.model)
             .arg("-f")
-            .arg(wav_path)
+            .arg(&wav_path)
             .arg("-oj")
             .arg("-of")
             .arg(&out_base)
@@ -51,6 +114,11 @@ impl TranscriptionEngine for WhisperCppEngine {
             .arg(self.threads.max(1).to_string())
             .arg("-l")
             .arg(opts.language.as_deref().unwrap_or("auto"));
+        if let Some(max_context) = opts.max_context {
+            // 0 disables cross-window text carryover, the fuel that lets one
+            // hallucinated window poison the rest of a recording
+            cmd.arg("-mc").arg(max_context.to_string());
+        }
         if let Some(prompt) = &opts.prompt {
             cmd.arg("--prompt").arg(prompt);
         }
@@ -63,7 +131,9 @@ impl TranscriptionEngine for WhisperCppEngine {
         let output = cmd
             .output()
             .await
-            .map_err(|e| AsrError::Engine(format!("failed to launch whisper-cli: {e}")))?;
+            .map_err(|e| AsrError::Engine(format!("failed to launch whisper-cli: {e}")));
+        let _ = std::fs::remove_file(&wav_path);
+        let output = output?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(AsrError::Engine(format!(
@@ -120,9 +190,68 @@ pub fn parse_whisper_json(json: &str) -> Result<RawTranscript> {
     })
 }
 
+/// Group speech spans into transcription batches: consecutive spans join a
+/// batch until its total speech reaches `max_speech_ms`; a single span longer
+/// than the cap gets its own batch (contiguous speech is never cut).
+fn plan_batches(spans: &[SpeechSpan], max_speech_ms: u64) -> Vec<Vec<SpeechSpan>> {
+    let mut batches: Vec<Vec<SpeechSpan>> = Vec::new();
+    let mut current: Vec<SpeechSpan> = Vec::new();
+    let mut current_ms = 0u64;
+    for span in spans {
+        let len = span.end_ms.saturating_sub(span.start_ms);
+        if !current.is_empty() && current_ms + len > max_speech_ms {
+            batches.push(std::mem::take(&mut current));
+            current_ms = 0;
+        }
+        current.push(*span);
+        current_ms += len;
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn span(start_s: u64, end_s: u64) -> SpeechSpan {
+        SpeechSpan {
+            start_ms: start_s * 1000,
+            end_ms: end_s * 1000,
+        }
+    }
+
+    #[test]
+    fn no_spans_no_batches() {
+        assert!(plan_batches(&[], 120_000).is_empty());
+    }
+
+    #[test]
+    fn small_spans_share_one_batch() {
+        let spans = vec![span(0, 10), span(20, 35), span(50, 70)];
+        let batches = plan_batches(&spans, 120_000);
+        assert_eq!(batches, vec![spans]);
+    }
+
+    #[test]
+    fn batch_splits_before_overflow() {
+        let spans = vec![span(0, 60), span(100, 150), span(200, 230)];
+        let batches = plan_batches(&spans, 120_000);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], vec![span(0, 60), span(100, 150)]); // 110s speech
+        assert_eq!(batches[1], vec![span(200, 230)]);
+    }
+
+    #[test]
+    fn oversized_span_gets_its_own_batch() {
+        let spans = vec![span(0, 200), span(300, 310)];
+        let batches = plan_batches(&spans, 120_000);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], vec![span(0, 200)]);
+        assert_eq!(batches[1], vec![span(300, 310)]);
+    }
 
     #[test]
     fn parses_word_entries_and_skips_blanks() {

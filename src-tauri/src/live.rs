@@ -185,6 +185,7 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
                     let opts = looma_asr::TranscribeOptions {
                         language: None,
                         prompt: (!cur.prompt_tail.is_empty()).then(|| cur.prompt_tail.clone()),
+                        ..Default::default()
                     };
                     let text = match engine.transcribe(&chunk_path, &opts).await {
                         Ok(raw) => raw

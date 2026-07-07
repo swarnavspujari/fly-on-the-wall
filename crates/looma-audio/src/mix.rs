@@ -65,6 +65,20 @@ pub fn resample_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32
     out
 }
 
+/// Boost quiet audio so its peak hits `target_peak` (never attenuates, never
+/// boosts more than `max_gain`). System-loopback recordings routinely peak at
+/// −12 dBFS or lower; ASR models behave better on healthy levels.
+pub fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    if peak <= 0.0 || peak >= target_peak {
+        return;
+    }
+    let gain = (target_peak / peak).min(max_gain);
+    for s in samples.iter_mut() {
+        *s *= gain;
+    }
+}
+
 /// Sum two mono tracks (already at the same rate); the longer one defines
 /// the length. Soft-clipped to [-1, 1].
 pub fn mix_tracks(a: &[f32], b: &[f32]) -> Vec<f32> {
@@ -135,6 +149,32 @@ mod tests {
     fn resample_same_rate_is_identity() {
         let samples = vec![0.1, 0.2, 0.3];
         assert_eq!(resample_linear(&samples, 16_000, 16_000), samples);
+    }
+
+    #[test]
+    fn normalize_boosts_quiet_audio_to_target() {
+        let mut s = vec![0.0, 0.1, -0.2, 0.05];
+        normalize_peak(&mut s, 0.8, 40.0);
+        assert!((s[2] + 0.8).abs() < 1e-6, "peak should hit target: {s:?}");
+        assert!((s[1] - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_caps_gain_and_never_attenuates() {
+        let mut quiet = vec![0.001, -0.001];
+        normalize_peak(&mut quiet, 0.8, 10.0);
+        assert!((quiet[0] - 0.01).abs() < 1e-6, "gain must cap at 10x: {quiet:?}");
+
+        let mut loud = vec![0.9, -0.95];
+        normalize_peak(&mut loud, 0.8, 10.0);
+        assert_eq!(loud, vec![0.9, -0.95], "already-loud audio is untouched");
+    }
+
+    #[test]
+    fn normalize_leaves_silence_alone() {
+        let mut silence = vec![0.0; 8];
+        normalize_peak(&mut silence, 0.8, 10.0);
+        assert_eq!(silence, vec![0.0; 8]);
     }
 
     #[test]
