@@ -39,7 +39,10 @@
 Every push: ESLint + Prettier check, `tsc` typecheck, frontend build, rustfmt check, clippy
 (`-D warnings`), `cargo test`, `cargo build` on `windows-latest`, plus a build-and-test
 matrix on `macos-latest` and `ubuntu-22.04`. Tag pushes (`v*`) build the three-OS
-installers and attach them to a GitHub Release. `main` stays green.
+installers and attach them to a GitHub Release; the Windows leg also signs the installer
+with the updater key and attaches `latest.json` for the in-app auto-updater (requires the
+`TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` secrets — see README "Cutting a release").
+`main` stays green.
 
 ## Manual checklist (run before tagging a milestone)
 
@@ -73,3 +76,11 @@ installers and attach them to a GitHub Release. `main` stays green.
       ~20 s of speech and the full diarized transcript replaces them after Stop (M14)
 - [ ] Export .md saves the note's markdown; Print / PDF prints only the note content, no
       app chrome (M14)
+- [ ] Settings → App updates shows the current version and "Check for updates" answers
+      against the latest published release (needs a release with `latest.json`) (auto-update)
+- [ ] With an older build installed and a newer release published: the update banner appears
+      shortly after launch; "Update now" downloads with visible progress and the app
+      restarts into the new version (auto-update)
+- [ ] While a recording (mic or screen) is active, no update banner ever appears and
+      Settings' install/restart buttons are disabled; once the recording stops, the deferred
+      prompt shows up (auto-update)

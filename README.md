@@ -62,6 +62,13 @@ expected; here's how to get past it.
 3. Launch Looma from the Start menu. On first transcription it downloads the speech models
    (with progress + checksums); after that everything runs offline.
 
+After this one manual install, Looma keeps itself current: it checks GitHub Releases on
+launch (and via **Settings → App updates**), downloads the new installer in the background,
+and restarts once when you confirm. Updates never interrupt a recording — the prompt waits
+until you're done. Update packages are signed with Looma's updater key and verified before
+install. (Installs older than the updater, v0.2.0 and earlier, need one last manual
+download.)
+
 ### macOS
 
 1. Download the `.dmg` for your Mac — `macos-arm64` for Apple Silicon (M1 and later),
@@ -118,6 +125,29 @@ Run the test suite:
 ```powershell
 cargo test --workspace
 ```
+
+## Cutting a release
+
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) on
+every `v*` tag. The Windows leg also feeds the auto-updater: it signs the NSIS installer
+(detached `.sig`) and attaches `latest.json`, which installed apps poll at
+`releases/latest/download/latest.json`.
+
+1. Bump the version in `src-tauri/tauri.conf.json` **and** the workspace `Cargo.toml`
+   (`[workspace.package] version`) — the workflow refuses a tag that doesn't match the
+   config version, because a mismatched `latest.json` would make installed apps re-download
+   the same update forever.
+2. Make sure the two repo secrets exist (one-time setup): `TAURI_SIGNING_PRIVATE_KEY` and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the Tauri updater keypair. The public half lives
+   in `tauri.conf.json` (`plugins.updater.pubkey`). **If the private key or password is
+   lost, shipped apps can never verify another update** — they'd need a manual reinstall
+   with a new key.
+3. Land everything on `main` first (tag-push workflows run the workflow file at the tag's
+   commit), then `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+Local production builds don't need the key: `npm run tauri build` skips updater artifacts.
+To reproduce the CI build exactly, set both `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` env vars
+and add `--config src-tauri/tauri.updater.conf.json`.
 
 ## Repository layout
 
