@@ -122,8 +122,11 @@ impl WhisperCppEngine {
         }
         #[cfg(windows)]
         {
-            // CREATE_NO_WINDOW: no console flash from the sidecar
-            cmd.creation_flags(0x0800_0000);
+            // CREATE_NO_WINDOW (no console flash from the sidecar) |
+            // BELOW_NORMAL_PRIORITY_CLASS: transcription is background work —
+            // audio capture and the user's foreground apps must win the CPU,
+            // never the decoder.
+            cmd.creation_flags(0x0800_0000 | 0x0000_4000);
         }
 
         let output = cmd

@@ -118,8 +118,12 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
             return;
         }
     };
+    // Live chunks run WHILE audio is captured, so they get a strict budget:
+    // a quarter of the logical CPUs, at most 4 threads (the small model stays
+    // well ahead of real time on that; partials are cosmetic anyway and the
+    // capture callbacks must never be starved).
     let threads = std::thread::available_parallelism()
-        .map(|n| (n.get() / 2).max(2))
+        .map(|n| (n.get() / 4).clamp(2, 4))
         .unwrap_or(2);
     let engine = looma_asr::whisper_cpp::WhisperCppEngine {
         exe,

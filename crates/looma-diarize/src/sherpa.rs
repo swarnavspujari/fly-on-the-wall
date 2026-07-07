@@ -44,7 +44,9 @@ impl DiarizationEngine for SherpaDiarizeEngine {
         cmd.arg(wav_path);
         #[cfg(windows)]
         {
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS: diarization is
+            // background work — recording and foreground apps win the CPU.
+            cmd.creation_flags(0x0800_0000 | 0x0000_4000);
         }
 
         let output = cmd
