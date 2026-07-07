@@ -9,9 +9,13 @@ import type {
   Template,
 } from "../types";
 import { Btn, ModalShell, SectionLabel } from "./ui";
+import type { Updater } from "../updater";
 
 interface Props {
   modelProgress: ModelProgress | null;
+  updater: Updater;
+  recordingActive: boolean;
+  appVersion: string | null;
   onClose: () => void;
 }
 
@@ -34,7 +38,13 @@ function gb(bytes: number): string {
     : `${Math.round(bytes / 1_000_000)} MB`;
 }
 
-export default function SettingsModal({ modelProgress, onClose }: Props) {
+export default function SettingsModal({
+  modelProgress,
+  updater,
+  recordingActive,
+  appVersion,
+  onClose,
+}: Props) {
   const [settings, setSettings] = useState<AsrSettings | null>(null);
   const [tier, setTier] = useState("balanced");
   const [modelId, setModelId] = useState<string>("");
@@ -707,6 +717,100 @@ export default function SettingsModal({ modelProgress, onClose }: Props) {
                   </div>
                 )}
               </div>
+            </section>
+
+            <section className="space-y-2">
+              <SectionLabel>App updates</SectionLabel>
+              {updater.supported ? (
+                <div className="space-y-2 rounded-[14px] border border-line bg-surface p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[13px] text-ink-2">
+                      Current version{" "}
+                      <span className="font-semibold text-ink">v{appVersion ?? "…"}</span>
+                    </span>
+                    {(updater.phase === "idle" ||
+                      updater.phase === "upToDate" ||
+                      updater.phase === "error") && (
+                      <Btn variant="outline" size="sm" onClick={updater.check}>
+                        Check for updates
+                      </Btn>
+                    )}
+                    {updater.phase === "checking" && (
+                      <Btn variant="outline" size="sm" disabled>
+                        Checking…
+                      </Btn>
+                    )}
+                    {updater.phase === "available" && (
+                      <Btn
+                        variant="primary"
+                        size="sm"
+                        disabled={recordingActive}
+                        onClick={updater.downloadAndInstall}
+                      >
+                        Download &amp; install v{updater.version}
+                      </Btn>
+                    )}
+                    {updater.phase === "downloading" && (
+                      <span className="flex items-center gap-2">
+                        <span className="h-1.5 w-24 overflow-hidden rounded-full bg-line">
+                          <span
+                            className={`block h-full rounded-full bg-coral ${
+                              updater.progress == null ? "w-1/3 animate-pulse" : ""
+                            }`}
+                            style={
+                              updater.progress == null
+                                ? undefined
+                                : { width: `${Math.round(updater.progress * 100)}%` }
+                            }
+                          />
+                        </span>
+                        <span className="font-mono text-[11px] text-mute">
+                          {updater.progress == null
+                            ? "downloading…"
+                            : `${Math.round(updater.progress * 100)}%`}
+                        </span>
+                      </span>
+                    )}
+                    {updater.phase === "ready" && (
+                      <Btn
+                        variant="primary"
+                        size="sm"
+                        disabled={recordingActive}
+                        onClick={updater.restart}
+                      >
+                        Restart now
+                      </Btn>
+                    )}
+                    {updater.phase === "installing" && (
+                      <span className="text-xs text-ink-2">Installing — Looma will restart…</span>
+                    )}
+                  </div>
+                  {updater.phase === "upToDate" && (
+                    <p className="text-xs font-medium text-spk-teal">
+                      You're on the latest version ✓
+                    </p>
+                  )}
+                  {updater.phase === "error" && (
+                    <p className="text-xs text-clay">✗ {updater.error}</p>
+                  )}
+                  {updater.phase === "ready" && !recordingActive && (
+                    <p className="text-xs text-ink-2">
+                      Update downloaded — restart when you're ready.
+                    </p>
+                  )}
+                  {recordingActive &&
+                    (updater.phase === "available" || updater.phase === "ready") && (
+                      <p className="text-xs text-ink-2">
+                        Recording in progress — the update waits until you're done.
+                      </p>
+                    )}
+                </div>
+              ) : (
+                <p className="text-[11px] text-mute">
+                  Auto-update is Windows-only for now — new versions are published on the GitHub
+                  releases page.
+                </p>
+              )}
             </section>
           </div>
 

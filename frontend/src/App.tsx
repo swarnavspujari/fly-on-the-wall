@@ -23,6 +23,8 @@ import Editor from "./components/Editor";
 import RecordingBar from "./components/RecordingBar";
 import SettingsModal from "./components/SettingsModal";
 import FirstRunNotice from "./components/FirstRunNotice";
+import UpdateBanner from "./components/UpdateBanner";
+import { useUpdater } from "./updater";
 
 const IDLE_STATUS: RecordingStatus = {
   active: false,
@@ -58,6 +60,11 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showFirstRun, setShowFirstRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Auto-update (Windows-only). Recording is sacred: while anything records,
+  // the banner is unmounted and Settings disables install/restart.
+  const recordingActive = recStatus.active || screenStatus.active;
+  const updater = useUpdater(info?.os ?? null, recordingActive);
 
   const openMeetingIdRef = useRef<string | null>(null);
   useEffect(() => {
@@ -399,6 +406,7 @@ export default function App() {
           </button>
         )}
       </footer>
+      {!recordingActive && <UpdateBanner updater={updater} />}
       {showFirstRun && (
         <FirstRunNotice
           onAccept={() => {
@@ -410,6 +418,9 @@ export default function App() {
       {showSettings && (
         <SettingsModal
           modelProgress={modelProgress}
+          updater={updater}
+          recordingActive={recordingActive}
+          appVersion={info?.version ?? null}
           onClose={() => {
             setShowSettings(false);
             api

@@ -20,6 +20,8 @@ fn err_str<E: std::fmt::Display>(e: E) -> String {
 pub struct AppInfo {
     pub version: String,
     pub data_dir: String,
+    /// "windows" | "macos" | "linux" — the UI gates auto-update on this.
+    pub os: String,
 }
 
 /// Smoke-test command: proves IPC works.
@@ -33,6 +35,7 @@ pub fn app_info(state: State<'_, AppState>) -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: state.data_dir.display().to_string(),
+        os: std::env::consts::OS.to_string(),
     }
 }
 

@@ -54,6 +54,8 @@ export interface SearchHit {
 export interface AppInfo {
   version: string;
   data_dir: string;
+  /** "windows" | "macos" | "linux" — auto-update is gated on this. */
+  os: string;
 }
 
 export interface RecordingRef {
