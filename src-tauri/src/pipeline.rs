@@ -19,7 +19,6 @@ use looma_core::repeat::collapse_loops;
 use looma_core::{Speaker, Transcript};
 use looma_diarize::{DiarizationEngine, DiarizeOptions};
 use serde::Serialize;
-use tauri::{Emitter, Manager};
 
 use crate::state::AppState;
 use crate::{hw, models};
@@ -58,42 +57,16 @@ fn emit_stage(
     });
 }
 
-/// Tauri entrypoint used by the transcribe command and auto-run-after-stop:
-/// bridges pipeline events onto the app's event bus.
-pub async fn run<R: tauri::Runtime>(app: tauri::AppHandle<R>, meeting_id: String) {
-    let on_stage = {
-        let app = app.clone();
-        move |p: PipelineProgress| {
-            let _ = app.emit("pipeline:progress", p);
-        }
-    };
-    let on_model = {
-        let app = app.clone();
-        move |p: models::ModelProgress| {
-            let _ = app.emit("model:progress", p);
-        }
-    };
-    let state = app.state::<AppState>();
-    let result = run_with(&state, &on_stage, &on_model, &meeting_id).await;
-
-    let error = match result {
-        Ok(_) => None,
-        Err(e) => {
-            tracing::error!(meeting_id, error = %e, "transcription pipeline failed");
-            Some(e)
-        }
-    };
-    state.pipeline_stage.lock().unwrap().remove(&meeting_id);
-    let _ = app.emit(
-        "pipeline:progress",
-        PipelineProgress {
-            meeting_id: meeting_id.clone(),
-            stage: if error.is_some() { "error" } else { "done" }.into(),
-            detail: None,
-            done: true,
-            error,
-        },
-    );
+/// Sidecar thread budget. Transcription is background work: recording and
+/// whatever the user is actively doing must stay responsive while it runs,
+/// so it never gets more than half the logical CPUs, capped at 8 (whisper.cpp
+/// scales poorly beyond that anyway). Pipelines are additionally serialized
+/// behind the queue worker (scheduler.rs), so this is the whole ASR budget.
+pub fn sidecar_threads() -> usize {
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (n / 2).clamp(2, 8)
 }
 
 pub async fn run_with(
@@ -158,9 +131,7 @@ pub async fn run_with(
     let seg_model = models::ensure(on_model, &data_dir, "pyannote-seg").await?;
     let emb_model = models::ensure(on_model, &data_dir, "campplus-embedding").await?;
 
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let threads = sidecar_threads();
 
     let asr: Box<dyn TranscriptionEngine> = if use_groq || tier == "cloud" {
         let key = state
@@ -329,7 +300,7 @@ pub async fn run_with(
         .save_transcript(&transcript)
         .map_err(|e| e.to_string())?;
 
-    // release the per-meeting guard for direct callers (run() also clears it)
+    // release the per-meeting guard (on failure the scheduler clears it)
     state.pipeline_stage.lock().unwrap().remove(meeting_id);
     Ok(transcript)
 }

@@ -5,16 +5,20 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 use crate::state::AppState;
-use crate::{hw, models, pipeline};
+use crate::{hw, models, scheduler};
 
 type CmdResult<T> = Result<T, String>;
 
-/// Kick off the pipeline for a meeting; progress arrives via
-/// `pipeline:progress` events and `pipeline_stage`.
+/// Queue the pipeline for a meeting — it runs as soon as no recording is
+/// active (recording always wins). Progress arrives via `pipeline:progress`
+/// events and `pipeline_stage` ("waiting" while queued).
 #[tauri::command]
-pub fn transcribe_meeting(app: tauri::AppHandle, meeting_id: String) -> CmdResult<()> {
-    tauri::async_runtime::spawn(pipeline::run(app.clone(), meeting_id));
-    Ok(())
+pub fn transcribe_meeting(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> CmdResult<()> {
+    scheduler::enqueue(&state, &scheduler::stage_emitter(&app), &meeting_id)
 }
 
 #[tauri::command]

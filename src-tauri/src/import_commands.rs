@@ -8,7 +8,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::state::AppState;
-use crate::{models, pipeline};
+use crate::{models, scheduler};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -100,8 +100,13 @@ pub async fn import_media(
             .map_err(|e| e.to_string())?
     };
 
-    // same pipeline as a live recording (single-track: diarize whole file)
-    tauri::async_runtime::spawn(pipeline::run(app.clone(), meeting_id));
+    // same pipeline as a live recording (single-track: diarize whole file),
+    // queued so an active recording is never contended with
+    scheduler::enqueue(
+        &state,
+        &scheduler::stage_emitter(&app),
+        &meeting_id,
+    )?;
 
     Ok(Some(ImportResult { meeting, note_id }))
 }

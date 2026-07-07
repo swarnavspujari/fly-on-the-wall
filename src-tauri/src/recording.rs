@@ -194,12 +194,15 @@ pub async fn stop_recording(state: State<'_, AppState>) -> CmdResult<Meeting> {
         duration_ms: output.duration_ms,
     };
 
-    state
+    let meeting = state
         .storage
         .lock()
         .unwrap()
         .end_meeting(&meeting_id, &recording_ref)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // recording over → the transcription queue may proceed
+    state.jobs_notify.notify_one();
+    Ok(meeting)
 }
 
 #[tauri::command]

@@ -27,6 +27,9 @@ pub struct AppState {
     pub pipeline_stage: Mutex<HashMap<String, String>>,
     /// At most one screen capture at a time.
     pub screen: Mutex<Option<ActiveScreenRecording>>,
+    /// Nudges the transcription queue worker (job enqueued, recording
+    /// stopped). The worker also polls, so a missed nudge only delays it.
+    pub jobs_notify: tokio::sync::Notify,
 }
 
 impl AppState {
@@ -46,6 +49,7 @@ impl AppState {
             secrets,
             pipeline_stage: Mutex::new(HashMap::new()),
             screen: Mutex::new(None),
+            jobs_notify: tokio::sync::Notify::new(),
         })
     }
 
