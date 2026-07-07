@@ -7,6 +7,7 @@
 pub mod align;
 pub mod enhance;
 pub mod model;
+pub mod repeat;
 pub mod seams;
 
 pub use align::{align_words_to_speakers, AlignOptions};
