@@ -132,7 +132,7 @@ pub async fn run_with(
     }
 
     // ---- settings → engines ----
-    let (tier, use_groq, max_quality, model_override) = {
+    let (tier, use_groq, max_quality, model_override, language_setting) = {
         let storage = state.storage.lock().unwrap();
         let get = |k: &str| storage.get_setting(k).ok().flatten();
         (
@@ -140,6 +140,7 @@ pub async fn run_with(
             get("asr.use_groq").as_deref() == Some("true"),
             get("asr.max_quality").as_deref() == Some("true"),
             get("asr.model_id").filter(|s| !s.is_empty()),
+            get("asr.language").filter(|s| !s.is_empty()),
         )
     };
 
@@ -207,7 +208,22 @@ pub async fn run_with(
         Ok(dst)
     };
 
-    let opts = TranscribeOptions::default();
+    // Meetings are transcribed in a fixed language ("asr.language" setting,
+    // default English, "auto" opts back into detection). Auto-detect on a
+    // language-less window (silence, noise) destabilizes whisper decoding —
+    // it was part of how a real meeting collapsed into a hallucination loop.
+    let language = match language_setting.as_deref() {
+        Some("auto") => None,
+        Some(lang) => Some(lang.to_string()),
+        None => Some("en".to_string()),
+    };
+    let opts = TranscribeOptions {
+        language,
+        prompt: None,
+        // decode 30 s windows independently: one bad window must never poison
+        // the rest of the recording (observed: a loop consumed 63 minutes)
+        max_context: Some(0),
+    };
     let align_opts = AlignOptions::default();
     let mut language = None;
     let mut channels: Vec<Vec<looma_core::TranscriptSegment>> = Vec::new();

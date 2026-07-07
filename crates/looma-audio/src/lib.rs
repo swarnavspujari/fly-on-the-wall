@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub mod cpal_backend;
 pub mod mix;
 pub mod null;
+pub mod vad;
 #[cfg(target_os = "linux")]
 mod pulse_loopback;
 #[cfg(target_os = "windows")]

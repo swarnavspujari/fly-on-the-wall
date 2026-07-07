@@ -37,6 +37,10 @@ pub struct TranscribeOptions {
     pub language: Option<String>,
     /// Initial prompt / vocabulary hint passed to the engine when supported.
     pub prompt: Option<String>,
+    /// Cross-window text context cap for local whisper (`-mc`); `Some(0)`
+    /// decodes every 30 s window independently, which stops one hallucinated
+    /// window from poisoning the rest of the file. `None` = engine default.
+    pub max_context: Option<i32>,
 }
 
 /// True for tokens ASR engines emit that no person said: whisper's silence /
