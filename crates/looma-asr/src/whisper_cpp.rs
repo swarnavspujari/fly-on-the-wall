@@ -28,6 +28,10 @@ pub struct WhisperCppEngine {
     /// Path to the GGML/GGUF model file.
     pub model: PathBuf,
     pub threads: usize,
+    /// Pass `-ng` (--no-gpu) so a GPU-capable build (Metal on macOS, Vulkan
+    /// on the pinned Windows build) decodes on CPU. False leaves the build's
+    /// default untouched — identical invocation to before this flag existed.
+    pub force_cpu: bool,
 }
 
 #[async_trait::async_trait]
@@ -120,6 +124,9 @@ impl WhisperCppEngine {
         if let Some(prompt) = &opts.prompt {
             cmd.arg("--prompt").arg(prompt);
         }
+        if self.force_cpu {
+            cmd.arg("-ng");
+        }
         #[cfg(windows)]
         {
             // CREATE_NO_WINDOW (no console flash from the sidecar) |
@@ -135,6 +142,7 @@ impl WhisperCppEngine {
             .map_err(|e| AsrError::Engine(format!("failed to launch whisper-cli: {e}")));
         let _ = std::fs::remove_file(&wav_path);
         let output = output?;
+        log_device_lines(&String::from_utf8_lossy(&output.stderr));
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(AsrError::Engine(format!(
@@ -148,6 +156,24 @@ impl WhisperCppEngine {
         let json = std::fs::read_to_string(&json_path)?;
         let _ = std::fs::remove_file(&json_path);
         parse_whisper_json(&json)
+    }
+}
+
+/// Surface whisper-cli's compute-device lines (Metal/Vulkan/CUDA init,
+/// fallbacks) in our logs — the only evidence of which device actually
+/// decoded. Debug level: one whisper-cli run per ≤2 min speech batch.
+fn log_device_lines(stderr: &str) {
+    for line in stderr.lines() {
+        let l = line.trim();
+        let lower = l.to_ascii_lowercase();
+        if ["ggml_vulkan", "ggml_metal", "ggml_cuda"]
+            .iter()
+            .any(|m| lower.starts_with(m))
+            || lower.contains("use gpu")
+            || lower.contains("backends")
+        {
+            tracing::debug!(target: "whisper_device", "{l}");
+        }
     }
 }
 
