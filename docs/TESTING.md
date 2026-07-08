@@ -16,13 +16,19 @@
   Heavy + needs downloaded artifacts, so it's `#[ignore]`d in CI; run locally with:
   `cargo test -p looma-app --test pipeline_e2e -- --ignored --nocapture`
   (artifacts are hardlinked from `%APPDATA%/Looma`; the test skips if absent).
+  `LOOMA_E2E_GPU=1` runs it through the pinned Vulkan GPU engine instead (combine with
+  `GGML_VK_VISIBLE_DEVICES=<n>` to pick the GPU); the same file also carries
+  `gpu_failure_falls_back_to_cpu`, which plants a broken GPU exe and asserts the pipeline
+  completes on CPU with the verdict re-pinned.
 - **Offline accuracy harness** (`src-tauri/tests/accuracy_harness.rs`, `#[ignore]`d): runs the
   real per-channel pipeline over any recording folder (`recording.mic.wav` +
   `recording.system.wav`) and reports the trust metrics — consecutive n-gram repetition runs
   (hallucination loops), distinct speaker count, per-channel word counts. Point
   `LOOMA_HARNESS_DIR` at the folder (optionally `LOOMA_HARNESS_MODEL`, and
   `LOOMA_HARNESS_MAX_SECS` to trim for fast iteration), or score an already-exported transcript
-  JSON without running the pipeline via `LOOMA_HARNESS_SCORE_JSON`. Built to validate the
+  JSON without running the pipeline via `LOOMA_HARNESS_SCORE_JSON`. `LOOMA_HARNESS_GPU=1`
+  forces the Vulkan GPU engine (seeded verdict, no benchmark); `LOOMA_HARNESS_GPU=bench`
+  enables GPU with no verdict so the real in-pipeline benchmark + gate run. Built to validate the
   anti-hallucination work against a real 1-hour meeting (a 1881×-repetition loop and 68 phantom
   speakers in the baseline).
 - **Integration test** (`src-tauri/tests/enhance_flow.rs`, runs in CI): the enhance flow

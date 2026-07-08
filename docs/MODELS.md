@@ -39,8 +39,27 @@ local speaker turns (spec §6.3): "who said what" never depends on the network.
 | Artifact | Version | Size | Purpose |
 |---|---|---|---|
 | whisper.cpp CLI (`whisper-cli.exe`) | v1.9.1 (CPU build) | ~8 MB zip | ASR; the same zip ships `parakeet-cli.exe` for a future Parakeet engine |
+| whisper.cpp CLI (Vulkan GPU, Windows) | v1.9.1 (`GGML_VULKAN=1` build) | ~24 MB zip | optional GPU ASR — one cross-vendor build (NVIDIA/AMD/Intel); see below |
 | sherpa-onnx diarization CLI | v1.13.3 | ~19 MB | speaker diarization |
 | ffmpeg | n8.1 (BtbN autobuild, dated tag) | ~79 MB zip | screen capture (gdigrab) + media import conversion |
+
+## GPU transcription (post-meeting only)
+
+The CPU whisper build stays the shipped, validated default everywhere. With
+`asr.use_gpu` on (the default), the first transcription on a machine runs a
+one-time GPU-vs-CPU speed test on ~60 s of real speech cut from that
+recording; the verdict persists per (machine, model) and the GPU is used only
+when it measured faster (`src-tauri/src/gpu.rs`). Any GPU failure — benchmark,
+launch, or mid-run — falls back to CPU visibly and re-pins the machine to CPU
+(toggling the Settings switch off→on re-tests).
+
+Per-OS strategy: **Windows** downloads the pinned Vulkan build above (upstream
+whisper.cpp publishes no Vulkan Windows binary — only CPU/BLAS/CUDA-only — so
+this one is built from the upstream v1.9.1 tag with `-DGGML_VULKAN=1` and
+hosted as a tools release on this repo). **macOS** whisper.cpp builds
+(including brew's, found via PATH) default to Metal already, so the setting
+only gates a `-ng` force-CPU flag there. The live transcript loop always stays
+on CPU: it runs during capture, exactly when the GPU is busy with the call.
 
 ## Model registry
 
