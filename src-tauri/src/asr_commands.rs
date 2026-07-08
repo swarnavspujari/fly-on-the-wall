@@ -84,9 +84,29 @@ pub struct AsrSettings {
     pub models: Vec<ModelStatus>,
 }
 
+/// Async so it never queues behind (or in front of) other startup commands
+/// on the main thread; the hardware profile comes from the persisted cache,
+/// so nvidia-smi only ever runs here on the very first launch — off the IPC
+/// thread — before the background warm-up (lib.rs) has landed.
 #[tauri::command]
-pub fn get_asr_settings(state: State<'_, AppState>) -> CmdResult<AsrSettings> {
-    let hw_info = hw::detect();
+pub async fn get_asr_settings(state: State<'_, AppState>) -> CmdResult<AsrSettings> {
+    let cached = {
+        let storage = state.storage.lock().unwrap();
+        hw::cached(&storage)
+    };
+    let hw_info = match cached {
+        Some(info) => info,
+        None => {
+            let info = tauri::async_runtime::spawn_blocking(hw::detect)
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Ok(json) = serde_json::to_string(&info) {
+                let storage = state.storage.lock().unwrap();
+                let _ = storage.set_setting(hw::CACHE_KEY, &json);
+            }
+            info
+        }
+    };
     let storage = state.storage.lock().unwrap();
     let get = |k: &str| storage.get_setting(k).ok().flatten();
 

@@ -24,9 +24,11 @@ pub struct ScreenStatus {
     pub elapsed_ms: u64,
 }
 
+/// Async (like every startup/polling command) so it can't convoy behind a
+/// slow synchronous command on the main thread.
 #[tauri::command]
-pub fn screen_status(state: State<'_, AppState>) -> ScreenStatus {
-    match state.screen.lock().unwrap().as_ref() {
+pub async fn screen_status(state: State<'_, AppState>) -> Result<ScreenStatus, String> {
+    Ok(match state.screen.lock().unwrap().as_ref() {
         Some(s) => ScreenStatus {
             active: true,
             note_id: Some(s.note_id.clone()),
@@ -37,7 +39,7 @@ pub fn screen_status(state: State<'_, AppState>) -> ScreenStatus {
             note_id: None,
             elapsed_ms: 0,
         },
-    }
+    })
 }
 
 /// Start capturing the screen (full / window / region) for a note. Downloads

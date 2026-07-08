@@ -30,19 +30,25 @@ pub fn ping() -> String {
     "pong".to_string()
 }
 
+// Startup-path commands are `async` on purpose: Tauri runs synchronous
+// commands one at a time on the main thread, so a slow one in the launch
+// burst makes everything after it (notably the notes list) wait. Async
+// commands run concurrently on the runtime instead. (Async commands that
+// borrow State must return Result — hence CmdResult on infallible ones.)
+
 #[tauri::command]
-pub fn app_info(state: State<'_, AppState>) -> AppInfo {
-    AppInfo {
+pub async fn app_info(state: State<'_, AppState>) -> CmdResult<AppInfo> {
+    Ok(AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: state.data_dir.display().to_string(),
         os: std::env::consts::OS.to_string(),
-    }
+    })
 }
 
 /// Generic non-secret app settings (consent flags, UI prefs). Secrets never
 /// go through here — they belong to looma-secrets.
 #[tauri::command]
-pub fn get_app_setting(state: State<'_, AppState>, key: String) -> CmdResult<Option<String>> {
+pub async fn get_app_setting(state: State<'_, AppState>, key: String) -> CmdResult<Option<String>> {
     state
         .storage
         .lock()
@@ -66,7 +72,7 @@ pub fn set_app_setting(state: State<'_, AppState>, key: String, value: String) -
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_folders(state: State<'_, AppState>) -> CmdResult<Vec<Folder>> {
+pub async fn list_folders(state: State<'_, AppState>) -> CmdResult<Vec<Folder>> {
     state
         .storage
         .lock()
@@ -147,7 +153,7 @@ pub fn get_note(state: State<'_, AppState>, id: String) -> CmdResult<Note> {
 }
 
 #[tauri::command]
-pub fn list_notes_in_folder(
+pub async fn list_notes_in_folder(
     state: State<'_, AppState>,
     folder_id: Option<String>,
 ) -> CmdResult<Vec<NoteSummary>> {
@@ -160,7 +166,10 @@ pub fn list_notes_in_folder(
 }
 
 #[tauri::command]
-pub fn list_recent_notes(state: State<'_, AppState>, limit: usize) -> CmdResult<Vec<NoteSummary>> {
+pub async fn list_recent_notes(
+    state: State<'_, AppState>,
+    limit: usize,
+) -> CmdResult<Vec<NoteSummary>> {
     state
         .storage
         .lock()

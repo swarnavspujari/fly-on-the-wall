@@ -1,15 +1,43 @@
 //! Hardware detection → recommended ASR tier (spec §6.2). Auto-picked on
 //! first run, always user-overridable in Settings.
+//!
+//! `detect()` shells out to nvidia-smi (hundreds of ms), so nothing on a
+//! command path calls it directly: the result is cached in settings
+//! ([`cached`]) and refreshed in the background at each launch (lib.rs) —
+//! a hardware change is picked up one launch later.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+/// Settings key holding the JSON-serialized [`HwInfo`] of the last run.
+pub const CACHE_KEY: &str = "hw.cache";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HwInfo {
     pub ram_gb: f64,
     pub cpu_cores: usize,
     pub gpu_name: Option<String>,
     pub vram_mb: Option<u64>,
     pub recommended_tier: String,
+}
+
+/// The hardware profile persisted by the last detection run, if any.
+pub fn cached(storage: &looma_storage::Storage) -> Option<HwInfo> {
+    storage
+        .get_setting(CACHE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+}
+
+/// Run detection and persist the result for [`cached`] readers.
+pub fn detect_and_cache(storage: &looma_storage::Storage) -> HwInfo {
+    let info = detect();
+    if let Ok(json) = serde_json::to_string(&info) {
+        if let Err(e) = storage.set_setting(CACHE_KEY, &json) {
+            tracing::warn!(error = %e, "could not persist hardware cache");
+        }
+    }
+    info
 }
 
 pub fn detect() -> HwInfo {
