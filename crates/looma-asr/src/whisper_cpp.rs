@@ -172,7 +172,7 @@ fn log_device_lines(stderr: &str) {
             || lower.contains("use gpu")
             || lower.contains("backends")
         {
-            tracing::debug!(target: "whisper_device", "{l}");
+            tracing::debug!("whisper device: {l}");
         }
     }
 }
