@@ -47,8 +47,11 @@ pauses. Speaker keys (`mic`, `spk_0`, …) are stable; display labels are relabe
 
 SQLite (bundled, WAL) is the **index**: folders, note metadata, FTS5 tables for note bodies and
 transcripts. The **source of truth the user owns** is markdown/JSON on disk under a visible data
-dir (`%APPDATA%/Looma` by default): `notes/*.md`, `transcripts/*.{md,json}`, `attachments/`,
-`recordings/`. Everything is portable; nothing is locked in a database blob.
+dir (`%APPDATA%/Looma` by default), with human-readable `<date> <title>` names: one folder per
+meeting under `recordings/` (WAVs + `transcript.{md,json}`), note mirrors as
+`notes/<date> <title>.md`, and `attachments/`. Everything is portable; nothing is locked in a
+database blob. Layout upgrades run as `user_version`-gated migrations on open (see
+`looma-storage/src/migrations.rs`).
 
 ### Secrets (looma-secrets)
 

@@ -280,3 +280,35 @@ Running log of technical decisions, newest last. Format: date — decision — w
   work that shouldn't be rushed at the end of a session; friends can re-download installers.
   In-process bindings remain the right endgame (they'd give macOS/Linux whisper without
   Homebrew), noted for the next session.
+
+## Storage naming & startup latency
+
+- **2026-07-07 — Disk artifacts are named `<YYYY-MM-DD> <title>`, one folder per meeting.**
+  Meeting folders (`recordings/2026-07-02 Tina 1-1/`) hold the WAVs, the imported source
+  file, and the transcript mirrors (`transcript.md`/`.json`); note mirrors are
+  `notes/<date> <title>.md`. Names are Windows-safe (illegal chars stripped, trailing
+  dots/spaces trimmed, reserved device names suffixed, title capped at 60 chars) and deduped
+  with ` (2)` suffixes. The date prefix makes Explorer's name sort chronological. The
+  relative paths in `recording_json` remain the single source of truth for recording
+  locations; meeting folders are found through them, never derived from titles. Notes get a
+  `disk_path` column because dedup suffixes make mirror names non-derivable.
+- **2026-07-07 — Title-edit policy: renames follow the note, best-effort for folders.**
+  Renaming a note always renames its markdown mirror, and renames its meeting folders
+  (rewriting `recording_json`) unless the folder is busy — e.g. mid-recording or
+  mid-transcription, where Windows refuses the rename and the old (still valid) name is
+  kept. Meeting rows keep their creation-time title snapshot; folders follow the note title
+  because that's the one the user curates.
+- **2026-07-07 — Versioned migrations via SQLite `user_version` (now 2).** `Storage::migrate`
+  gates one-shot upgrade steps on the stored version. v2 renames existing UUID artifacts,
+  moves transcript mirrors into meeting folders, sweeps leftover `*.16k.wav` intermediates
+  (the pipeline now deletes its own on success), and parks artifacts with no DB row under
+  `recordings/_unlinked/` and `notes/_unlinked/` — preserved, never deleted, and never
+  resurrected into the DB (mirrors flatten provenance; re-indexing would be guesswork).
+- **2026-07-07 — Startup: async commands + cached hardware detection + notes-first fetch.**
+  Tauri runs sync commands serially on the main thread; the launch burst convoyed behind
+  `get_asr_settings`, whose synchronous `nvidia-smi` ran before the notes query got a turn.
+  Startup/polling commands are async now, `hw::detect()` is persisted in settings
+  (`hw.cache`, background-refreshed each launch), the frontend fires the notes query first,
+  and the last-known notes list (localStorage) paints immediately while the fresh fetch
+  reconciles. Transient state (recording/queue/pipeline progress) is never persisted —
+  always rendered from live polls and events.
