@@ -17,6 +17,7 @@ import type {
   Template,
   Transcript,
 } from "./types";
+import { readNotesCache, writeNotesCache } from "./notesCache";
 import Sidebar, { type Selection } from "./components/Sidebar";
 import NoteList from "./components/NoteList";
 import Editor from "./components/Editor";
@@ -39,7 +40,8 @@ export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [selection, setSelection] = useState<Selection>({ view: "all" });
-  const [notes, setNotes] = useState<NoteSummary[]>([]);
+  // paint the last-known list instantly; reconciled by the first fetch
+  const [notes, setNotes] = useState<NoteSummary[]>(readNotesCache);
   const [openNote, setOpenNote] = useState<Note | null>(null);
   const [openMeeting, setOpenMeeting] = useState<Meeting | null>(null);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
@@ -75,15 +77,28 @@ export default function App() {
     setFolders(await api.listFolders());
   }, []);
 
+  const firstNotesLogged = useRef(false);
   const refreshNotes = useCallback(async () => {
     if (selection.view === "all") {
-      setNotes(await api.listRecentNotes(200));
+      const fresh = await api.listRecentNotes(200);
+      setNotes(fresh);
+      writeNotesCache(fresh);
     } else if (selection.view === "unfiled") {
       setNotes(await api.listNotesInFolder(null));
     } else {
       setNotes(await api.listNotesInFolder(selection.id));
     }
+    if (!firstNotesLogged.current) {
+      firstNotesLogged.current = true;
+      console.info(`[startup] fresh notes list at ${Math.round(performance.now())} ms`);
+    }
   }, [selection]);
+
+  // Notes first: this effect stays ahead of the others so the notes query
+  // is the first invoke the backend sees on launch.
+  useEffect(() => {
+    refreshNotes().catch((e) => setError(String(e)));
+  }, [refreshNotes]);
 
   useEffect(() => {
     api
@@ -111,10 +126,6 @@ export default function App() {
     const t = window.setInterval(fetchUpcoming, 5 * 60_000);
     return () => window.clearInterval(t);
   }, []);
-
-  useEffect(() => {
-    refreshNotes().catch((e) => setError(String(e)));
-  }, [refreshNotes]);
 
   // poll recording + screen status once a second (indicators, elapsed time)
   useEffect(() => {
