@@ -2304,7 +2304,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "looma-app"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2339,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "looma-asr"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "looma-audio",
@@ -2356,7 +2356,7 @@ dependencies = [
 
 [[package]]
 name = "looma-audio"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "hound",
@@ -2372,7 +2372,7 @@ dependencies = [
 
 [[package]]
 name = "looma-calendar"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2392,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "looma-capture-screen"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "looma-core",
  "serde",
@@ -2402,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "looma-core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2413,7 +2413,7 @@ dependencies = [
 
 [[package]]
 name = "looma-diarize"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "looma-core",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "looma-llm"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "looma-core",
@@ -2438,7 +2438,7 @@ dependencies = [
 
 [[package]]
 name = "looma-mcp"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "looma-secrets"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "keyring",
  "thiserror 2.0.18",
@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "looma-storage"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "looma-core",
