@@ -37,6 +37,18 @@ pub fn run() {
             }
             let app_state = state::AppState::init()?;
             app.manage(app_state);
+            // Warm the hardware cache off the startup path: detection shells
+            // out to nvidia-smi and must never sit in front of first paint.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        let state = handle.state::<state::AppState>();
+                        hw::detect_and_cache(&state.storage.lock().unwrap());
+                    })
+                    .await;
+                });
+            }
             // Drain queued transcriptions (incl. jobs surviving a restart)
             // whenever no recording is active.
             scheduler::spawn(app.handle().clone());

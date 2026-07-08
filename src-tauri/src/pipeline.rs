@@ -110,7 +110,9 @@ pub async fn run_with(
         let storage = state.storage.lock().unwrap();
         let get = |k: &str| storage.get_setting(k).ok().flatten();
         (
-            get("asr.tier").unwrap_or_else(|| hw::detect().recommended_tier),
+            get("asr.tier")
+                .or_else(|| hw::cached(&storage).map(|h| h.recommended_tier))
+                .unwrap_or_else(|| hw::detect_and_cache(&storage).recommended_tier),
             get("asr.use_groq").as_deref() == Some("true"),
             get("asr.max_quality").as_deref() == Some("true"),
             get("asr.model_id").filter(|s| !s.is_empty()),

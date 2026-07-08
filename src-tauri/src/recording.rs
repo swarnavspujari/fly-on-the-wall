@@ -55,12 +55,14 @@ impl RecordingStatus {
     }
 }
 
+/// Async (like every startup/polling command) so it can't convoy behind a
+/// slow synchronous command on the main thread.
 #[tauri::command]
-pub fn recording_status(state: State<'_, AppState>) -> RecordingStatus {
-    match state.recording.lock().unwrap().as_ref() {
+pub async fn recording_status(state: State<'_, AppState>) -> CmdResult<RecordingStatus> {
+    Ok(match state.recording.lock().unwrap().as_ref() {
         Some(rec) => RecordingStatus::from_active(rec, state.audio.capture_warnings()),
         None => RecordingStatus::idle(),
-    }
+    })
 }
 
 /// Start recording for a note (created on the fly when none is given).

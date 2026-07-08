@@ -233,7 +233,7 @@ pub async fn ask_meeting(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_templates(state: State<'_, AppState>) -> CmdResult<Vec<Template>> {
+pub async fn list_templates(state: State<'_, AppState>) -> CmdResult<Vec<Template>> {
     state
         .storage
         .lock()
