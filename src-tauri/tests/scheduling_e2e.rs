@@ -96,6 +96,8 @@ fn transcription_defers_to_recording_then_completes() {
     let meeting_a = {
         let storage = state.storage.lock().unwrap();
         storage.set_setting("asr.tier", "light").unwrap();
+        // scheduling semantics under test, not engine selection — pin CPU
+        storage.set_setting("asr.use_gpu", "false").unwrap();
         storage
             .set_setting("asr.model_id", "ggml-small-q5_1")
             .unwrap();
