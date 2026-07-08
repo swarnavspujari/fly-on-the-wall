@@ -8,6 +8,8 @@ interface Props {
   transcript: Transcript | null;
   /** Current pipeline stage, or null when idle. */
   stage: string | null;
+  /** One-line stage detail (channel being transcribed, GPU benchmark result, CPU fallback notice). */
+  stageDetail: string | null;
   modelProgress: ModelProgress | null;
   pipelineError: string | null;
   /** Zoom-in: segment ids to highlight + scroll to (AI block sources). */
@@ -20,6 +22,7 @@ const STAGE_LABELS: Record<string, string> = {
   waiting: "Waiting to transcribe (recording comes first)…",
   starting: "Starting…",
   "ensuring-models": "Preparing models…",
+  benchmarking: "Testing GPU vs CPU speed (one time)…",
   "preparing-audio": "Preparing audio…",
   transcribing: "Transcribing",
   diarizing: "Detecting speakers…",
@@ -31,6 +34,7 @@ export default function TranscriptPanel({
   meeting,
   transcript,
   stage,
+  stageDetail,
   modelProgress,
   pipelineError,
   highlightIds,
@@ -66,6 +70,7 @@ export default function TranscriptPanel({
             style={{ animation: "pulse-dot 1s ease infinite" }}
           />
           <span>{STAGE_LABELS[stage] ?? stage}</span>
+          {stageDetail && <span className="font-normal text-mute">— {stageDetail}</span>}
           {pct !== null && (
             <span className="font-normal text-mute">
               downloading {modelProgress!.id} — {pct}%

@@ -51,6 +51,7 @@ export default function SettingsModal({
   const [useGroq, setUseGroq] = useState(false);
   const [maxQuality, setMaxQuality] = useState(false);
   const [autoTranscribe, setAutoTranscribe] = useState(true);
+  const [useGpu, setUseGpu] = useState(true);
   const [groqKey, setGroqKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -143,6 +144,7 @@ export default function SettingsModal({
       setUseGroq(s.use_groq);
       setMaxQuality(s.max_quality);
       setAutoTranscribe(s.auto_transcribe);
+      setUseGpu(s.use_gpu);
     });
 
   const loadLlm = () =>
@@ -237,6 +239,7 @@ export default function SettingsModal({
         use_groq: useGroq,
         max_quality: maxQuality,
         auto_transcribe: autoTranscribe,
+        use_gpu: useGpu,
         groq_key: groqKey ? groqKey : null,
       });
       onClose();
@@ -328,6 +331,30 @@ export default function SettingsModal({
                   </label>
                 ))}
               </div>
+
+              <label className="flex items-center gap-2 text-sm text-ink-2">
+                <input
+                  type="checkbox"
+                  className="accent-coral"
+                  checked={useGpu}
+                  onChange={(e) => setUseGpu(e.target.checked)}
+                />
+                Use GPU for transcription when it is faster on this machine
+              </label>
+              {useGpu && settings?.gpu_bench && (
+                <p className="pl-6 text-xs text-mute">
+                  {settings.gpu_bench.verdict === "gpu"
+                    ? `Speed test: GPU ${settings.gpu_bench.gpu_secs?.toFixed(0)} s vs CPU ${settings.gpu_bench.cpu_secs?.toFixed(0)} s — transcribing on the GPU.`
+                    : settings.gpu_bench.gpu_secs != null && settings.gpu_bench.cpu_secs != null
+                      ? `Speed test: GPU ${settings.gpu_bench.gpu_secs.toFixed(0)} s vs CPU ${settings.gpu_bench.cpu_secs.toFixed(0)} s — CPU is faster here, so it stays on CPU.`
+                      : "GPU transcription failed on this machine — staying on CPU. Toggle off and on to test again."}
+                </p>
+              )}
+              {useGpu && !settings?.gpu_bench && (
+                <p className="pl-6 text-xs text-mute">
+                  A one-time speed test runs at the start of the next transcription.
+                </p>
+              )}
             </section>
 
             <section className="space-y-2">

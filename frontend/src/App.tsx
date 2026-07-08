@@ -46,6 +46,7 @@ export default function App() {
   const [openMeeting, setOpenMeeting] = useState<Meeting | null>(null);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [pipeStage, setPipeStage] = useState<string | null>(null);
+  const [pipeDetail, setPipeDetail] = useState<string | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [modelProgress, setModelProgress] = useState<ModelProgress | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -143,12 +144,14 @@ export default function App() {
       if (p.meeting_id !== openMeetingIdRef.current) return;
       if (p.done) {
         setPipeStage(null);
+        setPipeDetail(null);
         setPipelineError(p.error);
         if (!p.error) {
           api.getTranscript(p.meeting_id).then(setTranscript).catch(console.error);
         }
       } else {
         setPipeStage(p.stage);
+        setPipeDetail(p.detail);
         setPipelineError(null);
       }
     });
@@ -178,6 +181,7 @@ export default function App() {
     const meeting = await api.getMeetingForNote(id);
     setOpenMeeting(meeting);
     setPipelineError(null);
+    setPipeDetail(null);
     if (meeting) {
       setTranscript(await api.getTranscript(meeting.id));
       setPipeStage(await api.pipelineStage(meeting.id));
@@ -195,6 +199,7 @@ export default function App() {
     setOpenMeeting(null);
     setTranscript(null);
     setPipeStage(null);
+    setPipeDetail(null);
   };
 
   const deleteNote = async (id: string) => {
@@ -246,6 +251,7 @@ export default function App() {
         await api.transcribeMeeting(meeting.id);
         if (openNote?.id === meeting.note_id) {
           setPipeStage("starting");
+          setPipeDetail(null);
           setPipelineError(null);
         }
       }
@@ -258,6 +264,7 @@ export default function App() {
     if (!openMeeting) return;
     setPipelineError(null);
     setPipeStage("starting");
+    setPipeDetail(null);
     await api.transcribeMeeting(openMeeting.id);
   };
 
@@ -363,6 +370,7 @@ export default function App() {
             meeting={openMeeting}
             transcript={transcript}
             pipeStage={pipeStage}
+            pipeDetail={pipeDetail}
             pipelineError={pipelineError}
             modelProgress={modelProgress}
             recStatus={recStatus}

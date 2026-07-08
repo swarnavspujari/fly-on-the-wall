@@ -143,6 +143,14 @@ export interface ModelStatus {
   installed: boolean;
 }
 
+export interface GpuBench {
+  verdict: string; // "gpu" | "cpu"
+  reason: string;
+  gpu_secs: number | null;
+  cpu_secs: number | null;
+  model_id: string;
+}
+
 export interface AsrSettings {
   tier: string;
   model_id: string | null;
@@ -150,6 +158,8 @@ export interface AsrSettings {
   max_quality: boolean;
   has_groq_key: boolean;
   auto_transcribe: boolean;
+  use_gpu: boolean;
+  gpu_bench: GpuBench | null;
   hw: HwInfo;
   models: ModelStatus[];
 }
@@ -160,6 +170,7 @@ export interface AsrSettingsUpdate {
   use_groq: boolean;
   max_quality: boolean;
   auto_transcribe: boolean;
+  use_gpu: boolean;
   groq_key: string | null;
 }
 
