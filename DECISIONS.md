@@ -312,3 +312,14 @@ Running log of technical decisions, newest last. Format: date — decision — w
   and the last-known notes list (localStorage) paints immediately while the fresh fetch
   reconciles. Transient state (recording/queue/pipeline progress) is never persisted —
   always rendered from live polls and events.
+- **2026-07-08 — GPU transcription: one Vulkan build per OS, gated by a measured-on-this-machine
+  benchmark; CPU stays canon.** Post-meeting ASR may run on the GPU (any vendor) but only when a
+  one-time speed test on ~60 s of real speech from the recording measured it faster than the CPU
+  on that machine; the verdict persists per (machine, model) in `asr.gpu_bench`. Upstream
+  whisper.cpp ships no Vulkan Windows binary (CPU/BLAS/CUDA-only), and a CUDA-only entry was
+  rejected as vendor-locked, so `whisper-bin-vulkan` is whisper.cpp v1.9.1 built from the
+  upstream tag with `-DGGML_VULKAN=1`, SHA-256-pinned and hosted as a tools release on this
+  repo. Every GPU failure (benchmark, launch, nonzero exit, mid-run) falls back to the CPU
+  engine visibly and re-pins the machine to CPU — a meeting transcript is never lost to a GPU.
+  macOS keeps its Metal-by-default PATH build (setting gates a `-ng` flag only). The live loop
+  never uses the GPU: it runs during capture, exactly when the GPU is busy with the video call.
