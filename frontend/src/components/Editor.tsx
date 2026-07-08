@@ -23,6 +23,7 @@ interface Props {
   meeting: Meeting | null;
   transcript: Transcript | null;
   pipeStage: string | null;
+  pipeDetail: string | null;
   pipelineError: string | null;
   modelProgress: ModelProgress | null;
   recStatus: RecordingStatus;
@@ -48,6 +49,7 @@ export default function Editor({
   meeting,
   transcript,
   pipeStage,
+  pipeDetail,
   pipelineError,
   modelProgress,
   recStatus,
@@ -328,6 +330,7 @@ export default function Editor({
             meeting={meeting}
             transcript={transcript}
             stage={pipeStage}
+            stageDetail={pipeDetail}
             modelProgress={modelProgress}
             pipelineError={pipelineError}
             highlightIds={zoomIds}
