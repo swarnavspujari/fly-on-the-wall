@@ -102,12 +102,15 @@ fn detect_nvidia() -> (Option<String>, Option<u64>) {
 fn detect_any_gpu_name() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let out = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
                 "(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name) -join \"`n\"",
             ])
+            // CREATE_NO_WINDOW — no console flash from a GUI process
+            .creation_flags(0x0800_0000)
             .output()
             .ok()?;
         if !out.status.success() {
