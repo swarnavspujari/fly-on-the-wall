@@ -246,6 +246,22 @@ fn accuracy_harness() {
         let storage = state.storage.lock().unwrap();
         storage.set_setting("asr.tier", "light").unwrap();
         storage.set_setting("asr.model_id", &model).unwrap();
+        // Deterministic engine selection: CPU by default; LOOMA_HARNESS_GPU=1
+        // forces the Vulkan build (verdict pre-seeded so no benchmark runs;
+        // pick the GPU with GGML_VK_VISIBLE_DEVICES).
+        if std::env::var("LOOMA_HARNESS_GPU").is_ok_and(|v| !v.is_empty() && v != "0") {
+            storage.set_setting("asr.use_gpu", "true").unwrap();
+            storage
+                .set_setting(
+                    "asr.gpu_bench",
+                    &format!(
+                        r#"{{"verdict":"gpu","reason":"forced by accuracy_harness","gpu_secs":null,"cpu_secs":null,"model_id":"{model}"}}"#
+                    ),
+                )
+                .unwrap();
+        } else {
+            storage.set_setting("asr.use_gpu", "false").unwrap();
+        }
         let note = storage.create_note("Accuracy harness", None).unwrap();
         let meeting = storage
             .create_meeting("Accuracy harness", &note.id, &[])

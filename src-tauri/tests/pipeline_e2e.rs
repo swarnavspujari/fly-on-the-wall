@@ -91,10 +91,32 @@ fn golden_fixture_transcribes_and_diarizes() {
         return;
     }
 
+    // LOOMA_E2E_GPU=1 runs the golden fixture through the Vulkan GPU engine
+    // instead of CPU (needs the whisper-bin-vulkan artifact installed; pick
+    // the GPU with GGML_VK_VISIBLE_DEVICES). A pre-seeded "gpu" verdict
+    // skips the in-pipeline benchmark so the test exercises decode, not the
+    // gate.
+    let gpu = std::env::var("LOOMA_E2E_GPU").is_ok_and(|v| !v.is_empty() && v != "0");
+    if gpu
+        && !real_data
+            .join("bin/whisper-vulkan/Release/whisper-cli.exe")
+            .exists()
+    {
+        eprintln!("SKIP: LOOMA_E2E_GPU set but whisper-bin-vulkan is not installed");
+        return;
+    }
+
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
     for sub in ["bin/whisper", "bin/sherpa", "models/diarize"] {
         link_tree(&real_data.join(sub), &data_dir.join(sub)).unwrap();
+    }
+    if gpu {
+        link_tree(
+            &real_data.join("bin/whisper-vulkan"),
+            &data_dir.join("bin/whisper-vulkan"),
+        )
+        .unwrap();
     }
     std::fs::create_dir_all(data_dir.join("models/asr")).unwrap();
     std::fs::hard_link(
@@ -116,6 +138,19 @@ fn golden_fixture_transcribes_and_diarizes() {
         storage
             .set_setting("asr.model_id", "ggml-small-q5_1")
             .unwrap();
+        // Deterministic engine selection: this test validates one specific
+        // path, never whichever verdict this machine's benchmark would give.
+        if gpu {
+            storage.set_setting("asr.use_gpu", "true").unwrap();
+            storage
+                .set_setting(
+                    "asr.gpu_bench",
+                    r#"{"verdict":"gpu","reason":"forced by pipeline_e2e","gpu_secs":null,"cpu_secs":null,"model_id":"ggml-small-q5_1"}"#,
+                )
+                .unwrap();
+        } else {
+            storage.set_setting("asr.use_gpu", "false").unwrap();
+        }
         let note = storage.create_note("Golden fixture", None).unwrap();
         let meeting = storage
             .create_meeting("Golden fixture", &note.id, &[])
@@ -151,6 +186,17 @@ fn golden_fixture_transcribes_and_diarizes() {
             &meeting_id,
         ))
         .expect("pipeline should succeed");
+
+    // --- the requested engine actually ran (no silent CPU fallback) ---
+    let expected_engine = if gpu {
+        "whisper.cpp-vulkan"
+    } else {
+        "whisper.cpp"
+    };
+    assert_eq!(
+        transcript.engine, expected_engine,
+        "expected the {expected_engine} engine to produce this transcript"
+    );
 
     // --- accuracy: WER within tolerance on clean TTS audio ---
     let hypothesis: String = transcript
