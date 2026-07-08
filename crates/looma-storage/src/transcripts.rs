@@ -1,5 +1,6 @@
 //! Transcript persistence: structured JSON in SQLite (+ FTS) and portable
-//! markdown/JSON mirrors under `transcripts/`.
+//! markdown/JSON mirrors inside the meeting's folder (`transcript.md`,
+//! `transcript.json`), so one folder holds a meeting's audio + transcript.
 
 use looma_core::Transcript;
 use rusqlite::OptionalExtension;
@@ -76,12 +77,28 @@ impl Storage {
             (&t.meeting_id, &body),
         )?;
 
-        let dir = self.data_dir.join("transcripts");
-        std::fs::write(dir.join(format!("{}.md", t.meeting_id)), t.to_markdown())?;
-        std::fs::write(
-            dir.join(format!("{}.json", t.meeting_id)),
-            serde_json::to_string_pretty(t)?,
-        )?;
+        // Mirrors live next to the recording; a meeting without a resolvable
+        // folder (no recording attached, folder gone) falls back to the
+        // legacy top-level transcripts/ dir.
+        let meeting_dir = self
+            .get_meeting(&t.meeting_id)
+            .ok()
+            .and_then(|m| m.recording)
+            .and_then(|r| crate::meetings::recording_dir_rel(&r))
+            .map(|rel| self.data_dir.join(rel))
+            .filter(|d| d.is_dir());
+        let (md, json) = match meeting_dir {
+            Some(dir) => (dir.join("transcript.md"), dir.join("transcript.json")),
+            None => {
+                let dir = self.data_dir.join("transcripts");
+                (
+                    dir.join(format!("{}.md", t.meeting_id)),
+                    dir.join(format!("{}.json", t.meeting_id)),
+                )
+            }
+        };
+        std::fs::write(md, t.to_markdown())?;
+        std::fs::write(json, serde_json::to_string_pretty(t)?)?;
         Ok(())
     }
 }
@@ -161,5 +178,41 @@ mod tests {
         )
         .unwrap();
         assert!(md.contains("**Dana:**"));
+    }
+
+    /// A meeting with a recording keeps its transcript mirrors inside its
+    /// folder — one folder = audio + transcript.
+    #[test]
+    fn mirrors_live_in_the_meeting_folder() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("Budget mtg", None).unwrap();
+        let meeting = s.create_meeting("Budget mtg", &note.id, &[]).unwrap();
+        let rec_dir = s
+            .allocate_meeting_dir("Budget mtg", meeting.started_at)
+            .unwrap();
+        std::fs::write(rec_dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        let rel = format!(
+            "recordings/{}/recording.mixed.wav",
+            rec_dir.file_name().unwrap().to_string_lossy()
+        );
+        s.end_meeting(
+            &meeting.id,
+            &looma_core::RecordingRef {
+                mic_path: None,
+                system_path: None,
+                mixed_path: Some(rel),
+                duration_ms: 1000,
+            },
+        )
+        .unwrap();
+
+        s.save_transcript(&sample_transcript(&meeting.id)).unwrap();
+        assert!(rec_dir.join("transcript.md").exists());
+        assert!(rec_dir.join("transcript.json").exists());
+        assert!(!dir
+            .path()
+            .join("transcripts")
+            .join(format!("{}.md", meeting.id))
+            .exists());
     }
 }

@@ -1,18 +1,25 @@
 //! looma-storage: SQLite (bundled, FTS5) as the search/index layer plus
 //! portable markdown/JSON files on disk as the source of truth the user owns.
 //!
-//! Layout under the user-visible data dir:
-//!   looma.db                     — index (folders, notes, meetings, FTS)
-//!   notes/<note_id>.md           — plain-markdown mirror of each note
-//!   transcripts/<meeting_id>.md  — human-readable transcript
-//!   transcripts/<meeting_id>.json— structured transcript (words, speakers)
-//!   attachments/<note_id>/…      — attached files, referenced relatively
-//!   recordings/…                 — captured audio
+//! Layout under the user-visible data dir (human-readable names since v2;
+//! see naming.rs for the sanitization rules and migrations.rs for upgrades):
+//!   looma.db                          — index (folders, notes, meetings, FTS)
+//!   notes/<date> <title>.md           — plain-markdown mirror of each note
+//!   notes/_unlinked/…                 — mirrors with no DB row (preserved)
+//!   recordings/<date> <title>/        — one folder per meeting:
+//!     recording.{mic,system,mixed}.wav, source.<ext> (imports),
+//!     transcript.md, transcript.json
+//!   recordings/_unlinked/…            — recordings with no DB row (preserved)
+//!   transcripts/…                     — legacy fallback for transcripts whose
+//!                                       meeting folder is unresolvable
+//!   attachments/<note_id>/…           — attached files, referenced relatively
 
 mod attachments;
 mod folders;
 mod jobs;
 mod meetings;
+mod migrations;
+pub mod naming;
 mod notes;
 mod search;
 mod settings;
@@ -20,6 +27,7 @@ mod templates;
 mod transcripts;
 
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
+pub use meetings::recording_dir_rel;
 pub use notes::NoteSummary;
 pub use search::{SearchHit, SearchHitKind};
 
@@ -58,7 +66,7 @@ impl Storage {
         let conn = Connection::open(data_dir.join("looma.db"))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        Self::migrate(&conn)?;
+        Self::migrate(&conn, data_dir)?;
         let storage = Self {
             conn,
             data_dir: data_dir.to_path_buf(),
@@ -71,10 +79,21 @@ impl Storage {
         &self.data_dir
     }
 
-    fn migrate(conn: &Connection) -> Result<()> {
+    /// Current schema/layout version stamped into SQLite `user_version`.
+    /// Bump it and add a `if from < N` step below for every upgrade that
+    /// must run exactly once against existing data.
+    const SCHEMA_VERSION: i64 = 2;
+
+    fn migrate(conn: &Connection, data_dir: &Path) -> Result<()> {
+        let from: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         Self::create_baseline(conn)?;
         Self::repair_missing_columns(conn)?;
-        conn.pragma_update(None, "user_version", 1)?;
+        // v2: human-readable disk layout (meeting folders + note mirrors
+        // named by date + title; transcripts inside their meeting folder).
+        if from < 2 {
+            migrations::to_v2(conn, data_dir)?;
+        }
+        conn.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         Ok(())
     }
 
@@ -97,7 +116,10 @@ impl Storage {
                 blocks_json      TEXT NOT NULL DEFAULT '[]',
                 attachments_json TEXT NOT NULL DEFAULT '[]',
                 created_at       TEXT NOT NULL,
-                updated_at       TEXT NOT NULL
+                updated_at       TEXT NOT NULL,
+                -- data-dir-relative markdown mirror ("notes/<date> <title>.md");
+                -- stored because dedup suffixes make it non-derivable
+                disk_path        TEXT
             );
 
             CREATE TABLE IF NOT EXISTS meetings (
@@ -181,6 +203,7 @@ impl Storage {
                     ("attachments_json", "TEXT NOT NULL DEFAULT '[]'"),
                     ("created_at", "TEXT NOT NULL DEFAULT ''"),
                     ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+                    ("disk_path", "TEXT"),
                 ],
             ),
             (
