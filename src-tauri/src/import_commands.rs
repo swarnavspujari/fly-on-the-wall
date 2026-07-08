@@ -45,7 +45,7 @@ pub async fn import_media(
         .unwrap_or("Imported recording")
         .to_string();
 
-    // note + meeting first, so everything lands in recordings/<meeting_id>/
+    // note + meeting first, so everything lands in the meeting's folder
     let (note_id, meeting_id, rec_dir) = {
         let storage = state.storage.lock().unwrap();
         let note = storage
@@ -54,10 +54,11 @@ pub async fn import_media(
         let meeting = storage
             .create_meeting(&stem, &note.id, &[])
             .map_err(|e| e.to_string())?;
-        let rec_dir = state.data_dir.join("recordings").join(&meeting.id);
+        let rec_dir = storage
+            .allocate_meeting_dir(&stem, meeting.started_at)
+            .map_err(|e| e.to_string())?;
         (note.id, meeting.id, rec_dir)
     };
-    std::fs::create_dir_all(&rec_dir).map_err(|e| e.to_string())?;
 
     // keep the original next to the derived track
     let ext = src
@@ -85,6 +86,11 @@ pub async fn import_media(
         convert_with_ffmpeg(&app, &state, &source_copy, &mixed).await?
     };
 
+    let mixed_rel = mixed
+        .strip_prefix(&state.data_dir)
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
     let meeting = {
         let storage = state.storage.lock().unwrap();
         storage
@@ -93,7 +99,7 @@ pub async fn import_media(
                 &RecordingRef {
                     mic_path: None,
                     system_path: None,
-                    mixed_path: Some(format!("recordings/{meeting_id}/recording.mixed.wav")),
+                    mixed_path: Some(mixed_rel),
                     duration_ms,
                 },
             )

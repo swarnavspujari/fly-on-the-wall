@@ -88,7 +88,7 @@ pub fn start_recording_impl(
         return Err("a recording is already in progress".into());
     }
 
-    let (note, meeting, mic_device_id) = {
+    let (note, meeting, mic_device_id, out_dir) = {
         let storage = state.storage.lock().unwrap();
         let note = match note_id {
             Some(id) => storage.get_note(&id).map_err(|e| e.to_string())?,
@@ -104,30 +104,30 @@ pub fn start_recording_impl(
         let meeting = storage
             .create_meeting(&note.title, &note.id, attendees)
             .map_err(|e| e.to_string())?;
+        // human-readable meeting folder ("recordings/<date> <title>/");
+        // the relative paths stored at stop_recording tie it to the meeting
+        let out_dir = storage
+            .allocate_meeting_dir(&note.title, meeting.started_at)
+            .map_err(|e| e.to_string())?;
         let mic_device_id = storage
             .get_setting("capture.mic_device_id")
             .ok()
             .flatten()
             .filter(|s| !s.is_empty());
-        (note, meeting, mic_device_id)
+        (note, meeting, mic_device_id, out_dir)
     };
 
-    let out_dir = state.data_dir.join("recordings").join(&meeting.id);
     let session = state
         .audio
         .start(CaptureConfig {
             mic_device_id,
             capture_system: true,
-            out_dir,
+            out_dir: out_dir.clone(),
             base_name: "recording".into(),
         })
         .map_err(|e| e.to_string())?;
 
-    let live_stop = Some(crate::live::spawn(
-        app.clone(),
-        meeting.id.clone(),
-        state.data_dir.join("recordings").join(&meeting.id),
-    ));
+    let live_stop = Some(crate::live::spawn(app.clone(), meeting.id.clone(), out_dir));
     let active = ActiveRecording {
         session,
         meeting_id: meeting.id,

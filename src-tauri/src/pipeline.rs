@@ -169,9 +169,16 @@ pub async fn run_with(
 
     // ---- prepare 16 kHz mono inputs ----
     emit_stage(state, on_stage, meeting_id, "preparing-audio", None);
-    let work_dir = data_dir.join("recordings").join(meeting_id);
-    std::fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
+    // intermediates live next to the recordings (the meeting's folder)
+    let work_dir = mic_wav
+        .as_ref()
+        .or(system_wav.as_ref())
+        .or(mixed_wav.as_ref())
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf)
+        .expect("checked above: at least one recording file exists");
     let per_channel = mic_wav.is_some() && system_wav.is_some();
+    let mut intermediates: Vec<PathBuf> = Vec::new();
     let prep = |src: &Path, name: &str| -> Result<PathBuf, String> {
         let dst = work_dir.join(name);
         let (samples, rate) = looma_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
@@ -204,6 +211,7 @@ pub async fn run_with(
     if per_channel {
         let mic_16k = prep(mic_wav.as_ref().unwrap(), "mic.16k.wav")?;
         let sys_16k = prep(system_wav.as_ref().unwrap(), "system.16k.wav")?;
+        intermediates.extend([mic_16k.clone(), sys_16k.clone()]);
 
         emit_stage(
             state,
@@ -260,6 +268,7 @@ pub async fn run_with(
         // single-track path (imports, mic-only recordings)
         let src = mixed_wav.or(mic_wav).or(system_wav).expect("checked above");
         let track_16k = prep(&src, "track.16k.wav")?;
+        intermediates.push(track_16k.clone());
 
         emit_stage(state, on_stage, meeting_id, "transcribing", None);
         let raw = guard_loops(
@@ -299,6 +308,15 @@ pub async fn run_with(
         .unwrap()
         .save_transcript(&transcript)
         .map_err(|e| e.to_string())?;
+
+    // 16 kHz intermediates are pure derived data — drop them once the
+    // transcript is saved so meeting folders hold only the real recordings.
+    // (A failed run keeps them; the retry overwrites them anyway.)
+    for f in &intermediates {
+        if let Err(e) = std::fs::remove_file(f) {
+            tracing::warn!(path = %f.display(), error = %e, "could not remove 16k intermediate");
+        }
+    }
 
     // release the per-meeting guard (on failure the scheduler clears it)
     state.pipeline_stage.lock().unwrap().remove(meeting_id);

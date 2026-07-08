@@ -202,8 +202,14 @@ fn golden_fixture_transcribes_and_diarizes() {
         let hits = storage.search("forecast", 10).unwrap();
         assert!(!hits.is_empty(), "transcript should be searchable");
     }
-    assert!(data_dir
-        .join("transcripts")
-        .join(format!("{meeting_id}.md"))
-        .exists());
+    // mirrors live inside the meeting's folder; the 16 kHz intermediate is
+    // cleaned up after success (only the real recording remains)
+    let rec_dir = data_dir.join("recordings").join(&meeting_id);
+    assert!(rec_dir.join("transcript.md").exists());
+    assert!(rec_dir.join("transcript.json").exists());
+    assert!(rec_dir.join("recording.mixed.wav").exists());
+    assert!(
+        !rec_dir.join("track.16k.wav").exists(),
+        "16k intermediate should be removed after a successful run"
+    );
 }
