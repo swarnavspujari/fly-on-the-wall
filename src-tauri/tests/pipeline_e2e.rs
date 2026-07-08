@@ -259,3 +259,129 @@ fn golden_fixture_transcribes_and_diarizes() {
         "16k intermediate should be removed after a successful run"
     );
 }
+
+/// Forced-fallback: the GPU verdict says "gpu" but the Vulkan exe is broken
+/// (planted garbage). The pipeline must complete on the CPU engine, label the
+/// transcript accordingly, and re-pin this "machine" to CPU so the failure
+/// is not retried every meeting.
+#[test]
+#[ignore = "needs whisper/sherpa artifacts in %APPDATA%/Looma; run with --ignored"]
+#[cfg(target_os = "windows")]
+fn gpu_failure_falls_back_to_cpu() {
+    let real_data = dirs::data_dir().unwrap().join("Looma");
+    let needed = [
+        "bin/whisper/Release/whisper-cli.exe",
+        "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe",
+        "models/diarize/sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
+        "models/diarize/campplus.onnx",
+        "models/asr/ggml-small-q5_1.bin",
+    ];
+    if needed.iter().any(|p| !real_data.join(p).exists()) {
+        eprintln!(
+            "SKIP: artifacts not installed under {}",
+            real_data.display()
+        );
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().to_path_buf();
+    for sub in ["bin/whisper", "bin/sherpa", "models/diarize"] {
+        link_tree(&real_data.join(sub), &data_dir.join(sub)).unwrap();
+    }
+    std::fs::create_dir_all(data_dir.join("models/asr")).unwrap();
+    std::fs::hard_link(
+        real_data.join("models/asr/ggml-small-q5_1.bin"),
+        data_dir.join("models/asr/ggml-small-q5_1.bin"),
+    )
+    .unwrap();
+    // Plant a "Vulkan build" whose exe can't run: the registry probe exists,
+    // so gpu::plan resolves it, and the launch fails at transcribe time.
+    std::fs::create_dir_all(data_dir.join("bin/whisper-vulkan/Release")).unwrap();
+    std::fs::write(
+        data_dir.join("bin/whisper-vulkan/Release/whisper-cli.exe"),
+        b"not an executable",
+    )
+    .unwrap();
+
+    let state = AppState::init_with(
+        data_dir.clone(),
+        std::sync::Arc::new(looma_secrets::MemorySecretStore::default()),
+    )
+    .unwrap();
+
+    let meeting_id = {
+        let storage = state.storage.lock().unwrap();
+        storage.set_setting("asr.tier", "light").unwrap();
+        storage
+            .set_setting("asr.model_id", "ggml-small-q5_1")
+            .unwrap();
+        storage.set_setting("asr.use_gpu", "true").unwrap();
+        storage
+            .set_setting(
+                "asr.gpu_bench",
+                r#"{"verdict":"gpu","reason":"forced by gpu_failure_falls_back_to_cpu","gpu_secs":null,"cpu_secs":null,"model_id":"ggml-small-q5_1"}"#,
+            )
+            .unwrap();
+        let note = storage.create_note("Fallback test", None).unwrap();
+        let meeting = storage
+            .create_meeting("Fallback test", &note.id, &[])
+            .unwrap();
+        let rec_dir = data_dir.join("recordings").join(&meeting.id);
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/meeting-fixture.wav");
+        std::fs::copy(&fixture, rec_dir.join("recording.mixed.wav")).unwrap();
+        storage
+            .end_meeting(
+                &meeting.id,
+                &RecordingRef {
+                    mic_path: None,
+                    system_path: None,
+                    mixed_path: Some(format!("recordings/{}/recording.mixed.wav", meeting.id)),
+                    duration_ms: 27_540,
+                },
+            )
+            .unwrap();
+        meeting.id
+    };
+
+    let on_stage = |p: pipeline::PipelineProgress| {
+        eprintln!("stage: {} {}", p.stage, p.detail.unwrap_or_default())
+    };
+    let on_model = |p: looma_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let transcript = runtime
+        .block_on(pipeline::run_with(
+            &state,
+            &on_stage,
+            &on_model,
+            &meeting_id,
+        ))
+        .expect("pipeline must survive a broken GPU build via CPU fallback");
+
+    assert_eq!(
+        transcript.engine, "whisper.cpp",
+        "fallback transcript must be labeled with the CPU engine"
+    );
+    assert!(
+        !transcript.segments.is_empty(),
+        "fallback transcript should contain real segments"
+    );
+
+    // the machine is re-pinned to CPU for future meetings
+    let bench = {
+        let storage = state.storage.lock().unwrap();
+        storage.get_setting("asr.gpu_bench").unwrap().unwrap()
+    };
+    let bench: serde_json::Value = serde_json::from_str(&bench).unwrap();
+    assert_eq!(bench["verdict"], "cpu", "verdict should re-pin to cpu");
+    assert!(
+        bench["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("runtime-failure"),
+        "reason should record the runtime failure, got {}",
+        bench["reason"]
+    );
+}
