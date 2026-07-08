@@ -112,10 +112,11 @@ fn enhance_flow_with_mock_provider_offline() {
     }
 
     // enhanced content is searchable and mirrored to markdown on disk
+    // (mirrors are named "<date> <title>.md" since the v2 layout)
     let hits = storage.search("forecast tomorrow", 10).unwrap();
     assert!(hits.iter().any(|h| h.note_id == note.id));
-    let md =
-        std::fs::read_to_string(dir.path().join("notes").join(format!("{}.md", note.id))).unwrap();
+    let label = looma_storage::naming::disk_label(note.created_at, "Budget sync");
+    let md = std::fs::read_to_string(dir.path().join("notes").join(format!("{label}.md"))).unwrap();
     assert!(md.contains("approve extra $50k"));
 
     // --- editing an AI block reclaims it as user text ---
