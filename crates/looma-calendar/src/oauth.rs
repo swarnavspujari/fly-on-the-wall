@@ -90,8 +90,8 @@ pub async fn interactive_auth(
 
     let result = parse_redirect_request(&request, &state);
     let body = match &result {
-        Ok(_) => "<html><body style='font-family:sans-serif'><h2>Looma is connected \u{2705}</h2>You can close this tab and return to the app.</body></html>",
-        Err(_) => "<html><body style='font-family:sans-serif'><h2>Connection failed</h2>Please return to Looma and try again.</body></html>",
+        Ok(_) => "<html><body style='font-family:sans-serif'><h2>Fly on the Wall is connected \u{2705}</h2>You can close this tab and return to the app.</body></html>",
+        Err(_) => "<html><body style='font-family:sans-serif'><h2>Connection failed</h2>Please return to Fly on the Wall and try again.</body></html>",
     };
     let _ = stream
         .write_all(

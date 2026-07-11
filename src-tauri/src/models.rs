@@ -57,7 +57,7 @@ const TOOLS: &[Artifact] = &[
     Artifact {
         id: "whisper-bin-vulkan",
         display: "whisper.cpp CLI (Vulkan GPU, v1.9.1)",
-        url: "https://github.com/swarnavspujari/looma-notetaker/releases/download/tools-whisper-vulkan-v1.9.1/whisper-bin-x64-vulkan-v1.9.1.zip",
+        url: "https://github.com/swarnavspujari/fly-on-the-wall/releases/download/tools-whisper-vulkan-v1.9.1/whisper-bin-x64-vulkan-v1.9.1.zip",
         sha256: "9dbd3ab65394a26784d79ae495de36311925f1f489a6e0e905841b6076799973",
         bytes: 23_632_146,
         kind: ArtifactKind::Archive,

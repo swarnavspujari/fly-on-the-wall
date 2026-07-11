@@ -206,7 +206,7 @@ pub async fn ask_meeting(
     };
 
     let mut messages = vec![ChatMessage::system(format!(
-        "You are Looma's meeting assistant. Answer questions about THIS meeting using only the \
+        "You are Fly on the Wall's meeting assistant. Answer questions about THIS meeting using only the \
          context below. Be concrete and cite who said what when relevant. If the answer is not \
          in the meeting, say so.\n\n{context}"
     ))];

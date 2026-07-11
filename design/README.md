@@ -1,4 +1,4 @@
-# Looma design system
+# Fly on the Wall design system
 
 `Looma.dc.html` is the Claude design export this UI is built from (open it in a browser —
 `support.js` is its tiny runtime). It is the visual source of truth: a warm cream/coral

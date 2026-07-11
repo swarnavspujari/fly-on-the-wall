@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Looma records your microphone during meetings you start. Audio never leaves this Mac unless you explicitly enable a cloud provider.</string>
+  <string>Fly on the Wall records your microphone during meetings you start. Audio never leaves this Mac unless you explicitly enable a cloud provider.</string>
   <key>NSAudioCaptureUsageDescription</key>
-  <string>Looma captures the meeting's system audio (the other participants) so it can transcribe who said what — entirely on this Mac.</string>
+  <string>Fly on the Wall captures the meeting's system audio (the other participants) so it can transcribe who said what — entirely on this Mac.</string>
   <key>NSScreenCaptureUsageDescription</key>
-  <string>Looma records your screen only when you start a screen recording, and saves it to this Mac.</string>
+  <string>Fly on the Wall records your screen only when you start a screen recording, and saves it to this Mac.</string>
 </dict>
 </plist>

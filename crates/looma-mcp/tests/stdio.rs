@@ -1,4 +1,4 @@
-//! Spec §11 MCP test: spawn the real looma-mcp binary, speak MCP over its
+//! Spec §11 MCP test: spawn the real flyonthewall-mcp binary, speak MCP over its
 //! stdio, and assert tool calls return the expected resources.
 
 use std::io::{BufRead, BufReader, Write};
@@ -19,7 +19,7 @@ fn stdio_server_answers_initialize_and_tool_calls() {
         note.id
     };
 
-    let exe = env!("CARGO_BIN_EXE_looma-mcp");
+    let exe = env!("CARGO_BIN_EXE_flyonthewall-mcp");
     let mut child = Command::new(exe)
         .arg("--data-dir")
         .arg(dir.path())
@@ -27,7 +27,7 @@ fn stdio_server_answers_initialize_and_tool_calls() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn looma-mcp");
+        .expect("spawn flyonthewall-mcp");
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
 

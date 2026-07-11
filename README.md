@@ -1,105 +1,226 @@
-# Looma
+# Fly on the Wall
 
-**Local-first meeting notes. Your machine, your models, your keys.**
+**Private meeting notes that never leave your computer.**
 
-Looma records your meetings (your mic and the other participants' system audio as separate
-channels), transcribes and diarizes them **entirely on your machine**, and merges your rough
-scratchpad notes with the transcript into clean, structured markdown — with visible provenance
-for every AI-written line and click-through to the exact transcript segment it came from.
+Fly on the Wall listens to your meetings, writes down who said what, and turns your rough
+notes into clean, organized notes — all on your own machine. Nothing is uploaded to the
+internet unless you choose to switch on a cloud feature.
 
-In the spirit of Granola, but private by default:
+> 📸 _Screenshot TODO: the main window when you first open the app._
 
-- **Capture, transcription, diarization, notes, and search work fully offline.** Nothing leaves
-  the machine unless you explicitly call an LLM provider or opt into the Groq cloud-ASR fallback.
-- **Bring your own models & keys** — whisper.cpp locally, or NVIDIA NIM / OpenAI / Anthropic /
-  local Ollama for note enhancement.
-- **Who-said-what** — speaker diarization always runs locally (sherpa-onnx), on every hardware tier.
-- **Uses your GPU when it's faster** — post-meeting transcription runs on whatever GPU you have
-  (NVIDIA/AMD/Intel via one Vulkan build, Apple via Metal), but only after a one-time speed test
-  proves it beats your CPU on your machine; it silently stays on CPU otherwise. *(from v0.3.0)*
-- **Your calendars** — Google Calendar & Microsoft 365, one-click meeting start. *(from M5)*
-- **MCP server** — chat with your notes from Claude Desktop or any MCP client. *(from M6)*
+## What Fly on the Wall is
 
-> **Status: v0.3.0.** Recording, local transcription + diarization (with optional cross-vendor
-> GPU acceleration), enhance with provenance, templates, Ask, calendars, MCP, screen recording,
-> file import, the warm design-system UI, live partial transcript while you record, note export,
-> auto-updating installers for Windows/macOS/Linux, and Linux system-audio capture. See
-> [DECISIONS.md](DECISIONS.md) for the build story.
+Fly on the Wall is a desktop app for Windows, macOS, and Linux that helps you remember your
+meetings.
 
-## A two-minute tour
+While you're on a call, it records two things separately: your microphone (your voice) and the
+sound coming out of your computer (everyone else on the call). When the meeting ends, it:
 
-1. **Record** — open Looma, hit **Record** (or click **Start** on a calendar event). A
-   recording bar shows while capturing; your mic and the meeting's system audio are captured as
-   separate channels, and a rough live transcript streams in as people talk (the full diarized
-   one replaces it when you stop). Jot rough notes in the scratchpad as you go. Two tips for
-   clean captures:
-   keep the system output audible (Looma warns you live if it's muted or at 0 % — muted output
-   means the other side records as silence), and prefer a headset — on open speakers the mic
-   also hears the meeting audio and picks up echo fragments.
-2. **Stop** — the transcript starts automatically: whisper.cpp + sherpa-onnx run *on your
-   machine* (first run downloads the models with progress + checksums). You get timestamped,
-   speaker-labeled text; click any name to rename ("Speaker 1" → "Dana").
-3. **Enhance** — pick a template (1:1, Sales discovery, Standup, Interview, General) and hit
-   **✨ Enhance**. Your own lines stay your color; AI-added lines are tinted and cite their
-   transcript segments — click 🔍 to jump to the exact source. Edit an AI line and it becomes
-   yours.
-4. **Ask** — 💬 opens a chat grounded in this meeting ("What did I miss?", "Draft a follow-up
-   email"). Insert any answer into the note with one click.
-5. **Organize & find** — folders on the left, full-text search across notes *and* transcripts
-   at the top, attachments and pasted links on any note. Everything is markdown on disk you
-   can open without Looma — or use **Export .md** / **Print → PDF** on any note.
-6. **Chat from Claude Desktop** — Settings → copy the MCP snippet, and your notes are queryable
-   from any MCP client, fully locally.
+- **writes out the whole conversation** as text, and
+- **labels who said each part** — "Speaker 1", "Speaker 2", and so on, which you can rename.
 
-## Install Looma
+Then, if you'd like, it can **tidy your rough notes into a clean summary**.
 
-Grab the installer for your OS from the
-[latest release](https://github.com/swarnavspujari/looma-notetaker/releases/latest).
-The binaries are **not code-signed yet**, so each OS shows a one-time warning — that's
-expected; here's how to get past it.
+The important part: **all of this happens on your computer.** The recording, the transcription
+(turning speech into text), and the speaker labeling never touch the internet. Your meetings
+stay with you.
+
+There are only two exceptions, and both are switched off until you turn them on — and clearly
+labeled in the app when they're active:
+
+- sending a meeting to a cloud service for faster transcription (Groq), and
+- using a cloud AI assistant to clean up your notes or answer questions about them (for
+  example, Anthropic's Claude).
+
+You bring your own account and key for those, so you stay in control of what leaves your
+machine.
+
+A couple of tips for the clearest recordings:
+
+- **Keep your speaker volume up.** Fly on the Wall hears the other people through your
+  computer's sound. If your output is muted, their side records as silence — the app warns you
+  on screen if this happens mid-meeting.
+- **Use a headset if you can.** On open speakers, your microphone also picks up the other
+  people, which can leave echoes in the transcript. A headset keeps the two sides clean.
+
+> 📸 _Screenshot TODO: a finished note with colored speaker labels._
+
+## Install Fly on the Wall
+
+Download the installer for your system from the
+[latest release](https://github.com/swarnavspujari/fly-on-the-wall/releases/latest).
+
+The app isn't signed with a paid certificate yet, so each system shows a one-time warning the
+first time you open it. This is expected, and it goes away in a later release once the app is
+signed. Here's how to get past it for now.
 
 ### Windows
 
-1. Download `Looma_…-setup-windows-x64.exe` and run it.
-2. SmartScreen will say "Windows protected your PC". Click **More info → Run anyway**.
-3. Launch Looma from the Start menu. On first transcription it downloads the speech models
-   (with progress + checksums); after that everything runs offline.
+1. Download the file whose name starts with **Fly on the Wall** and ends in
+   `-setup-windows-x64.exe`, then double-click it.
+2. Windows may show a blue box that says "Windows protected your PC." Click **More info**, then
+   **Run anyway**.
+3. Open **Fly on the Wall** from the Start menu. The first time you make a transcript, it
+   downloads the speech models it needs (you'll see a progress bar). After that, it works
+   without any internet connection.
 
-After this one manual install, Looma keeps itself current: it checks GitHub Releases on
-launch (and via **Settings → App updates**), downloads the new installer in the background,
-and restarts once when you confirm. Updates never interrupt a recording — the prompt waits
-until you're done. Update packages are signed with Looma's updater key and verified before
-install. (Installs older than the updater, v0.2.0 and earlier, need one last manual
-download.)
+> 📸 _Screenshot TODO: the Windows SmartScreen "More info → Run anyway" prompt._
+
+After this one manual step, the app keeps itself up to date: it checks for a new version when
+it starts, downloads it quietly in the background, and restarts once when you say so. Updates
+never interrupt a recording — the prompt waits until you're finished.
 
 ### macOS
 
-1. Download the `.dmg` for your Mac — `macos-arm64` for Apple Silicon (M1 and later),
-   `macos-x64` for Intel — open it, and drag **Looma** into **Applications**.
-2. Gatekeeper will block the unsigned app on first open. Either right-click the app →
-   **Open** → **Open**, or if macOS says the app "is damaged"/"can't be checked", clear the
-   quarantine flag once: `xattr -cr /Applications/Looma.app`, then open it normally.
-3. Grant the microphone permission when asked.
-   *(Capture of the other participants' system audio is not wired up on macOS yet — Looma
-   records your mic and says so; see docs/PORTING.md.)*
+1. Download the `.dmg` for your Mac — choose **macos-arm64** if you have an Apple Silicon Mac
+   (M1 or newer), or **macos-x64** if you have an Intel Mac. Open it and drag **Fly on the
+   Wall** into your **Applications** folder.
+2. The first time you open it, macOS may block it, or say it "can't be checked" or "is
+   damaged." Either right-click the app and choose **Open**, then **Open** again — or, if macOS
+   still refuses, open the **Terminal** app, run this line once, and then open the app normally:
+   ```
+   xattr -cr "/Applications/Fly on the Wall.app"
+   ```
+3. When it asks for permission to use your microphone, choose **Allow**.
+
+> On a Mac, recording the other participants' sound isn't available yet, so Fly on the Wall
+> records only your microphone and tells you so. Everything else works.
+
+> 📸 _Screenshot TODO: the macOS "Open anyway" prompt._
 
 ### Linux
 
-1. Download the `.AppImage` (any distro) or the `.deb` (Debian/Ubuntu).
-2. AppImage: `chmod +x Looma_*.AppImage && ./Looma_*.AppImage`.
-   Deb: `sudo apt install ./Looma_*.deb`.
-3. Secrets (API keys, calendar tokens) use the desktop keyring via Secret Service — on a
-   minimal install make sure `gnome-keyring` (or KWallet) is running.
+1. Download the **.AppImage** (works on most Linux systems) or the **.deb** (Debian and
+   Ubuntu).
+2. For the AppImage: right-click it → **Properties** → allow it to run as a program (or run
+   `chmod +x` on it in a terminal), then double-click it. For the `.deb`: open it with your
+   software installer, or run `sudo apt install ./` followed by the file's name in a terminal.
+3. Your API keys and calendar sign-ins are kept in your system keyring. On a minimal setup,
+   make sure `gnome-keyring` (or KWallet) is running so they have somewhere to live.
 
-### Code signing (the real fix, later)
+## Your first meeting
 
-The warnings above disappear once releases are signed: an OV/EV Authenticode certificate +
-`signtool` on Windows (a few hundred USD/yr), and an Apple Developer ID certificate with
-notarization (`codesign` + `notarytool`, 99 USD/yr) on macOS — both wire into
-`tauri.conf.json`/CI secrets with no code changes. Linux needs no signing. Until someone pays
-for certificates, the manual bypass is the honest path, and this README says so.
+1. **Record.** Open the app and click **Record** (or click **Start** next to a meeting from
+   your calendar). A bar shows that you're recording. Jot rough notes in the scratchpad as you
+   go.
+2. **Stop.** When the meeting ends, stop the recording. Fly on the Wall builds the transcript
+   on your computer. You get timestamped text with speaker labels — click any name to rename it
+   ("Speaker 1" → "Dana").
+3. **Enhance.** Pick a template (1:1, sales, standup, interview, or general) and click
+   **✨ Enhance**. It turns your rough notes and the transcript into clean, structured notes.
+   Your own words stay in your color; lines the assistant added are tinted and link back to the
+   exact moment in the transcript.
+4. **Ask.** Click the chat button to ask questions about the meeting — "what did I miss?",
+   "draft a follow-up email." Drop any answer into your note with one click.
+5. **Organize and find.** Use folders on the left and the search box at the top (it searches
+   your notes *and* your transcripts). Every note is also a plain file on your computer that you
+   can open in any editor, or export to Markdown or PDF.
 
-## Build & run (Windows)
+By default, **Enhance** and **Ask** use a local assistant that also runs on your computer, so
+nothing leaves your machine. If you'd rather use a cloud assistant like Anthropic's Claude, see
+[Add your API keys](#add-your-api-keys) below.
+
+## Connect your calendars
+
+Connecting a calendar is optional. It lets you start a note and recording straight from a
+meeting, and shows what's coming up next.
+
+### Connect your Google Calendar
+
+If you're one of our invited testers, this is one click:
+
+1. Click **Settings** at the bottom-left, then open the **Calendars** section.
+2. Next to **Google Calendar**, click **Connect**.
+3. Your web browser opens. Sign in to Google and click **Allow**.
+4. You may see a screen saying Google "hasn't verified this app." While we're in testing, that
+   screen is expected — click **Advanced**, then the link to continue to the app.
+5. When the browser says you're connected, close that tab and come back to Fly on the Wall.
+
+> 📸 _Screenshot TODO: Settings → Calendars, with the Connect buttons._
+
+### Connect your Outlook / Microsoft 365 calendar
+
+Same one click:
+
+1. Open **Settings → Calendars**.
+2. Next to **Microsoft 365 / Outlook**, click **Connect**.
+3. Sign in with your Microsoft account, review the permissions, and click **Accept**.
+4. If you see an "unverified app" notice, that's expected while we're in testing — continue.
+5. Come back to the app once the browser says you're connected.
+
+Your calendar sign-in is stored in your system's keychain, never in a plain file.
+
+### Advanced: bring your own OAuth app
+
+The one-click connections above are for invited testers. If you're setting up Fly on the Wall
+on your own, you can register your own free calendar app instead — it takes a few minutes once.
+Fly on the Wall talks directly to Google and Microsoft, with no server in between.
+
+**Google Calendar**
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project, then go
+   to **APIs & Services** and enable the **Google Calendar API**.
+2. Go to **Credentials → Create credentials → OAuth client ID**, and choose the type
+   **Desktop app**.
+3. Copy the **client ID** and **client secret** into Fly on the Wall under
+   **Settings → Calendars**, then click **Connect** and finish signing in through the browser
+   tab that opens.
+
+**Microsoft 365 / Outlook**
+
+1. In the [Azure Portal](https://portal.azure.com/), go to **App registrations → New
+   registration** (any name; for supported account types, choose personal + work accounts).
+2. Under **Authentication → Add a platform**, choose **Mobile and desktop applications**, tick
+   the loopback option (`http://localhost`), and turn on **Allow public client flows**.
+3. Copy the **Application (client) ID** into Fly on the Wall under **Settings → Calendars**,
+   then click **Connect**. No client secret is needed here.
+
+## Add your API keys
+
+Two optional keys unlock the cloud features. You paste each one into **Settings**, and it's
+stored in your system keychain — never in a plain file.
+
+### Get your Groq API key (for faster transcription on slower computers)
+
+Groq is a cloud service that can produce transcripts quickly when your computer is too slow to
+do it well on its own. When Groq is switched on, your meeting audio is sent to Groq for
+transcription — the speaker labeling still happens on your machine. Groq has a free tier.
+
+1. Go to [console.groq.com](https://console.groq.com/) and sign in (you can use Google, GitHub,
+   or email).
+2. Open **API Keys → Create API Key**. Give it a name, then copy the key it shows you (it
+   starts with `gsk_`). You won't be able to see it again, so paste it somewhere safe for a
+   moment.
+3. In Fly on the Wall, open **Settings**. In the transcription area, tick **Use Groq for
+   transcription (cloud fallback)** and paste your key into the box just below it.
+4. Save your settings. That's it.
+
+> 📸 _Screenshot TODO: Settings, the "Use Groq" checkbox and key field._
+
+### Get your Anthropic API key (for Enhance and Ask)
+
+Anthropic's Claude is the cloud assistant that can clean up your notes (**Enhance**) and answer
+questions about your meeting (**Ask**). When you use those features with Claude, your notes and
+transcript are sent to Anthropic.
+
+1. Go to [console.anthropic.com](https://console.anthropic.com/) and sign in.
+2. Open **API Keys → Create Key**, and copy the key (it starts with `sk-ant-`). Keep it
+   somewhere safe — you won't see it again. Using Claude requires some credit in your Anthropic
+   account.
+3. In Fly on the Wall, open **Settings** and find **AI provider (for Enhance & Ask)**.
+4. Click **anthropic**, paste your key into the **API key** box, and click **Save provider**.
+   You can click **Test connection** to check it worked.
+
+> 📸 _Screenshot TODO: Settings, AI provider with the Anthropic key field._
+
+---
+
+## For developers
+
+Everything below is for building Fly on the Wall from source or cutting a release. If you just
+want to use the app, you're done above.
+
+### Build & run (Windows)
 
 Prerequisites:
 
@@ -109,8 +230,8 @@ Prerequisites:
 - WebView2 runtime (preinstalled on Windows 11)
 
 ```powershell
-git clone https://github.com/swarnavspujari/looma-notetaker.git
-cd looma-notetaker
+git clone https://github.com/swarnavspujari/fly-on-the-wall.git
+cd fly-on-the-wall
 npm install
 npm --prefix frontend install
 npm run prepare-sidecars   # builds + stages looma-mcp (required once before any cargo build)
@@ -129,69 +250,53 @@ Run the test suite:
 cargo test --workspace
 ```
 
-## Cutting a release
+### Cutting a release
 
-Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) on
-every `v*` tag. The Windows leg also feeds the auto-updater: it signs the NSIS installer
-(detached `.sig`) and attaches `latest.json`, which installed apps poll at
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) on every
+`v*` tag. The Windows leg also feeds the auto-updater: it signs the NSIS installer (detached
+`.sig`) and attaches `latest.json`, which installed apps poll at
 `releases/latest/download/latest.json`.
 
 1. Bump the version in `src-tauri/tauri.conf.json` **and** the workspace `Cargo.toml`
-   (`[workspace.package] version`) — the workflow refuses a tag that doesn't match the
-   config version, because a mismatched `latest.json` would make installed apps re-download
-   the same update forever.
+   (`[workspace.package] version`) — the workflow refuses a tag that doesn't match the config
+   version, because a mismatched `latest.json` would make installed apps re-download the same
+   update forever.
 2. Make sure the two repo secrets exist (one-time setup): `TAURI_SIGNING_PRIVATE_KEY` and
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the Tauri updater keypair. The public half lives
-   in `tauri.conf.json` (`plugins.updater.pubkey`). **If the private key or password is
-   lost, shipped apps can never verify another update** — they'd need a manual reinstall
-   with a new key.
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the Tauri updater keypair. The public half lives in
+   `tauri.conf.json` (`plugins.updater.pubkey`). **If the private key or password is lost,
+   shipped apps can never verify another update** — they'd need a manual reinstall with a new
+   key.
 3. Land everything on `main` first (tag-push workflows run the workflow file at the tag's
    commit), then `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
-Local production builds don't need the key: `npm run tauri build` skips updater artifacts.
-To reproduce the CI build exactly, set both `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` env vars
-and add `--config src-tauri/tauri.updater.conf.json`.
+Local production builds don't need the key: `npm run tauri build` skips updater artifacts. To
+reproduce the CI build exactly, set both `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` env vars and add
+`--config src-tauri/tauri.updater.conf.json`.
 
-## Repository layout
+The installers are **unsigned** for now, which is why users see the SmartScreen/Gatekeeper
+warnings documented in [Install Fly on the Wall](#install-fly-on-the-wall). Signing removes them
+with no code changes: an OV/EV Authenticode certificate + `signtool` on Windows, and an Apple
+Developer ID certificate with notarization (`codesign` + `notarytool`) on macOS — both wire into
+`tauri.conf.json`/CI secrets. Linux needs no signing.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full picture. In short: `crates/looma-core` is the
-OS-free domain; every platform capability (audio, ASR, diarization, LLM, calendar, screen,
+### Repository layout
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full picture. In short: `crates/looma-core` is
+the OS-free domain; every platform capability (audio, ASR, diarization, LLM, calendar, screen,
 secrets) is a trait crate; `src-tauri` is the only place impls are picked; `frontend/` is a thin
 React layer.
 
-## Connecting calendars (bring your own OAuth app)
+### Chat with your notes from Claude Desktop (MCP)
 
-Looma talks directly to Google/Microsoft — no middleman server — so you register your own
-(free) OAuth app once:
-
-**Google Calendar**
-1. In [Google Cloud Console](https://console.cloud.google.com/) create a project → *APIs &
-   Services* → enable the **Google Calendar API**.
-2. *Credentials* → *Create credentials* → **OAuth client ID** → type **Desktop app**.
-3. Copy the client ID and client secret into Looma → Settings → Calendars, hit **Connect**,
-   finish sign-in in the browser tab that opens.
-
-**Microsoft 365 / Outlook**
-1. In [Azure Portal](https://portal.azure.com/) → *App registrations* → *New registration*
-   (any name; supported account types: personal + work accounts).
-2. Under *Authentication* → *Add a platform* → **Mobile and desktop applications** → check the
-   loopback option (`http://localhost`) and enable **Allow public client flows**.
-3. Copy the *Application (client) ID* into Looma → Settings → Calendars → **Connect**.
-   No client secret is needed (PKCE public client).
-
-Tokens are stored in the Windows Credential Manager, never on disk.
-
-## Chat with your notes from Claude Desktop (MCP)
-
-Looma ships `looma-mcp.exe`, a local stdio MCP server over your notes, folders, meetings, and
-transcripts (read-only; nothing leaves the machine). Add it to Claude Desktop's
-`claude_desktop_config.json` — Looma → Settings → "Chat with your notes (MCP)" generates the
-exact snippet for your install location:
+Fly on the Wall ships `flyonthewall-mcp.exe`, a local stdio MCP server over your notes, folders,
+meetings, and transcripts (read-only; nothing leaves the machine). Add it to Claude Desktop's
+`claude_desktop_config.json` — in the app, **Settings → "Chat with your notes (MCP)"** generates
+the exact snippet for your install location:
 
 ```json
 {
   "mcpServers": {
-    "looma": { "command": "C:\\path\\to\\looma-mcp.exe", "args": [] }
+    "flyonthewall": { "command": "C:\\path\\to\\flyonthewall-mcp.exe", "args": [] }
   }
 }
 ```
@@ -199,7 +304,7 @@ exact snippet for your install location:
 Tools exposed: `search_notes`, `list_folders`, `get_note`, `get_transcript`, `get_meeting`,
 `list_recent`.
 
-## Docs
+### More docs
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — module boundaries and the porting story
 - [DECISIONS.md](DECISIONS.md) — running log of technical decisions

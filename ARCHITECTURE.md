@@ -1,4 +1,4 @@
-# Looma architecture
+# Fly on the Wall architecture
 
 ## The golden rule
 

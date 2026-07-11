@@ -120,7 +120,7 @@ Running log of technical decisions, newest last. Format: date — decision — w
   ~200 lines: bind 127.0.0.1:0, open the system browser, catch one redirect, exchange the code.
   Owning it keeps the dependency tree small and makes the redirect UX (success page, state
   check, 5-min timeout) explicit. Pure parsers (redirect query, token JSON) are unit-tested.
-- **2026-07-02 — BYO OAuth app registrations.** Looma ships no client credentials: users create
+- **2026-07-02 — BYO OAuth app registrations.** Fly on the Wall ships no client credentials: users create
   a free Google "Desktop app" client (ID + secret) and/or an Azure public-client registration
   (ID only, PKCE). README documents both, step by step. Tokens (and Google's client secret) live
   in the keychain; client IDs are non-secret settings.

@@ -341,7 +341,7 @@ pub fn reveal_data_dir(app: tauri::AppHandle, state: State<'_, AppState>) -> Cmd
         .map_err(err_str)
 }
 
-/// Claude Desktop / MCP client config snippet pointing at the looma-mcp
+/// Claude Desktop / MCP client config snippet pointing at the flyonthewall-mcp
 /// binary that ships next to the app executable.
 #[tauri::command]
 pub fn mcp_config() -> CmdResult<String> {
@@ -350,13 +350,13 @@ pub fn mcp_config() -> CmdResult<String> {
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .ok_or("cannot resolve the app directory")?;
     let mcp = exe_dir.join(if cfg!(windows) {
-        "looma-mcp.exe"
+        "flyonthewall-mcp.exe"
     } else {
-        "looma-mcp"
+        "flyonthewall-mcp"
     });
     serde_json::to_string_pretty(&serde_json::json!({
         "mcpServers": {
-            "looma": { "command": mcp.display().to_string(), "args": [] }
+            "flyonthewall": { "command": mcp.display().to_string(), "args": [] }
         }
     }))
     .map_err(err_str)

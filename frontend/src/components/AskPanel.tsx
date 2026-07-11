@@ -49,7 +49,7 @@ export default function AskPanel({ noteId, onInsert, onClose }: Props) {
   return (
     <div className="print:hidden flex w-80 shrink-0 flex-col border-l border-line bg-cream">
       <div className="flex items-center justify-between border-b border-line px-3 py-2">
-        <SectionLabel>Ask Looma</SectionLabel>
+        <SectionLabel>Ask Fly on the Wall</SectionLabel>
         <Btn variant="ghost" size="xs" onClick={onClose}>
           ✕
         </Btn>

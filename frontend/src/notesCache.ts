@@ -5,7 +5,7 @@
 // this snapshot.
 import type { NoteSummary } from "./types";
 
-const KEY = "looma.notes-cache.v1";
+const KEY = "flyonthewall.notes-cache.v1";
 
 export function readNotesCache(): NoteSummary[] {
   try {

@@ -1,4 +1,4 @@
-//! v1 → v2 upgrade against a fixture shaped like a real `%APPDATA%/Looma`
+//! v1 → v2 upgrade against a fixture shaped like a real `%APPDATA%/FlyOnTheWall`
 //! data dir: UUID-named artifacts with DB rows, one orphaned recordings
 //! folder (with transcript mirrors but no meeting row), and one orphaned
 //! note mirror (no notes row). After `Storage::open`, everything must be

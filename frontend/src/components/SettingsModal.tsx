@@ -716,7 +716,7 @@ export default function SettingsModal({
               <SectionLabel>Chat with your notes (MCP)</SectionLabel>
               <div className="rounded-[16px] bg-ink p-5 text-white">
                 <p className="mb-3 text-[13px] leading-relaxed text-white/70">
-                  Looma ships a local MCP server. Add this to Claude Desktop's{" "}
+                  Fly on the Wall ships a local MCP server. Add this to Claude Desktop's{" "}
                   <code className="rounded bg-white/10 px-1 py-0.5 font-mono text-[11px] text-white">
                     claude_desktop_config.json
                   </code>{" "}
@@ -809,7 +809,7 @@ export default function SettingsModal({
                       </Btn>
                     )}
                     {updater.phase === "installing" && (
-                      <span className="text-xs text-ink-2">Installing — Looma will restart…</span>
+                      <span className="text-xs text-ink-2">Installing — Fly on the Wall will restart…</span>
                     )}
                   </div>
                   {updater.phase === "upToDate" && (

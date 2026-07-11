@@ -949,7 +949,7 @@ fn accuracy_harness() {
     }
 
     // ---- artifacts, hardlinked from the real data dir like the golden E2E ----
-    let real_data = dirs::data_dir().unwrap().join("Looma");
+    let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
     let needed = [
         "bin/whisper/Release/whisper-cli.exe".to_string(),
         "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe".to_string(),

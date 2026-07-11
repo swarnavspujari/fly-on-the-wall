@@ -2,7 +2,7 @@ name: Release
 
 # Builds installers for Windows (NSIS), macOS (.app/.dmg, both architectures)
 # and Linux (AppImage + .deb) on every version tag and attaches them to a
-# GitHub Release. Binaries are UNSIGNED — see README "Install Looma" for the
+# GitHub Release. Binaries are UNSIGNED — see README "Install Fly on the Wall" for the
 # SmartScreen/Gatekeeper notes shipped to users.
 #
 # The Windows leg additionally feeds the in-app auto-updater: it signs the
@@ -145,7 +145,7 @@ jobs:
           [ -f "${sig[0]}" ] || { echo "::error::updater .sig not found — did createUpdaterArtifacts run?"; exit 1; }
           jq -n \
             --arg version "$version" \
-            --arg notes "Looma ${version} — full notes: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+            --arg notes "Fly on the Wall ${version} — full notes: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
             --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$(basename "${setup[0]}")" \
             --arg signature "$(cat "${sig[0]}")" \

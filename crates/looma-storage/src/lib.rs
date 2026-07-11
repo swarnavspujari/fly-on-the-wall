@@ -3,7 +3,7 @@
 //!
 //! Layout under the user-visible data dir (human-readable names since v2;
 //! see naming.rs for the sanitization rules and migrations.rs for upgrades):
-//!   looma.db                          — index (folders, notes, meetings, FTS)
+//!   flyonthewall.db                   — index (folders, notes, meetings, FTS)
 //!   notes/<date> <title>.md           — plain-markdown mirror of each note
 //!   notes/_unlinked/…                 — mirrors with no DB row (preserved)
 //!   recordings/<date> <title>/        — one folder per meeting:
@@ -57,13 +57,18 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Open (creating if needed) the Looma data dir and its SQLite index.
+    /// On-disk name of the SQLite index. Pre-rebrand builds used `looma.db`;
+    /// `migrations::rename_legacy_db` renames it in place on open.
+    const DB_FILE: &str = "flyonthewall.db";
+
+    /// Open (creating if needed) the app data dir and its SQLite index.
     pub fn open(data_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         for sub in ["notes", "transcripts", "attachments", "recordings"] {
             std::fs::create_dir_all(data_dir.join(sub))?;
         }
-        let conn = Connection::open(data_dir.join("looma.db"))?;
+        migrations::rename_legacy_db(data_dir)?;
+        let conn = Connection::open(data_dir.join(Self::DB_FILE))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Self::migrate(&conn, data_dir)?;
@@ -254,7 +259,7 @@ mod tests {
     fn open_creates_schema_and_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).unwrap();
-        assert!(dir.path().join("looma.db").exists());
+        assert!(dir.path().join("flyonthewall.db").exists());
         assert!(dir.path().join("notes").is_dir());
         assert!(dir.path().join("attachments").is_dir());
         // reopen works (migrations are idempotent)
@@ -291,6 +296,40 @@ mod tests {
         let storage = Storage::open(dir.path()).unwrap();
         let note = storage.create_note("upgraded", None).unwrap();
         assert_eq!(storage.get_note(&note.id).unwrap().title, "upgraded");
+    }
+
+    #[test]
+    fn open_fresh_install_creates_new_db() {
+        let dir = tempfile::tempdir().unwrap();
+        Storage::open(dir.path()).unwrap();
+        assert!(dir.path().join("flyonthewall.db").exists());
+        assert!(!dir.path().join("looma.db").exists());
+    }
+
+    /// A pre-rebrand data dir (`looma.db`) is migrated in place on open: the
+    /// file is renamed to `flyonthewall.db` and its rows survive.
+    #[test]
+    fn open_migrates_legacy_looma_db() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join("looma.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, \
+                 parent_id TEXT, created_at TEXT NOT NULL);\
+                 INSERT INTO folders (id, name, parent_id, created_at) \
+                 VALUES ('f1', 'Legacy', NULL, '2026-01-01');",
+            )
+            .unwrap();
+        }
+        let storage = Storage::open(dir.path()).unwrap();
+        assert!(dir.path().join("flyonthewall.db").exists());
+        assert!(!dir.path().join("looma.db").exists());
+        drop(storage);
+        let conn = Connection::open(dir.path().join("flyonthewall.db")).unwrap();
+        let name: String = conn
+            .query_row("SELECT name FROM folders WHERE id = 'f1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "Legacy");
     }
 
     /// Guards the "bundled SQLite has FTS5" assumption the whole search

@@ -176,7 +176,7 @@ export default function Sidebar({
         <span className="flex h-[30px] w-[30px] flex-none items-center justify-center rounded-[9px] bg-coral">
           <span className="h-3.5 w-3.5 rounded-full border-[3px] border-white" />
         </span>
-        <span className="font-display text-[19px] font-bold tracking-tight text-ink">Looma</span>
+        <span className="font-display text-[19px] font-bold tracking-tight text-ink">Fly on the Wall</span>
       </div>
       <nav className="flex-1 overflow-y-auto px-3 pb-3">
         <div

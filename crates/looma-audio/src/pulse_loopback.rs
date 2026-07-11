@@ -52,7 +52,7 @@ impl PulseRecorder {
         };
         let simple = Simple::new(
             None,
-            "Looma",
+            "Fly on the Wall",
             Direction::Record,
             Some("@DEFAULT_MONITOR@"),
             "system audio",

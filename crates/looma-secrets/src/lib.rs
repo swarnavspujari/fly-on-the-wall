@@ -40,8 +40,14 @@ pub struct KeychainSecretStore {
 
 impl KeychainSecretStore {
     pub fn new() -> Self {
+        Self::with_service("com.flyonthewall.app")
+    }
+
+    /// Build a store for a specific service name. Used by the one-time
+    /// migration that copies secrets out of the pre-rebrand service.
+    pub fn with_service(service: impl Into<String>) -> Self {
         Self {
-            service: "com.looma.notetaker".to_string(),
+            service: service.into(),
         }
     }
 

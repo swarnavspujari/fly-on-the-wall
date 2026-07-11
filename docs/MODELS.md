@@ -1,6 +1,6 @@
 # Models: ASR & diarization
 
-Looma downloads models on first use into the data dir (`models/`), with progress and checksum
+Fly on the Wall downloads models on first use into the data dir (`models/`), with progress and checksum
 verification. **Weights are never committed to git and never bundled in the installer.**
 
 ## Hardware-adaptive ASR tiers (auto-picked on first run, user-overridable)
@@ -28,7 +28,7 @@ quantization — negligible accuracy loss, big RAM/disk savings, especially on L
 ## Diarization models (always downloaded, all tiers)
 
 - `pyannote-segmentation-3.0` (ONNX) — ~6 MB — speaker segmentation (license: MIT, gated
-  upstream on HF; Looma fetches the ONNX conversion published for sherpa-onnx)
+  upstream on HF; Fly on the Wall fetches the ONNX conversion published for sherpa-onnx)
 - Speaker embedding: 3D-Speaker CAM++ (or WeSpeaker) ONNX — ~26 MB — Apache-2.0
 
 Even on the Cloud tier, diarization runs locally and Groq's word timestamps are merged with the

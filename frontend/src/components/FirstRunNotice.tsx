@@ -17,7 +17,7 @@ export default function FirstRunNotice({ onAccept }: Props) {
         Before you record
       </h2>
       <p className="mb-3 text-[14px] leading-relaxed text-ink-2">
-        Looma records your microphone <em>and</em> the audio of other meeting participants (system
+        Fly on the Wall records your microphone <em>and</em> the audio of other meeting participants (system
         audio). Everything is stored{" "}
         <span className="font-medium text-ink">only on this computer</span> — nothing is uploaded
         unless you explicitly enable a cloud provider.
@@ -27,7 +27,7 @@ export default function FirstRunNotice({ onAccept }: Props) {
         <p>
           Many places require the consent of <em>all</em> participants before recording a
           conversation. It is your responsibility to know the rules that apply to you and to tell
-          people they are being recorded. Looma shows a persistent on-screen indicator while
+          people they are being recorded. Fly on the Wall shows a persistent on-screen indicator while
           recording.
         </p>
       </div>

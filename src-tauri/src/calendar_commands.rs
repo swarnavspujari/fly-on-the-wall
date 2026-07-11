@@ -18,7 +18,7 @@ type CmdResult<T> = Result<T, String>;
 
 /// Google installed-app client secrets are distributed with the app config,
 /// but we still keep them out of plaintext storage.
-const GOOGLE_CLIENT_SECRET_KEY: &str = "google_oauth_client_secret";
+pub(crate) const GOOGLE_CLIENT_SECRET_KEY: &str = "google_oauth_client_secret";
 
 fn open_url_fn(app: &tauri::AppHandle) -> looma_calendar::google::OpenUrl {
     let app = app.clone();

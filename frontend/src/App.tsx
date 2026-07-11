@@ -393,7 +393,7 @@ export default function App() {
                   <span className="h-4 w-4 rounded-full border-[3px] border-white" />
                 </span>
                 <span className="font-display text-4xl font-bold tracking-tight text-ink">
-                  Looma
+                  Fly on the Wall
                 </span>
               </div>
               <div className="mt-3 text-sm text-ink-2">

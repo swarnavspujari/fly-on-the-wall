@@ -1,4 +1,4 @@
-// Copies the release looma-mcp binary into src-tauri/binaries with the
+// Copies the release flyonthewall-mcp binary into src-tauri/binaries with the
 // target-triple suffix Tauri's externalBin bundling expects.
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync } from "node:fs";
@@ -12,9 +12,9 @@ const host = execFileSync("rustc", ["-vV"])
   .trim();
 
 const ext = process.platform === "win32" ? ".exe" : "";
-const src = join("target", "release", `looma-mcp${ext}`);
+const src = join("target", "release", `flyonthewall-mcp${ext}`);
 const destDir = join("src-tauri", "binaries");
 mkdirSync(destDir, { recursive: true });
-const dest = join(destDir, `looma-mcp-${host}${ext}`);
+const dest = join(destDir, `flyonthewall-mcp-${host}${ext}`);
 copyFileSync(src, dest);
 console.log(`sidecar ready: ${dest}`);

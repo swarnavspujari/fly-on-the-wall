@@ -1,5 +1,5 @@
 //! stdio entrypoint: newline-delimited JSON-RPC over stdin/stdout.
-//! Usage: looma-mcp [--data-dir <path>]   (defaults to the app's data dir)
+//! Usage: flyonthewall-mcp [--data-dir <path>]   (defaults to the app's data dir)
 
 use std::io::{BufRead, Write};
 
@@ -8,7 +8,7 @@ use looma_mcp::Server;
 fn main() -> anyhow::Result<()> {
     let mut data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Looma");
+        .join("FlyOnTheWall");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--data-dir" {
@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
     let server = Server::new(storage);
     // logs must go to stderr — stdout is the protocol channel
     eprintln!(
-        "looma-mcp v{} serving {}",
+        "flyonthewall-mcp v{} serving {}",
         looma_mcp::SERVER_VERSION,
         data_dir.display()
     );

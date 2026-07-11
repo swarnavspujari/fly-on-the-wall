@@ -6,7 +6,7 @@
 //! `cargo test`. Run locally with:
 //!   cargo test -p looma-app --test pipeline_e2e -- --ignored --nocapture
 //!
-//! Artifacts are hardlinked from the real Looma data dir (%APPDATA%/Looma);
+//! Artifacts are hardlinked from the real FlyOnTheWall data dir (%APPDATA%/FlyOnTheWall);
 //! the test skips (passes with a notice) when they are not installed.
 
 use looma_app_lib::pipeline;
@@ -73,9 +73,9 @@ fn link_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()
 }
 
 #[test]
-#[ignore = "needs whisper/sherpa artifacts in %APPDATA%/Looma; run with --ignored"]
+#[ignore = "needs whisper/sherpa artifacts in %APPDATA%/FlyOnTheWall; run with --ignored"]
 fn golden_fixture_transcribes_and_diarizes() {
-    let real_data = dirs::data_dir().unwrap().join("Looma");
+    let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
     let needed = [
         "bin/whisper/Release/whisper-cli.exe",
         "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe",
@@ -265,10 +265,10 @@ fn golden_fixture_transcribes_and_diarizes() {
 /// transcript accordingly, and re-pin this "machine" to CPU so the failure
 /// is not retried every meeting.
 #[test]
-#[ignore = "needs whisper/sherpa artifacts in %APPDATA%/Looma; run with --ignored"]
+#[ignore = "needs whisper/sherpa artifacts in %APPDATA%/FlyOnTheWall; run with --ignored"]
 #[cfg(target_os = "windows")]
 fn gpu_failure_falls_back_to_cpu() {
-    let real_data = dirs::data_dir().unwrap().join("Looma");
+    let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
     let needed = [
         "bin/whisper/Release/whisper-cli.exe",
         "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe",

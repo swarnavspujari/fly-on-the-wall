@@ -95,7 +95,7 @@ impl WhisperCppEngine {
         rate: u32,
         opts: &TranscribeOptions,
     ) -> Result<RawTranscript> {
-        let out_base = std::env::temp_dir().join(format!("looma-whisper-{}", uuid::Uuid::new_v4()));
+        let out_base = std::env::temp_dir().join(format!("flyonthewall-whisper-{}", uuid::Uuid::new_v4()));
         let wav_path = PathBuf::from(format!("{}.wav", out_base.display()));
         looma_audio::mix::write_wav_mono_16(&wav_path, samples, rate)
             .map_err(|e| AsrError::Engine(format!("write chunk wav: {e}")))?;

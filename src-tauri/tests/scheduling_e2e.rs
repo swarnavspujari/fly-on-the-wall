@@ -56,9 +56,9 @@ fn link_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()
 }
 
 #[test]
-#[ignore = "needs whisper/sherpa artifacts in %APPDATA%/Looma; run with --ignored"]
+#[ignore = "needs whisper/sherpa artifacts in %APPDATA%/FlyOnTheWall; run with --ignored"]
 fn transcription_defers_to_recording_then_completes() {
-    let real_data = dirs::data_dir().unwrap().join("Looma");
+    let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
     let needed = [
         "bin/whisper/Release/whisper-cli.exe",
         "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe",

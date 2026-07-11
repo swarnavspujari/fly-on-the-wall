@@ -18,13 +18,13 @@ export default function UpdateBanner({ updater }: Props) {
   return (
     <div className="fixed bottom-12 right-4 z-40 w-80 rounded-2xl border border-line bg-surface p-4 shadow-warm">
       <p className="font-display text-[15px] font-bold tracking-tight text-ink">
-        {phase === "ready" ? "Update downloaded" : `Update available: Looma v${version}`}
+        {phase === "ready" ? "Update downloaded" : `Update available: Fly on the Wall v${version}`}
       </p>
 
       {phase === "available" && (
         <>
           <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-            Downloads in the background — Looma restarts once to apply it.
+            Downloads in the background — Fly on the Wall restarts once to apply it.
           </p>
           <div className="mt-3 flex justify-end gap-2">
             <Btn variant="ghost" size="sm" onClick={updater.dismiss}>
@@ -54,7 +54,7 @@ export default function UpdateBanner({ updater }: Props) {
       {phase === "ready" && (
         <>
           <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-            Restart Looma to finish updating.
+            Restart Fly on the Wall to finish updating.
           </p>
           <div className="mt-3 flex justify-end gap-2">
             <Btn variant="ghost" size="sm" onClick={updater.dismiss}>
@@ -69,7 +69,7 @@ export default function UpdateBanner({ updater }: Props) {
 
       {phase === "installing" && (
         <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-          Installing — Looma will restart itself…
+          Installing — Fly on the Wall will restart itself…
         </p>
       )}
     </div>

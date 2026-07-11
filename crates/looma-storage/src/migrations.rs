@@ -35,6 +35,22 @@ pub(crate) fn to_v2(conn: &Connection, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// One-time rename of the pre-rebrand SQLite file (and its WAL/SHM sidecars)
+/// from `looma.db` to `flyonthewall.db`. Runs in `Storage::open` *before* the
+/// connection is opened, so it can't be a `user_version` step (those fire
+/// after open). Idempotent: each file is skipped when its target already
+/// exists or its source is absent, so a fresh install and a rerun are no-ops.
+pub(crate) fn rename_legacy_db(data_dir: &Path) -> Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let old = data_dir.join(format!("looma.db{suffix}"));
+        let new = data_dir.join(format!("flyonthewall.db{suffix}"));
+        if old.exists() && !new.exists() {
+            std::fs::rename(&old, &new)?;
+        }
+    }
+    Ok(())
+}
+
 fn rename_meeting_dirs(conn: &Connection, data_dir: &Path) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.title, m.started_at, m.recording_json, n.title
@@ -240,4 +256,30 @@ fn park_orphan_notes(conn: &Connection, data_dir: &Path) -> Result<()> {
         let _ = std::fs::rename(entry.path(), notes.join("_unlinked").join(&name));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_legacy_db_moves_main_file_and_wal_shm() {
+        let dir = tempfile::tempdir().unwrap();
+        // An uncheckpointed WAL holds committed rows, so it must move with the
+        // main file or that data is lost. (Bytes here are opaque, not real DBs.)
+        std::fs::write(dir.path().join("looma.db"), b"main").unwrap();
+        std::fs::write(dir.path().join("looma.db-wal"), b"wal").unwrap();
+        std::fs::write(dir.path().join("looma.db-shm"), b"shm").unwrap();
+
+        rename_legacy_db(dir.path()).unwrap();
+
+        assert_eq!(std::fs::read(dir.path().join("flyonthewall.db")).unwrap(), b"main");
+        assert_eq!(std::fs::read(dir.path().join("flyonthewall.db-wal")).unwrap(), b"wal");
+        assert_eq!(std::fs::read(dir.path().join("flyonthewall.db-shm")).unwrap(), b"shm");
+        assert!(!dir.path().join("looma.db").exists());
+
+        // Rerun is a no-op that never clobbers the already-migrated file.
+        rename_legacy_db(dir.path()).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("flyonthewall.db")).unwrap(), b"main");
+    }
 }

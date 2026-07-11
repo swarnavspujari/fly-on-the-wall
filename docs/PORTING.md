@@ -7,7 +7,7 @@ storage, and UI are untouched.
 
 ## macOS
 
-> **Status (v0.2):** Looma builds and runs on macOS (CI-verified; not yet exercised on a
+> **Status (v0.2):** Fly on the Wall builds and runs on macOS (CI-verified; not yet exercised on a
 > physical Mac). Capture is **mic-only**: process taps need a signed binary (see the third
 > trap below) and v0.2 ships unsigned, so a tap impl would record silence for every user.
 > Diarization downloads the universal2 sherpa-onnx build; whisper-cli and ffmpeg are picked
@@ -32,7 +32,7 @@ storage, and UI are untouched.
 ## iOS
 
 - System-audio capture is **sandbox-forbidden** (only a Broadcast Upload Extension with a 50 MB
-  cap). iOS Looma is therefore a **mic-only / in-person** notetaker — the honest alternative;
+  cap). iOS Fly on the Wall is therefore a **mic-only / in-person** notetaker — the honest alternative;
   the UI must not pretend otherwise.
 - whisper.cpp and sherpa-onnx both run on iOS; core + storage are reused as-is via Tauri mobile.
 

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Looma",
+  "productName": "Fly on the Wall",
   "version": "0.3.1",
-  "identifier": "com.looma.notetaker",
+  "identifier": "com.flyonthewall.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3MTZCQzg1MzQ4MTFCNEMKUldSTUc0RTBoYndXZDZnSjZvN3VMQTNxNnUzZTRBdEFqYTV2eTBoSW9RMnlYd1VISzBETEE2TkgK",
       "endpoints": [
-        "https://github.com/swarnavspujari/looma-notetaker/releases/latest/download/latest.json"
+        "https://github.com/swarnavspujari/fly-on-the-wall/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
@@ -23,7 +23,7 @@
   "app": {
     "windows": [
       {
-        "title": "Looma",
+        "title": "Fly on the Wall",
         "width": 1280,
         "height": 840,
         "minWidth": 900,
@@ -37,7 +37,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "externalBin": ["binaries/looma-mcp"],
+    "externalBin": ["binaries/flyonthewall-mcp"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -46,7 +46,7 @@
       "icons/icon.ico"
     ],
     "shortDescription": "Local-first meeting notes",
-    "longDescription": "Looma records, transcribes and diarizes your meetings entirely on your machine, and merges your rough notes with the transcript into clean, structured notes with per-line provenance.",
+    "longDescription": "Fly on the Wall records, transcribes and diarizes your meetings entirely on your machine, and merges your rough notes with the transcript into clean, structured notes with per-line provenance.",
     "linux": {
       "deb": {
         "depends": ["libwebkit2gtk-4.1-0", "libasound2", "libpulse0"]
