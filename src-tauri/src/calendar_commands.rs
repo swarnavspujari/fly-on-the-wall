@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use looma_calendar::google::GoogleCalendarProvider;
-use looma_calendar::msgraph::MsGraphProvider;
-use looma_calendar::{CalendarEvent, CalendarProvider};
-use looma_secrets::SecretStore;
-use looma_storage::Storage;
+use fly_calendar::google::GoogleCalendarProvider;
+use fly_calendar::msgraph::MsGraphProvider;
+use fly_calendar::{CalendarEvent, CalendarProvider};
+use fly_secrets::SecretStore;
+use fly_storage::Storage;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
@@ -70,7 +70,7 @@ fn read_disabled(storage: &Storage, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn open_url_fn(app: &tauri::AppHandle) -> looma_calendar::google::OpenUrl {
+fn open_url_fn(app: &tauri::AppHandle) -> fly_calendar::google::OpenUrl {
     let app = app.clone();
     Arc::new(move |url: String| {
         let _ = app.opener().open_url(url, None::<&str>);
@@ -148,7 +148,7 @@ pub fn get_calendar_settings(state: State<'_, AppState>) -> CmdResult<CalendarSt
             .is_some(),
         google_connected: state
             .secrets
-            .get(looma_secrets::keys::GOOGLE_OAUTH_TOKEN)
+            .get(fly_secrets::keys::GOOGLE_OAUTH_TOKEN)
             .ok()
             .flatten()
             .is_some(),
@@ -156,7 +156,7 @@ pub fn get_calendar_settings(state: State<'_, AppState>) -> CmdResult<CalendarSt
         ms_client_id,
         ms_connected: state
             .secrets
-            .get(looma_secrets::keys::MS_OAUTH_TOKEN)
+            .get(fly_secrets::keys::MS_OAUTH_TOKEN)
             .ok()
             .flatten()
             .is_some(),
@@ -258,7 +258,7 @@ pub async fn upcoming_meetings(
     let to = Utc::now() + Duration::hours(24);
     let mut events = Vec::new();
 
-    if is_connected(&state, looma_secrets::keys::GOOGLE_OAUTH_TOKEN) {
+    if is_connected(&state, fly_secrets::keys::GOOGLE_OAUTH_TOKEN) {
         match build_google(&app, &state) {
             Ok(p) => match p.upcoming(from, to).await {
                 Ok(mut ev) => events.append(&mut ev),
@@ -267,7 +267,7 @@ pub async fn upcoming_meetings(
             Err(e) => tracing::warn!("google calendar not buildable: {e}"),
         }
     }
-    if is_connected(&state, looma_secrets::keys::MS_OAUTH_TOKEN) {
+    if is_connected(&state, fly_secrets::keys::MS_OAUTH_TOKEN) {
         match build_msgraph(&app, &state) {
             Ok(p) => match p.upcoming(from, to).await {
                 Ok(mut ev) => events.append(&mut ev),
@@ -278,7 +278,7 @@ pub async fn upcoming_meetings(
     }
 
     // Drop link-less events, de-dupe, sort by start.
-    Ok(looma_calendar::merge_upcoming(events))
+    Ok(fly_calendar::merge_upcoming(events))
 }
 
 /// One of the user's calendars plus its on/off state, for the settings list.
@@ -302,7 +302,7 @@ pub async fn list_calendars(
 ) -> CmdResult<Vec<CalendarToggle>> {
     let mut out = Vec::new();
 
-    if is_connected(&state, looma_secrets::keys::GOOGLE_OAUTH_TOKEN) {
+    if is_connected(&state, fly_secrets::keys::GOOGLE_OAUTH_TOKEN) {
         if let Ok(p) = build_google(&app, &state) {
             let disabled = p.disabled_calendars.clone();
             match p.list_calendars().await {
@@ -317,7 +317,7 @@ pub async fn list_calendars(
             }
         }
     }
-    if is_connected(&state, looma_secrets::keys::MS_OAUTH_TOKEN) {
+    if is_connected(&state, fly_secrets::keys::MS_OAUTH_TOKEN) {
         if let Ok(p) = build_msgraph(&app, &state) {
             let disabled = p.disabled_calendars.clone();
             match p.list_calendars().await {

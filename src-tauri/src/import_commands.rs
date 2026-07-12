@@ -2,7 +2,7 @@
 //! mono track the pipeline expects, and run the same transcribe → diarize →
 //! (enhanceable) flow as a live recording.
 
-use looma_core::{Meeting, RecordingRef};
+use fly_core::{Meeting, RecordingRef};
 use serde::Serialize;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
@@ -72,10 +72,10 @@ pub async fn import_media(
     // normalize to 16 kHz mono WAV (pure Rust for PCM wav; ffmpeg otherwise)
     let mixed = rec_dir.join("recording.mixed.wav");
     let duration_ms = if ext == "wav" {
-        match looma_audio::mix::read_wav_mono(&source_copy) {
+        match fly_audio::mix::read_wav_mono(&source_copy) {
             Ok((samples, rate)) => {
-                let resampled = looma_audio::mix::resample_linear(&samples, rate, 16_000);
-                looma_audio::mix::write_wav_mono_16(&mixed, &resampled, 16_000)
+                let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
+                fly_audio::mix::write_wav_mono_16(&mixed, &resampled, 16_000)
                     .map_err(|e| e.to_string())?;
                 (resampled.len() as u64) * 1000 / 16_000
             }
@@ -155,6 +155,6 @@ async fn convert_with_ffmpeg(
             stderr.chars().take(400).collect::<String>()
         ));
     }
-    let (samples, rate) = looma_audio::mix::read_wav_mono(dst).map_err(|e| e.to_string())?;
+    let (samples, rate) = fly_audio::mix::read_wav_mono(dst).map_err(|e| e.to_string())?;
     Ok((samples.len() as u64) * 1000 / rate.max(1) as u64)
 }

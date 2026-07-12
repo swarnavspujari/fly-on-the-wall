@@ -2,7 +2,7 @@
 //!
 //! A dropped or degraded recording is unrecoverable; transcription can always
 //! happen later. So the full pipeline never STARTS while any capture is
-//! active — jobs queue up (persistently, see looma-storage jobs.rs) and a
+//! active — jobs queue up (persistently, see fly-storage jobs.rs) and a
 //! single worker drains them one at a time once recording ends. Serializing
 //! jobs also means at most one whisper/sherpa sidecar set runs at once.
 //!
@@ -228,7 +228,7 @@ fn emit_final(on_stage: StageSink<'_>, meeting_id: &str, error: Option<String>) 
 /// Job bookkeeping must never take the pipeline down; log and continue.
 fn set_job_state(
     state: &AppState,
-    f: impl FnOnce(&looma_storage::Storage) -> looma_storage::Result<()>,
+    f: impl FnOnce(&fly_storage::Storage) -> fly_storage::Result<()>,
 ) {
     if let Err(e) = f(&state.storage.lock().unwrap()) {
         tracing::error!(error = %e, "updating transcription job state failed");

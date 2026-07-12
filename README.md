@@ -271,7 +271,7 @@ git clone https://github.com/swarnavspujari/fly-on-the-wall.git
 cd fly-on-the-wall
 npm install
 npm --prefix frontend install
-npm run prepare-sidecars   # builds + stages looma-mcp (required once before any cargo build)
+npm run prepare-sidecars   # builds + stages fly-mcp (required once before any cargo build)
 npm run tauri dev          # dev app with hot reload
 ```
 
@@ -324,7 +324,7 @@ Developer ID certificate with notarization (`codesign` + `notarytool`) on macOS 
 
 ### Repository layout
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full picture. In short: `crates/looma-core` is
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full picture. In short: `crates/fly-core` is
 the OS-free domain; every platform capability (audio, ASR, diarization, LLM, calendar, screen,
 secrets) is a trait crate; `src-tauri` is the only place impls are picked; `frontend/` is a thin
 React layer.

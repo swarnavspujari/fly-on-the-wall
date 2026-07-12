@@ -1,16 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/looma-core",
-    "crates/looma-audio",
-    "crates/looma-asr",
-    "crates/looma-diarize",
-    "crates/looma-llm",
-    "crates/looma-calendar",
-    "crates/looma-capture-screen",
-    "crates/looma-storage",
-    "crates/looma-mcp",
-    "crates/looma-secrets",
+    "crates/fly-core",
+    "crates/fly-audio",
+    "crates/fly-asr",
+    "crates/fly-diarize",
+    "crates/fly-llm",
+    "crates/fly-calendar",
+    "crates/fly-capture-screen",
+    "crates/fly-storage",
+    "crates/fly-mcp",
+    "crates/fly-secrets",
     "src-tauri",
 ]
 
@@ -22,15 +22,15 @@ repository = "https://github.com/swarnavspujari/fly-on-the-wall"
 
 [workspace.dependencies]
 # internal crates
-looma-core = { path = "crates/looma-core" }
-looma-audio = { path = "crates/looma-audio" }
-looma-asr = { path = "crates/looma-asr" }
-looma-diarize = { path = "crates/looma-diarize" }
-looma-llm = { path = "crates/looma-llm" }
-looma-calendar = { path = "crates/looma-calendar" }
-looma-capture-screen = { path = "crates/looma-capture-screen" }
-looma-storage = { path = "crates/looma-storage" }
-looma-secrets = { path = "crates/looma-secrets" }
+fly-core = { path = "crates/fly-core" }
+fly-audio = { path = "crates/fly-audio" }
+fly-asr = { path = "crates/fly-asr" }
+fly-diarize = { path = "crates/fly-diarize" }
+fly-llm = { path = "crates/fly-llm" }
+fly-calendar = { path = "crates/fly-calendar" }
+fly-capture-screen = { path = "crates/fly-capture-screen" }
+fly-storage = { path = "crates/fly-storage" }
+fly-secrets = { path = "crates/fly-secrets" }
 
 # shared external deps — pinned once here so every crate agrees
 serde = { version = "1", features = ["derive"] }

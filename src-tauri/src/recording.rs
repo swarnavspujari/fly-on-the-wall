@@ -1,8 +1,8 @@
 //! Recording commands: one active capture session at a time, tied to a
 //! meeting row and its note.
 
-use looma_audio::{CaptureConfig, CaptureSession, CaptureState};
-use looma_core::{Meeting, RecordingRef};
+use fly_audio::{CaptureConfig, CaptureSession, CaptureState};
+use fly_core::{Meeting, RecordingRef};
 use serde::Serialize;
 use tauri::State;
 
@@ -221,6 +221,6 @@ pub fn get_meeting_for_note(
 }
 
 #[tauri::command]
-pub fn list_mic_devices(state: State<'_, AppState>) -> CmdResult<Vec<looma_audio::AudioDevice>> {
+pub fn list_mic_devices(state: State<'_, AppState>) -> CmdResult<Vec<fly_audio::AudioDevice>> {
     state.audio.list_mic_devices().map_err(|e| e.to_string())
 }

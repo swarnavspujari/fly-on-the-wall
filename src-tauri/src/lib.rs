@@ -1,5 +1,5 @@
 //! Composition root: this is the ONLY place where platform impls are picked
-//! and wired to the UI. `looma-core` and the frontend never see an OS API.
+//! and wired to the UI. `fly-core` and the frontend never see an OS API.
 
 mod asr_commands;
 mod calendar_commands;

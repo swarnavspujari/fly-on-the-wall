@@ -6,9 +6,9 @@
 //! against claude-sonnet-5, because the provider omits the rejected param.
 //!
 //!   ANTHROPIC_API_KEY=sk-ant-... \
-//!     cargo test -p looma-app --test anthropic_live -- --ignored --nocapture
+//!     cargo test -p fly-app --test anthropic_live -- --ignored --nocapture
 
-use looma_llm::{ChatMessage, ChatRequest, LLMProvider, ThinkingMode};
+use fly_llm::{ChatMessage, ChatRequest, LLMProvider, ThinkingMode};
 
 #[test]
 #[ignore = "hits the real Anthropic API; needs ANTHROPIC_API_KEY"]
@@ -18,7 +18,7 @@ fn temperature_request_succeeds_on_sonnet5() {
         return;
     };
     let provider =
-        looma_llm::anthropic::AnthropicProvider::new(key, "claude-sonnet-5".to_string());
+        fly_llm::anthropic::AnthropicProvider::new(key, "claude-sonnet-5".to_string());
 
     // Mirror enhance_note exactly: an explicit temperature + default thinking.
     // Before the fix this returned HTTP 400 ("`temperature` is deprecated").

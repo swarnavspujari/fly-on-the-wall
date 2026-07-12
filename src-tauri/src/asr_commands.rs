@@ -1,6 +1,6 @@
 //! Commands for transcription, transcripts, ASR settings, and models.
 
-use looma_core::Transcript;
+use fly_core::Transcript;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
@@ -161,7 +161,7 @@ pub async fn get_asr_settings(state: State<'_, AppState>) -> CmdResult<AsrSettin
         max_quality: get("asr.max_quality").as_deref() == Some("true"),
         has_groq_key: state
             .secrets
-            .get(looma_secrets::keys::GROQ_API_KEY)
+            .get(fly_secrets::keys::GROQ_API_KEY)
             .ok()
             .flatten()
             .is_some(),
@@ -243,12 +243,12 @@ pub fn set_asr_settings(state: State<'_, AppState>, update: AsrSettingsUpdate) -
         if key.is_empty() {
             state
                 .secrets
-                .delete(looma_secrets::keys::GROQ_API_KEY)
+                .delete(fly_secrets::keys::GROQ_API_KEY)
                 .map_err(|e| e.to_string())?;
         } else {
             state
                 .secrets
-                .set(looma_secrets::keys::GROQ_API_KEY, &key)
+                .set(fly_secrets::keys::GROQ_API_KEY, &key)
                 .map_err(|e| e.to_string())?;
         }
     }

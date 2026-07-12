@@ -35,7 +35,7 @@ pub struct GpuBench {
     pub model_id: String,
 }
 
-pub fn enabled(storage: &looma_storage::Storage) -> bool {
+pub fn enabled(storage: &fly_storage::Storage) -> bool {
     storage
         .get_setting(USE_GPU_KEY)
         .ok()
@@ -44,7 +44,7 @@ pub fn enabled(storage: &looma_storage::Storage) -> bool {
         .unwrap_or(true)
 }
 
-pub fn stored(storage: &looma_storage::Storage) -> Option<GpuBench> {
+pub fn stored(storage: &fly_storage::Storage) -> Option<GpuBench> {
     storage
         .get_setting(BENCH_KEY)
         .ok()
@@ -52,7 +52,7 @@ pub fn stored(storage: &looma_storage::Storage) -> Option<GpuBench> {
         .and_then(|json| serde_json::from_str(&json).ok())
 }
 
-pub fn store(storage: &looma_storage::Storage, bench: &GpuBench) {
+pub fn store(storage: &fly_storage::Storage, bench: &GpuBench) {
     match serde_json::to_string(bench) {
         Ok(json) => {
             if let Err(e) = storage.set_setting(BENCH_KEY, &json) {
@@ -66,7 +66,7 @@ pub fn store(storage: &looma_storage::Storage, bench: &GpuBench) {
 /// A GPU engine failed mid-pipeline (after winning the benchmark). Pin this
 /// machine back to CPU so the failure isn't retried every meeting; toggling
 /// the Settings switch off→on clears the verdict for another attempt.
-pub fn record_runtime_failure(storage: &looma_storage::Storage, model_id: &str, error: &str) {
+pub fn record_runtime_failure(storage: &fly_storage::Storage, model_id: &str, error: &str) {
     let mut reason = format!("runtime-failure: {error}");
     reason.truncate(300);
     store(
@@ -88,7 +88,7 @@ pub use windows::{plan, PlanRequest};
 mod windows {
     use std::path::{Path, PathBuf};
 
-    use looma_asr::{TranscribeOptions, TranscriptionEngine};
+    use fly_asr::{TranscribeOptions, TranscriptionEngine};
 
     use super::GpuBench;
     use crate::models;
@@ -170,7 +170,7 @@ mod windows {
         ));
 
         let time_run = |exe: PathBuf| {
-            let engine = looma_asr::whisper_cpp::WhisperCppEngine {
+            let engine = fly_asr::whisper_cpp::WhisperCppEngine {
                 exe,
                 model: req.model_path.to_path_buf(),
                 threads: req.threads,
@@ -256,10 +256,10 @@ mod windows {
     /// Cut a speech-only 16 kHz sample from the recording: VAD the audio and
     /// stitch detected speech up to the target. Ok(None) = too little speech.
     fn build_bench_sample(src: &Path) -> Result<Option<BenchSample>, String> {
-        use looma_audio::vad::{detect_speech_spans, stitch_spans, VadConfig};
+        use fly_audio::vad::{detect_speech_spans, stitch_spans, VadConfig};
 
-        let (samples, rate) = looma_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
-        let samples = looma_audio::mix::resample_linear(&samples, rate, 16_000);
+        let (samples, rate) = fly_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
+        let samples = fly_audio::mix::resample_linear(&samples, rate, 16_000);
         let spans = detect_speech_spans(&samples, 16_000, &VadConfig::default());
 
         let mut take = Vec::new();
@@ -277,7 +277,7 @@ mod windows {
         let (chunk, _map) = stitch_spans(&samples, 16_000, &take).map_err(|e| e.to_string())?;
         // one benchmark at a time per app instance — pid is unique enough
         let wav = std::env::temp_dir().join(format!("flyonthewall-gpu-bench-{}.wav", std::process::id()));
-        looma_audio::mix::write_wav_mono_16(&wav, &chunk, 16_000).map_err(|e| e.to_string())?;
+        fly_audio::mix::write_wav_mono_16(&wav, &chunk, 16_000).map_err(|e| e.to_string())?;
         Ok(Some(BenchSample { wav, speech_ms }))
     }
 }

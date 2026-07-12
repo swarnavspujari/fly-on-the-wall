@@ -1,0 +1,21 @@
+[package]
+name = "fly-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "flyonthewall-mcp"
+path = "src/main.rs"
+
+[dependencies]
+fly-core.workspace = true
+fly-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile = "3" 

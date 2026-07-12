@@ -5,29 +5,29 @@
 
 use std::sync::Arc;
 
-use looma_app_lib::recording::ActiveRecording;
-use looma_app_lib::scheduler::{self, Tick};
-use looma_app_lib::state::AppState;
+use fly_app_lib::recording::ActiveRecording;
+use fly_app_lib::scheduler::{self, Tick};
+use fly_app_lib::state::AppState;
 
 struct FakeSession;
 
-impl looma_audio::CaptureSession for FakeSession {
-    fn pause(&mut self) -> looma_audio::Result<()> {
+impl fly_audio::CaptureSession for FakeSession {
+    fn pause(&mut self) -> fly_audio::Result<()> {
         Ok(())
     }
-    fn resume(&mut self) -> looma_audio::Result<()> {
+    fn resume(&mut self) -> fly_audio::Result<()> {
         Ok(())
     }
-    fn stop(self: Box<Self>) -> looma_audio::Result<looma_audio::CaptureOutput> {
-        Ok(looma_audio::CaptureOutput {
+    fn stop(self: Box<Self>) -> fly_audio::Result<fly_audio::CaptureOutput> {
+        Ok(fly_audio::CaptureOutput {
             mic_path: None,
             system_path: None,
             mixed_path: None,
             duration_ms: 0,
         })
     }
-    fn state(&self) -> looma_audio::CaptureState {
-        looma_audio::CaptureState::Recording
+    fn state(&self) -> fly_audio::CaptureState {
+        fly_audio::CaptureState::Recording
     }
     fn elapsed_ms(&self) -> u64 {
         0
@@ -38,7 +38,7 @@ fn test_state() -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::init_with(
         dir.path().to_path_buf(),
-        Arc::new(looma_secrets::MemorySecretStore::default()),
+        Arc::new(fly_secrets::MemorySecretStore::default()),
     )
     .unwrap();
     (dir, state)
@@ -60,11 +60,11 @@ fn fake_recording(meeting_id: &str) -> ActiveRecording {
     }
 }
 
-fn on_stage() -> impl Fn(looma_app_lib::pipeline::PipelineProgress) + Send + Sync {
+fn on_stage() -> impl Fn(fly_app_lib::pipeline::PipelineProgress) + Send + Sync {
     |_| {}
 }
 
-fn on_model() -> impl Fn(looma_app_lib::models::ModelProgress) + Send + Sync {
+fn on_model() -> impl Fn(fly_app_lib::models::ModelProgress) + Send + Sync {
     |_| {}
 }
 
@@ -100,7 +100,7 @@ fn queue_defers_while_recording_then_attempts_after() {
     {
         let storage = state.storage.lock().unwrap();
         let job = storage.transcription_job(&meeting_id).unwrap().unwrap();
-        assert_eq!(job.status, looma_storage::JOB_QUEUED);
+        assert_eq!(job.status, fly_storage::JOB_QUEUED);
         assert_eq!(job.attempts, 0);
     }
     assert_eq!(
@@ -158,7 +158,7 @@ fn failing_job_is_retried_then_parked_as_failed() {
 
     let storage = state.storage.lock().unwrap();
     let job = storage.transcription_job(&meeting_id).unwrap().unwrap();
-    assert_eq!(job.status, looma_storage::JOB_FAILED);
+    assert_eq!(job.status, fly_storage::JOB_FAILED);
     assert_eq!(job.attempts, scheduler::MAX_ATTEMPTS);
     assert!(job.last_error.is_some());
     // nothing schedulable left, and no ghost stage entry for the UI
@@ -175,7 +175,7 @@ fn failing_job_is_retried_then_parked_as_failed() {
     scheduler::enqueue(&state, &stage, &meeting_id).unwrap();
     let storage = state.storage.lock().unwrap();
     let job = storage.transcription_job(&meeting_id).unwrap().unwrap();
-    assert_eq!(job.status, looma_storage::JOB_QUEUED);
+    assert_eq!(job.status, fly_storage::JOB_QUEUED);
     assert_eq!(job.attempts, 0);
 }
 
@@ -185,7 +185,7 @@ fn failing_job_is_retried_then_parked_as_failed() {
 #[test]
 fn queued_and_running_jobs_survive_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let secrets = Arc::new(looma_secrets::MemorySecretStore::default());
+    let secrets = Arc::new(fly_secrets::MemorySecretStore::default());
     let (queued_id, running_id) = {
         let state = AppState::init_with(dir.path().to_path_buf(), secrets.clone()).unwrap();
         let queued_id = meeting_without_recording(&state);
@@ -206,7 +206,7 @@ fn queued_and_running_jobs_survive_restart() {
     for id in [&queued_id, &running_id] {
         let storage = state.storage.lock().unwrap();
         let job = storage.transcription_job(id).unwrap().unwrap();
-        assert_eq!(job.status, looma_storage::JOB_QUEUED, "job {id}");
+        assert_eq!(job.status, fly_storage::JOB_QUEUED, "job {id}");
         assert_eq!(
             stages.get(id.as_str()).map(String::as_str),
             Some(scheduler::WAITING_STAGE),

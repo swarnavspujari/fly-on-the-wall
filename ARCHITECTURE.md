@@ -2,7 +2,7 @@
 
 ## The golden rule
 
-**UI talks to `looma-core` types via Tauri commands only. `looma-core` depends on trait crates,
+**UI talks to `fly-core` types via Tauri commands only. `fly-core` depends on trait crates,
 never on OS-specific impls. Impl selection happens once, in `src-tauri`.** That composition-root
 discipline is what makes the macOS/iOS/Android ports "add one impl crate," not a rewrite.
 
@@ -14,36 +14,36 @@ src-tauri/ (composition root: picks platform impls, owns app state, exposes comm
     │
     ▼
 crates/
-  looma-core/           domain: notes, folders, meetings, templates, provenance,
+  fly-core/           domain: notes, folders, meetings, templates, provenance,
                         transcript model, word↔speaker aligner. No OS, no UI, no network.
-  looma-audio/          AudioCapture trait (+ Windows WASAPI impl from M2)
-  looma-asr/            TranscriptionEngine trait (whisper.cpp / parakeet / groq from M3)
-  looma-diarize/        DiarizationEngine trait (sherpa-onnx from M3)
-  looma-llm/            LLMProvider trait (nim / openai / anthropic / ollama from M4) + mock
-  looma-calendar/       CalendarProvider trait (google / msgraph from M5)
-  looma-capture-screen/ ScreenRecorder trait (ffmpeg sidecar from M7)
-  looma-storage/        SQLite+FTS5 index + markdown/JSON on disk + media/attachments
-  looma-secrets/        SecretStore trait + OS-keychain impl (all keys/tokens live here)
-  looma-mcp/            stdio MCP server binary over looma-storage (from M6)
+  fly-audio/          AudioCapture trait (+ Windows WASAPI impl from M2)
+  fly-asr/            TranscriptionEngine trait (whisper.cpp / parakeet / groq from M3)
+  fly-diarize/        DiarizationEngine trait (sherpa-onnx from M3)
+  fly-llm/            LLMProvider trait (nim / openai / anthropic / ollama from M4) + mock
+  fly-calendar/       CalendarProvider trait (google / msgraph from M5)
+  fly-capture-screen/ ScreenRecorder trait (ffmpeg sidecar from M7)
+  fly-storage/        SQLite+FTS5 index + markdown/JSON on disk + media/attachments
+  fly-secrets/        SecretStore trait + OS-keychain impl (all keys/tokens live here)
+  fly-mcp/            stdio MCP server binary over fly-storage (from M6)
 ```
 
 ## Key design points
 
-### Provenance (looma-core::model)
+### Provenance (fly-core::model)
 
 A note is a list of **blocks**; each block is `origin: user | ai{source_segment_ids}`. AI blocks
 carry the transcript segment ids they were derived from — that mapping powers "zoom in" (click an
 AI line → see the exact source). Editing an AI block flips it to `user` (the text becomes yours).
 Plain-markdown export flattens colors, optionally keeping sources as comments.
 
-### Transcript model & aligner (looma-core::align)
+### Transcript model & aligner (fly-core::align)
 
 ASR produces **words with timestamps**; diarization produces **speaker turns**. The pure,
 unit-tested aligner assigns every word the speaker whose turn overlaps it most (nearest-turn
 fallback within 1 s), then groups consecutive same-speaker words into segments, splitting on >2 s
 pauses. Speaker keys (`mic`, `spk_0`, …) are stable; display labels are relabelable.
 
-### Storage (looma-storage)
+### Storage (fly-storage)
 
 SQLite (bundled, WAL) is the **index**: folders, note metadata, FTS5 tables for note bodies and
 transcripts. The **source of truth the user owns** is markdown/JSON on disk under a visible data
@@ -51,9 +51,9 @@ dir (`%APPDATA%/Looma` by default), with human-readable `<date> <title>` names: 
 meeting under `recordings/` (WAVs + `transcript.{md,json}`), note mirrors as
 `notes/<date> <title>.md`, and `attachments/`. Everything is portable; nothing is locked in a
 database blob. Layout upgrades run as `user_version`-gated migrations on open (see
-`looma-storage/src/migrations.rs`).
+`fly-storage/src/migrations.rs`).
 
-### Secrets (looma-secrets)
+### Secrets (fly-secrets)
 
 Every API key and OAuth token goes through `SecretStore` → OS keychain (Windows Credential
 Manager). No plaintext secrets on disk, no secrets in logs, `.env` only as a dev convenience.
@@ -67,7 +67,7 @@ ASR is offloaded — Groq's word timestamps are merged with locally computed spe
 
 ### Deliberately empty seams
 
-`looma-core::seams::{SharingProvider, Integration}` exist so hosted sharing and CRM/app
+`fly-core::seams::{SharingProvider, Integration}` exist so hosted sharing and CRM/app
 integrations have a place to plug in later. They are intentionally unimplemented (out of scope).
 
 ## Runtime shape

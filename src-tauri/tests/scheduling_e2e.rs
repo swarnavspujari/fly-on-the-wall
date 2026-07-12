@@ -6,34 +6,34 @@
 //! falling back to a stub session on machines without audio devices.
 //!
 //! Run locally with:
-//!   cargo test -p looma-app --test scheduling_e2e -- --ignored --nocapture
+//!   cargo test -p fly-app --test scheduling_e2e -- --ignored --nocapture
 
 use std::sync::Arc;
 
-use looma_app_lib::recording::ActiveRecording;
-use looma_app_lib::scheduler::{self, Tick};
-use looma_app_lib::state::AppState;
-use looma_core::RecordingRef;
+use fly_app_lib::recording::ActiveRecording;
+use fly_app_lib::scheduler::{self, Tick};
+use fly_app_lib::state::AppState;
+use fly_core::RecordingRef;
 
 struct StubSession;
 
-impl looma_audio::CaptureSession for StubSession {
-    fn pause(&mut self) -> looma_audio::Result<()> {
+impl fly_audio::CaptureSession for StubSession {
+    fn pause(&mut self) -> fly_audio::Result<()> {
         Ok(())
     }
-    fn resume(&mut self) -> looma_audio::Result<()> {
+    fn resume(&mut self) -> fly_audio::Result<()> {
         Ok(())
     }
-    fn stop(self: Box<Self>) -> looma_audio::Result<looma_audio::CaptureOutput> {
-        Ok(looma_audio::CaptureOutput {
+    fn stop(self: Box<Self>) -> fly_audio::Result<fly_audio::CaptureOutput> {
+        Ok(fly_audio::CaptureOutput {
             mic_path: None,
             system_path: None,
             mixed_path: None,
             duration_ms: 0,
         })
     }
-    fn state(&self) -> looma_audio::CaptureState {
-        looma_audio::CaptureState::Recording
+    fn state(&self) -> fly_audio::CaptureState {
+        fly_audio::CaptureState::Recording
     }
     fn elapsed_ms(&self) -> u64 {
         0
@@ -88,7 +88,7 @@ fn transcription_defers_to_recording_then_completes() {
 
     let state = AppState::init_with(
         data_dir.clone(),
-        Arc::new(looma_secrets::MemorySecretStore::default()),
+        Arc::new(fly_secrets::MemorySecretStore::default()),
     )
     .unwrap();
 
@@ -132,7 +132,7 @@ fn transcription_defers_to_recording_then_completes() {
             .id
     };
     let out_dir = data_dir.join("recordings").join(&meeting_b);
-    let (session, real_capture) = match state.audio.start(looma_audio::CaptureConfig {
+    let (session, real_capture) = match state.audio.start(fly_audio::CaptureConfig {
         mic_device_id: None,
         capture_system: true,
         out_dir: out_dir.clone(),
@@ -145,7 +145,7 @@ fn transcription_defers_to_recording_then_completes() {
         Err(e) => {
             eprintln!("no audio devices ({e}); recording meeting B with a stub session");
             (
-                Box::new(StubSession) as Box<dyn looma_audio::CaptureSession>,
+                Box::new(StubSession) as Box<dyn fly_audio::CaptureSession>,
                 false,
             )
         }
@@ -157,10 +157,10 @@ fn transcription_defers_to_recording_then_completes() {
         live_stop: None,
     });
 
-    let on_stage = |p: looma_app_lib::pipeline::PipelineProgress| {
+    let on_stage = |p: fly_app_lib::pipeline::PipelineProgress| {
         eprintln!("stage[{}]: {}", p.meeting_id, p.stage)
     };
-    let on_model = |p: looma_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
+    let on_model = |p: fly_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     // 1. queue A while B records → must defer, however often we ask
@@ -181,7 +181,7 @@ fn transcription_defers_to_recording_then_completes() {
                 .unwrap()
                 .unwrap()
                 .status,
-            looma_storage::JOB_QUEUED
+            fly_storage::JOB_QUEUED
         );
     }
 
@@ -247,7 +247,7 @@ fn transcription_defers_to_recording_then_completes() {
             .unwrap()
             .unwrap()
             .status,
-        looma_storage::JOB_DONE
+        fly_storage::JOB_DONE
     );
     if real_capture {
         assert_eq!(
@@ -256,7 +256,7 @@ fn transcription_defers_to_recording_then_completes() {
                 .unwrap()
                 .unwrap()
                 .status,
-            looma_storage::JOB_DONE
+            fly_storage::JOB_DONE
         );
     }
     eprintln!(

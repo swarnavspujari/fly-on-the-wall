@@ -3,18 +3,18 @@
 ## Automated
 
 - **Unit tests (`cargo test --workspace`)**
-  - `looma-core`: provenance transitions (AI block reclaimed on edit), the word↔speaker aligner
+  - `fly-core`: provenance transitions (AI block reclaimed on edit), the word↔speaker aligner
     (overlap assignment, straddling words, pause splitting, orphan fallback), markdown export.
-  - `looma-storage`: schema creation, **FTS5 availability** (guards the bundled-SQLite
+  - `fly-storage`: schema creation, **FTS5 availability** (guards the bundled-SQLite
     assumption), and — from M1 — folder ops, note CRUD, search indexing.
-  - `looma-secrets`: in-memory store roundtrip (keychain impl is exercised manually — CI runners
+  - `fly-secrets`: in-memory store roundtrip (keychain impl is exercised manually — CI runners
     have no unlocked keychain).
 - **Golden transcription/diarization sample** (`src-tauri/tests/pipeline_e2e.rs`): a committed
   two-voice Windows-TTS clip (license-clear by construction) runs through the REAL pipeline —
   whisper.cpp sidecar → sherpa-onnx diarization → aligner → storage. Asserts WER < 25 %
   (measured: 5.4 %), exactly 2 speakers, correct line attribution, and searchable persistence.
   Heavy + needs downloaded artifacts, so it's `#[ignore]`d in CI; run locally with:
-  `cargo test -p looma-app --test pipeline_e2e -- --ignored --nocapture`
+  `cargo test -p fly-app --test pipeline_e2e -- --ignored --nocapture`
   (artifacts are hardlinked from `%APPDATA%/Looma`; the test skips if absent).
   `LOOMA_E2E_GPU=1` runs it through the pinned Vulkan GPU engine instead (combine with
   `GGML_VK_VISIBLE_DEVICES=<n>` to pick the GPU); the same file also carries
@@ -35,9 +35,9 @@
   offline with the deterministic `MockLLMProvider` — note + transcript → prompt (numbered
   segments) → canned block JSON → provenance-tagged storage, zoom-in id mapping, FTS
   searchability, markdown mirror, and reclaim-on-edit semantics.
-- **MCP tests** (`crates/looma-mcp`, run in CI): in-process protocol tests (initialize
+- **MCP tests** (`crates/fly-mcp`, run in CI): in-process protocol tests (initialize
   handshake, tools/list, tool calls, error paths) plus `tests/stdio.rs`, which spawns the real
-  `looma-mcp` binary against a seeded data dir and asserts `search_notes`/`get_note` return the
+  `fly-mcp` binary against a seeded data dir and asserts `search_notes`/`get_note` return the
   expected resources over actual stdio.
 
 ## CI

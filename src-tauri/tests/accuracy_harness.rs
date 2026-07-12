@@ -6,14 +6,14 @@
 //!
 //! Score an already-exported transcript JSON (no pipeline run):
 //!   LOOMA_HARNESS_SCORE_JSON=path\to\meeting.json \
-//!     cargo test -p looma-app --test accuracy_harness -- --ignored --nocapture
+//!     cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
 //!
 //! Run the pipeline over a recording folder (recording.mic.wav +
 //! recording.system.wav), optionally trimmed for fast iteration:
 //!   LOOMA_HARNESS_DIR=path\to\recording-folder \
 //!   LOOMA_HARNESS_MODEL=ggml-large-v3-turbo-q5_0 \
 //!   LOOMA_HARNESS_MAX_SECS=300 \
-//!     cargo test -p looma-app --test accuracy_harness -- --ignored --nocapture
+//!     cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
 //!
 //! Score against a human-grade reference transcript (Fathom .txt export) —
 //! adds per-channel WER, speaker-attributed WER, attribution error, and the
@@ -28,12 +28,12 @@
 //!   GROQ_API_KEY=... LOOMA_HARNESS_GROQ=1 LOOMA_HARNESS_DIR=... \
 //!   LOOMA_HARNESS_GROQ_MODEL=whisper-large-v3 \
 //!   LOOMA_HARNESS_GROQ_CACHE=path\to\cache-dir   # optional per-chunk response cache
-//!     cargo test -p looma-app --test accuracy_harness -- --ignored --nocapture
+//!     cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
 
 use std::path::Path;
 
-use looma_core::repeat::loop_token;
-use looma_core::{RecordingRef, Transcript};
+use fly_core::repeat::loop_token;
+use fly_core::{RecordingRef, Transcript};
 
 /// One reportable repetition run: `reps` consecutive occurrences of an
 /// `n`-word phrase starting at `start_ms`.
@@ -730,9 +730,9 @@ async fn groq_transcribe_channel(
     label: &str,
     max_secs: Option<u64>,
     work: &Path,
-) -> Vec<looma_core::Word> {
-    let (samples, rate) = looma_audio::mix::read_wav_mono(src).expect("read channel wav");
-    let samples = looma_audio::mix::resample_linear(&samples, rate, 16_000);
+) -> Vec<fly_core::Word> {
+    let (samples, rate) = fly_audio::mix::read_wav_mono(src).expect("read channel wav");
+    let samples = fly_audio::mix::resample_linear(&samples, rate, 16_000);
     let take = max_secs
         .map(|s| ((s * 16_000) as usize).min(samples.len()))
         .unwrap_or(samples.len());
@@ -744,7 +744,7 @@ async fn groq_transcribe_channel(
         d
     });
 
-    let mut words: Vec<looma_core::Word> = Vec::new();
+    let mut words: Vec<fly_core::Word> = Vec::new();
     let mut chunk_start = 0u64;
     while chunk_start < total_ms {
         let chunk_end = (chunk_start + GROQ_CHUNK_MS + GROQ_OVERLAP_MS).min(total_ms);
@@ -768,7 +768,7 @@ async fn groq_transcribe_channel(
                     ((chunk_end * 16) as usize).min(samples.len()),
                 );
                 let wav = work.join(format!("{label}-{chunk_start}.wav"));
-                looma_audio::mix::write_wav_mono_16(&wav, &samples[a..b], 16_000)
+                fly_audio::mix::write_wav_mono_16(&wav, &samples[a..b], 16_000)
                     .expect("write chunk");
                 let (media, mime, name) = encode_chunk(&wav);
                 let size = std::fs::metadata(&media).map(|m| m.len()).unwrap_or(0);
@@ -786,7 +786,7 @@ async fn groq_transcribe_channel(
                 body
             }
         };
-        let raw = looma_asr::groq::parse_groq_verbose_json(&body).expect("parse groq response");
+        let raw = fly_asr::groq::parse_groq_verbose_json(&body).expect("parse groq response");
         for mut w in raw.words {
             w.start_ms += chunk_start;
             w.end_ms += chunk_start;
@@ -838,10 +838,10 @@ fn groq_reference_transcript(rec_dir: &Path, max_secs: Option<u64>) -> Transcrip
         (mic, sys)
     });
 
-    let align_opts = looma_core::AlignOptions::default();
+    let align_opts = fly_core::AlignOptions::default();
     let mut segments =
-        looma_core::align::segments_from_single_speaker(&mic_words, "mic", &align_opts);
-    segments.extend(looma_core::align::segments_from_single_speaker(
+        fly_core::align::segments_from_single_speaker(&mic_words, "mic", &align_opts);
+    segments.extend(fly_core::align::segments_from_single_speaker(
         &sys_words,
         "spk_0",
         &align_opts,
@@ -853,11 +853,11 @@ fn groq_reference_transcript(rec_dir: &Path, max_secs: Option<u64>) -> Transcrip
         engine: format!("groq:{model}"),
         segments,
         speakers: vec![
-            looma_core::Speaker {
+            fly_core::Speaker {
                 key: "mic".into(),
                 label: "You".into(),
             },
-            looma_core::Speaker {
+            fly_core::Speaker {
                 key: "spk_0".into(),
                 label: "System".into(),
             },
@@ -886,14 +886,14 @@ fn stage_channel(src: &Path, dst: &Path, max_secs: Option<u64>) -> Result<u64, S
         None => {
             std::fs::copy(src, dst).map_err(|e| e.to_string())?;
             let (samples, rate) =
-                looma_audio::mix::read_wav_mono(dst).map_err(|e| e.to_string())?;
+                fly_audio::mix::read_wav_mono(dst).map_err(|e| e.to_string())?;
             Ok(samples.len() as u64 * 1000 / rate as u64)
         }
         Some(secs) => {
             let (samples, rate) =
-                looma_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
+                fly_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
             let take = (secs * rate as u64).min(samples.len() as u64) as usize;
-            looma_audio::mix::write_wav_mono_16(dst, &samples[..take], rate)
+            fly_audio::mix::write_wav_mono_16(dst, &samples[..take], rate)
                 .map_err(|e| e.to_string())?;
             Ok(take as u64 * 1000 / rate as u64)
         }
@@ -907,7 +907,7 @@ fn accuracy_harness() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "looma_app_lib=debug,looma_asr=debug".into()),
+                .unwrap_or_else(|_| "fly_app_lib=debug,fly_asr=debug".into()),
         )
         .try_init();
 
@@ -985,9 +985,9 @@ fn accuracy_harness() {
     )
     .unwrap();
 
-    let state = looma_app_lib::state::AppState::init_with(
+    let state = fly_app_lib::state::AppState::init_with(
         data_dir.clone(),
-        std::sync::Arc::new(looma_secrets::MemorySecretStore::default()),
+        std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
     )
     .unwrap();
 
@@ -1044,7 +1044,7 @@ fn accuracy_harness() {
     };
 
     let started = std::time::Instant::now();
-    let on_stage = |p: looma_app_lib::pipeline::PipelineProgress| {
+    let on_stage = |p: fly_app_lib::pipeline::PipelineProgress| {
         eprintln!(
             "[{:>6.1}s] stage: {} {}",
             started.elapsed().as_secs_f32(),
@@ -1052,10 +1052,10 @@ fn accuracy_harness() {
             p.detail.unwrap_or_default()
         )
     };
-    let on_model = |p: looma_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
+    let on_model = |p: fly_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let transcript = runtime
-        .block_on(looma_app_lib::pipeline::run_with(
+        .block_on(fly_app_lib::pipeline::run_with(
             &state,
             &on_stage,
             &on_model,

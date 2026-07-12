@@ -1156,6 +1156,177 @@ dependencies = [
 ]
 
 [[package]]
+name = "fly-app"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "fly-asr",
+ "fly-audio",
+ "fly-calendar",
+ "fly-capture-screen",
+ "fly-core",
+ "fly-diarize",
+ "fly-llm",
+ "fly-secrets",
+ "fly-storage",
+ "futures-util",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tauri-plugin-process",
+ "tauri-plugin-updater",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fly-asr"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "fly-audio",
+ "fly-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fly-audio"
+version = "0.3.1"
+dependencies = [
+ "cpal",
+ "fly-core",
+ "hound",
+ "libpulse-binding",
+ "libpulse-simple-binding",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "fly-calendar"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "fly-core",
+ "fly-secrets",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fly-capture-screen"
+version = "0.3.1"
+dependencies = [
+ "fly-core",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "fly-core"
+version = "0.3.1"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "fly-diarize"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "fly-core",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fly-llm"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "fly-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "fly-mcp"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "fly-core",
+ "fly-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "fly-secrets"
+version = "0.3.1"
+dependencies = [
+ "keyring",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "fly-storage"
+version = "0.3.1"
+dependencies = [
+ "chrono",
+ "fly-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2307,177 +2478,6 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-
-[[package]]
-name = "looma-app"
-version = "0.3.1"
-dependencies = [
- "anyhow",
- "chrono",
- "dirs",
- "futures-util",
- "hex",
- "looma-asr",
- "looma-audio",
- "looma-calendar",
- "looma-capture-screen",
- "looma-core",
- "looma-diarize",
- "looma-llm",
- "looma-secrets",
- "looma-storage",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-process",
- "tauri-plugin-updater",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "looma-asr"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "looma-audio",
- "looma-core",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "looma-audio"
-version = "0.3.1"
-dependencies = [
- "cpal",
- "hound",
- "libpulse-binding",
- "libpulse-simple-binding",
- "looma-core",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "looma-calendar"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "looma-core",
- "looma-secrets",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "looma-capture-screen"
-version = "0.3.1"
-dependencies = [
- "looma-core",
- "serde",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "looma-core"
-version = "0.3.1"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "looma-diarize"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "looma-core",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "looma-llm"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "looma-core",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "looma-mcp"
-version = "0.3.1"
-dependencies = [
- "anyhow",
- "dirs",
- "looma-core",
- "looma-storage",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "looma-secrets"
-version = "0.3.1"
-dependencies = [
- "keyring",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "looma-storage"
-version = "0.3.1"
-dependencies = [
- "chrono",
- "looma-core",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
-]
 
 [[package]]
 name = "lru-slab"

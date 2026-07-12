@@ -48,7 +48,7 @@ storage, and UI are untouched.
 - **AudioCapture:** mic via cpal/ALSA; system audio via the default sink's **monitor
   source** over the PulseAudio simple API (`@DEFAULT_MONITOR@`) — served natively by
   PulseAudio and by PipeWire's pipewire-pulse. Implemented in
-  `looma-audio/src/pulse_loopback.rs` with the same pad-to-clock discipline as WASAPI.
+  `fly-audio/src/pulse_loopback.rs` with the same pad-to-clock discipline as WASAPI.
 - **ScreenRecorder:** ffmpeg x11grab (full screen + region). Wayland sessions need an
   xdg-desktop-portal/PipeWire recorder — not implemented; x11grab's failure is surfaced.
 - **Tools:** sherpa-onnx and ffmpeg download managed per-OS builds; whisper.cpp publishes

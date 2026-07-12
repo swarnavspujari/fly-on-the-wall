@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 
-use looma_core::{enhance, Note, Template, Transcript};
-use looma_llm::{ChatMessage, ChatRequest, LLMProvider, ThinkingMode};
+use fly_core::{enhance, Note, Template, Transcript};
+use fly_llm::{ChatMessage, ChatRequest, LLMProvider, ThinkingMode};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -23,9 +23,9 @@ pub const PROVIDERS: &[(&str, &str, bool)] = &[
 
 fn secret_key_for(provider: &str) -> Option<&'static str> {
     match provider {
-        "openai" => Some(looma_secrets::keys::OPENAI_API_KEY),
-        "anthropic" => Some(looma_secrets::keys::ANTHROPIC_API_KEY),
-        "nim" => Some(looma_secrets::keys::NIM_API_KEY),
+        "openai" => Some(fly_secrets::keys::OPENAI_API_KEY),
+        "anthropic" => Some(fly_secrets::keys::ANTHROPIC_API_KEY),
+        "nim" => Some(fly_secrets::keys::NIM_API_KEY),
         _ => None,
     }
 }
@@ -60,8 +60,8 @@ pub fn build_provider(state: &AppState) -> Result<Box<dyn LLMProvider>, String> 
 
     Ok(match provider.as_str() {
         "openai" => {
-            let mut p = looma_llm::openai_compat::OpenAiCompatProvider::openai(
-                key(looma_secrets::keys::OPENAI_API_KEY)?,
+            let mut p = fly_llm::openai_compat::OpenAiCompatProvider::openai(
+                key(fly_secrets::keys::OPENAI_API_KEY)?,
                 model,
             );
             if let Some(url) = base_url {
@@ -70,8 +70,8 @@ pub fn build_provider(state: &AppState) -> Result<Box<dyn LLMProvider>, String> 
             Box::new(p)
         }
         "nim" => {
-            let mut p = looma_llm::openai_compat::OpenAiCompatProvider::nim(
-                key(looma_secrets::keys::NIM_API_KEY)?,
+            let mut p = fly_llm::openai_compat::OpenAiCompatProvider::nim(
+                key(fly_secrets::keys::NIM_API_KEY)?,
                 model,
             );
             if let Some(url) = base_url {
@@ -79,11 +79,11 @@ pub fn build_provider(state: &AppState) -> Result<Box<dyn LLMProvider>, String> 
             }
             Box::new(p)
         }
-        "anthropic" => Box::new(looma_llm::anthropic::AnthropicProvider::new(
-            key(looma_secrets::keys::ANTHROPIC_API_KEY)?,
+        "anthropic" => Box::new(fly_llm::anthropic::AnthropicProvider::new(
+            key(fly_secrets::keys::ANTHROPIC_API_KEY)?,
             model,
         )),
-        _ => Box::new(looma_llm::openai_compat::OpenAiCompatProvider::ollama(
+        _ => Box::new(fly_llm::openai_compat::OpenAiCompatProvider::ollama(
             base_url, model,
         )),
     })
@@ -370,7 +370,7 @@ pub async fn list_templates(state: State<'_, AppState>) -> CmdResult<Vec<Templat
 pub fn save_template(state: State<'_, AppState>, template: Template) -> CmdResult<()> {
     let template = if template.id.is_empty() {
         Template {
-            id: looma_core::new_id(),
+            id: fly_core::new_id(),
             built_in: false,
             ..template
         }

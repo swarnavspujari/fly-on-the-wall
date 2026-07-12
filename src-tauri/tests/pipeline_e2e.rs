@@ -4,14 +4,14 @@
 //!
 //! Heavy + needs artifacts on disk, so it is `#[ignore]` for plain
 //! `cargo test`. Run locally with:
-//!   cargo test -p looma-app --test pipeline_e2e -- --ignored --nocapture
+//!   cargo test -p fly-app --test pipeline_e2e -- --ignored --nocapture
 //!
 //! Artifacts are hardlinked from the real FlyOnTheWall data dir (%APPDATA%/FlyOnTheWall);
 //! the test skips (passes with a notice) when they are not installed.
 
-use looma_app_lib::pipeline;
-use looma_app_lib::state::AppState;
-use looma_core::RecordingRef;
+use fly_app_lib::pipeline;
+use fly_app_lib::state::AppState;
+use fly_core::RecordingRef;
 
 const REFERENCE: &str = "good morning everyone let us start with the quarterly budget review \
 thanks david the engineering budget is on track but marketing needs another fifty thousand dollars \
@@ -127,7 +127,7 @@ fn golden_fixture_transcribes_and_diarizes() {
 
     let state = AppState::init_with(
         data_dir.clone(),
-        std::sync::Arc::new(looma_secrets::MemorySecretStore::default()),
+        std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
     )
     .unwrap();
 
@@ -176,7 +176,7 @@ fn golden_fixture_transcribes_and_diarizes() {
     assert!(fixture_ok, "fixture wav missing from repo");
 
     let on_stage = |p: pipeline::PipelineProgress| eprintln!("stage: {}", p.stage);
-    let on_model = |p: looma_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
+    let on_model = |p: fly_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let transcript = runtime
         .block_on(pipeline::run_with(
@@ -306,7 +306,7 @@ fn gpu_failure_falls_back_to_cpu() {
 
     let state = AppState::init_with(
         data_dir.clone(),
-        std::sync::Arc::new(looma_secrets::MemorySecretStore::default()),
+        std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
     )
     .unwrap();
 
@@ -349,7 +349,7 @@ fn gpu_failure_falls_back_to_cpu() {
     let on_stage = |p: pipeline::PipelineProgress| {
         eprintln!("stage: {} {}", p.stage, p.detail.unwrap_or_default())
     };
-    let on_model = |p: looma_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
+    let on_model = |p: fly_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let transcript = runtime
         .block_on(pipeline::run_with(

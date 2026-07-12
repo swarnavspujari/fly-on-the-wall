@@ -14,12 +14,12 @@
 //!   POLISH_HARNESS_PROVIDER=anthropic \                 # anthropic | ollama (default anthropic)
 //!   POLISH_HARNESS_MODEL=claude-sonnet-5 \              # optional model override
 //!   ANTHROPIC_API_KEY=sk-ant-... \                      # required for anthropic
-//!     cargo test -p looma-app --test polish_harness -- --ignored --nocapture
+//!     cargo test -p fly-app --test polish_harness -- --ignored --nocapture
 
 use std::collections::HashMap;
 
-use looma_core::{enhance, Transcript};
-use looma_llm::{ChatMessage, ChatRequest, LLMProvider};
+use fly_core::{enhance, Transcript};
+use fly_llm::{ChatMessage, ChatRequest, LLMProvider};
 
 const MAX_BATCH_WORDS: usize = 1200;
 const MAX_BATCH_SEGMENTS: usize = 40;
@@ -37,7 +37,7 @@ fn build_provider() -> Box<dyn LLMProvider> {
     match which.as_str() {
         "ollama" => {
             let model = std::env::var("POLISH_HARNESS_MODEL").unwrap_or_else(|_| "llama3.1".into());
-            Box::new(looma_llm::openai_compat::OpenAiCompatProvider::ollama(
+            Box::new(fly_llm::openai_compat::OpenAiCompatProvider::ollama(
                 None, model,
             ))
         }
@@ -45,8 +45,8 @@ fn build_provider() -> Box<dyn LLMProvider> {
             let key = std::env::var("ANTHROPIC_API_KEY")
                 .expect("ANTHROPIC_API_KEY must be set for the anthropic provider");
             let model = std::env::var("POLISH_HARNESS_MODEL")
-                .unwrap_or_else(|_| looma_llm::anthropic::ANTHROPIC_DEFAULT_MODEL.into());
-            Box::new(looma_llm::anthropic::AnthropicProvider::new(key, model))
+                .unwrap_or_else(|_| fly_llm::anthropic::ANTHROPIC_DEFAULT_MODEL.into());
+            Box::new(fly_llm::anthropic::AnthropicProvider::new(key, model))
         }
     }
 }
@@ -118,7 +118,7 @@ fn polish_harness() {
                     max_tokens: Some(8192),
                     // Mechanical cleanup: no thinking, so the full budget goes
                     // to the JSON answer (see AnthropicProvider::request_body).
-                    thinking: looma_llm::ThinkingMode::Disabled,
+                    thinking: fly_llm::ThinkingMode::Disabled,
                 },
             )
             .await;

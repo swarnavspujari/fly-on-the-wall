@@ -1,7 +1,7 @@
 //! Tauri commands: the entire surface the frontend can call.
 
-use looma_core::{Folder, Note};
-use looma_storage::{NoteSummary, SearchHit};
+use fly_core::{Folder, Note};
+use fly_storage::{NoteSummary, SearchHit};
 use serde::Serialize;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
@@ -46,7 +46,7 @@ pub async fn app_info(state: State<'_, AppState>) -> CmdResult<AppInfo> {
 }
 
 /// Generic non-secret app settings (consent flags, UI prefs). Secrets never
-/// go through here — they belong to looma-secrets.
+/// go through here — they belong to fly-secrets.
 #[tauri::command]
 pub async fn get_app_setting(state: State<'_, AppState>, key: String) -> CmdResult<Option<String>> {
     state

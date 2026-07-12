@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use looma_asr::TranscriptionEngine;
+use fly_asr::TranscriptionEngine;
 use tauri::{Emitter, Manager};
 
 use crate::models;
@@ -131,7 +131,7 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
     // the one regression this app can't afford. On Windows that means the
     // CPU whisper build resolved above; on macOS this invocation is
     // unchanged from what shipped (brew builds default to Metal there).
-    let engine = looma_asr::whisper_cpp::WhisperCppEngine {
+    let engine = fly_asr::whisper_cpp::WhisperCppEngine {
         exe,
         model,
         threads,
@@ -174,7 +174,7 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
             let rec = state.recording.lock().unwrap();
             match rec.as_ref() {
                 Some(r) if r.meeting_id == meeting_id => {
-                    r.session.state() == looma_audio::CaptureState::Paused
+                    r.session.state() == fly_audio::CaptureState::Paused
                 }
                 _ => break, // recording ended
             }
@@ -187,13 +187,13 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
             match take_chunk(&cur.path, cur.consumed_samples) {
                 Some((samples, rate, start_sample)) => {
                     let start_ms = start_sample * 1000 / rate as u64;
-                    let resampled = looma_audio::mix::resample_linear(&samples, rate, 16_000);
+                    let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
                     let chunk_path = tmp_dir.join(format!("{}-{}.wav", cur.channel, start_sample));
-                    if looma_audio::mix::write_wav_mono_16(&chunk_path, &resampled, 16_000).is_err()
+                    if fly_audio::mix::write_wav_mono_16(&chunk_path, &resampled, 16_000).is_err()
                     {
                         continue;
                     }
-                    let opts = looma_asr::TranscribeOptions {
+                    let opts = fly_asr::TranscribeOptions {
                         language: None,
                         prompt: (!cur.prompt_tail.is_empty()).then(|| cur.prompt_tail.clone()),
                         ..Default::default()
@@ -282,7 +282,7 @@ mod tests {
         let path = dir.path().join("t.wav");
         // 10 s of 16 kHz audio
         let samples: Vec<f32> = (0..160_000).map(|i| ((i % 100) as f32) / 100.0).collect();
-        looma_audio::mix::write_wav_mono_16(&path, &samples, 16_000).unwrap();
+        fly_audio::mix::write_wav_mono_16(&path, &samples, 16_000).unwrap();
 
         let (chunk, rate, start) = take_chunk(&path, 0).expect("10s should clear the 8s minimum");
         assert_eq!(rate, 16_000);

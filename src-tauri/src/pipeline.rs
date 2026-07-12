@@ -11,13 +11,13 @@
 
 use std::path::{Path, PathBuf};
 
-use looma_asr::{RawTranscript, TranscribeOptions, TranscriptionEngine};
-use looma_core::align::{
+use fly_asr::{RawTranscript, TranscribeOptions, TranscriptionEngine};
+use fly_core::align::{
     align_words_to_speakers, merge_channel_segments, segments_from_single_speaker, AlignOptions,
 };
-use looma_core::repeat::collapse_loops;
-use looma_core::{Speaker, Transcript};
-use looma_diarize::{DiarizationEngine, DiarizeOptions};
+use fly_core::repeat::collapse_loops;
+use fly_core::{Speaker, Transcript};
+use fly_diarize::{DiarizationEngine, DiarizeOptions};
 use serde::Serialize;
 
 use crate::state::AppState;
@@ -156,10 +156,10 @@ pub async fn run_with(
     let asr: GuardedAsr = if use_groq || tier == "cloud" {
         let key = state
             .secrets
-            .get(looma_secrets::keys::GROQ_API_KEY)
+            .get(fly_secrets::keys::GROQ_API_KEY)
             .map_err(|e| e.to_string())?
             .ok_or("Groq transcription is enabled but no Groq API key is set")?;
-        GuardedAsr::single(Box::new(looma_asr::groq::GroqEngine::new(key)))
+        GuardedAsr::single(Box::new(fly_asr::groq::GroqEngine::new(key)))
     } else {
         let model_id = model_override
             .unwrap_or_else(|| hw::default_model_for_tier(&tier, max_quality).to_string());
@@ -214,14 +214,14 @@ pub async fn run_with(
 
         match gpu_exe {
             Some(exe) => GuardedAsr::with_cpu_fallback(
-                Box::new(looma_asr::whisper_cpp::WhisperCppEngine {
+                Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
                     exe,
                     model: model_path.clone(),
                     threads,
                     force_cpu: false,
                 }),
                 "whisper.cpp-vulkan",
-                Box::new(looma_asr::whisper_cpp::WhisperCppEngine {
+                Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
                     exe: whisper_exe,
                     model: model_path,
                     threads,
@@ -229,7 +229,7 @@ pub async fn run_with(
                 }),
                 model_id,
             ),
-            None => GuardedAsr::single(Box::new(looma_asr::whisper_cpp::WhisperCppEngine {
+            None => GuardedAsr::single(Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
                 exe: whisper_exe,
                 model: model_path,
                 threads,
@@ -240,7 +240,7 @@ pub async fn run_with(
             })),
         }
     };
-    let diarizer = looma_diarize::sherpa::SherpaDiarizeEngine {
+    let diarizer = fly_diarize::sherpa::SherpaDiarizeEngine {
         exe: sherpa_exe,
         segmentation_model: seg_model,
         embedding_model: emb_model,
@@ -261,15 +261,15 @@ pub async fn run_with(
     let mut intermediates: Vec<PathBuf> = Vec::new();
     let prep = |src: &Path, name: &str| -> Result<PathBuf, String> {
         let dst = work_dir.join(name);
-        let (samples, rate) = looma_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
-        let resampled = looma_audio::mix::resample_linear(&samples, rate, 16_000);
-        looma_audio::mix::write_wav_mono_16(&dst, &resampled, 16_000).map_err(|e| e.to_string())?;
+        let (samples, rate) = fly_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
+        let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
+        fly_audio::mix::write_wav_mono_16(&dst, &resampled, 16_000).map_err(|e| e.to_string())?;
         Ok(dst)
     };
 
     let align_opts = AlignOptions::default();
     let mut language = None;
-    let mut channels: Vec<Vec<looma_core::TranscriptSegment>> = Vec::new();
+    let mut channels: Vec<Vec<fly_core::TranscriptSegment>> = Vec::new();
     let mut speakers: Vec<Speaker> = Vec::new();
 
     // A GPU failure mid-transcription surfaces as a one-line detail and the
@@ -307,7 +307,7 @@ pub async fn run_with(
         language = language.or(sys_raw.language.clone());
 
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
-        let turns = looma_diarize::drop_dust_clusters(
+        let turns = fly_diarize::drop_dust_clusters(
             diarizer
                 .diarize(&sys_16k, &DiarizeOptions::default())
                 .await
@@ -322,10 +322,10 @@ pub async fn run_with(
         // source (measured: the system loopback). Genuine talk-over — DIFFERENT
         // words on the two channels at the same instant — has no cross-channel
         // token match and survives.
-        let split = looma_core::crosstalk::split_crosstalk(
+        let split = fly_core::crosstalk::split_crosstalk(
             &mic_raw.words,
             &sys_raw.words,
-            &looma_core::crosstalk::CrosstalkOptions::default(),
+            &fly_core::crosstalk::CrosstalkOptions::default(),
         );
         let echo_dropped = mic_raw.words.len().saturating_sub(split.you_words.len());
         if echo_dropped > 0 {
@@ -367,7 +367,7 @@ pub async fn run_with(
         language = raw.language.clone();
 
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
-        let turns = looma_diarize::drop_dust_clusters(
+        let turns = fly_diarize::drop_dust_clusters(
             diarizer
                 .diarize(&track_16k, &DiarizeOptions::default())
                 .await
@@ -533,7 +533,7 @@ fn guard_loops(raw: RawTranscript, channel: &str) -> RawTranscript {
 /// not by raw cluster id: dropping dust clusters leaves sparse ids (spk_1,
 /// spk_3), and "Speaker 2 / Speaker 4" for two people reads as a bug. The
 /// fallback cluster becomes "Unknown"; "mic" is pre-registered as "You".
-fn collect_speakers(speakers: &mut Vec<Speaker>, segments: &[looma_core::TranscriptSegment]) {
+fn collect_speakers(speakers: &mut Vec<Speaker>, segments: &[fly_core::TranscriptSegment]) {
     let mut next = 1 + speakers
         .iter()
         .filter(|s| s.label.starts_with("Speaker "))
@@ -561,7 +561,7 @@ fn collect_speakers(speakers: &mut Vec<Speaker>, segments: &[looma_core::Transcr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use looma_core::TranscriptSegment;
+    use fly_core::TranscriptSegment;
 
     fn seg(key: &str) -> TranscriptSegment {
         TranscriptSegment {

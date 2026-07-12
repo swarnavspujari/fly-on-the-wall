@@ -3,10 +3,10 @@
 //! blocks → provenance-tagged storage → zoom-in mapping → reclaim-on-edit.
 //! Runs in CI: no network, no models.
 
-use looma_core::{enhance, BlockOrigin, RecordingRef, Speaker, Transcript, TranscriptSegment};
-use looma_llm::mock::MockLLMProvider;
-use looma_llm::{ChatMessage, ChatRequest, LLMProvider};
-use looma_storage::Storage;
+use fly_core::{enhance, BlockOrigin, RecordingRef, Speaker, Transcript, TranscriptSegment};
+use fly_llm::mock::MockLLMProvider;
+use fly_llm::{ChatMessage, ChatRequest, LLMProvider};
+use fly_storage::Storage;
 
 #[test]
 fn enhance_flow_with_mock_provider_offline() {
@@ -96,7 +96,7 @@ fn enhance_flow_with_mock_provider_offline() {
             ],
             temperature: Some(0.2),
             max_tokens: None,
-            thinking: looma_llm::ThinkingMode::Default,
+            thinking: fly_llm::ThinkingMode::Default,
         }))
         .unwrap();
 
@@ -116,7 +116,7 @@ fn enhance_flow_with_mock_provider_offline() {
     // (mirrors are named "<date> <title>.md" since the v2 layout)
     let hits = storage.search("forecast tomorrow", 10).unwrap();
     assert!(hits.iter().any(|h| h.note_id == note.id));
-    let label = looma_storage::naming::disk_label(note.created_at, "Budget sync");
+    let label = fly_storage::naming::disk_label(note.created_at, "Budget sync");
     let md = std::fs::read_to_string(dir.path().join("notes").join(format!("{label}.md"))).unwrap();
     assert!(md.contains("approve extra $50k"));
 

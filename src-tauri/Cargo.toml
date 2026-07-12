@@ -1,12 +1,12 @@
 [package]
-name = "looma-app"
+name = "fly-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 # lib + thin main so the same code can back desktop now and mobile later
 [lib]
-name = "looma_app_lib"
+name = "fly_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -17,15 +17,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
-looma-core.workspace = true
-looma-audio.workspace = true
-looma-asr.workspace = true
-looma-diarize.workspace = true
-looma-llm.workspace = true
-looma-calendar.workspace = true
-looma-capture-screen.workspace = true
-looma-storage.workspace = true
-looma-secrets.workspace = true
+fly-core.workspace = true
+fly-audio.workspace = true
+fly-asr.workspace = true
+fly-diarize.workspace = true
+fly-llm.workspace = true
+fly-calendar.workspace = true
+fly-capture-screen.workspace = true
+fly-storage.workspace = true
+fly-secrets.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

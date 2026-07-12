@@ -21,7 +21,7 @@ pub struct HwInfo {
 }
 
 /// The hardware profile persisted by the last detection run, if any.
-pub fn cached(storage: &looma_storage::Storage) -> Option<HwInfo> {
+pub fn cached(storage: &fly_storage::Storage) -> Option<HwInfo> {
     storage
         .get_setting(CACHE_KEY)
         .ok()
@@ -30,7 +30,7 @@ pub fn cached(storage: &looma_storage::Storage) -> Option<HwInfo> {
 }
 
 /// Run detection and persist the result for [`cached`] readers.
-pub fn detect_and_cache(storage: &looma_storage::Storage) -> HwInfo {
+pub fn detect_and_cache(storage: &fly_storage::Storage) -> HwInfo {
     let info = detect();
     if let Ok(json) = serde_json::to_string(&info) {
         if let Err(e) = storage.set_setting(CACHE_KEY, &json) {

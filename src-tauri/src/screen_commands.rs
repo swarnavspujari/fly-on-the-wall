@@ -1,8 +1,8 @@
 //! Screen-recording commands (M7): ffmpeg sidecar, capture linked to a note
 //! as an in-place attachment.
 
-use looma_capture_screen::{CaptureTarget, ScreenRecorder, ScreenSession};
-use looma_core::Note;
+use fly_capture_screen::{CaptureTarget, ScreenRecorder, ScreenSession};
+use fly_core::Note;
 use serde::Serialize;
 use tauri::State;
 
@@ -85,7 +85,7 @@ pub async fn start_screen_recording(
     let rel_path = format!("attachments/{note_id}/{file_name}");
     let out_path = state.data_dir.join(&rel_path);
 
-    let recorder = looma_capture_screen::ffmpeg::FfmpegScreenRecorder::new(ffmpeg);
+    let recorder = fly_capture_screen::ffmpeg::FfmpegScreenRecorder::new(ffmpeg);
     let session = recorder
         .start(target, &out_path)
         .map_err(|e| e.to_string())?;

@@ -19,7 +19,7 @@
 //!   • Local one-click build: export those three vars before
 //!     `npm run tauri build` (or `dev`), then force a rebuild of this crate so
 //!     `option_env!` re-reads them (`touch src-tauri/src/calendar_defaults.rs`,
-//!     or `cargo clean -p looma-app`).
+//!     or `cargo clean -p fly-app`).
 //!
 //! Bundling the Google desktop-client secret is safe: for an installed app
 //! using PKCE the "client secret" is non-confidential (Google's own docs say

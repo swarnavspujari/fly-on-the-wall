@@ -11,10 +11,10 @@
 
 use std::collections::HashMap;
 
-use looma_core::{enhance, RecordingRef, Speaker, Transcript, TranscriptSegment, Word};
-use looma_llm::mock::MockLLMProvider;
-use looma_llm::{ChatMessage, ChatRequest, LLMProvider};
-use looma_storage::Storage;
+use fly_core::{enhance, RecordingRef, Speaker, Transcript, TranscriptSegment, Word};
+use fly_llm::mock::MockLLMProvider;
+use fly_llm::{ChatMessage, ChatRequest, LLMProvider};
+use fly_storage::Storage;
 
 fn raw_transcript(meeting_id: &str) -> Transcript {
     Transcript {
@@ -95,7 +95,7 @@ fn run_polish(storage: &Storage, meeting_id: &str, canned: &str) -> enhance::Pol
             ],
             temperature: None,
             max_tokens: Some(8192),
-            thinking: looma_llm::ThinkingMode::Disabled,
+            thinking: fly_llm::ThinkingMode::Disabled,
         }))
         .unwrap();
 

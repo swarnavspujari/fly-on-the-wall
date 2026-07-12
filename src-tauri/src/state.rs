@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use looma_audio::cpal_backend::CpalAudioCapture;
-use looma_audio::AudioCapture;
-use looma_secrets::{KeychainSecretStore, SecretStore};
-use looma_storage::Storage;
+use fly_audio::cpal_backend::CpalAudioCapture;
+use fly_audio::AudioCapture;
+use fly_secrets::{KeychainSecretStore, SecretStore};
+use fly_storage::Storage;
 
 use crate::recording::ActiveRecording;
 use crate::screen_commands::ActiveScreenRecording;
@@ -110,7 +110,7 @@ fn move_legacy_dir(legacy: &Path, new_dir: &Path) -> std::io::Result<()> {
 /// Keychain keys that predate the rebrand and must follow the user to the new
 /// service. Keys added later are created directly in the new service.
 fn migrated_secret_keys() -> [&'static str; 7] {
-    use looma_secrets::keys::*;
+    use fly_secrets::keys::*;
     [
         OPENAI_API_KEY,
         ANTHROPIC_API_KEY,
@@ -137,7 +137,7 @@ fn copy_secrets(old: &dyn SecretStore, new: &dyn SecretStore, keys: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use looma_secrets::MemorySecretStore;
+    use fly_secrets::MemorySecretStore;
 
     #[test]
     fn move_legacy_dir_moves_when_new_absent() {
