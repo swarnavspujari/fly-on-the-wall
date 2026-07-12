@@ -26,7 +26,26 @@ pub fn run() {
         )
         .init();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Single-instance must be the FIRST plugin registered: a second launch from
+    // the desktop shortcut then focuses the already-open window instead of
+    // spawning another process. Desktop-only, like the updater/process plugins.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Runs inside the already-running instance when a second launch is
+            // attempted; bring the existing "main" window forward (robust even
+            // if it was minimized or hidden — unminimize/show before focusing).
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
