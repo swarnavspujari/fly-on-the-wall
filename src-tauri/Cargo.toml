@@ -40,11 +40,12 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs.workspace = true
 
-# Auto-update + relaunch are desktop-only plugins; keep them out of a future
-# mobile build of this lib.
+# Auto-update + relaunch + single-instance are desktop-only plugins; keep them
+# out of a future mobile build of this lib.
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 tempfile = "3"

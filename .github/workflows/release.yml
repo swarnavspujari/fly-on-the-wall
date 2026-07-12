@@ -134,7 +134,13 @@ jobs:
               base=$(basename "$f")
               stem="${base%.*}"
               ext="${base##*.}"
-              cp "$f" "dist-upload/${stem}-${{ matrix.name }}.${ext}"
+              # GitHub replaces spaces in release-asset names with dots on upload,
+              # so pre-apply that here: the on-disk name then equals the served
+              # asset name equals the url latest.json is built from. A spaced url
+              # 404s the updater ("Download request failed with status 404").
+              out="${stem}-${{ matrix.name }}.${ext}"
+              out="${out// /.}"
+              cp "$f" "dist-upload/${out}"
             done
           done <<< "${{ matrix.bundles }}"
           ls -la dist-upload/
