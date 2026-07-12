@@ -24,12 +24,48 @@ const folders = [
 ];
 
 const noteMeta = [
-  { id: "n1", title: "Acme — renewal review", folder_id: "f-clients", meeting_id: "m1", updated_at: ago(1) },
-  { id: "n2", title: "Weekly 1:1 with Dana", folder_id: "f-team", meeting_id: "m2", updated_at: ago(120) },
-  { id: "n3", title: "Design weekly — notes", folder_id: "f-team", meeting_id: null, updated_at: ago(1500) },
-  { id: "n4", title: "Q3 planning offsite", folder_id: "f-clients", meeting_id: "m4", updated_at: ago(2900) },
-  { id: "n5", title: "Interview — staff eng", folder_id: null, meeting_id: "m5", updated_at: ago(5800) },
-  { id: "n6", title: "Roadmap brainstorm", folder_id: "f-personal", meeting_id: null, updated_at: ago(8600) },
+  {
+    id: "n1",
+    title: "Acme — renewal review",
+    folder_id: "f-clients",
+    meeting_id: "m1",
+    updated_at: ago(1),
+  },
+  {
+    id: "n2",
+    title: "Weekly 1:1 with Dana",
+    folder_id: "f-team",
+    meeting_id: "m2",
+    updated_at: ago(120),
+  },
+  {
+    id: "n3",
+    title: "Design weekly — notes",
+    folder_id: "f-team",
+    meeting_id: null,
+    updated_at: ago(1500),
+  },
+  {
+    id: "n4",
+    title: "Q3 planning offsite",
+    folder_id: "f-clients",
+    meeting_id: "m4",
+    updated_at: ago(2900),
+  },
+  {
+    id: "n5",
+    title: "Interview — staff eng",
+    folder_id: null,
+    meeting_id: "m5",
+    updated_at: ago(5800),
+  },
+  {
+    id: "n6",
+    title: "Roadmap brainstorm",
+    folder_id: "f-personal",
+    meeting_id: null,
+    updated_at: ago(8600),
+  },
 ];
 
 const scratchpad =
@@ -39,26 +75,55 @@ const scratchpad =
   "- send revised SOW, book legal review mon";
 
 const blocks = [
-  { id: "b1", origin: { kind: "user" }, markdown: "Renewal risk on Acme — procurement flagged pricing. Dana to loop in legal." },
   {
-    id: "b2", origin: { kind: "ai", source_segment_ids: ["t1", "t2", "t3"] },
-    markdown: "## Summary\nAcme is happy with the pilot; transcription accuracy removed manual note-taking for PMs. Main blocker is renewal pricing and data-residency language for legal.",
+    id: "b1",
+    origin: { kind: "user" },
+    markdown: "Renewal risk on Acme — procurement flagged pricing. Dana to loop in legal.",
   },
   {
-    id: "b3", origin: { kind: "ai", source_segment_ids: ["t4", "t5"] },
-    markdown: "## Action items\n- **You** — send revised SOW today.\n- **You** — book legal review Monday.\n- **Dana** — confirm data-residency requirements.",
+    id: "b2",
+    origin: { kind: "ai", source_segment_ids: ["t1", "t2", "t3"] },
+    markdown:
+      "## Summary\nAcme is happy with the pilot; transcription accuracy removed manual note-taking for PMs. Main blocker is renewal pricing and data-residency language for legal.",
   },
-  { id: "b4", origin: { kind: "user" }, markdown: "Gut check: annual looks likely if legal signs off this week." },
+  {
+    id: "b3",
+    origin: { kind: "ai", source_segment_ids: ["t4", "t5"] },
+    markdown:
+      "## Action items\n- **You** — send revised SOW today.\n- **You** — book legal review Monday.\n- **Dana** — confirm data-residency requirements.",
+  },
+  {
+    id: "b4",
+    origin: { kind: "user" },
+    markdown: "Gut check: annual looks likely if legal signs off this week.",
+  },
 ];
 
 function note(id: string) {
   const m = noteMeta.find((n) => n.id === id) || noteMeta[0];
   return {
-    id: m.id, title: m.title, folder_id: m.folder_id, meeting_id: m.meeting_id,
+    id: m.id,
+    title: m.title,
+    folder_id: m.folder_id,
+    meeting_id: m.meeting_id,
     scratchpad: m.id === "n1" ? scratchpad : "",
-    blocks: m.meeting_id ? blocks : [{ id: "b0", origin: { kind: "user" }, markdown: "Rough notes go here." }],
-    attachments: m.id === "n1" ? [{ id: "a1", file_name: "acme-pricing.pdf", rel_path: "att/acme-pricing.pdf", mime: "application/pdf", added_at: ago(30) }] : [],
-    created_at: ago(200), updated_at: m.updated_at,
+    blocks: m.meeting_id
+      ? blocks
+      : [{ id: "b0", origin: { kind: "user" }, markdown: "Rough notes go here." }],
+    attachments:
+      m.id === "n1"
+        ? [
+            {
+              id: "a1",
+              file_name: "acme-pricing.pdf",
+              rel_path: "att/acme-pricing.pdf",
+              mime: "application/pdf",
+              added_at: ago(30),
+            },
+          ]
+        : [],
+    created_at: ago(200),
+    updated_at: m.updated_at,
   };
 }
 
@@ -66,40 +131,109 @@ function meeting(noteId: string) {
   const m = noteMeta.find((n) => n.id === noteId);
   if (!m || !m.meeting_id) return null;
   return {
-    id: m.meeting_id, title: m.title, note_id: m.id, attendees: ["Dana Osei", "Marc Reyes"],
-    started_at: ago(30), ended_at: ago(17), recording: { mic_path: "mic.wav", system_path: "sys.wav", mixed_path: "mix.wav", duration_ms: 754_000 },
+    id: m.meeting_id,
+    title: m.title,
+    note_id: m.id,
+    attendees: ["Dana Osei", "Marc Reyes"],
+    started_at: ago(30),
+    ended_at: ago(17),
+    recording: {
+      mic_path: "mic.wav",
+      system_path: "sys.wav",
+      mixed_path: "mix.wav",
+      duration_ms: 754_000,
+    },
   };
 }
 
 const seg = (id: string, key: string, start: number, text: string) => ({
-  id, speaker_key: key, start_ms: start, end_ms: start + 7000, text, words: [],
+  id,
+  speaker_key: key,
+  start_ms: start,
+  end_ms: start + 7000,
+  text,
+  words: [],
 });
 const transcript = {
-  meeting_id: "m1", language: "en", engine: "whisper-large-v3-turbo",
-  speakers: [{ key: "mic", label: "You" }, { key: "s1", label: "Dana Osei" }, { key: "s2", label: "Marc Reyes" }],
+  meeting_id: "m1",
+  language: "en",
+  engine: "whisper-large-v3-turbo",
+  speakers: [
+    { key: "mic", label: "You" },
+    { key: "s1", label: "Dana Osei" },
+    { key: "s2", label: "Marc Reyes" },
+  ],
   segments: [
-    seg("t1", "s1", 4000, "Thanks for hopping on. We've been happy with the pilot, but procurement flagged the renewal price."),
-    seg("t2", "mic", 12000, "Totally hear you. Let's walk through where the value has landed and see what makes sense for the annual."),
-    seg("t3", "s2", 21000, "The transcription accuracy is the big win — our PMs stopped taking manual notes entirely."),
-    seg("t4", "s1", 33000, "Right. If we can get legal comfortable with the data-residency language, I think we're there by Friday."),
-    seg("t5", "mic", 44000, "I'll send the revised SOW today and we can book a legal review Monday."),
+    seg(
+      "t1",
+      "s1",
+      4000,
+      "Thanks for hopping on. We've been happy with the pilot, but procurement flagged the renewal price.",
+    ),
+    seg(
+      "t2",
+      "mic",
+      12000,
+      "Totally hear you. Let's walk through where the value has landed and see what makes sense for the annual.",
+    ),
+    seg(
+      "t3",
+      "s2",
+      21000,
+      "The transcription accuracy is the big win — our PMs stopped taking manual notes entirely.",
+    ),
+    seg(
+      "t4",
+      "s1",
+      33000,
+      "Right. If we can get legal comfortable with the data-residency language, I think we're there by Friday.",
+    ),
+    seg(
+      "t5",
+      "mic",
+      44000,
+      "I'll send the revised SOW today and we can book a legal review Monday.",
+    ),
   ],
 };
 
 const templates = [
   { id: "tpl-general", name: "General", system_prompt: "", structure_hint: "", built_in: true },
   { id: "tpl-1on1", name: "1:1", system_prompt: "", structure_hint: "", built_in: true },
-  { id: "tpl-sales", name: "Sales discovery", system_prompt: "", structure_hint: "", built_in: true },
+  {
+    id: "tpl-sales",
+    name: "Sales discovery",
+    system_prompt: "",
+    structure_hint: "",
+    built_in: true,
+  },
   { id: "tpl-standup", name: "Standup", system_prompt: "", structure_hint: "", built_in: true },
   { id: "tpl-interview", name: "Interview", system_prompt: "", structure_hint: "", built_in: true },
 ];
 
 const asrSettings = {
-  tier: "balanced", model_id: "whisper-large-v3-turbo", use_groq: false, max_quality: false,
-  has_groq_key: false, auto_transcribe: true, use_gpu: true, gpu_bench: null,
-  hw: { ram_gb: 32, cpu_cores: 12, gpu_name: "Apple M3 Pro", vram_mb: 18000, recommended_tier: "best" },
+  tier: "balanced",
+  model_id: "whisper-large-v3-turbo",
+  use_groq: false,
+  max_quality: false,
+  has_groq_key: false,
+  auto_transcribe: true,
+  use_gpu: true,
+  gpu_bench: null,
+  hw: {
+    ram_gb: 32,
+    cpu_cores: 12,
+    gpu_name: "Apple M3 Pro",
+    vram_mb: 18000,
+    recommended_tier: "best",
+  },
   models: [
-    { id: "whisper-turbo", display: "whisper large-v3-turbo", bytes: 1_600_000_000, installed: true },
+    {
+      id: "whisper-turbo",
+      display: "whisper large-v3-turbo",
+      bytes: 1_600_000_000,
+      installed: true,
+    },
     { id: "whisper-large", display: "whisper large-v3", bytes: 3_100_000_000, installed: false },
     { id: "diarize", display: "pyannote-community-1", bytes: 400_000_000, installed: true },
     { id: "embed", display: "bge-small-en", bytes: 100_000_000, installed: true },
@@ -109,38 +243,110 @@ const asrSettings = {
 const llmSettings = {
   provider: "anthropic",
   providers: [
-    { id: "ollama", default_model: "llama3.1", is_local: true, has_key: true, model: "llama3.1", base_url: "http://localhost:11434" },
-    { id: "anthropic", default_model: "claude-sonnet", is_local: false, has_key: true, model: "claude-sonnet", base_url: null },
-    { id: "openai", default_model: "gpt-4o", is_local: false, has_key: false, model: null, base_url: null },
-    { id: "nvidia-nim", default_model: "nemotron", is_local: false, has_key: false, model: null, base_url: null },
+    {
+      id: "ollama",
+      default_model: "llama3.1",
+      is_local: true,
+      has_key: true,
+      model: "llama3.1",
+      base_url: "http://localhost:11434",
+    },
+    {
+      id: "anthropic",
+      default_model: "claude-sonnet",
+      is_local: false,
+      has_key: true,
+      model: "claude-sonnet",
+      base_url: null,
+    },
+    {
+      id: "openai",
+      default_model: "gpt-4o",
+      is_local: false,
+      has_key: false,
+      model: null,
+      base_url: null,
+    },
+    {
+      id: "nvidia-nim",
+      default_model: "nemotron",
+      is_local: false,
+      has_key: false,
+      model: null,
+      base_url: null,
+    },
   ],
 };
 
 const calendarStatus = {
-  google_client_id: "8342••••.apps.googleusercontent.com", google_has_secret: true, google_connected: true,
-  ms_client_id: "", ms_connected: false,
+  google_client_id: "8342••••.apps.googleusercontent.com",
+  google_has_secret: true,
+  google_connected: true,
+  ms_client_id: "",
+  ms_connected: false,
 };
 
 function upcoming() {
   return [
-    { id: "e1", provider: "google", title: "Acme — renewal review", start: ago(5), end: new Date(Date.now() + 25 * 60_000).toISOString(), attendees: ["Dana Osei", "Marc Reyes"], join_url: "https://meet.google.com/abc" },
-    { id: "e2", provider: "msgraph", title: "Design weekly", start: new Date(Date.now() + 150 * 60_000).toISOString(), end: new Date(Date.now() + 180 * 60_000).toISOString(), attendees: ["Priya N."], join_url: null },
+    {
+      id: "e1",
+      provider: "google",
+      title: "Acme — renewal review",
+      start: ago(5),
+      end: new Date(Date.now() + 25 * 60_000).toISOString(),
+      attendees: ["Dana Osei", "Marc Reyes"],
+      join_url: "https://meet.google.com/abc",
+    },
+    {
+      id: "e2",
+      provider: "msgraph",
+      title: "Design weekly",
+      start: new Date(Date.now() + 150 * 60_000).toISOString(),
+      end: new Date(Date.now() + 180 * 60_000).toISOString(),
+      attendees: ["Priya N."],
+      join_url: null,
+    },
   ];
 }
 
 function recordingStatus() {
   if (typeof localStorage !== "undefined" && localStorage.getItem("fotwMockRecording") === "1") {
     return {
-      active: true, state: "recording", elapsed_ms: 154_000, meeting_id: "m1", note_id: "n1",
-      warnings: ["System output looks muted — the other side may record as silence. Unmute to capture them."],
+      active: true,
+      state: "recording",
+      elapsed_ms: 154_000,
+      meeting_id: "m1",
+      note_id: "n1",
+      warnings: [
+        "System output looks muted — the other side may record as silence. Unmute to capture them.",
+      ],
     };
   }
-  return { active: false, state: null, elapsed_ms: 0, meeting_id: null, note_id: null, warnings: [] };
+  return {
+    active: false,
+    state: null,
+    elapsed_ms: 0,
+    meeting_id: null,
+    note_id: null,
+    warnings: [],
+  };
 }
 
 const searchHits = (q: string) => [
-  { kind: "note", note_id: "n1", title: "Acme — renewal review", snippet: `…procurement flagged the [[${q || "renewal"}]] price and legal…`, start_ms: null },
-  { kind: "transcript", note_id: "n1", title: "Acme — renewal review", snippet: `Dana: …get legal comfortable with the [[${q || "data"}]]-residency language…`, start_ms: 33000 },
+  {
+    kind: "note",
+    note_id: "n1",
+    title: "Acme — renewal review",
+    snippet: `…procurement flagged the [[${q || "renewal"}]] price and legal…`,
+    start_ms: null,
+  },
+  {
+    kind: "transcript",
+    note_id: "n1",
+    title: "Acme — renewal review",
+    snippet: `Dana: …get legal comfortable with the [[${q || "data"}]]-residency language…`,
+    start_ms: 33000,
+  },
 ];
 
 const mcpSnippet = `{
@@ -155,47 +361,100 @@ const mcpSnippet = `{
 /* ---- command router ---- */
 function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
   switch (cmd) {
-    case "ping": return "pong";
-    case "app_info": return { version: "0.3.1", data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall", os: "windows" };
-    case "list_folders": return folders;
-    case "create_folder": return { id: "f-new", name: String(args.name ?? "New folder"), parent_id: (args.parentId as string) ?? null, created_at: nowIso() };
-    case "rename_folder": case "move_folder": case "delete_folder": case "move_note": case "delete_note": return null;
-    case "list_recent_notes": return noteMeta;
-    case "list_notes_in_folder": return args.folderId == null ? noteMeta.filter((n) => !n.folder_id) : noteMeta.filter((n) => n.folder_id === args.folderId);
-    case "get_note": return note(String(args.id));
-    case "create_note": return note("n3");
-    case "update_note_title": case "update_note_scratchpad": case "edit_note_block": case "enhance_note": return note(String(args.id ?? args.noteId ?? "n1"));
-    case "get_meeting_for_note": return meeting(String(args.noteId));
-    case "get_transcript": return transcript;
-    case "relabel_speaker": return transcript;
+    case "ping":
+      return "pong";
+    case "app_info":
+      return {
+        version: "0.3.1",
+        data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
+        os: "windows",
+      };
+    case "list_folders":
+      return folders;
+    case "create_folder":
+      return {
+        id: "f-new",
+        name: String(args.name ?? "New folder"),
+        parent_id: (args.parentId as string) ?? null,
+        created_at: nowIso(),
+      };
+    case "rename_folder":
+    case "move_folder":
+    case "delete_folder":
+    case "move_note":
+    case "delete_note":
+      return null;
+    case "list_recent_notes":
+      return noteMeta;
+    case "list_notes_in_folder":
+      return args.folderId == null
+        ? noteMeta.filter((n) => !n.folder_id)
+        : noteMeta.filter((n) => n.folder_id === args.folderId);
+    case "get_note":
+      return note(String(args.id));
+    case "create_note":
+      return note("n3");
+    case "update_note_title":
+    case "update_note_scratchpad":
+    case "edit_note_block":
+    case "enhance_note":
+      return note(String(args.id ?? args.noteId ?? "n1"));
+    case "get_meeting_for_note":
+      return meeting(String(args.noteId));
+    case "get_transcript":
+      return transcript;
+    case "relabel_speaker":
+      return transcript;
     case "edit_transcript_segment": {
       const s = transcript.segments.find((x) => x.id === args.segmentId);
       if (s) s.text = String(args.text ?? s.text);
       return transcript;
     }
-    case "pipeline_stage": return null;
-    case "search": return searchHits(String(args.query ?? ""));
-    case "recording_status": return recordingStatus();
+    case "pipeline_stage":
+      return null;
+    case "search":
+      return searchHits(String(args.query ?? ""));
+    case "recording_status":
+      return recordingStatus();
     case "screen_status":
-      return typeof localStorage !== "undefined" && localStorage.getItem("fotwMockRecording") === "1"
+      return typeof localStorage !== "undefined" &&
+        localStorage.getItem("fotwMockRecording") === "1"
         ? { active: true, note_id: "n1", elapsed_ms: 132_000 }
         : { active: false, note_id: null, elapsed_ms: 0 };
-    case "get_asr_settings": return asrSettings;
-    case "get_llm_settings": return llmSettings;
-    case "get_calendar_settings": return calendarStatus;
-    case "upcoming_meetings": return upcoming();
-    case "list_templates": return templates;
-    case "list_mic_devices": return [{ id: "d1", name: "MacBook Pro Microphone", is_default: true }, { id: "d2", name: "AirPods Pro", is_default: false }];
-    case "mcp_config": return mcpSnippet;
-    case "ask_meeting": return "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
-    case "test_llm_connection": return "ok";
+    case "get_asr_settings":
+      return asrSettings;
+    case "get_llm_settings":
+      return llmSettings;
+    case "get_calendar_settings":
+      return calendarStatus;
+    case "upcoming_meetings":
+      return upcoming();
+    case "list_templates":
+      return templates;
+    case "list_mic_devices":
+      return [
+        { id: "d1", name: "MacBook Pro Microphone", is_default: true },
+        { id: "d2", name: "AirPods Pro", is_default: false },
+      ];
+    case "mcp_config":
+      return mcpSnippet;
+    case "ask_meeting":
+      return "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
+    case "test_llm_connection":
+      return "ok";
     case "get_app_setting":
       if (args.key === "consent.recording_notice_accepted") {
-        return (typeof localStorage !== "undefined" && localStorage.getItem("fotwMockFirstRun") === "1") ? null : "true";
+        return typeof localStorage !== "undefined" &&
+          localStorage.getItem("fotwMockFirstRun") === "1"
+          ? null
+          : "true";
       }
       return null;
-    case "download_model": case "export_note": return "";
-    default: return null;
+    case "download_model":
+    case "export_note":
+      return "";
+    default:
+      return null;
   }
 }
 

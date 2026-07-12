@@ -44,8 +44,34 @@ const FOLDER_COLORS = [
   "var(--spk-indigo)",
 ];
 const FOLDER_EMOJIS = [
-  "📁", "📂", "🗂️", "💼", "🧑‍💻", "📊", "📈", "📌", "📎", "✅", "🎯", "🚀", "🔥", "⭐",
-  "💡", "🧠", "📝", "🗓️", "👥", "🤝", "🏷️", "🔒", "🌐", "🧩", "🎨", "🛠️", "📣", "☕",
+  "📁",
+  "📂",
+  "🗂️",
+  "💼",
+  "🧑‍💻",
+  "📊",
+  "📈",
+  "📌",
+  "📎",
+  "✅",
+  "🎯",
+  "🚀",
+  "🔥",
+  "⭐",
+  "💡",
+  "🧠",
+  "📝",
+  "🗓️",
+  "👥",
+  "🤝",
+  "🏷️",
+  "🔒",
+  "🌐",
+  "🧩",
+  "🎨",
+  "🛠️",
+  "📣",
+  "☕",
 ];
 
 /** A folder's chosen dot color (falls back to a stable rotation color). */
@@ -153,7 +179,8 @@ export default function Sidebar({
           },
         }
       : {};
-  const dropRing = "outline outline-[1.5px] -outline-offset-1 outline-dashed outline-primary bg-primary-soft";
+  const dropRing =
+    "outline outline-[1.5px] -outline-offset-1 outline-dashed outline-primary bg-primary-soft";
 
   const submitNewFolder = () => {
     const name = newFolderName.trim();

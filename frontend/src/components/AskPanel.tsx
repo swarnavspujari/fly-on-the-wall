@@ -58,7 +58,10 @@ export default function AskPanel({ noteId, onInsert, onClose }: Props) {
           <X size={14} strokeWidth={1.75} />
         </Button>
       </div>
-      <div className="border-b border-line px-3 py-2 text-[11px] leading-snug" style={{ color: "var(--text-3)" }}>
+      <div
+        className="border-b border-line px-3 py-2 text-[11px] leading-snug"
+        style={{ color: "var(--text-3)" }}
+      >
         Chat is ephemeral — insert an answer to keep it.
       </div>
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
@@ -80,7 +83,10 @@ export default function AskPanel({ noteId, onInsert, onClose }: Props) {
           >
             <div
               className="rounded-[14px] border border-line px-3.5 py-2.5 text-left text-[14px] leading-relaxed"
-              style={{ color: "var(--text)", background: m.role === "user" ? "var(--primary-soft)" : "var(--surface)" }}
+              style={{
+                color: "var(--text)",
+                background: m.role === "user" ? "var(--primary-soft)" : "var(--surface)",
+              }}
             >
               <div className="[&_a]:text-primary-text [&_a]:underline [&_li]:ml-4 [&_li]:list-disc [&_p]:my-1">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
@@ -94,13 +100,19 @@ export default function AskPanel({ noteId, onInsert, onClose }: Props) {
           </div>
         ))}
         {busy && (
-          <div className="flex items-center gap-2 self-start px-1 text-xs font-medium" style={{ color: "var(--primary-soft-text)" }}>
+          <div
+            className="flex items-center gap-2 self-start px-1 text-xs font-medium"
+            style={{ color: "var(--primary-soft-text)" }}
+          >
             <span className="flex items-center gap-1">
               {[0, 0.2, 0.4].map((d) => (
                 <span
                   key={d}
                   className="h-1.5 w-1.5 rounded-full"
-                  style={{ background: "var(--primary)", animation: `fly-pulse-dot 1s ease-in-out ${d}s infinite` }}
+                  style={{
+                    background: "var(--primary)",
+                    animation: `fly-pulse-dot 1s ease-in-out ${d}s infinite`,
+                  }}
                 />
               ))}
             </span>

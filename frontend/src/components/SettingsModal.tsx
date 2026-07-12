@@ -11,7 +11,17 @@ import type {
   ModelProgress,
   Template,
 } from "../types";
-import { Badge, Button, Card, Checkbox, Input, Modal, ProgressBar, SectionLabel, Select } from "./ui";
+import {
+  Badge,
+  Button,
+  Card,
+  Checkbox,
+  Input,
+  Modal,
+  ProgressBar,
+  SectionLabel,
+  Select,
+} from "./ui";
 import { useTheme } from "../theme";
 import type { Updater } from "../updater";
 
@@ -99,7 +109,11 @@ function Segmented({
         const on = value === id;
         // keep edge tooltips inside the panel: first anchors left, last right, middle centers
         const anchor: CSSProperties =
-          i === 0 ? { left: 0 } : i === last ? { right: 0 } : { left: "50%", transform: "translateX(-50%)" };
+          i === 0
+            ? { left: 0 }
+            : i === last
+              ? { right: 0 }
+              : { left: "50%", transform: "translateX(-50%)" };
         return (
           <button
             key={id}
@@ -461,12 +475,13 @@ export default function SettingsModal({
             className="bg-bg text-text-2"
             style={{ borderRadius: 12, padding: "10px 14px", fontSize: 12 }}
           >
-            This machine: {settings.hw.cpu_cores} cores · {settings.hw.ram_gb} GB RAM — recommended tier:{" "}
-            <b className="capitalize text-text">{settings.hw.recommended_tier}</b>
+            This machine: {settings.hw.cpu_cores} cores · {settings.hw.ram_gb} GB RAM — recommended
+            tier: <b className="capitalize text-text">{settings.hw.recommended_tier}</b>
             {technical && settings.hw.gpu_name && (
               <span>
                 {" "}
-                · GPU: {settings.hw.gpu_name} ({Math.round((settings.hw.vram_mb ?? 0) / 1024)} GB VRAM)
+                · GPU: {settings.hw.gpu_name} ({Math.round((settings.hw.vram_mb ?? 0) / 1024)} GB
+                VRAM)
               </span>
             )}
             {technical && !settings.hw.gpu_name && <span> · no NVIDIA GPU</span>}
@@ -558,14 +573,19 @@ export default function SettingsModal({
               <Input
                 type="password"
                 style={MONO_KEY}
-                placeholder={settings?.has_groq_key ? "Groq API key saved — enter to replace" : "gsk_…"}
+                placeholder={
+                  settings?.has_groq_key ? "Groq API key saved — enter to replace" : "gsk_…"
+                }
                 value={groqKey}
                 onChange={(e) => setGroqKey(e.target.value)}
               />
-              <p className="text-text-3" style={{ margin: "8px 0 0", fontSize: 11, lineHeight: 1.5 }}>
+              <p
+                className="text-text-3"
+                style={{ margin: "8px 0 0", fontSize: 11, lineHeight: 1.5 }}
+              >
                 Cloud transcription uploads meeting audio to Groq — it{" "}
-                <span style={LEAVES_PILL}>LEAVES</span> this machine. Who-said-what (diarization) still
-                runs locally. Applied when you press Save.
+                <span style={LEAVES_PILL}>LEAVES</span> this machine. Who-said-what (diarization)
+                still runs locally. Applied when you press Save.
               </p>
             </Card>
           )}
@@ -641,7 +661,10 @@ export default function SettingsModal({
             <div>
               {[...asrModels, ...otherModels].map((m) => {
                 const prog =
-                  downloading === m.id && modelProgress && modelProgress.id === m.id && modelProgress.total > 0
+                  downloading === m.id &&
+                  modelProgress &&
+                  modelProgress.id === m.id &&
+                  modelProgress.total > 0
                     ? modelProgress
                     : null;
                 const pct = prog ? Math.round((prog.downloaded / prog.total) * 100) : 0;
@@ -702,8 +725,8 @@ export default function SettingsModal({
         <section className="space-y-2">
           <SectionLabel>AI provider (for Enhance &amp; Ask)</SectionLabel>
           <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-            Ollama runs entirely on this machine. OpenAI, Anthropic, and NVIDIA NIM send your notes +
-            transcript to their APIs when you use Enhance or Ask.
+            Ollama runs entirely on this machine. OpenAI, Anthropic, and NVIDIA NIM send your notes
+            + transcript to their APIs when you use Enhance or Ask.
           </p>
           {llm && llm.providers.length > 0 && (
             <Segmented
@@ -719,7 +742,10 @@ export default function SettingsModal({
             const hasKey = p.has_key || !!llmKey;
             return (
               <Card tone="muted" pad="sm" radius="md">
-                <div className="flex items-center gap-2" style={{ marginBottom: p.is_local ? 0 : 8 }}>
+                <div
+                  className="flex items-center gap-2"
+                  style={{ marginBottom: p.is_local ? 0 : 8 }}
+                >
                   <span className="text-text" style={{ fontSize: "12.5px", fontWeight: 600 }}>
                     {p.id}
                   </span>
@@ -740,7 +766,9 @@ export default function SettingsModal({
                   <Input
                     type="password"
                     style={MONO_KEY}
-                    placeholder={p.has_key ? "API key saved — enter to replace" : `Paste your ${p.id} API key`}
+                    placeholder={
+                      p.has_key ? "API key saved — enter to replace" : `Paste your ${p.id} API key`
+                    }
                     value={llmKey}
                     onChange={(e) => setLlmKey(e.target.value)}
                   />
@@ -754,7 +782,9 @@ export default function SettingsModal({
                     />
                     <Input
                       placeholder={
-                        llmProvider === "ollama" ? "base URL (default: localhost:11434)" : "base URL (optional)"
+                        llmProvider === "ollama"
+                          ? "base URL (default: localhost:11434)"
+                          : "base URL (optional)"
                       }
                       value={llmBaseUrl}
                       onChange={(e) => setLlmBaseUrl(e.target.value)}
@@ -762,13 +792,27 @@ export default function SettingsModal({
                   </div>
                 )}
                 <div className="mt-3 flex items-center gap-2">
-                  <Button variant="primary" size="sm" onClick={() => void saveLlm()} disabled={llmBusy}>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => void saveLlm()}
+                    disabled={llmBusy}
+                  >
                     {hasKey && !p.is_local ? "Update" : "Save provider"}
                   </Button>
-                  <Button variant="outline" size="sm" onClick={() => void testLlm()} disabled={llmBusy}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void testLlm()}
+                    disabled={llmBusy}
+                  >
                     Test connection
                   </Button>
-                  {llmTest && <span className="text-text-2" style={{ fontSize: 12 }}>{llmTest}</span>}
+                  {llmTest && (
+                    <span className="text-text-2" style={{ fontSize: 12 }}>
+                      {llmTest}
+                    </span>
+                  )}
                 </div>
               </Card>
             );
@@ -826,7 +870,11 @@ export default function SettingsModal({
                 <Input
                   type="password"
                   style={MONO_KEY}
-                  placeholder={cal?.google_has_secret ? "Client secret saved — enter to replace" : "Client secret"}
+                  placeholder={
+                    cal?.google_has_secret
+                      ? "Client secret saved — enter to replace"
+                      : "Client secret"
+                  }
                   value={googleSecret}
                   onChange={(e) => setGoogleSecret(e.target.value)}
                 />
@@ -879,8 +927,8 @@ export default function SettingsModal({
             <div className="space-y-1.5 pt-1">
               <SectionLabel style={{ display: "block" }}>Calendars in “Up next”</SectionLabel>
               <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-                Meetings from the calendars you enable here feed the sidebar. Only events with a join
-                link are shown.
+                Meetings from the calendars you enable here feed the sidebar. Only events with a
+                join link are shown.
               </p>
               {calList.map((c) => (
                 <div
@@ -911,7 +959,11 @@ export default function SettingsModal({
               <Button variant="primary" size="sm" onClick={() => void saveCal()}>
                 Save calendar config
               </Button>
-              {calMsg && <span className="text-text-2" style={{ fontSize: 12 }}>{calMsg}</span>}
+              {calMsg && (
+                <span className="text-text-2" style={{ fontSize: 12 }}>
+                  {calMsg}
+                </span>
+              )}
             </div>
           )}
         </section>
@@ -1006,8 +1058,16 @@ export default function SettingsModal({
         <section className="space-y-2">
           <SectionLabel>Chat with your notes (MCP)</SectionLabel>
           <Card tone="invert" pad="lg">
-            <p style={{ margin: "0 0 12px", fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,.72)" }}>
-              Fly on the Wall ships a local MCP server. Add this to your MCP client (Claude Desktop's{" "}
+            <p
+              style={{
+                margin: "0 0 12px",
+                fontSize: 13,
+                lineHeight: 1.5,
+                color: "rgba(255,255,255,.72)",
+              }}
+            >
+              Fly on the Wall ships a local MCP server. Add this to your MCP client (Claude
+              Desktop's{" "}
               <code
                 style={{
                   borderRadius: 4,
@@ -1019,8 +1079,8 @@ export default function SettingsModal({
               >
                 claude_desktop_config.json
               </code>
-              , or any client) to search and read your notes and transcripts — everything stays on this
-              machine.
+              , or any client) to search and read your notes and transcripts — everything stays on
+              this machine.
             </p>
             {mcpJson && (
               <div style={{ position: "relative" }}>
@@ -1045,7 +1105,11 @@ export default function SettingsModal({
                     variant="primary"
                     size="sm"
                     startIcon={
-                      mcpCopied ? <Check size={14} strokeWidth={1.75} /> : <Copy size={14} strokeWidth={1.75} />
+                      mcpCopied ? (
+                        <Check size={14} strokeWidth={1.75} />
+                      ) : (
+                        <Copy size={14} strokeWidth={1.75} />
+                      )
                     }
                     onClick={() => {
                       void navigator.clipboard.writeText(mcpJson).then(() => {
@@ -1070,9 +1134,12 @@ export default function SettingsModal({
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-text-2" style={{ fontSize: 13 }}>
-                    Current version <span className="font-semibold text-text">v{appVersion ?? "…"}</span>
+                    Current version{" "}
+                    <span className="font-semibold text-text">v{appVersion ?? "…"}</span>
                   </span>
-                  {(updater.phase === "idle" || updater.phase === "upToDate" || updater.phase === "error") && (
+                  {(updater.phase === "idle" ||
+                    updater.phase === "upToDate" ||
+                    updater.phase === "error") && (
                     <Button variant="outline" size="sm" onClick={updater.check}>
                       Check for updates
                     </Button>
@@ -1098,13 +1165,23 @@ export default function SettingsModal({
                         value={updater.progress == null ? null : Math.round(updater.progress * 100)}
                         style={{ width: 96 }}
                       />
-                      <span className="text-text-3" style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
-                        {updater.progress == null ? "downloading…" : `${Math.round(updater.progress * 100)}%`}
+                      <span
+                        className="text-text-3"
+                        style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
+                      >
+                        {updater.progress == null
+                          ? "downloading…"
+                          : `${Math.round(updater.progress * 100)}%`}
                       </span>
                     </span>
                   )}
                   {updater.phase === "ready" && (
-                    <Button variant="primary" size="sm" disabled={recordingActive} onClick={updater.restart}>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      disabled={recordingActive}
+                      onClick={updater.restart}
+                    >
                       Restart now
                     </Button>
                   )}
@@ -1129,16 +1206,18 @@ export default function SettingsModal({
                     Update downloaded — restart when you're ready.
                   </p>
                 )}
-                {recordingActive && (updater.phase === "available" || updater.phase === "ready") && (
-                  <p className="text-text-2" style={{ fontSize: 12 }}>
-                    Recording in progress — the update waits until you're done.
-                  </p>
-                )}
+                {recordingActive &&
+                  (updater.phase === "available" || updater.phase === "ready") && (
+                    <p className="text-text-2" style={{ fontSize: 12 }}>
+                      Recording in progress — the update waits until you're done.
+                    </p>
+                  )}
               </div>
             </Card>
           ) : (
             <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-              Auto-update is Windows-only for now — new versions are published on the GitHub releases page.
+              Auto-update is Windows-only for now — new versions are published on the GitHub
+              releases page.
             </p>
           )}
         </section>

@@ -69,7 +69,10 @@ export default function LivePane({ meetingId }: { meetingId: string }) {
             />
           ))}
         </span>
-        <span className="flex-1 text-[12.5px] font-semibold" style={{ color: "var(--primary-soft-text)" }}>
+        <span
+          className="flex-1 text-[12.5px] font-semibold"
+          style={{ color: "var(--primary-soft-text)" }}
+        >
           {status?.state === "unavailable"
             ? status.detail
             : "Listening — live, rough transcript. Full diarized transcript arrives after Stop."}
@@ -82,10 +85,16 @@ export default function LivePane({ meetingId }: { meetingId: string }) {
       {/* Live segments — channel-level bubbles */}
       <div ref={scrollRef}>
         {segments.length === 0 && status?.state !== "unavailable" && (
-          <div className="flex items-center gap-2 py-2 text-[13px]" style={{ color: "var(--primary-soft-text)" }}>
+          <div
+            className="flex items-center gap-2 py-2 text-[13px]"
+            style={{ color: "var(--primary-soft-text)" }}
+          >
             <span
               className="h-2 w-2 rounded-full"
-              style={{ background: "var(--primary)", animation: "fly-pulse-dot 1.2s ease infinite" }}
+              style={{
+                background: "var(--primary)",
+                animation: "fly-pulse-dot 1.2s ease infinite",
+              }}
             />
             Listening — first passage lands after ~15 s of speech.
           </div>
@@ -104,7 +113,10 @@ export default function LivePane({ meetingId }: { meetingId: string }) {
                   style={{ color: self ? "var(--spk-self)" : "var(--spk-teal)" }}
                 >
                   {self ? "You" : "Them"}
-                  <span className="font-mono text-[10px] font-normal" style={{ color: "var(--text-3)" }}>
+                  <span
+                    className="font-mono text-[10px] font-normal"
+                    style={{ color: "var(--text-3)" }}
+                  >
                     {fmtElapsed(s.start_ms)}
                   </span>
                 </div>

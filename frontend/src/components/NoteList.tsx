@@ -32,7 +32,10 @@ function Snippet({ text }: { text: string }) {
     <span>
       {parts.map((p, i) =>
         i % 2 === 1 ? (
-          <mark key={i} className="rounded-[var(--radius-xs)] bg-highlight px-0.5 text-on-highlight">
+          <mark
+            key={i}
+            className="rounded-[var(--radius-xs)] bg-highlight px-0.5 text-on-highlight"
+          >
             {p}
           </mark>
         ) : (
@@ -121,7 +124,9 @@ export default function NoteList({
                   <Avatar shape="square" colorKey={hit.note_id} size="md" name={hit.title} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="min-w-0 truncate text-[14px] font-semibold text-text">{hit.title}</span>
+                      <span className="min-w-0 truncate text-[14px] font-semibold text-text">
+                        {hit.title}
+                      </span>
                       {hit.kind === "transcript" && (
                         <Badge tone="primary" size="sm" uppercase className="flex-none">
                           transcript
@@ -158,7 +163,9 @@ export default function NoteList({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                      <span className="min-w-0 truncate text-[14px] font-semibold text-text">{n.title}</span>
+                      <span className="min-w-0 truncate text-[14px] font-semibold text-text">
+                        {n.title}
+                      </span>
                       {n.meeting_id && (
                         <Mic size={12} strokeWidth={1.75} className="flex-none text-text-3" />
                       )}

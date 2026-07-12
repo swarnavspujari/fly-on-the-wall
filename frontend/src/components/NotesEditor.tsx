@@ -69,7 +69,15 @@ if (typeof document !== "undefined" && !document.getElementById("fotw-richtext-c
   document.head.appendChild(el);
 }
 
-function FmtBtn({ title, onDo, children }: { title: string; onDo: () => void; children: React.ReactNode }) {
+function FmtBtn({
+  title,
+  onDo,
+  children,
+}: {
+  title: string;
+  onDo: () => void;
+  children: React.ReactNode;
+}) {
   return (
     <button
       type="button"

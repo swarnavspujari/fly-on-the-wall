@@ -302,7 +302,11 @@ export default function App() {
     try {
       setScreenStatus(await api.startScreenRecording(openNote.id, target));
       setScreenSource(
-        target.kind === "full_screen" ? "Full screen" : target.kind === "window" ? "Window" : "Region",
+        target.kind === "full_screen"
+          ? "Full screen"
+          : target.kind === "window"
+            ? "Window"
+            : "Region",
       );
     } catch (e) {
       setError(String(e));

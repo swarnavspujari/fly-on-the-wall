@@ -220,7 +220,13 @@ interface SectionLabelProps extends HTMLAttributes<HTMLElement> {
 }
 
 /** Tiny uppercase micro-heading for control groups / panel regions. */
-export function SectionLabel({ as: Tag = "p", className = "", style, children, ...rest }: SectionLabelProps) {
+export function SectionLabel({
+  as: Tag = "p",
+  className = "",
+  style,
+  children,
+  ...rest
+}: SectionLabelProps) {
   return (
     <Tag
       className={className}
@@ -243,7 +249,11 @@ export function SectionLabel({ as: Tag = "p", className = "", style, children, .
 }
 
 const CARD_PADS = { none: "0", sm: "12px", md: "16px", lg: "20px" } as const;
-const CARD_RADII = { md: "var(--radius-xl)", lg: "var(--radius-2xl)", xl: "var(--radius-3xl)" } as const;
+const CARD_RADII = {
+  md: "var(--radius-xl)",
+  lg: "var(--radius-2xl)",
+  xl: "var(--radius-3xl)",
+} as const;
 
 interface CardProps extends HTMLAttributes<HTMLDivElement> {
   tone?: "surface" | "muted" | "invert";
@@ -264,8 +274,16 @@ export function Card({
   ...rest
 }: CardProps) {
   const tones = {
-    surface: { background: "var(--surface)", color: "var(--text)", border: "1px solid var(--line)" },
-    muted: { background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--line-2)" },
+    surface: {
+      background: "var(--surface)",
+      color: "var(--text)",
+      border: "1px solid var(--line)",
+    },
+    muted: {
+      background: "var(--surface-2)",
+      color: "var(--text)",
+      border: "1px solid var(--line-2)",
+    },
     invert: { background: "var(--text)", color: "var(--surface)", border: "1px solid transparent" },
   } as const;
   const t = tones[tone] || tones.surface;
@@ -300,7 +318,16 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
 }
 
 /** Single-line text field with optional label, hint and error. */
-export function Input({ label, hint, error, invalid = false, id, className = "", style, ...rest }: InputProps) {
+export function Input({
+  label,
+  hint,
+  error,
+  invalid = false,
+  id,
+  className = "",
+  style,
+  ...rest
+}: InputProps) {
   const autoId = useId();
   const fieldId = id || (label ? autoId : undefined);
   const isBad = invalid || !!error;
@@ -323,7 +350,9 @@ export function Input({ label, hint, error, invalid = false, id, className = "",
       )}
       {input}
       {(error || hint) && (
-        <span className={cx("fly-field-msg", error ? "fly-field-msg--err" : null)}>{error || hint}</span>
+        <span className={cx("fly-field-msg", error ? "fly-field-msg--err" : null)}>
+          {error || hint}
+        </span>
       )}
     </span>
   );
@@ -342,10 +371,25 @@ export function Select({ options, className = "", style, children, ...rest }: Se
   return (
     <span className="fly-select-wrap" style={style}>
       <select className={cx("fly-select", className)} {...rest}>
-        {options ? options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>) : children}
+        {options
+          ? options.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))
+          : children}
       </select>
       <span className="fly-select-chevron" aria-hidden="true">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
           <path d="m6 9 6 6 6-6" />
         </svg>
       </span>
@@ -359,16 +403,36 @@ interface CheckboxProps extends InputHTMLAttributes<HTMLInputElement> {
 }
 
 /** Labelled checkbox (or radio via type="radio") with a violet indicator. */
-export function Checkbox({ type = "checkbox", label, description, disabled = false, className = "", style, ...rest }: CheckboxProps) {
+export function Checkbox({
+  type = "checkbox",
+  label,
+  description,
+  disabled = false,
+  className = "",
+  style,
+  ...rest
+}: CheckboxProps) {
   const isRadio = type === "radio";
   return (
     <label className={cx("fly-check", disabled && "fly-check--disabled", className)} style={style}>
       <input type={type} disabled={disabled} {...rest} />
-      <span className={cx("fly-check-box", `fly-check-box--${isRadio ? "radio" : "checkbox"}`)} aria-hidden="true">
+      <span
+        className={cx("fly-check-box", `fly-check-box--${isRadio ? "radio" : "checkbox"}`)}
+        aria-hidden="true"
+      >
         {isRadio ? (
           <span className="fly-radio-dot" />
         ) : (
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--on-primary)" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="var(--on-primary)"
+            strokeWidth="3.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
             <path d="M20 6 9 17l-5-5" />
           </svg>
         )}
@@ -393,10 +457,27 @@ interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
 }
 
 /** Small status pill. tone="live" is the pulsing red LIVE marker. */
-export function Badge({ tone = "neutral", size = "sm", uppercase = false, dot = false, className = "", children, ...rest }: BadgeProps) {
+export function Badge({
+  tone = "neutral",
+  size = "sm",
+  uppercase = false,
+  dot = false,
+  className = "",
+  children,
+  ...rest
+}: BadgeProps) {
   const showDot = dot || tone === "live";
   return (
-    <span className={cx("fly-badge", `fly-badge--${tone}`, `fly-badge--${size}`, uppercase && "fly-badge--upper", className)} {...rest}>
+    <span
+      className={cx(
+        "fly-badge",
+        `fly-badge--${tone}`,
+        `fly-badge--${size}`,
+        uppercase && "fly-badge--upper",
+        className,
+      )}
+      {...rest}
+    >
       {showDot && <span className="fly-badge-dot" aria-hidden="true" />}
       {children}
     </span>
@@ -409,7 +490,13 @@ interface ProgressBarProps extends HTMLAttributes<HTMLSpanElement> {
 }
 
 /** Thin determinate/indeterminate bar. Pass value 0–100, or omit for the sweep. */
-export function ProgressBar({ value = null, size = "sm", className = "", style, ...rest }: ProgressBarProps) {
+export function ProgressBar({
+  value = null,
+  size = "sm",
+  className = "",
+  style,
+  ...rest
+}: ProgressBarProps) {
   const indeterminate = value == null;
   const pct = indeterminate ? 0 : Math.max(0, Math.min(100, value));
   return (
@@ -464,11 +551,27 @@ export function RecordingIndicator({
   const recording = state === "recording";
   return (
     <span className={cx("fly-rec", className)} role="status" {...rest}>
-      <span className={cx("fly-rec-dot", `fly-rec-dot--${recording ? "rec" : "paused"}`, `fly-rec-dot--${size}`)} aria-hidden="true" />
+      <span
+        className={cx(
+          "fly-rec-dot",
+          `fly-rec-dot--${recording ? "rec" : "paused"}`,
+          `fly-rec-dot--${size}`,
+        )}
+        aria-hidden="true"
+      />
       {label && <span className="fly-rec-label">{label}</span>}
-      {showTimer && elapsedMs != null && <span className="fly-rec-time">{fmtElapsedMs(elapsedMs)}</span>}
+      {showTimer && elapsedMs != null && (
+        <span className="fly-rec-time">{fmtElapsedMs(elapsedMs)}</span>
+      )}
       {showWave && (
-        <span className={cx("fly-rec-wave", `fly-rec-wave--${size}`, recording && "fly-rec-wave--animate")} aria-hidden="true">
+        <span
+          className={cx(
+            "fly-rec-wave",
+            `fly-rec-wave--${size}`,
+            recording && "fly-rec-wave--animate",
+          )}
+          aria-hidden="true"
+        >
           {REC_DELAYS.map((d) => (
             <span key={d} style={{ animationDelay: d }} />
           ))}
@@ -571,9 +674,17 @@ interface CitationChipProps extends Omit<HTMLAttributes<HTMLSpanElement>, "onCli
 }
 
 /** Provenance marker linking an AI line to its transcript source. */
-export function CitationChip({ count, label, onClick, className = "", children, ...rest }: CitationChipProps) {
+export function CitationChip({
+  count,
+  label,
+  onClick,
+  className = "",
+  children,
+  ...rest
+}: CitationChipProps) {
   const isButton = typeof onClick === "function";
-  const text = children ?? label ?? (count != null ? `${count} source${count === 1 ? "" : "s"}` : "•");
+  const text =
+    children ?? label ?? (count != null ? `${count} source${count === 1 ? "" : "s"}` : "•");
   return (
     <span
       className={cx("fly-cite", !isButton && "fly-cite--static", className)}
@@ -609,7 +720,17 @@ interface ModalProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
 }
 
 /** Overlay + card shell for dialogs (Settings, consent). Esc / click-outside close. */
-export function Modal({ open = true, onClose, title, footer, width = 560, closeOnOverlay = true, className = "", children, ...rest }: ModalProps) {
+export function Modal({
+  open = true,
+  onClose,
+  title,
+  footer,
+  width = 560,
+  closeOnOverlay = true,
+  className = "",
+  children,
+  ...rest
+}: ModalProps) {
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose && onClose();
@@ -633,7 +754,15 @@ export function Modal({ open = true, onClose, title, footer, width = 560, closeO
             {title ? <h2 className="fly-modal-title">{title}</h2> : <span />}
             {onClose && (
               <button className="fly-modal-x" onClick={onClose} aria-label="Close">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                >
                   <path d="M18 6 6 18M6 6l12 12" />
                 </svg>
               </button>
@@ -670,10 +799,26 @@ export function Btn({ variant = "outline", size = "sm", ...rest }: BtnProps) {
 
 /** @deprecated Use `Modal`. Drop-in for the old shell — width still comes
  *  from the caller's className; only the scrim is now theme-correct. */
-export function ModalShell({ children, className = "" }: { children: ReactNode; className?: string }) {
+export function ModalShell({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6" style={{ background: "var(--overlay)" }}>
-      <div className={cx("max-h-full overflow-y-auto rounded-2xl border border-line bg-surface shadow-warm", className)} role="dialog" aria-modal="true">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-6"
+      style={{ background: "var(--overlay)" }}
+    >
+      <div
+        className={cx(
+          "max-h-full overflow-y-auto rounded-2xl border border-line bg-surface shadow-warm",
+          className,
+        )}
+        role="dialog"
+        aria-modal="true"
+      >
         {children}
       </div>
     </div>
@@ -682,6 +827,7 @@ export function ModalShell({ children, className = "" }: { children: ReactNode; 
 
 /** @deprecated Speaker fill: mic/self = brand violet; others rotate the speaker palette. */
 export function speakerColor(speakerKey: string, index: number): string {
-  if (speakerKey === "mic" || speakerKey === "you" || speakerKey === "self") return "var(--spk-self)";
+  if (speakerKey === "mic" || speakerKey === "you" || speakerKey === "self")
+    return "var(--spk-self)";
   return SPK_ROTATION[((index % SPK_ROTATION.length) + SPK_ROTATION.length) % SPK_ROTATION.length];
 }

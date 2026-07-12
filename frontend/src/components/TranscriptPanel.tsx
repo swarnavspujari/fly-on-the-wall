@@ -160,7 +160,10 @@ export default function TranscriptPanel({
   if (!transcript) {
     if (!meeting.recording) return null;
     return (
-      <div className="mb-4 rounded-xl border border-line px-4 py-3" style={{ background: "var(--surface-2)" }}>
+      <div
+        className="mb-4 rounded-xl border border-line px-4 py-3"
+        style={{ background: "var(--surface-2)" }}
+      >
         <div className="flex flex-wrap items-center gap-3">
           <Button variant="primary" size="sm" onClick={onTranscribe}>
             Transcribe recording
@@ -204,7 +207,15 @@ export default function TranscriptPanel({
               else segRefs.current.delete(seg.id);
             }}
             className={`mb-3.5 flex rounded-lg ${isSelf ? "justify-end" : "justify-start"}`}
-            style={hot ? { background: "var(--primary-soft)", outline: "1.5px solid var(--primary)", padding: 4 } : undefined}
+            style={
+              hot
+                ? {
+                    background: "var(--primary-soft)",
+                    outline: "1.5px solid var(--primary)",
+                    padding: 4,
+                  }
+                : undefined
+            }
           >
             <div className="min-w-0" style={{ maxWidth: "86%" }}>
               <div className={`mb-1 flex items-center gap-1.5 ${isSelf ? "justify-end" : ""}`}>

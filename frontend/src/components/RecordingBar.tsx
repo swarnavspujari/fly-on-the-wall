@@ -89,7 +89,10 @@ export default function RecordingBar({
       {status.warnings.length > 0 && (
         <div className="bg-brand-ink px-4 py-1.5">
           {status.warnings.map((w) => (
-            <p key={w} className="flex items-center gap-2 text-[12.5px] font-medium text-brand-cream">
+            <p
+              key={w}
+              className="flex items-center gap-2 text-[12.5px] font-medium text-brand-cream"
+            >
               <span className="h-2 w-2 flex-none rounded-full bg-warning" />
               {w}
             </p>

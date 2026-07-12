@@ -100,10 +100,19 @@ export default function EnhancedDoc({ note, onNoteChanged, onZoom }: Props) {
                   onFocus={(e) => (e.currentTarget.style.borderColor = "var(--primary)")}
                   onBlur={(e) => (e.currentTarget.style.borderColor = "var(--line)")}
                   className="w-full rounded-lg border px-3 py-2.5 text-[14px] outline-none"
-                  style={{ background: "var(--surface-2)", borderColor: "var(--line)", color: "var(--text)" }}
+                  style={{
+                    background: "var(--surface-2)",
+                    borderColor: "var(--line)",
+                    color: "var(--text)",
+                  }}
                 />
                 <div className="mt-1.5 flex items-center gap-2">
-                  <Button variant="primary" size="xs" onClick={() => void saveEdit()} disabled={saving}>
+                  <Button
+                    variant="primary"
+                    size="xs"
+                    onClick={() => void saveEdit()}
+                    disabled={saving}
+                  >
                     {saving ? "Saving…" : "Save (Ctrl+Enter)"}
                   </Button>
                   <Button variant="ghost" size="xs" onClick={() => setEditing(null)}>
@@ -118,8 +127,19 @@ export default function EnhancedDoc({ note, onNoteChanged, onZoom }: Props) {
               </div>
             ) : (
               <div
-                className={isAI ? "-mx-1 rounded-lg px-4 py-2 text-text" : "border-l-2 border-transparent pl-3 text-text"}
-                style={isAI ? { background: "var(--primary-soft)", borderLeft: "2px solid var(--primary-border)" } : undefined}
+                className={
+                  isAI
+                    ? "-mx-1 rounded-lg px-4 py-2 text-text"
+                    : "border-l-2 border-transparent pl-3 text-text"
+                }
+                style={
+                  isAI
+                    ? {
+                        background: "var(--primary-soft)",
+                        borderLeft: "2px solid var(--primary-border)",
+                      }
+                    : undefined
+                }
               >
                 {isAI && (
                   <div className="mb-1 flex items-start justify-between gap-2.5">
@@ -148,7 +168,11 @@ export default function EnhancedDoc({ note, onNoteChanged, onZoom }: Props) {
                     Edit
                   </button>
                   {isAI ? (
-                    sources.length > 0 ? <span>from transcript</span> : <span>AI (no source)</span>
+                    sources.length > 0 ? (
+                      <span>from transcript</span>
+                    ) : (
+                      <span>AI (no source)</span>
+                    )
                   ) : (
                     <span>your text</span>
                   )}

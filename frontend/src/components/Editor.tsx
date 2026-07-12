@@ -68,7 +68,8 @@ interface Props {
 type View = "notes" | "transcript" | "enhanced";
 
 const VIDEO_RE = /\.(mp4|webm|mov|mkv|m4v)$/i;
-const isVideo = (a: Attachment) => (a.mime?.startsWith("video/") ?? false) || VIDEO_RE.test(a.file_name);
+const isVideo = (a: Attachment) =>
+  (a.mime?.startsWith("video/") ?? false) || VIDEO_RE.test(a.file_name);
 
 const CHIP =
   "inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-[12.5px] font-medium text-text-2";
@@ -176,12 +177,19 @@ function AudioPlayer({
             <span
               key={i}
               className="flex-1 rounded-[2px]"
-              style={{ height: h, background: on ? "var(--primary)" : "var(--line-strong)", opacity: on ? 1 : 0.45 }}
+              style={{
+                height: h,
+                background: on ? "var(--primary)" : "var(--line-strong)",
+                opacity: on ? 1 : 0.45,
+              }}
             />
           );
         })}
       </div>
-      <span className="w-12 flex-none text-right font-mono text-[12px]" style={{ color: "var(--text-3)" }}>
+      <span
+        className="w-12 flex-none text-right font-mono text-[12px]"
+        style={{ color: "var(--text-3)" }}
+      >
         {fmtElapsed(dur * 1000)}
       </span>
     </div>
@@ -198,7 +206,10 @@ function VideoTile({
   onOpen: (relPath: string) => void;
 }) {
   return (
-    <div className="flex-none overflow-hidden rounded-xl border border-line" style={{ width: big ? "100%" : 200 }}>
+    <div
+      className="flex-none overflow-hidden rounded-xl border border-line"
+      style={{ width: big ? "100%" : 200 }}
+    >
       <button
         onClick={() => onOpen(att.rel_path)}
         title={`Play ${att.file_name}`}
@@ -206,7 +217,8 @@ function VideoTile({
         className="relative block w-full cursor-pointer border-0 p-0"
         style={{
           paddingTop: "56%",
-          background: "repeating-linear-gradient(135deg, rgba(128,124,140,.10) 0 8px, rgba(128,124,140,.2) 8px 16px)",
+          background:
+            "repeating-linear-gradient(135deg, rgba(128,124,140,.10) 0 8px, rgba(128,124,140,.2) 8px 16px)",
         }}
       >
         <span className="absolute inset-0 grid place-items-center">
@@ -234,7 +246,13 @@ function VideoTile({
   );
 }
 
-function VideoStrip({ videos, onOpen }: { videos: Attachment[]; onOpen: (relPath: string) => void }) {
+function VideoStrip({
+  videos,
+  onOpen,
+}: {
+  videos: Attachment[];
+  onOpen: (relPath: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   if (videos.length === 0) return null;
   if (videos.length === 1) {
@@ -287,7 +305,10 @@ function ScreenControl({
     return (
       <span
         className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5"
-        style={{ borderColor: "var(--rec)", background: "color-mix(in srgb, var(--rec) 12%, transparent)" }}
+        style={{
+          borderColor: "var(--rec)",
+          background: "color-mix(in srgb, var(--rec) 12%, transparent)",
+        }}
       >
         <span
           className="h-2 w-2 rounded-full"
@@ -319,7 +340,13 @@ function ScreenControl({
       const spec = prompt("Region as x,y,width,height:", "0,0,1280,720");
       const parts = spec?.split(",").map((n) => parseInt(n.trim(), 10)) ?? [];
       if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
-        onStartScreen({ kind: "region", x: parts[0], y: parts[1], width: parts[2], height: parts[3] });
+        onStartScreen({
+          kind: "region",
+          x: parts[0],
+          y: parts[1],
+          width: parts[2],
+          height: parts[3],
+        });
       }
     }
   };
@@ -394,7 +421,8 @@ function MetaRow({
   onRemoveAttachment: (attachmentId: string) => void;
 }) {
   const [opening, setOpening] = useState(false);
-  const tplName = templates.find((t) => t.id === templateId)?.name ?? templates[0]?.name ?? "Template";
+  const tplName =
+    templates.find((t) => t.id === templateId)?.name ?? templates[0]?.name ?? "Template";
   const rec = meeting?.recording ?? null;
   const mins = rec ? Math.max(1, Math.round(rec.duration_ms / 60000)) : 0;
   const fileAtts = note.attachments.filter((a) => !isVideo(a));
@@ -409,9 +437,13 @@ function MetaRow({
       )}
 
       {/* template chip — a styled native select */}
-      <span className={`${CHIP} relative cursor-pointer !p-0 hover:bg-surface-3`} title="Note template">
+      <span
+        className={`${CHIP} relative cursor-pointer !p-0 hover:bg-surface-3`}
+        title="Note template"
+      >
         <span className="pointer-events-none inline-flex items-center gap-1.5 py-1 pl-2.5 pr-7">
-          <LayoutTemplate size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} /> {tplName}
+          <LayoutTemplate size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} />{" "}
+          {tplName}
         </span>
         <ChevronDown
           size={12}
@@ -459,13 +491,17 @@ function MetaRow({
       )}
 
       {fileAtts.map((a) => (
-        <span key={a.id} className={`${CHIP} group cursor-pointer border-dashed hover:bg-surface-3`}>
+        <span
+          key={a.id}
+          className={`${CHIP} group cursor-pointer border-dashed hover:bg-surface-3`}
+        >
           <button
             className="inline-flex cursor-pointer items-center gap-1.5 border-0 bg-transparent p-0 text-inherit"
             title="Open"
             onClick={() => onOpenAttachment(a.rel_path)}
           >
-            <Paperclip size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} /> {a.file_name}
+            <Paperclip size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} />{" "}
+            {a.file_name}
           </button>
           <button
             title="Remove attachment"
@@ -478,7 +514,11 @@ function MetaRow({
       ))}
 
       {/* Secondary action — a real Button (not a chip): reveals this note's local folder */}
-      <span className="mx-1 h-[18px] w-px flex-none" style={{ background: "var(--line)" }} aria-hidden="true" />
+      <span
+        className="mx-1 h-[18px] w-px flex-none"
+        style={{ background: "var(--line)" }}
+        aria-hidden="true"
+      />
       <Button
         variant="outline"
         size="sm"
@@ -488,7 +528,9 @@ function MetaRow({
           onShowInFolder();
           window.setTimeout(() => setOpening(false), 1300);
         }}
-        startIcon={<FolderIcon size={14} strokeWidth={1.75} style={{ color: "var(--primary-text)" }} />}
+        startIcon={
+          <FolderIcon size={14} strokeWidth={1.75} style={{ color: "var(--primary-text)" }} />
+        }
       >
         {opening ? "Opening…" : "Show in folder"}
       </Button>
@@ -739,7 +781,12 @@ export default function Editor({
   // Absolute path → asset URL so the <audio> element can stream it in-app.
   const audioSrc =
     dataDir && audioPath
-      ? convertFileSrc(`${dataDir.replace(/[\\/]+$/, "")}/${audioPath.replace(/^[\\/]+/, "")}`.replace(/\\/g, "/"))
+      ? convertFileSrc(
+          `${dataDir.replace(/[\\/]+$/, "")}/${audioPath.replace(/^[\\/]+/, "")}`.replace(
+            /\\/g,
+            "/",
+          ),
+        )
       : null;
   const videos = note.attachments.filter(isVideo);
   const playAudio = () => {
@@ -772,7 +819,11 @@ export default function Editor({
               Record
             </Button>
           )}
-          <ScreenControl screenStatus={screenStatus} onStartScreen={onStartScreen} onStopScreen={onStopScreen} />
+          <ScreenControl
+            screenStatus={screenStatus}
+            onStartScreen={onStartScreen}
+            onStopScreen={onStopScreen}
+          />
           <Button
             variant={askOpen ? "soft" : "outline"}
             size="sm"
@@ -796,7 +847,13 @@ export default function Editor({
             ))}
           </select>
           <span className="h-5 w-px" style={{ background: "var(--line)" }} />
-          <Button variant="ghost" size="sm" title="Attach file" onClick={() => void attach()} className="!px-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            title="Attach file"
+            onClick={() => void attach()}
+            className="!px-2"
+          >
             <Paperclip size={15} strokeWidth={1.75} />
           </Button>
           <Button
@@ -849,7 +906,9 @@ export default function Editor({
 
         {/* single content region — one view at a time */}
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className={`mx-auto max-w-[var(--content-max)] px-6 ${showNotes ? "" : "pb-28 pt-5"}`}>
+          <div
+            className={`mx-auto max-w-[var(--content-max)] px-6 ${showNotes ? "" : "pb-28 pt-5"}`}
+          >
             {enhanceError && (
               <div
                 className="mt-4 mb-4 rounded-xl border border-line px-4 py-3 text-[13px]"
@@ -869,7 +928,11 @@ export default function Editor({
             {showTranscript && !isRecordingThisNote && meeting && (
               <div>
                 {audioPath && (
-                  <AudioPlayer src={audioSrc} durationMs={rec?.duration_ms ?? 0} onFallback={playAudio} />
+                  <AudioPlayer
+                    src={audioSrc}
+                    durationMs={rec?.duration_ms ?? 0}
+                    onFallback={playAudio}
+                  />
                 )}
                 {videos.length > 0 && <VideoStrip videos={videos} onOpen={openAttachmentRel} />}
                 <TranscriptPanel
@@ -888,7 +951,9 @@ export default function Editor({
             )}
 
             {/* Enhanced view */}
-            {showEnhanced && <EnhancedDoc note={note} onNoteChanged={onNoteChanged} onZoom={zoom} />}
+            {showEnhanced && (
+              <EnhancedDoc note={note} onNoteChanged={onNoteChanged} onZoom={zoom} />
+            )}
           </div>
 
           {/* Notes view — full-width (format bar spans, editable is centered);
