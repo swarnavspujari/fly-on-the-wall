@@ -3,6 +3,7 @@
 
 mod asr_commands;
 mod calendar_commands;
+mod calendar_defaults;
 mod commands;
 pub mod gpu;
 pub mod hw;
@@ -115,6 +116,8 @@ pub fn run() {
             calendar_commands::connect_calendar,
             calendar_commands::disconnect_calendar,
             calendar_commands::upcoming_meetings,
+            calendar_commands::list_calendars,
+            calendar_commands::set_calendar_enabled,
             calendar_commands::start_meeting_from_event,
             screen_commands::screen_status,
             screen_commands::start_screen_recording,

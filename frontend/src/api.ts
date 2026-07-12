@@ -9,6 +9,7 @@ import type {
   CalendarEvent,
   CalendarSettingsUpdate,
   CalendarStatus,
+  CalendarToggle,
   CaptureTarget,
   ImportResult,
   ScreenStatus,
@@ -109,6 +110,9 @@ export const api = {
     invoke<void>("set_calendar_settings", { update }),
   connectCalendar: (provider: string) => invoke<void>("connect_calendar", { provider }),
   disconnectCalendar: (provider: string) => invoke<void>("disconnect_calendar", { provider }),
+  listCalendars: () => invoke<CalendarToggle[]>("list_calendars"),
+  setCalendarEnabled: (provider: string, calendarId: string, enabled: boolean) =>
+    invoke<void>("set_calendar_enabled", { provider, calendarId, enabled }),
   upcomingMeetings: () => invoke<CalendarEvent[]>("upcoming_meetings"),
   startMeetingFromEvent: (title: string, attendees: string[]) =>
     invoke<RecordingStatus>("start_meeting_from_event", { title, attendees }),

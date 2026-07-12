@@ -154,26 +154,63 @@ Your calendar sign-in is stored in your system's keychain, never in a plain file
 
 The one-click connections above are for invited testers. If you're setting up Fly on the Wall
 on your own, you can register your own free calendar app instead — it takes a few minutes once.
-Fly on the Wall talks directly to Google and Microsoft, with no server in between.
+Fly on the Wall talks directly to Google and Microsoft, with no server in between: it uses the
+standard installed-app OAuth flow (PKCE + a loopback redirect on `http://127.0.0.1`), and your
+sign-in token is stored in your system keychain, never in a plain file.
 
-**Google Calendar**
+The client ID/secret fields live in **Settings → Calendars** — flip the **View** toggle at the
+top of Settings from **Simple** to **Technical** to reveal them.
 
-1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project, then go
-   to **APIs & Services** and enable the **Google Calendar API**.
-2. Go to **Credentials → Create credentials → OAuth client ID**, and choose the type
-   **Desktop app**.
-3. Copy the **client ID** and **client secret** into Fly on the Wall under
-   **Settings → Calendars**, then click **Connect** and finish signing in through the browser
-   tab that opens.
+#### Google Calendar (step by step)
 
-**Microsoft 365 / Outlook**
+1. **Create a project.** In the [Google Cloud Console](https://console.cloud.google.com/), use
+   the project picker at the top → **New Project** (or reuse one).
+2. **Enable the API.** Go to **APIs & Services → Library**, search for **Google Calendar API**,
+   and click **Enable**.
+3. **Configure the consent screen.** Go to **APIs & Services → OAuth consent screen** (newer
+   consoles call this the **Google Auth Platform**):
+   - User type **External** (choose *Internal* only if everyone is in your Google Workspace org).
+   - Fill in the app name, your support email, and a developer contact.
+   - Add the scope `https://www.googleapis.com/auth/calendar.readonly`.
+   - Add the Google addresses of anyone who will connect as **Test users**.
+4. **Create the client.** Go to **APIs & Services → Credentials → Create credentials → OAuth
+   client ID**, and choose application type **Desktop app**. (Desktop clients allow the loopback
+   redirect automatically — you don't add any redirect URI.) Create it, then copy the **client
+   ID** and **client secret**.
+5. **Connect.** Paste both into **Settings → Calendars** (Technical view), click **Connect**
+   next to Google Calendar, and finish signing in through the browser tab that opens.
 
-1. In the [Azure Portal](https://portal.azure.com/), go to **App registrations → New
-   registration** (any name; for supported account types, choose personal + work accounts).
-2. Under **Authentication → Add a platform**, choose **Mobile and desktop applications**, tick
-   the loopback option (`http://localhost`), and turn on **Allow public client flows**.
-3. Copy the **Application (client) ID** into Fly on the Wall under **Settings → Calendars**,
-   then click **Connect**. No client secret is needed here.
+> **Note on the "unverified app" screen and testers.** `calendar.readonly` is a *sensitive*
+> scope. While your consent screen is in **Testing**, only listed Test users can connect and
+> their sign-in refreshes **expire after 7 days** (they'd reconnect weekly). To make it
+> permanent, publish the app to **Production** (Google may ask you to verify it for the sensitive
+> scope). The one-click tester credentials Fly on the Wall bundles are set up this way already.
+
+#### Microsoft 365 / Outlook (step by step)
+
+> **First, make sure your account has a directory.** If you just created a fresh personal
+> Microsoft account and Microsoft Entra ID greets you with *"Selected user account does not exist
+> in tenant… Please use a different account,"* your account has no Entra **directory (tenant)**
+> yet. The quickest fix: sign up at [azure.microsoft.com/free](https://azure.microsoft.com/free)
+> with that account (the free tier isn't charged — the card is for identity only), which
+> provisions a default directory. Then return to the steps below. An existing work/school
+> account already has a directory and skips this.
+
+1. **Register the app.** In the [Azure Portal](https://portal.azure.com/), go to **Microsoft
+   Entra ID → App registrations → New registration**. Give it any name, and for **supported
+   account types** choose **"Accounts in any organizational directory and personal Microsoft
+   accounts"** — this is required, because Fly on the Wall signs in through the `/common`
+   endpoint.
+2. **Add the loopback redirect.** Under **Authentication → Add a platform**, choose **Mobile and
+   desktop applications**, and add the custom redirect URI **`http://127.0.0.1`** (Azure ignores
+   the random port on loopback addresses). On the same page, set **Allow public client flows** to
+   **Yes**.
+3. **Add permissions.** Under **API permissions → Add a permission → Microsoft Graph → Delegated
+   permissions**, add **`Calendars.Read`** and **`offline_access`**. (Most accounts consent at
+   sign-in; some organizations require an admin to approve once.)
+4. **Connect.** From the app's **Overview**, copy the **Application (client) ID** into **Settings
+   → Calendars** (Technical view), then click **Connect**. There is no client secret for
+   Microsoft.
 
 ## Add your API keys
 
@@ -266,7 +303,13 @@ Releases are built by [`.github/workflows/release.yml`](.github/workflows/releas
    `tauri.conf.json` (`plugins.updater.pubkey`). **If the private key or password is lost,
    shipped apps can never verify another update** — they'd need a manual reinstall with a new
    key.
-3. Land everything on `main` first (tag-push workflows run the workflow file at the tag's
+3. *(Optional — one-click calendar for invited testers.)* Set three more repo secrets so the
+   build bundles the app's own calendar OAuth client: `FOTW_GOOGLE_CLIENT_ID`,
+   `FOTW_GOOGLE_CLIENT_SECRET` (a non-confidential PKCE desktop-client secret), and
+   `FOTW_MS_CLIENT_ID`. They're read at compile time by `src-tauri/src/calendar_defaults.rs` and
+   never live in the repo. Leave them unset and the release is simply BYO-only — users add their
+   own OAuth app under Settings › Calendars (see [Connect your calendars](#connect-your-calendars)).
+4. Land everything on `main` first (tag-push workflows run the workflow file at the tag's
    commit), then `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 Local production builds don't need the key: `npm run tauri build` skips updater artifacts. To

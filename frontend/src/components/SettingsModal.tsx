@@ -6,6 +6,7 @@ import type {
   AsrSettings,
   AudioDevice,
   CalendarStatus,
+  CalendarToggle,
   LlmSettings,
   ModelProgress,
   Template,
@@ -207,6 +208,8 @@ export default function SettingsModal({
   const [msId, setMsId] = useState("");
   const [calBusy, setCalBusy] = useState<string | null>(null);
   const [calMsg, setCalMsg] = useState<string | null>(null);
+  // Per-calendar on/off toggles (which calendars feed "Up next").
+  const [calList, setCalList] = useState<CalendarToggle[]>([]);
 
   const loadCal = () =>
     api.getCalendarSettings().then((c) => {
@@ -214,6 +217,30 @@ export default function SettingsModal({
       setGoogleId(c.google_client_id);
       setMsId(c.ms_client_id);
     });
+
+  // Best-effort: lists calendars for the connected providers (empty if none).
+  const loadCalList = () =>
+    api
+      .listCalendars()
+      .then(setCalList)
+      .catch(() => setCalList([]));
+
+  const toggleCalendar = async (c: CalendarToggle, enabled: boolean) => {
+    setCalList((list) =>
+      list.map((x) => (x.provider === c.provider && x.id === c.id ? { ...x, enabled } : x)),
+    );
+    try {
+      await api.setCalendarEnabled(c.provider, c.id, enabled);
+    } catch (e) {
+      // revert the optimistic flip on failure
+      setCalList((list) =>
+        list.map((x) =>
+          x.provider === c.provider && x.id === c.id ? { ...x, enabled: !enabled } : x,
+        ),
+      );
+      setCalMsg(String(e));
+    }
+  };
 
   const saveCal = async () => {
     await api.setCalendarSettings({
@@ -239,6 +266,7 @@ export default function SettingsModal({
       await api.connectCalendar(provider);
       setCalMsg(`${provider} connected ✓`);
       await loadCal();
+      await loadCalList();
     } catch (e) {
       setCalMsg(`✗ ${e}`);
     } finally {
@@ -251,6 +279,7 @@ export default function SettingsModal({
     try {
       await api.disconnectCalendar(provider);
       await loadCal();
+      await loadCalList();
       setCalMsg(`${provider} disconnected`);
     } catch (e) {
       setCalMsg(String(e));
@@ -284,6 +313,7 @@ export default function SettingsModal({
     loadLlm().catch(console.error);
     api.listTemplates().then(setTemplates).catch(console.error);
     loadCal().catch(console.error);
+    loadCalList().catch(console.error);
     api.mcpConfig().then(setMcpJson).catch(console.error);
     api.listMicDevices().then(setMics).catch(console.error);
     api
@@ -749,9 +779,10 @@ export default function SettingsModal({
         <section className="space-y-2">
           <SectionLabel>Calendars</SectionLabel>
           <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-            Bring your own OAuth app: a Google Cloud "Desktop app" client (ID + secret) and/or an Azure
-            app registration with a public client + loopback redirect. Tokens are stored in the Windows
-            keychain. See the README for a step-by-step.
+            Connect in one click with the built-in app — or bring your own OAuth app (Technical): a
+            Google Cloud "Desktop app" client (ID + secret) and/or an Azure app registration with a
+            public client + loopback redirect. Tokens are stored in the Windows keychain. See the
+            README for a step-by-step.
           </p>
           <Card tone="surface" pad="md">
             <div className="flex items-center justify-between gap-2">
@@ -777,7 +808,7 @@ export default function SettingsModal({
                 <Button
                   variant="primary"
                   size="sm"
-                  disabled={calBusy !== null || !googleId}
+                  disabled={calBusy !== null || !cal?.google_configured}
                   onClick={() => void connectCal("google")}
                 >
                   {calBusy === "google" ? "waiting for browser…" : "Connect"}
@@ -826,7 +857,7 @@ export default function SettingsModal({
                 <Button
                   variant="primary"
                   size="sm"
-                  disabled={calBusy !== null || !msId}
+                  disabled={calBusy !== null || !cal?.ms_configured}
                   onClick={() => void connectCal("msgraph")}
                 >
                   {calBusy === "msgraph" ? "waiting for browser…" : "Connect"}
@@ -844,6 +875,37 @@ export default function SettingsModal({
               </div>
             )}
           </Card>
+          {calList.length > 0 && (
+            <div className="space-y-1.5 pt-1">
+              <SectionLabel style={{ display: "block" }}>Calendars in “Up next”</SectionLabel>
+              <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
+                Meetings from the calendars you enable here feed the sidebar. Only events with a join
+                link are shown.
+              </p>
+              {calList.map((c) => (
+                <div
+                  key={`${c.provider}-${c.id}`}
+                  className="flex items-center justify-between gap-2"
+                >
+                  <Checkbox
+                    checked={c.enabled}
+                    onChange={(e) => void toggleCalendar(c, e.target.checked)}
+                    label={c.name}
+                  />
+                  <span className="flex flex-none items-center gap-1.5">
+                    {c.primary && (
+                      <Badge tone="neutral" size="sm">
+                        primary
+                      </Badge>
+                    )}
+                    <Badge tone="neutral" size="sm">
+                      {c.provider === "google" ? "Google" : "Outlook"}
+                    </Badge>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
           {technical && (
             <div className="flex items-center gap-2">
               <Button variant="primary" size="sm" onClick={() => void saveCal()}>

@@ -222,8 +222,20 @@ export interface CalendarStatus {
   google_client_id: string;
   google_has_secret: boolean;
   google_connected: boolean;
+  /** Connectable — usable creds exist (user-supplied OR bundled default). */
+  google_configured: boolean;
   ms_client_id: string;
   ms_connected: boolean;
+  ms_configured: boolean;
+}
+
+/** One of the user's calendars plus whether it feeds "Up next". */
+export interface CalendarToggle {
+  provider: "google" | "msgraph";
+  id: string;
+  name: string;
+  primary: boolean;
+  enabled: boolean;
 }
 
 export interface CalendarSettingsUpdate {

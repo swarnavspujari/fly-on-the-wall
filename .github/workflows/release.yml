@@ -113,6 +113,14 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Bundled calendar OAuth defaults, read at compile time by
+          # src-tauri/src/calendar_defaults.rs (option_env!). These let invited
+          # testers connect in one click; if the secrets are unset, the build is
+          # simply BYO-only. The Google secret is a non-confidential PKCE
+          # desktop-client secret (safe to ship in the binary, kept out of git).
+          FOTW_GOOGLE_CLIENT_ID: ${{ secrets.FOTW_GOOGLE_CLIENT_ID }}
+          FOTW_GOOGLE_CLIENT_SECRET: ${{ secrets.FOTW_GOOGLE_CLIENT_SECRET }}
+          FOTW_MS_CLIENT_ID: ${{ secrets.FOTW_MS_CLIENT_ID }}
         run: npx tauri build ${{ matrix.buildArgs }}
 
       - name: Rename artifacts with target suffix
