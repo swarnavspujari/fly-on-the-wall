@@ -23,8 +23,22 @@ interface Props {
   onMoveNote?: (noteId: string, folderId: string | null) => void;
 }
 
-function eventTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+/** Light "Today · 2:30 PM EST" label: start day (Today / weekday) + start time +
+ *  the local timezone abbreviation. */
+function eventWhen(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  const day =
+    d.toDateString() === now.toDateString()
+      ? "Today"
+      : d.toLocaleDateString([], { weekday: "short" });
+  const time = new Intl.DateTimeFormat([], {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(d);
+  return `${day} · ${time}`;
 }
 
 /** Stable rotation index so each folder keeps the same dot color across renders. */
@@ -316,55 +330,46 @@ export default function Sidebar({
           <List size={15} strokeWidth={1.75} className="flex-none text-text-3" />
           All notes
         </div>
-        <div
-          className={`${ROW} ${selection.view === "unfiled" ? "bg-primary-soft" : "hover:bg-surface-3"} ${
-            dropId === "unfiled" ? dropRing : ""
-          }`}
-          onClick={() => onSelect({ view: "unfiled" })}
-          {...dropProps(null, "unfiled")}
-        >
-          <Inbox size={15} strokeWidth={1.75} className="flex-none text-text-3" />
-          Unfiled
-        </div>
-        {upcoming.length > 0 && (
-          <>
-            <SectionLabel className="mt-4 px-2.5 pb-1.5">Up next</SectionLabel>
-            {upcoming.map((ev) => {
-              const live =
-                now > 0 && new Date(ev.start).getTime() <= now && now <= new Date(ev.end).getTime();
-              return (
-                <div
-                  key={`${ev.provider}-${ev.id}`}
-                  className="group mt-0.5 rounded-lg px-2.5 py-1.5 hover:bg-surface-3"
-                >
-                  <div className="flex items-center gap-1.5">
-                    {live && (
-                      <Badge tone="live" size="sm" uppercase>
-                        Live
-                      </Badge>
-                    )}
-                    <span className="truncate text-[13px] font-semibold text-text">{ev.title}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-1.5">
-                    <span className="truncate text-[11.5px] text-text-3">
-                      {eventTime(ev.start)}–{eventTime(ev.end)} ·{" "}
-                      {ev.provider === "google" ? "Google" : "Outlook"}
-                    </span>
-                    <span className="hidden flex-none group-hover:inline-flex">
-                      <Button
-                        variant="soft"
-                        size="xs"
-                        title="Start note + recording for this meeting"
-                        onClick={() => onStartFromEvent(ev)}
-                      >
-                        Start
-                      </Button>
-                    </span>
-                  </div>
+        <SectionLabel className="mt-4 px-2.5 pb-1.5">Up next</SectionLabel>
+        {upcoming.length === 0 ? (
+          <div className="px-2.5 py-1.5 text-[12.5px] text-text-3">
+            Nothing scheduled for today.
+          </div>
+        ) : (
+          upcoming.map((ev) => {
+            const live =
+              now > 0 && new Date(ev.start).getTime() <= now && now <= new Date(ev.end).getTime();
+            return (
+              <div
+                key={`${ev.provider}-${ev.id}`}
+                className="group mt-0.5 rounded-lg px-2.5 py-1.5 hover:bg-surface-3"
+              >
+                <div className="flex items-center gap-1.5">
+                  {live && (
+                    <Badge tone="live" size="sm" uppercase>
+                      Live
+                    </Badge>
+                  )}
+                  <span className="truncate text-[13px] font-semibold text-text">{ev.title}</span>
                 </div>
-              );
-            })}
-          </>
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="truncate text-[11.5px] text-text-3">
+                    {eventWhen(ev.start)} · {ev.provider === "google" ? "Google" : "Outlook"}
+                  </span>
+                  <span className="hidden flex-none group-hover:inline-flex">
+                    <Button
+                      variant="soft"
+                      size="xs"
+                      title="Start note + recording for this meeting"
+                      onClick={() => onStartFromEvent(ev)}
+                    >
+                      Start
+                    </Button>
+                  </span>
+                </div>
+              </div>
+            );
+          })
         )}
         <div className="mt-4 flex items-center justify-between pb-1 pl-2.5 pr-1">
           <SectionLabel>Folders</SectionLabel>
@@ -394,7 +399,22 @@ export default function Sidebar({
             }}
           />
         )}
-        <div className="mt-1">{tree.map((n) => renderNode(n, 0))}</div>
+        <div className="mt-1">
+          {/* Unfiled sits with the folders: selects unfiled notes, and is a drop
+              target that un-files a dragged note (folder_id → null). */}
+          <div
+            className={`${ROW} ${selection.view === "unfiled" ? "bg-primary-soft" : "hover:bg-surface-3"} ${
+              dropId === "unfiled" ? dropRing : ""
+            }`}
+            style={{ paddingLeft: "10px" }}
+            onClick={() => onSelect({ view: "unfiled" })}
+            {...dropProps(null, "unfiled")}
+          >
+            <Inbox size={15} strokeWidth={1.75} className="flex-none text-text-3" />
+            <span className="flex-1 truncate">Unfiled</span>
+          </div>
+          {tree.map((n) => renderNode(n, 0))}
+        </div>
       </nav>
       <button
         onClick={onOpenSettings}

@@ -365,7 +365,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "pong";
     case "app_info":
       return {
-        version: "0.3.1",
+        version: "1.0.1",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
         os: "windows",
       };
@@ -427,6 +427,17 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return llmSettings;
     case "get_calendar_settings":
       return calendarStatus;
+    case "list_calendars":
+      return [
+        {
+          provider: "google",
+          id: "primary",
+          name: "you@example.com",
+          primary: true,
+          enabled: true,
+        },
+        { provider: "google", id: "team-cal", name: "Team events", primary: false, enabled: true },
+      ];
     case "upcoming_meetings":
       return upcoming();
     case "list_templates":

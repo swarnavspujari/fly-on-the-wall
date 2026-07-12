@@ -73,8 +73,6 @@ const isVideo = (a: Attachment) =>
 
 const CHIP =
   "inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-[12.5px] font-medium text-text-2";
-const FOLDER_SELECT_CLS =
-  "max-w-[8.5rem] cursor-pointer rounded-md border border-line bg-surface px-2 py-1 text-xs text-text-2 outline-none hover:border-line-strong focus:border-primary";
 
 function fmtWhen(iso: string): string {
   const d = new Date(iso);
@@ -404,18 +402,22 @@ function ScreenControl({
 function MetaRow({
   note,
   meeting,
+  folders,
   templates,
   templateId,
   setTemplateId,
+  onMoveNote,
   onShowInFolder,
   onOpenAttachment,
   onRemoveAttachment,
 }: {
   note: Note;
   meeting: Meeting | null;
+  folders: Folder[];
   templates: Template[];
   templateId: string;
   setTemplateId: (id: string) => void;
+  onMoveNote: (folderId: string | null) => void;
   onShowInFolder: () => void;
   onOpenAttachment: (relPath: string) => void;
   onRemoveAttachment: (attachmentId: string) => void;
@@ -423,6 +425,9 @@ function MetaRow({
   const [opening, setOpening] = useState(false);
   const tplName =
     templates.find((t) => t.id === templateId)?.name ?? templates[0]?.name ?? "Template";
+  const folderName = note.folder_id
+    ? (folders.find((f) => f.id === note.folder_id)?.name ?? "Unfiled")
+    : "Unfiled";
   const rec = meeting?.recording ?? null;
   const mins = rec ? Math.max(1, Math.round(rec.duration_ms / 60000)) : 0;
   const fileAtts = note.attachments.filter((a) => !isVideo(a));
@@ -460,6 +465,36 @@ function MetaRow({
           {templates.map((t) => (
             <option key={t.id} value={t.id}>
               {t.name}
+            </option>
+          ))}
+        </select>
+      </span>
+
+      {/* folder chip — a styled native select that files this note */}
+      <span
+        className={`${CHIP} relative cursor-pointer !p-0 hover:bg-surface-3`}
+        title="Move to folder"
+      >
+        <span className="pointer-events-none inline-flex items-center gap-1.5 py-1 pl-2.5 pr-7">
+          <FolderIcon size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} />{" "}
+          {folderName}
+        </span>
+        <ChevronDown
+          size={12}
+          strokeWidth={1.75}
+          className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2"
+          style={{ color: "var(--text-3)" }}
+        />
+        <select
+          value={note.folder_id ?? ""}
+          onChange={(e) => onMoveNote(e.target.value === "" ? null : e.target.value)}
+          aria-label="Move to folder"
+          className="absolute inset-0 h-full w-full cursor-pointer border-0 opacity-0"
+        >
+          <option value="">Unfiled</option>
+          {folders.map((f) => (
+            <option key={f.id} value={f.id}>
+              {f.name}
             </option>
           ))}
         </select>
@@ -833,19 +868,6 @@ export default function Editor({
           >
             Ask
           </Button>
-          <select
-            value={note.folder_id ?? ""}
-            onChange={(e) => onMoveNote(e.target.value === "" ? null : e.target.value)}
-            title="Move to folder"
-            className={FOLDER_SELECT_CLS}
-          >
-            <option value="">Unfiled</option>
-            {folders.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name}
-              </option>
-            ))}
-          </select>
           <span className="h-5 w-px" style={{ background: "var(--line)" }} />
           <Button
             variant="ghost"
@@ -894,9 +916,11 @@ export default function Editor({
             <MetaRow
               note={note}
               meeting={meeting}
+              folders={folders}
               templates={templates}
               templateId={templateId}
               setTemplateId={setTemplateId}
+              onMoveNote={onMoveNote}
               onShowInFolder={showInFolder}
               onOpenAttachment={openAttachmentRel}
               onRemoveAttachment={(id) => void removeAttachment(id)}

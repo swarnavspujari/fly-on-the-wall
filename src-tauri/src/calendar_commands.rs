@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, Local, TimeZone, Utc};
 use fly_calendar::google::GoogleCalendarProvider;
 use fly_calendar::msgraph::MsGraphProvider;
 use fly_calendar::{CalendarEvent, CalendarProvider};
@@ -247,16 +247,32 @@ fn is_connected(state: &AppState, token_key: &str) -> bool {
     state.secrets.get(token_key).ok().flatten().is_some()
 }
 
-/// Events in the next 24 h across every enabled calendar of every connected
-/// provider. Events with no join link are filtered out here (server-side,
-/// before the sort); the result is de-duped and sorted by start.
+/// Local midnight tonight (start of tomorrow in the user's local timezone),
+/// expressed in UTC for the provider queries. Falls back to +24 h on the rare
+/// DST gap where local midnight doesn't exist.
+fn end_of_local_day() -> chrono::DateTime<Utc> {
+    Local::now()
+        .date_naive()
+        .succ_opt()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .and_then(|naive| Local.from_local_datetime(&naive).earliest())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|| Utc::now() + Duration::hours(24))
+}
+
+/// Events for the rest of the current local day across every enabled calendar
+/// of every connected provider. The lower bound is now − 30 min (so in-progress
+/// meetings still show); the upper bound is local midnight tonight, so at 8 PM
+/// local we look ~4 h ahead to midnight and never into tomorrow. Events with no
+/// join link are filtered out here (server-side, before the sort); the result
+/// is de-duped and sorted by start.
 #[tauri::command]
 pub async fn upcoming_meetings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<Vec<CalendarEvent>> {
     let from = Utc::now() - Duration::minutes(30); // include in-progress meetings
-    let to = Utc::now() + Duration::hours(24);
+    let to = end_of_local_day();
     let mut events = Vec::new();
 
     if is_connected(&state, fly_secrets::keys::GOOGLE_OAUTH_TOKEN) {

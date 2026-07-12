@@ -11,6 +11,81 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{CalendarError, Result};
 
+/// Branded loopback response shown in the browser after a successful connect.
+/// Self-contained (no external assets — this is a one-shot loopback reply):
+/// full document, dark brand card (ink / cream / violet), best-effort auto-close.
+const CONNECTED_PAGE: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fly on the Wall — Connected</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { display: grid; place-items: center; padding: 24px;
+    background: #0d0d12; color: #f2f2e8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .card { width: 100%; max-width: 420px; text-align: center;
+    background: #17161f; border: 1px solid rgba(242,242,232,.10);
+    border-radius: 20px; padding: 40px 32px; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
+  .badge { width: 64px; height: 64px; margin: 0 auto 20px; display: grid; place-items: center;
+    border-radius: 50%; background: #7a5cff; }
+  h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
+  p { margin: 0; font-size: 14px; line-height: 1.6; color: rgba(242,242,232,.72); }
+  .hint { margin-top: 18px; font-size: 12.5px; color: rgba(242,242,232,.5); }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="badge" aria-hidden="true">
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#0d0d12" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+    </div>
+    <h1>You're connected</h1>
+    <p>Fly on the Wall can now see your upcoming meetings — everything stays on your machine.</p>
+    <p class="hint">You can close this tab and return to the app.</p>
+  </main>
+  <script>setTimeout(function(){try{window.close();}catch(e){}}, 3000);</script>
+</body>
+</html>"##;
+
+/// Branded loopback response shown when the connect flow fails.
+const FAILED_PAGE: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fly on the Wall — Connection failed</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { display: grid; place-items: center; padding: 24px;
+    background: #0d0d12; color: #f2f2e8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .card { width: 100%; max-width: 420px; text-align: center;
+    background: #17161f; border: 1px solid rgba(242,242,232,.10);
+    border-radius: 20px; padding: 40px 32px; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
+  .badge { width: 64px; height: 64px; margin: 0 auto 20px; display: grid; place-items: center;
+    border-radius: 50%; background: #f2f2e8; }
+  h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
+  p { margin: 0; font-size: 14px; line-height: 1.6; color: rgba(242,242,232,.72); }
+  .hint { margin-top: 18px; font-size: 12.5px; color: rgba(242,242,232,.5); }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="badge" aria-hidden="true">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#0d0d12" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </div>
+    <h1>Connection failed</h1>
+    <p>Something went wrong while connecting. Please return to Fly on the Wall and try again.</p>
+    <p class="hint">You can close this tab.</p>
+  </main>
+</body>
+</html>"##;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenSet {
     pub access_token: String,
@@ -90,8 +165,8 @@ pub async fn interactive_auth(
 
     let result = parse_redirect_request(&request, &state);
     let body = match &result {
-        Ok(_) => "<html><body style='font-family:sans-serif'><h2>Fly on the Wall is connected \u{2705}</h2>You can close this tab and return to the app.</body></html>",
-        Err(_) => "<html><body style='font-family:sans-serif'><h2>Connection failed</h2>Please return to Fly on the Wall and try again.</body></html>",
+        Ok(_) => CONNECTED_PAGE,
+        Err(_) => FAILED_PAGE,
     };
     let _ = stream
         .write_all(

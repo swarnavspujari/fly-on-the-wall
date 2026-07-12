@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Meeting, ModelProgress, Transcript } from "../types";
-import { Pencil } from "lucide-react";
+import { Pencil, RefreshCw } from "lucide-react";
 import { fmtElapsed } from "./RecordingBar";
 import { Avatar, Button, ProgressBar, SectionLabel, speakerColor } from "./ui";
 
@@ -186,11 +186,30 @@ export default function TranscriptPanel({
 
   return (
     <div>
-      <div className="mb-4 flex items-baseline gap-2">
-        <SectionLabel>Transcript</SectionLabel>
-        <span className="text-[11px]" style={{ color: "var(--text-3)" }}>
-          · click any line or name to edit
-        </span>
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <div className="flex items-baseline gap-2">
+          <SectionLabel>Transcript</SectionLabel>
+          <span className="text-[11px]" style={{ color: "var(--text-3)" }}>
+            · click any line or name to edit
+          </span>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          title="Re-process this recording with the current model settings"
+          startIcon={<RefreshCw size={13} strokeWidth={1.75} />}
+          onClick={() => {
+            if (
+              confirm(
+                "Re-run transcription for this meeting?\n\nThis reprocesses the recording with your current model settings and replaces the transcript — manual line edits and speaker renames for this meeting will be lost.",
+              )
+            ) {
+              onTranscribe();
+            }
+          }}
+        >
+          Re-run transcription
+        </Button>
       </div>
       {transcript.segments.map((seg) => {
         const isSelf = seg.speaker_key === "mic";

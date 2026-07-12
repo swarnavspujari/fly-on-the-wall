@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "fly-app"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "fly-asr"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "fly-audio",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "fly-audio"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cpal",
  "fly-core",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "fly-calendar"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "fly-capture-screen"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "fly-core",
  "serde",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "fly-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "fly-diarize"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "fly-core",
@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "fly-llm"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "fly-core",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "fly-mcp"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "fly-secrets"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "keyring",
  "thiserror 2.0.18",
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "fly-storage"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "fly-core",

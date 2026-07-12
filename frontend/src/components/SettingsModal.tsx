@@ -503,7 +503,7 @@ export default function SettingsModal({
         </section>
 
         {/* Microphone */}
-        <section className="space-y-2">
+        <section className="flex items-center justify-between gap-3">
           <SectionLabel>Microphone</SectionLabel>
           <Select
             style={{ maxWidth: "20rem" }}
@@ -1057,7 +1057,14 @@ export default function SettingsModal({
         {/* MCP */}
         <section className="space-y-2">
           <SectionLabel>Chat with your notes (MCP)</SectionLabel>
-          <Card tone="invert" pad="lg">
+          <Card
+            pad="lg"
+            style={{
+              background: "var(--brand-ink)",
+              color: "#fff",
+              border: "1px solid transparent",
+            }}
+          >
             <p
               style={{
                 margin: "0 0 12px",
@@ -1128,7 +1135,6 @@ export default function SettingsModal({
 
         {/* App updates */}
         <section className="space-y-2">
-          <SectionLabel>App updates</SectionLabel>
           {updater.supported ? (
             <Card tone="surface" pad="md">
               <div className="space-y-2">

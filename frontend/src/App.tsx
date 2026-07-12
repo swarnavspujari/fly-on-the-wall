@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { X } from "lucide-react";
 import { api } from "./api";
 import type {
   AppInfo,
@@ -434,20 +435,23 @@ export default function App() {
           </div>
         )}
       </div>
-      <footer className="print:hidden flex items-center justify-between border-t border-line bg-shell px-4 py-1.5 text-xs text-text-3">
-        <span className={error ? "font-medium text-error-text" : undefined}>
-          {error ? `⚠ ${error}` : "local-first · offline capable"}
-        </span>
-        {info && (
+      {error && (
+        <div
+          className="print:hidden fixed bottom-4 left-4 z-50 flex w-80 items-start gap-2.5 rounded-2xl border border-line bg-error-soft px-4 py-3 text-[13px] leading-relaxed text-error-text"
+          style={{ boxShadow: "var(--shadow-lg)" }}
+          role="alert"
+        >
+          <span className="min-w-0 flex-1 break-words">⚠ {error}</span>
           <button
-            className="cursor-pointer hover:text-text"
-            title="Reveal data folder in Explorer"
-            onClick={() => void api.revealDataDir()}
+            onClick={() => setError(null)}
+            title="Dismiss"
+            aria-label="Dismiss error"
+            className="flex-none cursor-pointer rounded p-0.5 opacity-70 hover:opacity-100"
           >
-            v{info.version} · {info.data_dir}
+            <X size={14} strokeWidth={2} />
           </button>
-        )}
-      </footer>
+        </div>
+      )}
       {!recordingActive && <UpdateBanner updater={updater} />}
       {showFirstRun && (
         <FirstRunNotice
