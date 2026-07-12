@@ -39,7 +39,8 @@ fn raw_transcript(meeting_id: &str) -> Transcript {
                 speaker_key: "spk_0".into(),
                 start_ms: 20_000,
                 end_ms: 26_000,
-                text: "the the the budget is approved for fifty thousand dollars this quarter".into(),
+                text: "the the the budget is approved for fifty thousand dollars this quarter"
+                    .into(),
                 words: vec![],
             },
         ],
@@ -58,7 +59,9 @@ fn raw_transcript(meeting_id: &str) -> Transcript {
 
 fn seed(storage: &Storage) -> String {
     let note = storage.create_note("Polish sync", None).unwrap();
-    let meeting = storage.create_meeting("Polish sync", &note.id, &[]).unwrap();
+    let meeting = storage
+        .create_meeting("Polish sync", &note.id, &[])
+        .unwrap();
     storage
         .end_meeting(
             &meeting.id,
@@ -70,7 +73,9 @@ fn seed(storage: &Storage) -> String {
             },
         )
         .unwrap();
-    storage.save_transcript(&raw_transcript(&meeting.id)).unwrap();
+    storage
+        .save_transcript(&raw_transcript(&meeting.id))
+        .unwrap();
     meeting.id
 }
 
@@ -132,7 +137,10 @@ fn polish_preserves_ids_speakers_timestamps_offline() {
     assert!(outcome.flags.is_empty());
 
     // Cleaned variant is stored alongside raw; raw is untouched.
-    let cleaned = storage.get_cleaned_transcript(&meeting_id).unwrap().unwrap();
+    let cleaned = storage
+        .get_cleaned_transcript(&meeting_id)
+        .unwrap()
+        .unwrap();
     let raw_again = storage.get_transcript(&meeting_id).unwrap().unwrap();
     assert_eq!(raw_again.segments[0].text, raw.segments[0].text);
 
@@ -172,7 +180,10 @@ fn polish_guard_trips_on_lossy_response_offline() {
     assert_eq!(outcome.flags[0].segment_id, "t2");
 
     // The persisted cleaned variant kept t2's RAW words, not the 2-word summary.
-    let cleaned = storage.get_cleaned_transcript(&meeting_id).unwrap().unwrap();
+    let cleaned = storage
+        .get_cleaned_transcript(&meeting_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(cleaned.segments[1].text, raw.segments[1].text);
     assert_ne!(cleaned.segments[1].text, "Budget approved.");
 }

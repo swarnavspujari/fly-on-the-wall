@@ -167,7 +167,10 @@ mod tests {
 
         assert!(new_dir.join("current.md").exists());
         assert!(!new_dir.join("old.md").exists(), "must not merge legacy in");
-        assert!(legacy.exists(), "legacy left intact when new dir already exists");
+        assert!(
+            legacy.exists(),
+            "legacy left intact when new dir already exists"
+        );
     }
 
     #[test]
@@ -187,9 +190,16 @@ mod tests {
         // A key the user re-entered after migrating must win over the old one.
         new.set("groq_api_key", "gsk-new").unwrap();
 
-        copy_secrets(&old, &new, &["openai_api_key", "groq_api_key", "ms_oauth_token"]);
+        copy_secrets(
+            &old,
+            &new,
+            &["openai_api_key", "groq_api_key", "ms_oauth_token"],
+        );
 
-        assert_eq!(new.get("openai_api_key").unwrap().as_deref(), Some("sk-old"));
+        assert_eq!(
+            new.get("openai_api_key").unwrap().as_deref(),
+            Some("sk-old")
+        );
         assert_eq!(new.get("groq_api_key").unwrap().as_deref(), Some("gsk-new"));
         assert_eq!(new.get("ms_oauth_token").unwrap(), None);
     }

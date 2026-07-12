@@ -137,7 +137,14 @@ fn polish_harness() {
                         "  ⚠ PARSE EMPTY (len={}, head={:?}, tail={:?})",
                         output.len(),
                         output.chars().take(120).collect::<String>(),
-                        output.chars().rev().take(120).collect::<String>().chars().rev().collect::<String>(),
+                        output
+                            .chars()
+                            .rev()
+                            .take(120)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect::<String>(),
                     )
                 } else {
                     String::new()
@@ -180,7 +187,10 @@ fn polish_harness() {
         cleaned_words,
         cleaned_words as f64 / raw_words.max(1) as f64 * 100.0
     );
-    eprintln!("guard flags (segments the guard kept raw): {}", outcome.flags.len());
+    eprintln!(
+        "guard flags (segments the guard kept raw): {}",
+        outcome.flags.len()
+    );
     for f in &outcome.flags {
         eprintln!(
             "  FLAG {} [{}]: {} → {} chars — {}",

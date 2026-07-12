@@ -259,9 +259,7 @@ pub async fn polish_transcript(
     // `apply_cleanup` guarantees this, so this is a belt-and-suspenders guard
     // against a future regression rather than an expected runtime path.
     if !enhance::preserves_provenance(&raw, &outcome.transcript) {
-        return Err(
-            "polish produced a structurally different transcript; refusing to save".into(),
-        );
+        return Err("polish produced a structurally different transcript; refusing to save".into());
     }
 
     state

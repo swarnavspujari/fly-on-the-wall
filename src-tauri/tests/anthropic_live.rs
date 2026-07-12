@@ -17,8 +17,7 @@ fn temperature_request_succeeds_on_sonnet5() {
         eprintln!("SKIP: set ANTHROPIC_API_KEY");
         return;
     };
-    let provider =
-        fly_llm::anthropic::AnthropicProvider::new(key, "claude-sonnet-5".to_string());
+    let provider = fly_llm::anthropic::AnthropicProvider::new(key, "claude-sonnet-5".to_string());
 
     // Mirror enhance_note exactly: an explicit temperature + default thinking.
     // Before the fix this returned HTTP 400 ("`temperature` is deprecated").

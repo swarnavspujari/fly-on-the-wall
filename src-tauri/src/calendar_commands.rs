@@ -101,8 +101,9 @@ fn build_google(
 fn build_msgraph(app: &tauri::AppHandle, state: &AppState) -> Result<MsGraphProvider, String> {
     let (client_id, disabled_calendars) = {
         let storage = state.storage.lock().unwrap();
-        let id = effective_ms_client_id(&storage)
-            .ok_or("Microsoft 365 is not configured — add an application (client) ID in Settings")?;
+        let id = effective_ms_client_id(&storage).ok_or(
+            "Microsoft 365 is not configured — add an application (client) ID in Settings",
+        )?;
         (id, read_disabled(&storage, MS_DISABLED_KEY))
     };
     Ok(MsGraphProvider {

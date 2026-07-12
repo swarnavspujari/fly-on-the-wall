@@ -265,7 +265,10 @@ pub fn parse_google_events(json: &str) -> Result<Vec<CalendarEvent>> {
             // Meet / GoToWebinar link the provider didn't surface natively.
             .or_else(|| {
                 let location = item.get("location").and_then(|l| l.as_str()).unwrap_or("");
-                let description = item.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                let description = item
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
                 detect_meeting_link(&[location, description])
             });
         events.push(CalendarEvent {

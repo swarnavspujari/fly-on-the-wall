@@ -312,7 +312,13 @@ pub fn parse_cleanup_response(output: &str) -> Option<Vec<(String, String)>> {
         return None;
     }
     let parsed: CleanupResponse = serde_json::from_str(&output[start..=end]).ok()?;
-    Some(parsed.segments.into_iter().map(|s| (s.id, s.text)).collect())
+    Some(
+        parsed
+            .segments
+            .into_iter()
+            .map(|s| (s.id, s.text))
+            .collect(),
+    )
 }
 
 /// Whitespace-delimited word count. Used only for batch sizing — it is a fine
@@ -402,17 +408,13 @@ pub fn apply_cleanup(raw: &Transcript, cleaned: &HashMap<String, String>) -> Pol
 pub fn preserves_provenance(raw: &Transcript, cleaned: &Transcript) -> bool {
     raw.speakers == cleaned.speakers
         && raw.segments.len() == cleaned.segments.len()
-        && raw
-            .segments
-            .iter()
-            .zip(&cleaned.segments)
-            .all(|(a, b)| {
-                a.id == b.id
-                    && a.speaker_key == b.speaker_key
-                    && a.start_ms == b.start_ms
-                    && a.end_ms == b.end_ms
-                    && a.words == b.words
-            })
+        && raw.segments.iter().zip(&cleaned.segments).all(|(a, b)| {
+            a.id == b.id
+                && a.speaker_key == b.speaker_key
+                && a.start_ms == b.start_ms
+                && a.end_ms == b.end_ms
+                && a.words == b.words
+        })
 }
 
 #[cfg(test)]
@@ -629,7 +631,10 @@ mod tests {
                 "t1".to_string(),
                 "Yeah, it's because of the recording, I think. Swarnav Pujari.".to_string(),
             ),
-            ("t2-renamed".to_string(), "totally different text".to_string()),
+            (
+                "t2-renamed".to_string(),
+                "totally different text".to_string(),
+            ),
         ]
         .into_iter()
         .collect();
@@ -649,7 +654,10 @@ mod tests {
         // t2 has 10 raw words; the model "cleaned" it down to 2 — real content
         // was dropped. The guard must reject it, keep the raw text, and flag it.
         let cleaned: HashMap<String, String> = [
-            ("t1".to_string(), "Yeah, it's because of the recording.".to_string()),
+            (
+                "t1".to_string(),
+                "Yeah, it's because of the recording.".to_string(),
+            ),
             ("t2".to_string(), "Budget approved.".to_string()),
         ]
         .into_iter()
@@ -697,13 +705,17 @@ mod tests {
                 .collect();
         let outcome = apply_cleanup(&src, &cleaned);
         // guard must trip → raw kept, flagged, no words lost
-        assert_eq!(outcome.segments_kept_raw, 1, "lossy CJK clean must be rejected");
+        assert_eq!(
+            outcome.segments_kept_raw, 1,
+            "lossy CJK clean must be rejected"
+        );
         assert_eq!(outcome.flags.len(), 1);
         assert_eq!(outcome.transcript.segments[0].text, src.segments[0].text);
         // a faithful CJK clean (punctuation/spacing only) must still pass
         let faithful: HashMap<String, String> = [(
             "j1".to_string(),
-            "今日は予算について話し合い、五万ドルの支出が承認されました。詳細は来週確認します。".to_string(),
+            "今日は予算について話し合い、五万ドルの支出が承認されました。詳細は来週確認します。"
+                .to_string(),
         )]
         .into_iter()
         .collect();
@@ -748,8 +760,9 @@ mod tests {
             }],
             speakers: vec![],
         };
-        let cleaned: HashMap<String, String> =
-            [("s".to_string(), "Yeah.".to_string())].into_iter().collect();
+        let cleaned: HashMap<String, String> = [("s".to_string(), "Yeah.".to_string())]
+            .into_iter()
+            .collect();
         let outcome = apply_cleanup(&src, &cleaned);
         assert!(outcome.flags.is_empty());
         assert_eq!(outcome.transcript.segments[0].text, "Yeah.");

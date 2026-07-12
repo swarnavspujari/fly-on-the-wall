@@ -189,8 +189,7 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
                     let start_ms = start_sample * 1000 / rate as u64;
                     let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
                     let chunk_path = tmp_dir.join(format!("{}-{}.wav", cur.channel, start_sample));
-                    if fly_audio::mix::write_wav_mono_16(&chunk_path, &resampled, 16_000).is_err()
-                    {
+                    if fly_audio::mix::write_wav_mono_16(&chunk_path, &resampled, 16_000).is_err() {
                         continue;
                     }
                     let opts = fly_asr::TranscribeOptions {

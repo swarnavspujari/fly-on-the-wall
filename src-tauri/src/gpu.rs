@@ -276,7 +276,8 @@ mod windows {
         }
         let (chunk, _map) = stitch_spans(&samples, 16_000, &take).map_err(|e| e.to_string())?;
         // one benchmark at a time per app instance — pid is unique enough
-        let wav = std::env::temp_dir().join(format!("flyonthewall-gpu-bench-{}.wav", std::process::id()));
+        let wav =
+            std::env::temp_dir().join(format!("flyonthewall-gpu-bench-{}.wav", std::process::id()));
         fly_audio::mix::write_wav_mono_16(&wav, &chunk, 16_000).map_err(|e| e.to_string())?;
         Ok(Some(BenchSample { wav, speech_ms }))
     }

@@ -102,9 +102,19 @@ mod tests {
     #[test]
     fn merge_drops_linkless_events_and_sorts_by_start() {
         let merged = merge_upcoming(vec![
-            ev("google", "b", "2026-07-01T10:00:00Z", Some("https://zoom.us/j/2")),
+            ev(
+                "google",
+                "b",
+                "2026-07-01T10:00:00Z",
+                Some("https://zoom.us/j/2"),
+            ),
             ev("google", "a", "2026-07-01T09:00:00Z", None), // no link → dropped
-            ev("msgraph", "c", "2026-07-01T08:00:00Z", Some("https://teams.microsoft.com/l/meetup-join/x")),
+            ev(
+                "msgraph",
+                "c",
+                "2026-07-01T08:00:00Z",
+                Some("https://teams.microsoft.com/l/meetup-join/x"),
+            ),
             ev("google", "d", "2026-07-01T11:00:00Z", Some("")), // empty link → dropped
         ]);
         let ids: Vec<_> = merged.iter().map(|e| e.id.as_str()).collect();
@@ -114,10 +124,25 @@ mod tests {
     #[test]
     fn merge_dedupes_same_provider_and_id() {
         let merged = merge_upcoming(vec![
-            ev("google", "x", "2026-07-01T09:00:00Z", Some("https://zoom.us/j/1")),
-            ev("google", "x", "2026-07-01T09:00:00Z", Some("https://zoom.us/j/1")),
+            ev(
+                "google",
+                "x",
+                "2026-07-01T09:00:00Z",
+                Some("https://zoom.us/j/1"),
+            ),
+            ev(
+                "google",
+                "x",
+                "2026-07-01T09:00:00Z",
+                Some("https://zoom.us/j/1"),
+            ),
             // same id, different provider is a genuinely different event
-            ev("msgraph", "x", "2026-07-01T09:30:00Z", Some("https://zoom.us/j/1")),
+            ev(
+                "msgraph",
+                "x",
+                "2026-07-01T09:30:00Z",
+                Some("https://zoom.us/j/1"),
+            ),
         ]);
         assert_eq!(merged.len(), 2);
     }

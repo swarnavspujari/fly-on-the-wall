@@ -62,7 +62,9 @@ pub fn meeting_platform(url: &str) -> Option<&'static str> {
 
     // Microsoft Teams: work/school (teams.microsoft.com, GCC .us) or personal
     // (teams.live.com). Join links carry a meetup-join / meet path.
-    if (host_is("teams.microsoft.com") || host_is("teams.microsoft.us") || host_is("teams.live.com"))
+    if (host_is("teams.microsoft.com")
+        || host_is("teams.microsoft.us")
+        || host_is("teams.live.com"))
         && (path_lower.contains("meetup-join")
             || path_lower.contains("/meet/")
             || path_lower.contains("/l/meeting"))
@@ -142,13 +144,22 @@ mod tests {
             Some("zoom")
         );
         // bare host
-        assert_eq!(meeting_platform("https://zoom.us/j/123456789"), Some("zoom"));
+        assert_eq!(
+            meeting_platform("https://zoom.us/j/123456789"),
+            Some("zoom")
+        );
         // company vanity subdomain
-        assert_eq!(meeting_platform("https://acme.zoom.us/j/98765"), Some("zoom"));
+        assert_eq!(
+            meeting_platform("https://acme.zoom.us/j/98765"),
+            Some("zoom")
+        );
         // personal room
         assert_eq!(meeting_platform("https://zoom.us/my/janedoe"), Some("zoom"));
         // webinar path
-        assert_eq!(meeting_platform("https://zoom.us/w/1234567890"), Some("zoom"));
+        assert_eq!(
+            meeting_platform("https://zoom.us/w/1234567890"),
+            Some("zoom")
+        );
         // web-client join
         assert_eq!(
             meeting_platform("https://zoom.us/wc/join/1234567890"),
@@ -168,7 +179,10 @@ mod tests {
         assert_eq!(meeting_platform("https://zoom.us/"), None);
         // look-alike host must not match
         assert_eq!(meeting_platform("https://notzoom.us/j/123"), None);
-        assert_eq!(meeting_platform("https://evilzoom.us.attacker.com/j/1"), None);
+        assert_eq!(
+            meeting_platform("https://evilzoom.us.attacker.com/j/1"),
+            None
+        );
     }
 
     // ---- Microsoft Teams -------------------------------------------------
@@ -179,7 +193,9 @@ mod tests {
         assert_eq!(meeting_platform(url), Some("teams"));
         // GCC-High / government cloud host
         assert_eq!(
-            meeting_platform("https://teams.microsoft.us/l/meetup-join/19%3ameeting_x%40thread.v2/0"),
+            meeting_platform(
+                "https://teams.microsoft.us/l/meetup-join/19%3ameeting_x%40thread.v2/0"
+            ),
             Some("teams")
         );
         // personal Teams
@@ -191,7 +207,10 @@ mod tests {
 
     #[test]
     fn teams_non_meeting_links_rejected() {
-        assert_eq!(meeting_platform("https://teams.microsoft.com/downloads"), None);
+        assert_eq!(
+            meeting_platform("https://teams.microsoft.com/downloads"),
+            None
+        );
         assert_eq!(meeting_platform("https://www.microsoft.com/teams"), None);
     }
 
@@ -232,12 +251,18 @@ mod tests {
             meeting_platform("https://global.gotowebinar.com/join/8888888888"),
             Some("gotowebinar")
         );
-        assert_eq!(meeting_platform("https://gotomeet.me/janedoe"), Some("gotowebinar"));
+        assert_eq!(
+            meeting_platform("https://gotomeet.me/janedoe"),
+            Some("gotowebinar")
+        );
     }
 
     #[test]
     fn goto_marketing_rejected() {
-        assert_eq!(meeting_platform("https://www.gotomeeting.com/features"), None);
+        assert_eq!(
+            meeting_platform("https://www.gotomeeting.com/features"),
+            None
+        );
         assert_eq!(meeting_platform("https://www.gotomeeting.com/"), None);
     }
 
@@ -246,7 +271,10 @@ mod tests {
     #[test]
     fn unrelated_urls_and_non_urls() {
         assert_eq!(meeting_platform("https://example.com/j/123"), None);
-        assert_eq!(meeting_platform("https://calendar.google.com/event?id=1"), None);
+        assert_eq!(
+            meeting_platform("https://calendar.google.com/event?id=1"),
+            None
+        );
         assert_eq!(meeting_platform("mailto:someone@example.com"), None);
         assert_eq!(meeting_platform("not a url at all"), None);
         assert_eq!(meeting_platform("ftp://zoom.us/j/1"), None);

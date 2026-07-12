@@ -251,11 +251,30 @@ mod tests {
 
     #[test]
     fn model_temperature_predicate_has_no_prefix_collisions() {
-        for m in ["claude-sonnet-4", "claude-sonnet-4-6", "claude-opus-4-5", "claude-opus-4-6", "claude-haiku-4-5", "claude-3-5-haiku"] {
-            assert!(model_accepts_temperature(m), "{m} should accept temperature");
+        for m in [
+            "claude-sonnet-4",
+            "claude-sonnet-4-6",
+            "claude-opus-4-5",
+            "claude-opus-4-6",
+            "claude-haiku-4-5",
+            "claude-3-5-haiku",
+        ] {
+            assert!(
+                model_accepts_temperature(m),
+                "{m} should accept temperature"
+            );
         }
-        for m in ["claude-sonnet-5", "claude-opus-4-7", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"] {
-            assert!(!model_accepts_temperature(m), "{m} must NOT accept temperature");
+        for m in [
+            "claude-sonnet-5",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-fable-5",
+            "claude-mythos-5",
+        ] {
+            assert!(
+                !model_accepts_temperature(m),
+                "{m} must NOT accept temperature"
+            );
         }
     }
 

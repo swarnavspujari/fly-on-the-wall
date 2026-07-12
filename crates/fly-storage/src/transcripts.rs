@@ -264,7 +264,11 @@ mod tests {
             "the budget is approved"
         );
         assert_eq!(
-            s.get_cleaned_transcript(&meeting.id).unwrap().unwrap().segments[0].text,
+            s.get_cleaned_transcript(&meeting.id)
+                .unwrap()
+                .unwrap()
+                .segments[0]
+                .text,
             "The budget is approved."
         );
 
@@ -279,7 +283,11 @@ mod tests {
         cleaned2.segments[0].text = "Budget approved for the year.".into();
         s.save_cleaned_transcript(&cleaned2).unwrap();
         assert_eq!(
-            s.get_cleaned_transcript(&meeting.id).unwrap().unwrap().segments[0].text,
+            s.get_cleaned_transcript(&meeting.id)
+                .unwrap()
+                .unwrap()
+                .segments[0]
+                .text,
             "Budget approved for the year."
         );
         assert_eq!(

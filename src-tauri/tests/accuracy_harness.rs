@@ -885,13 +885,11 @@ fn stage_channel(src: &Path, dst: &Path, max_secs: Option<u64>) -> Result<u64, S
     match max_secs {
         None => {
             std::fs::copy(src, dst).map_err(|e| e.to_string())?;
-            let (samples, rate) =
-                fly_audio::mix::read_wav_mono(dst).map_err(|e| e.to_string())?;
+            let (samples, rate) = fly_audio::mix::read_wav_mono(dst).map_err(|e| e.to_string())?;
             Ok(samples.len() as u64 * 1000 / rate as u64)
         }
         Some(secs) => {
-            let (samples, rate) =
-                fly_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
+            let (samples, rate) = fly_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
             let take = (secs * rate as u64).min(samples.len() as u64) as usize;
             fly_audio::mix::write_wav_mono_16(dst, &samples[..take], rate)
                 .map_err(|e| e.to_string())?;

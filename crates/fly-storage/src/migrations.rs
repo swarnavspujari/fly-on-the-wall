@@ -273,13 +273,25 @@ mod tests {
 
         rename_legacy_db(dir.path()).unwrap();
 
-        assert_eq!(std::fs::read(dir.path().join("flyonthewall.db")).unwrap(), b"main");
-        assert_eq!(std::fs::read(dir.path().join("flyonthewall.db-wal")).unwrap(), b"wal");
-        assert_eq!(std::fs::read(dir.path().join("flyonthewall.db-shm")).unwrap(), b"shm");
+        assert_eq!(
+            std::fs::read(dir.path().join("flyonthewall.db")).unwrap(),
+            b"main"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("flyonthewall.db-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("flyonthewall.db-shm")).unwrap(),
+            b"shm"
+        );
         assert!(!dir.path().join("looma.db").exists());
 
         // Rerun is a no-op that never clobbers the already-migrated file.
         rename_legacy_db(dir.path()).unwrap();
-        assert_eq!(std::fs::read(dir.path().join("flyonthewall.db")).unwrap(), b"main");
+        assert_eq!(
+            std::fs::read(dir.path().join("flyonthewall.db")).unwrap(),
+            b"main"
+        );
     }
 }
