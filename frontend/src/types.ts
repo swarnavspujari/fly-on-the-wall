@@ -112,6 +112,29 @@ export interface Transcript {
   speakers: Speaker[];
 }
 
+/** One segment the drop-content guard refused to clean (its raw text was
+ * kept). Surfaced so the UI can mark lines that couldn't be safely polished —
+ * a flagged segment is never a silent word loss. */
+export interface PolishFlag {
+  segment_id: string;
+  speaker_key: string;
+  /** Content length in non-whitespace characters (language-agnostic). */
+  raw_chars: number;
+  cleaned_chars: number;
+  reason: string;
+}
+
+/** Result of a `polishTranscript` run. `transcript` is the cleaned variant —
+ * same segment ids / speaker keys / timestamps as the raw one (so provenance
+ * citations still resolve); only segment text differs. */
+export interface PolishResult {
+  transcript: Transcript;
+  segments_total: number;
+  segments_cleaned: number;
+  segments_kept_raw: number;
+  flags: PolishFlag[];
+}
+
 export interface PipelineProgress {
   meeting_id: string;
   stage: string;

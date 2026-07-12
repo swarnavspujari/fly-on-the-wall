@@ -117,6 +117,7 @@ impl LLMProvider for OpenAiCompatProvider {
             messages: vec![crate::ChatMessage::user("Reply with the single word: ok")],
             temperature: Some(0.0),
             max_tokens: Some(5),
+            thinking: crate::ThinkingMode::Default,
         })
         .await
         .map(|_| ())

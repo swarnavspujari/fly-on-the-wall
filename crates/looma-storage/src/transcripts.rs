@@ -2,6 +2,8 @@
 //! markdown/JSON mirrors inside the meeting's folder (`transcript.md`,
 //! `transcript.json`), so one folder holds a meeting's audio + transcript.
 
+use std::path::PathBuf;
+
 use looma_core::Transcript;
 use rusqlite::OptionalExtension;
 
@@ -30,6 +32,51 @@ impl Storage {
             )
             .optional()?;
         match json {
+            Some(j) => Ok(Some(serde_json::from_str(&j)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Store the LLM-polished transcript variant ALONGSIDE the raw one, in the
+    /// raw row's `cleaned_json` column — the raw `json` is never touched, so a
+    /// bad or re-run polish can't corrupt the source of truth. Re-runnable:
+    /// each call replaces the cleaned variant. Requires the raw transcript to
+    /// exist first (the polish pass reads it), and mirrors to
+    /// `transcript.cleaned.{md,json}` next to `transcript.{md,json}`.
+    ///
+    /// The caller is responsible for the provenance contract: this persists
+    /// whatever it's given, so `cleaned` must share the raw's segment ids,
+    /// speaker keys, and timestamps (see `looma_core::enhance::apply_cleanup`).
+    pub fn save_cleaned_transcript(&self, cleaned: &Transcript) -> Result<()> {
+        let json = serde_json::to_string(cleaned)?;
+        let n = self.conn.execute(
+            "UPDATE transcripts SET cleaned_json = ?1 WHERE meeting_id = ?2",
+            (&json, &cleaned.meeting_id),
+        )?;
+        if n == 0 {
+            return Err(StorageError::NotFound(format!(
+                "raw transcript for {} (transcribe before polishing)",
+                cleaned.meeting_id
+            )));
+        }
+        let (md, json_path) = self.transcript_mirror_paths(&cleaned.meeting_id, ".cleaned");
+        std::fs::write(md, cleaned.to_markdown())?;
+        std::fs::write(json_path, serde_json::to_string_pretty(cleaned)?)?;
+        Ok(())
+    }
+
+    /// The polished variant if the polish pass has run, else `None` (the raw
+    /// transcript is always available via `get_transcript`).
+    pub fn get_cleaned_transcript(&self, meeting_id: &str) -> Result<Option<Transcript>> {
+        let json: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT cleaned_json FROM transcripts WHERE meeting_id = ?1",
+                [meeting_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match json.flatten() {
             Some(j) => Ok(Some(serde_json::from_str(&j)?)),
             None => Ok(None),
         }
@@ -98,29 +145,39 @@ impl Storage {
             (&t.meeting_id, &body),
         )?;
 
-        // Mirrors live next to the recording; a meeting without a resolvable
-        // folder (no recording attached, folder gone) falls back to the
-        // legacy top-level transcripts/ dir.
+        let (md, json) = self.transcript_mirror_paths(&t.meeting_id, "");
+        std::fs::write(md, t.to_markdown())?;
+        std::fs::write(json, serde_json::to_string_pretty(t)?)?;
+        Ok(())
+    }
+
+    /// Resolve the on-disk `(markdown, json)` mirror paths for a transcript
+    /// variant. Mirrors live next to the recording; a meeting without a
+    /// resolvable folder (no recording attached, folder gone) falls back to
+    /// the legacy top-level `transcripts/` dir. `variant` is `""` for the raw
+    /// transcript or `".cleaned"` for the polished one — so raw and polished
+    /// sit side by side (`transcript.md` / `transcript.cleaned.md`).
+    fn transcript_mirror_paths(&self, meeting_id: &str, variant: &str) -> (PathBuf, PathBuf) {
         let meeting_dir = self
-            .get_meeting(&t.meeting_id)
+            .get_meeting(meeting_id)
             .ok()
             .and_then(|m| m.recording)
             .and_then(|r| crate::meetings::recording_dir_rel(&r))
             .map(|rel| self.data_dir.join(rel))
             .filter(|d| d.is_dir());
-        let (md, json) = match meeting_dir {
-            Some(dir) => (dir.join("transcript.md"), dir.join("transcript.json")),
+        match meeting_dir {
+            Some(dir) => (
+                dir.join(format!("transcript{variant}.md")),
+                dir.join(format!("transcript{variant}.json")),
+            ),
             None => {
                 let dir = self.data_dir.join("transcripts");
                 (
-                    dir.join(format!("{}.md", t.meeting_id)),
-                    dir.join(format!("{}.json", t.meeting_id)),
+                    dir.join(format!("{meeting_id}{variant}.md")),
+                    dir.join(format!("{meeting_id}{variant}.json")),
                 )
             }
-        };
-        std::fs::write(md, t.to_markdown())?;
-        std::fs::write(json, serde_json::to_string_pretty(t)?)?;
-        Ok(())
+        }
     }
 }
 
@@ -181,6 +238,67 @@ mod tests {
         assert!(hits
             .iter()
             .any(|h| h.kind == crate::SearchHitKind::Transcript && h.note_id == note.id));
+    }
+
+    /// The polished variant is stored alongside the raw one: `get_transcript`
+    /// keeps returning the raw text, `get_cleaned_transcript` returns the
+    /// polished text, and both mirror files exist side by side.
+    #[test]
+    fn cleaned_transcript_stored_alongside_raw() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("Polish mtg", None).unwrap();
+        let meeting = s.create_meeting("Polish mtg", &note.id, &[]).unwrap();
+        let raw = sample_transcript(&meeting.id);
+        s.save_transcript(&raw).unwrap();
+
+        // no polish yet
+        assert!(s.get_cleaned_transcript(&meeting.id).unwrap().is_none());
+
+        let mut cleaned = raw.clone();
+        cleaned.segments[0].text = "The budget is approved.".into();
+        s.save_cleaned_transcript(&cleaned).unwrap();
+
+        // raw is untouched; cleaned is retrievable
+        assert_eq!(
+            s.get_transcript(&meeting.id).unwrap().unwrap().segments[0].text,
+            "the budget is approved"
+        );
+        assert_eq!(
+            s.get_cleaned_transcript(&meeting.id).unwrap().unwrap().segments[0].text,
+            "The budget is approved."
+        );
+
+        // both mirror files exist side by side (legacy dir: no recording)
+        let tdir = dir.path().join("transcripts");
+        assert!(tdir.join(format!("{}.md", meeting.id)).exists());
+        assert!(tdir.join(format!("{}.cleaned.md", meeting.id)).exists());
+        assert!(tdir.join(format!("{}.cleaned.json", meeting.id)).exists());
+
+        // re-running polish replaces the cleaned variant, still not the raw
+        let mut cleaned2 = raw.clone();
+        cleaned2.segments[0].text = "Budget approved for the year.".into();
+        s.save_cleaned_transcript(&cleaned2).unwrap();
+        assert_eq!(
+            s.get_cleaned_transcript(&meeting.id).unwrap().unwrap().segments[0].text,
+            "Budget approved for the year."
+        );
+        assert_eq!(
+            s.get_transcript(&meeting.id).unwrap().unwrap().segments[0].text,
+            "the budget is approved"
+        );
+    }
+
+    /// Polishing before the raw transcript exists is an error, not a silent
+    /// insert — the polish pass reads the raw transcript as its source.
+    #[test]
+    fn cleaned_transcript_requires_raw_first() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("m", None).unwrap();
+        let meeting = s.create_meeting("m", &note.id, &[]).unwrap();
+        let err = s
+            .save_cleaned_transcript(&sample_transcript(&meeting.id))
+            .unwrap_err();
+        assert!(matches!(err, crate::StorageError::NotFound(_)));
     }
 
     #[test]

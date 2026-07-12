@@ -91,11 +91,30 @@ impl ChatMessage {
     }
 }
 
+/// Whether the provider should run its (adaptive/extended) thinking. Mechanical
+/// transforms — like the transcript-cleanup pass — set `Disabled`: current
+/// Anthropic models (e.g. claude-sonnet-5) run adaptive thinking by default,
+/// and those reasoning tokens count against `max_tokens`, truncating the JSON
+/// output mid-array. Providers without a thinking mode ignore this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingMode {
+    /// Provider default (adaptive-on for current Anthropic models).
+    #[default]
+    Default,
+    /// Turn extended thinking off — full token budget goes to the answer.
+    Disabled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// Thinking control (see `ThinkingMode`); ignored by providers that don't
+    /// support thinking.
+    #[serde(default)]
+    pub thinking: ThinkingMode,
 }
 
 /// Per-provider connection settings, editable in the app's Settings screen.

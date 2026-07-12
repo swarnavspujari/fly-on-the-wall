@@ -21,6 +21,7 @@ import type {
   Meeting,
   Note,
   NoteSummary,
+  PolishResult,
   RecordingStatus,
   SearchHit,
   Template,
@@ -79,6 +80,13 @@ export const api = {
   // transcription
   transcribeMeeting: (meetingId: string) => invoke<void>("transcribe_meeting", { meetingId }),
   getTranscript: (meetingId: string) => invoke<Transcript | null>("get_transcript", { meetingId }),
+  // The LLM-polished transcript variant (null until polishTranscript runs).
+  getCleanedTranscript: (meetingId: string) =>
+    invoke<Transcript | null>("get_cleaned_transcript", { meetingId }),
+  // Re-runnable cleanup pass: produces + stores the polished variant alongside
+  // the raw transcript (never overwrites raw). Returns per-run stats + flags.
+  polishTranscript: (meetingId: string) =>
+    invoke<PolishResult>("polish_transcript", { meetingId }),
   relabelSpeaker: (meetingId: string, speakerKey: string, label: string) =>
     invoke<Transcript>("relabel_speaker", { meetingId, speakerKey, label }),
   editTranscriptSegment: (meetingId: string, segmentId: string, text: string) =>

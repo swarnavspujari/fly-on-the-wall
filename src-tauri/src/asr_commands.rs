@@ -34,6 +34,22 @@ pub fn get_transcript(
         .map_err(|e| e.to_string())
 }
 
+/// The LLM-polished transcript variant, if the polish pass has run for this
+/// meeting (else `None`). The raw transcript is always available via
+/// `get_transcript`; the UI toggles between the two.
+#[tauri::command]
+pub fn get_cleaned_transcript(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> CmdResult<Option<Transcript>> {
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .get_cleaned_transcript(&meeting_id)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn relabel_speaker(
     state: State<'_, AppState>,

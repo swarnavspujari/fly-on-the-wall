@@ -2,8 +2,10 @@
 //! settings. Provider selection is composition-root logic: settings rows
 //! (non-secret) + keychain (keys) → a boxed `LLMProvider`.
 
-use looma_core::{enhance, Note, Template};
-use looma_llm::{ChatMessage, ChatRequest, LLMProvider};
+use std::collections::HashMap;
+
+use looma_core::{enhance, Note, Template, Transcript};
+use looma_llm::{ChatMessage, ChatRequest, LLMProvider, ThinkingMode};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -128,6 +130,7 @@ pub async fn enhance_note(
             ],
             temperature: Some(0.2),
             max_tokens: Some(4096),
+            thinking: ThinkingMode::Default,
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -155,6 +158,126 @@ pub fn edit_note_block(
         .unwrap()
         .edit_note_block(&note_id, &block_id, &markdown)
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Polish transcript (LLM cleanup pass)
+// ---------------------------------------------------------------------------
+
+/// Batching bounds for the cleanup pass. A full meeting rarely fits one
+/// non-streaming response, and real segments vary wildly in length (a phone
+/// dial-in can produce 800-word run-on segments), so batches are bounded by
+/// BOTH a word budget — keeping each response under the token cap — and a
+/// segment count. The no-loss guard means a dropped or truncated batch only
+/// leaves those segments un-cleaned (raw), never dropped.
+const POLISH_MAX_BATCH_WORDS: usize = 1200;
+const POLISH_MAX_BATCH_SEGMENTS: usize = 40;
+
+#[derive(Serialize)]
+pub struct PolishResult {
+    /// The cleaned transcript — identical to the raw one in segment count,
+    /// ids, speaker keys, and timestamps; only text differs. Provenance
+    /// citations that reference segment ids keep resolving.
+    pub transcript: Transcript,
+    pub segments_total: usize,
+    pub segments_cleaned: usize,
+    pub segments_kept_raw: usize,
+    /// Segments the drop-content guard refused to clean (kept raw), so the UI
+    /// can show which lines couldn't be safely polished — never a silent loss.
+    pub flags: Vec<enhance::PolishFlag>,
+}
+
+/// Run the stored RAW transcript through the chosen LLM provider to produce a
+/// cleaned, readable variant, stored ALONGSIDE the raw one (never overwriting
+/// it). Re-runnable from the UI: each run rebuilds the cleaned variant from the
+/// raw source. Provider follows the user's selection — default Anthropic
+/// (`claude-sonnet-5`); the local Ollama provider is used when the user has
+/// selected it (privacy / offline). The cleaned text is mapped back strictly
+/// by segment id, so ids / speakers / timestamps are preserved exactly and a
+/// lossy or truncated response can only leave segments un-cleaned, not dropped.
+#[tauri::command]
+pub async fn polish_transcript(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> CmdResult<PolishResult> {
+    let provider = build_provider(&state)?;
+    let raw = {
+        let storage = state.storage.lock().unwrap();
+        storage
+            .get_transcript(&meeting_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                "no transcript to polish yet — transcribe the meeting first".to_string()
+            })?
+    };
+    if raw.segments.is_empty() {
+        return Err("transcript has no segments to polish".into());
+    }
+
+    tracing::info!(
+        meeting_id,
+        provider = provider.id(),
+        segments = raw.segments.len(),
+        "polishing transcript"
+    );
+
+    // One provider call per batch; merge cleaned text by segment id.
+    let mut cleaned_map: HashMap<String, String> = HashMap::new();
+    for range in enhance::plan_cleanup_batches(
+        &raw.segments,
+        POLISH_MAX_BATCH_WORDS,
+        POLISH_MAX_BATCH_SEGMENTS,
+    ) {
+        let prompt = enhance::build_cleanup_prompt(&raw.segments[range]);
+        let output = provider
+            .chat(ChatRequest {
+                messages: vec![
+                    ChatMessage::system(prompt.system),
+                    ChatMessage::user(prompt.user),
+                ],
+                // No temperature: the cleanup contract (no paraphrase/invent)
+                // lives in the system prompt, and the default model
+                // (claude-sonnet-5) rejects an explicit `temperature` with a
+                // 400. Omitting it works across every provider.
+                temperature: None,
+                max_tokens: Some(8192),
+                // Cleanup is mechanical; disable thinking so adaptive reasoning
+                // tokens don't eat the budget and truncate the JSON mid-array
+                // (claude-sonnet-5 thinks by default — see AnthropicProvider).
+                thinking: ThinkingMode::Disabled,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        for (id, text) in enhance::parse_cleanup_response(&output).unwrap_or_default() {
+            cleaned_map.insert(id, text);
+        }
+    }
+
+    let outcome = enhance::apply_cleanup(&raw, &cleaned_map);
+    // The provenance contract is load-bearing (the Enhanced doc cites segment
+    // ids): refuse to persist a variant that drifted from the raw structure.
+    // `apply_cleanup` guarantees this, so this is a belt-and-suspenders guard
+    // against a future regression rather than an expected runtime path.
+    if !enhance::preserves_provenance(&raw, &outcome.transcript) {
+        return Err(
+            "polish produced a structurally different transcript; refusing to save".into(),
+        );
+    }
+
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .save_cleaned_transcript(&outcome.transcript)
+        .map_err(|e| e.to_string())?;
+
+    Ok(PolishResult {
+        segments_total: raw.segments.len(),
+        segments_cleaned: outcome.segments_cleaned,
+        segments_kept_raw: outcome.segments_kept_raw,
+        flags: outcome.flags,
+        transcript: outcome.transcript,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +346,7 @@ pub async fn ask_meeting(
             messages,
             temperature: Some(0.3),
             max_tokens: Some(2048),
+            thinking: ThinkingMode::Default,
         })
         .await
         .map_err(|e| e.to_string())

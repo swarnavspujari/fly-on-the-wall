@@ -138,8 +138,12 @@ impl Storage {
             );
 
             CREATE TABLE IF NOT EXISTS transcripts (
-                meeting_id TEXT PRIMARY KEY,
-                json       TEXT NOT NULL
+                meeting_id   TEXT PRIMARY KEY,
+                json         TEXT NOT NULL,
+                -- LLM-polished variant, stored ALONGSIDE the raw `json` (never
+                -- overwriting it). NULL until the polish pass runs; a re-run
+                -- replaces it from the raw source. See transcripts.rs.
+                cleaned_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS templates (
@@ -228,6 +232,9 @@ impl Storage {
                     ("built_in", "INTEGER NOT NULL DEFAULT 0"),
                 ],
             ),
+            // Added with the transcript-polish feature; older DBs get it via
+            // ALTER so the polished-variant column exists before first write.
+            ("transcripts", &[("cleaned_json", "TEXT")]),
         ];
         for (table, cols) in EXPECTED {
             let existing: std::collections::HashSet<String> = conn
