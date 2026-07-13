@@ -194,7 +194,10 @@ async fn polish_after_transcribe(state: &AppState, on_stage: StageSink<'_>, meet
             tracing::info!(meeting_id, error = %e, "transcript cleanup skipped (raw transcript stands)")
         }
         Err(_) => {
-            tracing::warn!(meeting_id, "transcript cleanup timed out (raw transcript stands)")
+            tracing::warn!(
+                meeting_id,
+                "transcript cleanup timed out (raw transcript stands)"
+            )
         }
     }
     // Clear only OUR marker: if the user re-enqueued this meeting while the

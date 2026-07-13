@@ -106,14 +106,14 @@ impl Storage {
         speaker_key: &str,
         label: &str,
     ) -> Result<Transcript> {
-        let relabel = |t: &mut Transcript| match t.speakers.iter_mut().find(|s| s.key == speaker_key)
-        {
-            Some(s) => s.label = label.to_string(),
-            None => t.speakers.push(fly_core::Speaker {
-                key: speaker_key.to_string(),
-                label: label.to_string(),
-            }),
-        };
+        let relabel =
+            |t: &mut Transcript| match t.speakers.iter_mut().find(|s| s.key == speaker_key) {
+                Some(s) => s.label = label.to_string(),
+                None => t.speakers.push(fly_core::Speaker {
+                    key: speaker_key.to_string(),
+                    label: label.to_string(),
+                }),
+            };
         let mut transcript = self
             .get_transcript(meeting_id)?
             .ok_or_else(|| StorageError::NotFound(format!("transcript for {meeting_id}")))?;

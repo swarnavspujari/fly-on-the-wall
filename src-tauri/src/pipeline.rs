@@ -188,7 +188,9 @@ pub async fn run_with(
                 on_stage,
                 meeting_id,
                 "ensuring-models",
-                Some("Groq is enabled but no API key is saved — transcribing locally instead".into()),
+                Some(
+                    "Groq is enabled but no API key is saved — transcribing locally instead".into(),
+                ),
             );
         }
         key
