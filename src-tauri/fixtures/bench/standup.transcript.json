@@ -1,0 +1,41 @@
+{
+  "meeting_id": "bench-standup",
+  "language": "en",
+  "engine": "bench-fixture",
+  "segments": [
+    { "id": "seg001", "speaker_key": "mic", "start_ms": 0, "end_ms": 6000, "text": "okay um good morning everyone let's uh let's run through sprint 42 quickly we're at day eight of ten", "words": [] },
+    { "id": "seg002", "speaker_key": "mic", "start_ms": 6000, "end_ms": 14000, "text": "velocity check first we committed 41 points and we're tracking at 34 so we're we're a little behind", "words": [] },
+    { "id": "seg003", "speaker_key": "spk_0", "start_ms": 14000, "end_ms": 20000, "text": "yeah that's that's mostly the migration work landing on me I'll get into it", "words": [] },
+    { "id": "seg004", "speaker_key": "mic", "start_ms": 20000, "end_ms": 27000, "text": "bug count is seventeen open right now five of those are P1 which is uh which is too many", "words": [] },
+    { "id": "seg005", "speaker_key": "spk_1", "start_ms": 27000, "end_ms": 33000, "text": "two of the P1s are actually the same root cause the session token refresh thing", "words": [] },
+    { "id": "seg006", "speaker_key": "mic", "start_ms": 33000, "end_ms": 38000, "text": "okay good so effectively four then priya you want to go first", "words": [] },
+    { "id": "seg007", "speaker_key": "spk_0", "start_ms": 38000, "end_ms": 47000, "text": "sure so the postgres migration script is about eighty percent done um I finished the schema diff tooling yesterday", "words": [] },
+    { "id": "seg008", "speaker_key": "spk_0", "start_ms": 47000, "end_ms": 56000, "text": "the the remaining piece is the backfill for the events table which is nine hundred million rows so I want to batch it carefully", "words": [] },
+    { "id": "seg009", "speaker_key": "spk_0", "start_ms": 56000, "end_ms": 62000, "text": "I should have the whole script done by Thursday end of day", "words": [] },
+    { "id": "seg010", "speaker_key": "mic", "start_ms": 62000, "end_ms": 70000, "text": "okay and on the cutover date I've been thinking um given where we are I don't want to do it during the sprint", "words": [] },
+    { "id": "seg011", "speaker_key": "mic", "start_ms": 70000, "end_ms": 78000, "text": "let's officially postpone the database cutover to March 3rd that gives us the weekend buffer and QA time", "words": [] },
+    { "id": "seg012", "speaker_key": "spk_0", "start_ms": 78000, "end_ms": 83000, "text": "agreed March 3rd works I'd rather not rush nine hundred million rows", "words": [] },
+    { "id": "seg013", "speaker_key": "mic", "start_ms": 83000, "end_ms": 90000, "text": "and priya can you write up the rollback plan for the cutover I want it reviewed before we commit", "words": [] },
+    { "id": "seg014", "speaker_key": "spk_0", "start_ms": 90000, "end_ms": 95000, "text": "yep I'll have the rollback plan written by Friday", "words": [] },
+    { "id": "seg015", "speaker_key": "mic", "start_ms": 95000, "end_ms": 99000, "text": "great marcus you're up", "words": [] },
+    { "id": "seg016", "speaker_key": "spk_1", "start_ms": 99000, "end_ms": 108000, "text": "so the onboarding flow A B test wrapped on Monday um variant B the three step wizard beat control", "words": [] },
+    { "id": "seg017", "speaker_key": "spk_1", "start_ms": 108000, "end_ms": 116000, "text": "conversion to first project created was up twelve percent with variant B and time to activate dropped from nine minutes to six", "words": [] },
+    { "id": "seg018", "speaker_key": "mic", "start_ms": 116000, "end_ms": 122000, "text": "twelve percent is is huge okay decision made we ship variant B to everyone this sprint", "words": [] },
+    { "id": "seg019", "speaker_key": "spk_1", "start_ms": 122000, "end_ms": 130000, "text": "cool one thing though the wizard adds about 400 milliseconds to first paint on slow connections I want to lazy load step three", "words": [] },
+    { "id": "seg020", "speaker_key": "mic", "start_ms": 130000, "end_ms": 136000, "text": "file a perf ticket for that so it doesn't get lost and we'll slot it next sprint", "words": [] },
+    { "id": "seg021", "speaker_key": "spk_1", "start_ms": 136000, "end_ms": 140000, "text": "will do I'll file the perf ticket today", "words": [] },
+    { "id": "seg022", "speaker_key": "spk_0", "start_ms": 140000, "end_ms": 148000, "text": "oh one thing that came up from the the enterprise deal does anyone know if we need SOC 2 evidence for the EU tenant specifically", "words": [] },
+    { "id": "seg023", "speaker_key": "mic", "start_ms": 148000, "end_ms": 154000, "text": "hm I actually don't know um let's not guess I'll take it offline with legal", "words": [] },
+    { "id": "seg024", "speaker_key": "spk_1", "start_ms": 154000, "end_ms": 158000, "text": "yeah I have no idea either", "words": [] },
+    { "id": "seg025", "speaker_key": "mic", "start_ms": 158000, "end_ms": 167000, "text": "last thing from me I'm going to book the load test window with infra for February 25th so we have real numbers before cutover", "words": [] },
+    { "id": "seg026", "speaker_key": "spk_0", "start_ms": 167000, "end_ms": 172000, "text": "perfect that's the week before so we'll have time to react", "words": [] },
+    { "id": "seg027", "speaker_key": "mic", "start_ms": 172000, "end_ms": 180000, "text": "alright so recap migration script Thursday rollback plan Friday variant B ships perf ticket filed load test on the 25th cutover March 3rd", "words": [] },
+    { "id": "seg028", "speaker_key": "spk_1", "start_ms": 180000, "end_ms": 183000, "text": "sounds right", "words": [] },
+    { "id": "seg029", "speaker_key": "spk_0", "start_ms": 183000, "end_ms": 186000, "text": "yep thanks all", "words": [] }
+  ],
+  "speakers": [
+    { "key": "mic", "label": "Sam" },
+    { "key": "spk_0", "label": "Priya" },
+    { "key": "spk_1", "label": "Marcus" }
+  ]
+}

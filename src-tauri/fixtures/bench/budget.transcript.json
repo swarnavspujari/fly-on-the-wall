@@ -1,0 +1,38 @@
+{
+  "meeting_id": "bench-budget",
+  "language": "en",
+  "engine": "bench-fixture",
+  "segments": [
+    { "id": "seg001", "speaker_key": "mic", "start_ms": 0, "end_ms": 6000, "text": "hey dana thanks for making time I want to lock the Q3 budget today if we can", "words": [] },
+    { "id": "seg002", "speaker_key": "spk_0", "start_ms": 6000, "end_ms": 13000, "text": "yes let's do it I sent you the the updated model last night version seven", "words": [] },
+    { "id": "seg003", "speaker_key": "mic", "start_ms": 13000, "end_ms": 20000, "text": "saw it um first the headline where's runway landing after these changes", "words": [] },
+    { "id": "seg004", "speaker_key": "spk_0", "start_ms": 20000, "end_ms": 29000, "text": "with the current plan we're at fourteen months of runway burning about two hundred and ten thousand a month", "words": [] },
+    { "id": "seg005", "speaker_key": "mic", "start_ms": 29000, "end_ms": 34000, "text": "okay fourteen is is workable but I don't want it dropping under twelve", "words": [] },
+    { "id": "seg006", "speaker_key": "spk_0", "start_ms": 34000, "end_ms": 42000, "text": "right so that constrains the marketing ask they came in asking for a hundred and twenty thousand for the quarter", "words": [] },
+    { "id": "seg007", "speaker_key": "mic", "start_ms": 42000, "end_ms": 50000, "text": "a hundred twenty is too much given pipeline coverage um what did they actually convert last quarter", "words": [] },
+    { "id": "seg008", "speaker_key": "spk_0", "start_ms": 50000, "end_ms": 59000, "text": "they spent ninety and sourced about six hundred thousand in pipeline of which roughly a third closed so decent but not not spectacular", "words": [] },
+    { "id": "seg009", "speaker_key": "mic", "start_ms": 59000, "end_ms": 66000, "text": "let's approve ninety five thousand for marketing in Q3 and revisit mid quarter if CAC holds", "words": [] },
+    { "id": "seg010", "speaker_key": "spk_0", "start_ms": 66000, "end_ms": 71000, "text": "ninety five approved noted I'll tell them today", "words": [] },
+    { "id": "seg011", "speaker_key": "mic", "start_ms": 71000, "end_ms": 78000, "text": "on hiring I think we hold the freeze except except for the data role we keep losing deals on analytics", "words": [] },
+    { "id": "seg012", "speaker_key": "spk_0", "start_ms": 78000, "end_ms": 87000, "text": "agreed the model has one senior data engineer at one eighty five base plus benefits starting September first everything else stays frozen", "words": [] },
+    { "id": "seg013", "speaker_key": "mic", "start_ms": 87000, "end_ms": 93000, "text": "good I'll email the recruiter this afternoon to open the search", "words": [] },
+    { "id": "seg014", "speaker_key": "spk_0", "start_ms": 93000, "end_ms": 101000, "text": "next the office lease renewal is due the landlord came back at eight thousand four hundred a month for a twelve month term", "words": [] },
+    { "id": "seg015", "speaker_key": "mic", "start_ms": 101000, "end_ms": 108000, "text": "that's up what four percent from last year um given hybrid I thought about going smaller", "words": [] },
+    { "id": "seg016", "speaker_key": "spk_0", "start_ms": 108000, "end_ms": 116000, "text": "I looked the smaller suites nearby are actually more per seat and moving costs would eat two years of savings", "words": [] },
+    { "id": "seg017", "speaker_key": "mic", "start_ms": 116000, "end_ms": 122000, "text": "fine let's renew at eighty four hundred for twelve months decision made", "words": [] },
+    { "id": "seg018", "speaker_key": "spk_0", "start_ms": 122000, "end_ms": 131000, "text": "also I did the SaaS audit we're paying for nineteen tools nobody has logged into in ninety days that's three thousand two hundred a month", "words": [] },
+    { "id": "seg019", "speaker_key": "mic", "start_ms": 131000, "end_ms": 136000, "text": "wow yes kill them can you own cancelling those", "words": [] },
+    { "id": "seg020", "speaker_key": "spk_0", "start_ms": 136000, "end_ms": 142000, "text": "I'll cancel the unused subscriptions by end of next week thirty two hundred a month back", "words": [] },
+    { "id": "seg021", "speaker_key": "mic", "start_ms": 142000, "end_ms": 150000, "text": "one open thing payroll um the provider raised fees again should we move to a cheaper platform", "words": [] },
+    { "id": "seg022", "speaker_key": "spk_0", "start_ms": 150000, "end_ms": 158000, "text": "I honestly don't know yet switching mid year is painful for tax filings let me not answer that today", "words": [] },
+    { "id": "seg023", "speaker_key": "mic", "start_ms": 158000, "end_ms": 163000, "text": "okay parked um what's left for the board", "words": [] },
+    { "id": "seg024", "speaker_key": "spk_0", "start_ms": 163000, "end_ms": 172000, "text": "I'll commit to sending the revised financial model to the board by July twenty first ahead of the meeting on the twenty eighth", "words": [] },
+    { "id": "seg025", "speaker_key": "mic", "start_ms": 172000, "end_ms": 180000, "text": "perfect so recap marketing at ninety five k one data hire at one eighty five lease renewed at eighty four hundred SaaS cuts save thirty two hundred", "words": [] },
+    { "id": "seg026", "speaker_key": "spk_0", "start_ms": 180000, "end_ms": 186000, "text": "and runway stays around fourteen months at about two ten burn yes", "words": [] },
+    { "id": "seg027", "speaker_key": "mic", "start_ms": 186000, "end_ms": 190000, "text": "great thanks dana talk next week", "words": [] }
+  ],
+  "speakers": [
+    { "key": "mic", "label": "Alex" },
+    { "key": "spk_0", "label": "Dana" }
+  ]
+}
