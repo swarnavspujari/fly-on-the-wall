@@ -368,8 +368,8 @@ function VideoLightbox({
           className="rounded-lg border border-line px-4 py-6 text-center text-[13px]"
           style={{ color: "var(--text-2)" }}
         >
-          This recording can't be played here — the file may be missing or in a format the app
-          can't decode. Try the system player below.
+          This recording can't be played here — the file may be missing or in a format the app can't
+          decode. Try the system player below.
         </div>
       )}
     </Modal>

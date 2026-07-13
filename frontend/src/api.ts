@@ -66,8 +66,7 @@ export const api = {
   openAttachment: (relPath: string) => invoke<void>("open_attachment", { relPath }),
   // Lazily generates (native side, ffmpeg sidecar) and caches a poster .jpg
   // next to a video attachment; returns the poster's rel path.
-  ensureVideoThumbnail: (relPath: string) =>
-    invoke<string>("ensure_video_thumbnail", { relPath }),
+  ensureVideoThumbnail: (relPath: string) => invoke<string>("ensure_video_thumbnail", { relPath }),
   revealAttachment: (relPath: string) => invoke<void>("reveal_attachment", { relPath }),
   revealDataDir: () => invoke<void>("reveal_data_dir"),
   mcpConfig: () => invoke<string>("mcp_config"),
