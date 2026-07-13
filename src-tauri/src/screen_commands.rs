@@ -237,7 +237,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let clip = dir.path().join("clip.mp4");
         let out = tokio::process::Command::new(&ffmpeg)
-            .args(["-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=2:size=320x240:rate=10",
+            ])
             .args(["-pix_fmt", "yuv420p", "-y"])
             .arg(&clip)
             .output()
