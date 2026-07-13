@@ -17,6 +17,9 @@ pub enum SearchHitKind {
 pub struct SearchHit {
     pub kind: SearchHitKind,
     pub note_id: String,
+    /// For transcript hits: the meeting the matched transcript belongs to.
+    #[serde(default)]
+    pub meeting_id: Option<String>,
     pub title: String,
     /// FTS5 snippet with the match wrapped in `[[` `]]`.
     pub snippet: String,
@@ -24,49 +27,92 @@ pub struct SearchHit {
     pub start_ms: Option<u64>,
 }
 
+/// Filters + pagination for [`Storage::search_filtered`] (MCP `search_notes`).
+#[derive(Debug, Default, Clone)]
+pub struct SearchFilter {
+    pub folder_id: Option<String>,
+    /// Notes: updated at/after; transcripts: meeting started at/after.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    pub limit: usize,
+    /// Rank-ordered offset — the cursor for paging deeper into results.
+    pub offset: usize,
+}
+
 impl Storage {
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_filtered(
+            query,
+            &SearchFilter {
+                limit,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn search_filtered(&self, query: &str, filter: &SearchFilter) -> Result<Vec<SearchHit>> {
         let fts_query = sanitize_fts_query(query);
         if fts_query.is_empty() {
             return Ok(vec![]);
         }
+        let limit = filter.limit.max(1) as i64;
+        let offset = filter.offset as i64;
+        let folder = filter.folder_id.as_deref();
+        let since = filter.since.map(|t| t.to_rfc3339());
+        let until = filter.until.map(|t| t.to_rfc3339());
         let mut hits = Vec::new();
 
         let mut stmt = self.conn.prepare(
             "SELECT f.note_id, n.title, snippet(notes_fts, 2, '[[', ']]', ' … ', 12)
              FROM notes_fts f JOIN notes n ON n.id = f.note_id
              WHERE notes_fts MATCH ?1
-             ORDER BY rank LIMIT ?2",
+               AND (?2 IS NULL OR n.folder_id = ?2)
+               AND (?3 IS NULL OR n.updated_at >= ?3)
+               AND (?4 IS NULL OR n.updated_at <= ?4)
+             ORDER BY rank LIMIT ?5 OFFSET ?6",
         )?;
-        let rows = stmt.query_map((&fts_query, limit as i64), |r| {
-            Ok(SearchHit {
-                kind: SearchHitKind::Note,
-                note_id: r.get(0)?,
-                title: r.get(1)?,
-                snippet: r.get(2)?,
-                start_ms: None,
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![&fts_query, folder, &since, &until, limit, offset],
+            |r| {
+                Ok(SearchHit {
+                    kind: SearchHitKind::Note,
+                    note_id: r.get(0)?,
+                    meeting_id: None,
+                    title: r.get(1)?,
+                    snippet: r.get(2)?,
+                    start_ms: None,
+                })
+            },
+        )?;
         for row in rows {
             hits.push(row?);
         }
 
-        // Transcript hits join back to the owning note through meetings.
+        // Transcript hits join back to the owning note through meetings;
+        // folder filtering goes through that note.
         let mut stmt = self.conn.prepare(
-            "SELECT m.note_id, m.title, snippet(transcripts_fts, 1, '[[', ']]', ' … ', 12)
+            "SELECT m.note_id, m.id, m.title, snippet(transcripts_fts, 1, '[[', ']]', ' … ', 12)
              FROM transcripts_fts t JOIN meetings m ON m.id = t.meeting_id
+             LEFT JOIN notes n ON n.id = m.note_id
              WHERE transcripts_fts MATCH ?1
-             ORDER BY rank LIMIT ?2",
+               AND (?2 IS NULL OR n.folder_id = ?2)
+               AND (?3 IS NULL OR m.started_at >= ?3)
+               AND (?4 IS NULL OR m.started_at <= ?4)
+             ORDER BY rank LIMIT ?5 OFFSET ?6",
         )?;
-        let rows = stmt.query_map((&fts_query, limit as i64), |r| {
-            Ok(SearchHit {
-                kind: SearchHitKind::Transcript,
-                note_id: r.get(0)?,
-                title: r.get(1)?,
-                snippet: r.get(2)?,
-                start_ms: None,
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![&fts_query, folder, &since, &until, limit, offset],
+            |r| {
+                Ok(SearchHit {
+                    kind: SearchHitKind::Transcript,
+                    note_id: r.get(0)?,
+                    meeting_id: Some(r.get(1)?),
+                    title: r.get(2)?,
+                    snippet: r.get(3)?,
+                    start_ms: None,
+                })
+            },
+        )?;
         for row in rows {
             hits.push(row?);
         }

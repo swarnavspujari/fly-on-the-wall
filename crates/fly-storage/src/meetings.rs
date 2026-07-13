@@ -181,7 +181,7 @@ impl Storage {
     }
 }
 
-fn row_to_meeting(r: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting> {
+pub(crate) fn row_to_meeting(r: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting> {
     let attendees_json: String = r.get(3)?;
     let recording_json: Option<String> = r.get(6)?;
     Ok(Meeting {

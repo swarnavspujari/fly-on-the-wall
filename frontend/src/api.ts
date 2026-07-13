@@ -114,6 +114,11 @@ export const api = {
   getLlmSettings: () => invoke<LlmSettings>("get_llm_settings"),
   setLlmSettings: (update: LlmSettingsUpdate) => invoke<void>("set_llm_settings", { update }),
   testLlmConnection: () => invoke<string>("test_llm_connection"),
+  // structured item extraction (decisions / action items / figures …)
+  extractMeetingItems: (meetingId: string) =>
+    invoke<number>("extract_meeting_items", { meetingId }),
+  backfillMeetingItems: () =>
+    invoke<{ processed: number; extracted: number; failed: number }>("backfill_meeting_items"),
 
   // managed Ollama (local AI provider)
   ollamaStatus: () => invoke<OllamaStatus>("ollama_status"),

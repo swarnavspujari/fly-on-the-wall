@@ -16,6 +16,7 @@
 
 mod attachments;
 mod folders;
+mod items;
 mod jobs;
 mod meetings;
 mod migrations;
@@ -26,10 +27,11 @@ mod settings;
 mod templates;
 mod transcripts;
 
+pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::recording_dir_rel;
 pub use notes::NoteSummary;
-pub use search::{SearchHit, SearchHitKind};
+pub use search::{SearchFilter, SearchHit, SearchHitKind};
 
 use std::path::{Path, PathBuf};
 
@@ -169,6 +171,26 @@ impl Storage {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            -- Extracted meeting items (see items.rs): one row per typed fact
+            -- with provenance. kind '_none' marks "extraction ran, found
+            -- nothing" and is filtered from every read.
+            CREATE TABLE IF NOT EXISTS meeting_items (
+                id               TEXT PRIMARY KEY,
+                meeting_id       TEXT NOT NULL,
+                kind             TEXT NOT NULL,
+                text             TEXT NOT NULL,
+                owner            TEXT,
+                status           TEXT,
+                speaker_key      TEXT,
+                segment_ids_json TEXT NOT NULL DEFAULT '[]',
+                created_at       TEXT NOT NULL,
+                extracted_by     TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_meeting_items_meeting
+                ON meeting_items(meeting_id);
+            CREATE INDEX IF NOT EXISTS idx_meeting_items_kind
+                ON meeting_items(kind);
 
             -- Full-text search. Kept in sync by the write paths in this crate.
             CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
