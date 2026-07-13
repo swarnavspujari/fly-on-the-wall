@@ -36,7 +36,7 @@ import {
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import { fmtElapsed } from "./RecordingBar";
-import { Avatar, Button, SectionLabel } from "./ui";
+import { Avatar, Button, Modal, SectionLabel } from "./ui";
 import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
@@ -74,6 +74,14 @@ type View = "notes" | "transcript" | "enhanced";
 const VIDEO_RE = /\.(mp4|webm|mov|mkv|m4v)$/i;
 const isVideo = (a: Attachment) =>
   (a.mime?.startsWith("video/") ?? false) || VIDEO_RE.test(a.file_name);
+
+/** Rel path inside the data dir → asset-protocol URL the webview can stream. */
+const toAssetSrc = (dataDir: string | null, relPath: string): string | null =>
+  dataDir
+    ? convertFileSrc(
+        `${dataDir.replace(/[\\/]+$/, "")}/${relPath.replace(/^[\\/]+/, "")}`.replace(/\\/g, "/"),
+      )
+    : null;
 
 const CHIP =
   "inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-[12.5px] font-medium text-text-2";
@@ -201,28 +209,40 @@ function AudioPlayer({
 function VideoTile({
   att,
   big,
+  thumbSrc,
   onOpen,
 }: {
   att: Attachment;
   big?: boolean;
-  onOpen: (relPath: string) => void;
+  thumbSrc: string | null;
+  onOpen: (att: Attachment) => void;
 }) {
+  const [thumbOk, setThumbOk] = useState(true);
   return (
     <div
       className="flex-none overflow-hidden rounded-xl border border-line"
       style={{ width: big ? "100%" : 200 }}
     >
       <button
-        onClick={() => onOpen(att.rel_path)}
+        onClick={() => onOpen(att)}
         title={`Play ${att.file_name}`}
         aria-label={`Play ${att.file_name}`}
         className="relative block w-full cursor-pointer border-0 p-0"
         style={{
           paddingTop: "56%",
+          // striped placeholder stays underneath as the loading/failure state
           background:
             "repeating-linear-gradient(135deg, rgba(128,124,140,.10) 0 8px, rgba(128,124,140,.2) 8px 16px)",
         }}
       >
+        {thumbSrc && thumbOk && (
+          <img
+            src={thumbSrc}
+            alt=""
+            className="absolute inset-0 h-full w-full object-cover"
+            onError={() => setThumbOk(false)}
+          />
+        )}
         <span className="absolute inset-0 grid place-items-center">
           <span
             className="grid place-items-center rounded-full"
@@ -250,17 +270,26 @@ function VideoTile({
 
 function VideoStrip({
   videos,
+  thumbFor,
   onOpen,
 }: {
   videos: Attachment[];
-  onOpen: (relPath: string) => void;
+  thumbFor: (att: Attachment) => string | null;
+  onOpen: (att: Attachment) => void;
 }) {
   const [open, setOpen] = useState(false);
   if (videos.length === 0) return null;
   if (videos.length === 1) {
     return (
       <div className="mb-3.5">
-        <VideoTile att={videos[0]} big onOpen={onOpen} />
+        {/* keyed so per-tile img-error state resets when the note (and video) changes */}
+        <VideoTile
+          key={videos[0].id}
+          att={videos[0]}
+          big
+          thumbSrc={thumbFor(videos[0])}
+          onOpen={onOpen}
+        />
       </div>
     );
   }
@@ -282,11 +311,68 @@ function VideoStrip({
       {open && (
         <div className="mt-2.5 flex flex-wrap gap-2.5">
           {videos.map((v) => (
-            <VideoTile key={v.id} att={v} onOpen={onOpen} />
+            <VideoTile key={v.id} att={v} thumbSrc={thumbFor(v)} onOpen={onOpen} />
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+/* ---- Video lightbox: in-app playback for screen recordings via the same
+   asset protocol the audio player streams through (range requests → seeking
+   works on large MP4s). Modal gives Esc / overlay / × close; the OS player
+   stays available as a secondary action and as the fallback when the file
+   won't stream (moved/deleted). ---- */
+function VideoLightbox({
+  att,
+  src,
+  poster,
+  onClose,
+}: {
+  att: Attachment;
+  src: string | null;
+  poster: string | null;
+  onClose: () => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={att.file_name}
+      width={880}
+      footer={
+        <Button
+          variant="outline"
+          size="sm"
+          title="Open this recording in your system's video player"
+          onClick={() => void api.openAttachment(att.rel_path)}
+        >
+          Open in system player
+        </Button>
+      }
+    >
+      {src && !failed ? (
+        <video
+          src={src}
+          poster={poster ?? undefined}
+          controls
+          autoPlay
+          className="block w-full rounded-lg"
+          style={{ maxHeight: "68vh", background: "#000" }}
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <div
+          className="rounded-lg border border-line px-4 py-6 text-center text-[13px]"
+          style={{ color: "var(--text-2)" }}
+        >
+          This recording can't be played here — the file may be missing or in a format the app can't
+          decode. Try the system player below.
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -716,6 +802,12 @@ export default function Editor({
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
   const [askOpen, setAskOpen] = useState(false);
   const [zoomIds, setZoomIds] = useState<string[]>([]);
+  // Poster rel paths keyed by attachment id — doubles as a session cache when
+  // switching between notes. Requested ids are tracked so each video is asked
+  // for at most once per session.
+  const [videoThumbs, setVideoThumbs] = useState<Record<string, string>>({});
+  const thumbReqs = useRef<Set<string>>(new Set());
+  const [lightboxAtt, setLightboxAtt] = useState<Attachment | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [exportState, setExportState] = useState<"idle" | "saved" | "failed">("idle");
   const saveTimer = useRef<number | null>(null);
@@ -737,8 +829,24 @@ export default function Editor({
       setEnhanceError(null);
       setAskOpen(false);
       setZoomIds([]);
+      setLightboxAtt(null);
     }
   }, [note]);
+
+  // Lazily create missing poster frames (ffmpeg sidecar, native side) when a
+  // note's videos are first shown; failures just keep the CSS placeholder.
+  useEffect(() => {
+    for (const v of note.attachments.filter(isVideo)) {
+      if (thumbReqs.current.has(v.id)) continue;
+      thumbReqs.current.add(v.id);
+      api
+        .ensureVideoThumbnail(v.rel_path)
+        .then((rel) => {
+          if (rel) setVideoThumbs((m) => ({ ...m, [v.id]: rel }));
+        })
+        .catch(() => {});
+    }
+  }, [note.attachments]);
 
   // Keep the active view valid for this note.
   useEffect(() => {
@@ -872,6 +980,16 @@ export default function Editor({
     if (audioPath) void api.openAttachment(audioPath);
   };
   const openAttachmentRel = (relPath: string) => void api.openAttachment(relPath);
+  const videoThumbSrc = (att: Attachment) =>
+    videoThumbs[att.id] ? toAssetSrc(dataDir, videoThumbs[att.id]) : null;
+  const openVideo = (att: Attachment) => {
+    // No data dir → no asset URL possible; keep the old system-player path.
+    if (!dataDir) {
+      void api.openAttachment(att.rel_path);
+      return;
+    }
+    setLightboxAtt(att);
+  };
   const showInFolder = () => {
     const p = rec?.mixed_path || rec?.mic_path || note.attachments[0]?.rel_path || null;
     if (p) void api.revealAttachment(p);
@@ -1045,7 +1163,9 @@ export default function Editor({
                     onFallback={playAudio}
                   />
                 )}
-                {videos.length > 0 && <VideoStrip videos={videos} onOpen={openAttachmentRel} />}
+                {videos.length > 0 && (
+                  <VideoStrip videos={videos} thumbFor={videoThumbSrc} onOpen={openVideo} />
+                )}
                 <TranscriptPanel
                   meeting={meeting}
                   transcript={transcript}
@@ -1094,6 +1214,15 @@ export default function Editor({
 
       {askOpen && (
         <AskPanel noteId={note.id} onInsert={insertFromAsk} onClose={() => setAskOpen(false)} />
+      )}
+
+      {lightboxAtt && (
+        <VideoLightbox
+          att={lightboxAtt}
+          src={toAssetSrc(dataDir, lightboxAtt.rel_path)}
+          poster={videoThumbSrc(lightboxAtt)}
+          onClose={() => setLightboxAtt(null)}
+        />
       )}
     </div>
   );

@@ -151,6 +151,7 @@ pub fn run() {
             screen_commands::screen_status,
             screen_commands::start_screen_recording,
             screen_commands::stop_screen_recording,
+            screen_commands::ensure_video_thumbnail,
             import_commands::import_media,
         ])
         .build(tauri::generate_context!())

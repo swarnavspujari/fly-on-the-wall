@@ -120,6 +120,15 @@ function note(id: string) {
               mime: "application/pdf",
               added_at: ago(30),
             },
+            // Screen recording: in the browser this URL 404s, which exercises
+            // the thumbnail placeholder and the lightbox's playback fallback.
+            {
+              id: "a2",
+              file_name: "screen-20260713-101530.mp4",
+              rel_path: "attachments/n1/screen-20260713-101530.mp4",
+              mime: "video/mp4",
+              added_at: ago(25),
+            },
           ]
         : [],
     created_at: ago(200),
@@ -492,6 +501,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "";
     case "export_note":
       return "C:\\Users\\you\\Desktop\\note.md";
+    case "ensure_video_thumbnail":
+      return `${String(args.relPath ?? "")}.jpg`;
     default:
       return null;
   }
