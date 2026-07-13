@@ -145,6 +145,13 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             match tick(&state, &on_stage, &on_model).await {
                 Tick::Completed(meeting_id) => {
                     polish_after_transcribe(&state, &on_stage, &meeting_id).await;
+                    // Structured item extraction rides the same best-effort
+                    // train: enrichment only, never blocks or fails the job.
+                    let _ = tokio::time::timeout(
+                        POLISH_TIMEOUT,
+                        crate::extraction::extract_after_transcribe(&state, &meeting_id),
+                    )
+                    .await;
                     emit_final(&on_stage, &meeting_id, None)
                 }
                 Tick::Retrying {

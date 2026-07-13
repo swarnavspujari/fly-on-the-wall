@@ -190,6 +190,8 @@ export default function SettingsModal({
   const [saving, setSaving] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
+  const [backfillBusy, setBackfillBusy] = useState(false);
+  const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
 
   // Presentational view mode — Technical reveals model installs, GPU + OAuth details.
   const [technical, setTechnical] = useState(false);
@@ -468,6 +470,24 @@ export default function SettingsModal({
       onClose();
     } finally {
       setSaving(false);
+    }
+  };
+
+  const runBackfill = async () => {
+    setBackfillBusy(true);
+    setBackfillMsg(null);
+    try {
+      const r = await api.backfillMeetingItems();
+      setBackfillMsg(
+        r.processed === 0
+          ? "All meetings are already extracted."
+          : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
+              (r.failed ? `, ${r.failed} failed` : ""),
+      );
+    } catch (e) {
+      setBackfillMsg(String(e));
+    } finally {
+      setBackfillBusy(false);
     }
   };
 
@@ -1292,6 +1312,26 @@ export default function SettingsModal({
                 </span>
               </div>
             )}
+            {/* On-demand backfill: meetings transcribed before item
+                extraction existed get their decisions/action items/figures
+                extracted with the selected AI provider. New meetings are
+                extracted automatically after transcription. */}
+            <div className="flex items-center gap-3" style={{ marginTop: 12 }}>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={backfillBusy}
+                style={{ color: "#fff", borderColor: "rgba(255,255,255,.3)" }}
+                onClick={() => void runBackfill()}
+              >
+                {backfillBusy ? "Extracting…" : "Extract items from past meetings"}
+              </Button>
+              {backfillMsg && (
+                <span style={{ fontSize: 11.5, color: "rgba(255,255,255,.72)" }}>
+                  {backfillMsg}
+                </span>
+              )}
+            </div>
           </Card>
         </section>
 

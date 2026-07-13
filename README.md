@@ -331,8 +331,9 @@ React layer.
 
 ### Chat with your notes from Claude Desktop (MCP)
 
-Fly on the Wall ships `flyonthewall-mcp.exe`, a local stdio MCP server over your notes, folders,
-meetings, and transcripts (read-only; nothing leaves the machine). Add it to Claude Desktop's
+Fly on the Wall ships `flyonthewall-mcp.exe`, a local stdio MCP server over your notes,
+meetings, transcripts, and the structured items extracted from them (nothing leaves the
+machine; the only write it allows is renaming a speaker label). Add it to Claude Desktop's
 `claude_desktop_config.json` — in the app, **Settings → "Chat with your notes (MCP)"** generates
 the exact snippet for your install location:
 
@@ -344,8 +345,19 @@ the exact snippet for your install location:
 }
 ```
 
-Tools exposed: `search_notes`, `list_folders`, `get_note`, `get_transcript`, `get_meeting`,
-`list_recent`.
+Context layer (start here): `get_context` — a deterministic briefing for any project /
+customer / recurring meeting, with every claim citing its meeting and transcript segments —
+plus `whats_changed`, `open_items`, `query_items`, `get_meeting_items`. Underlying material:
+`search_notes`, `list_folders`, `get_note`, `get_transcript`, `get_transcripts`,
+`get_meeting`, `list_recent`. The write: `set_speaker_label`. Items are extracted in the app
+after each transcription (Settings → the MCP card has a one-click backfill for older
+meetings) using your selected AI provider.
+
+**Skill for AI clients:** [`skills/flyonthewall-meetings/SKILL.md`](skills/flyonthewall-meetings/SKILL.md)
+teaches the intended workflow (context first, transcripts to verify, provenance rules).
+Install it in Claude Code / Claude Desktop by copying the folder into `~/.claude/skills/`
+(or your project's `.claude/skills/`); for ChatGPT or Gemini, paste the file's body into
+custom instructions / a Gem alongside the MCP connection.
 
 ### More docs
 

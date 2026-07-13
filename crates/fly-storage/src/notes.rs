@@ -92,6 +92,55 @@ impl Storage {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Filtered, cursor-paginated listing (MCP `list_recent`): most recently
+    /// updated first. `before` is the `(updated_at, id)` of the last row of
+    /// the previous page — rows strictly after it in the sort order are
+    /// returned. Timestamps compare lexicographically (uniform RFC 3339 UTC).
+    pub fn list_notes_filtered(
+        &self,
+        limit: usize,
+        folder_id: Option<&str>,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+        before: Option<(String, String)>,
+    ) -> Result<Vec<NoteSummary>> {
+        let mut sql = String::from(
+            "SELECT id, title, folder_id, meeting_id, updated_at FROM notes WHERE 1=1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(f) = folder_id {
+            sql.push_str(&format!(" AND folder_id = ?{}", params.len() + 1));
+            params.push(Box::new(f.to_string()));
+        }
+        if let Some(s) = since {
+            sql.push_str(&format!(" AND updated_at >= ?{}", params.len() + 1));
+            params.push(Box::new(s.to_rfc3339()));
+        }
+        if let Some(u) = until {
+            sql.push_str(&format!(" AND updated_at <= ?{}", params.len() + 1));
+            params.push(Box::new(u.to_rfc3339()));
+        }
+        if let Some((ts, id)) = before {
+            sql.push_str(&format!(
+                " AND (updated_at < ?{n} OR (updated_at = ?{n} AND id > ?{m}))",
+                n = params.len() + 1,
+                m = params.len() + 2
+            ));
+            params.push(Box::new(ts));
+            params.push(Box::new(id));
+        }
+        sql.push_str(&format!(
+            " ORDER BY updated_at DESC, id LIMIT {}",
+            limit.max(1)
+        ));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            row_to_summary,
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn update_note_title(&self, id: &str, title: &str) -> Result<Note> {
         let title = title.trim();
         if title.is_empty() {

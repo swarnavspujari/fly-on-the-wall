@@ -5,6 +5,7 @@ mod asr_commands;
 mod calendar_commands;
 mod calendar_defaults;
 mod commands;
+pub mod extraction;
 pub mod gpu;
 pub mod hw;
 mod import_commands;
@@ -135,6 +136,8 @@ pub fn run() {
             llm_commands::get_llm_settings,
             llm_commands::set_llm_settings,
             llm_commands::test_llm_connection,
+            extraction::extract_meeting_items,
+            extraction::backfill_meeting_items,
             ollama::ollama_status,
             ollama::ollama_pull,
             calendar_commands::get_calendar_settings,

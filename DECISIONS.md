@@ -323,3 +323,15 @@ Running log of technical decisions, newest last. Format: date — decision — w
   engine visibly and re-pins the machine to CPU — a meeting transcript is never lost to a GPU.
   macOS keeps its Metal-by-default PATH build (setting gates a `-ng` flag only). The live loop
   never uses the GPU: it runs during capture, exactly when the GPU is busy with the video call.
+- **2026-07-13 — MCP: from storage primitives to context primitives; extraction lives in the
+  app, never the server.** The MCP server now leads with `get_context` — a recurring-series
+  briefing (normalized-title + participant-overlap detection) assembled deterministically
+  from stored data, with `whats_changed` / `open_items` / `query_items` as derivations over
+  a new `meeting_items` table (typed facts: decisions, action items, questions, commitments,
+  figures — each row carrying meeting_id, source segment ids, speaker key). Extraction runs
+  once per meeting in the APP (chained after transcription like the polish pass, plus an
+  on-demand backfill button), through the same provider plumbing as polish; the server holds
+  no API keys and makes no LLM calls at query time, so answers are reproducible and the
+  server stays a thin reader. One write tool only (`set_speaker_label`, the app UI's own
+  relabel), and a lifecycle contract enforced by test: exit on stdin EOF, so the server can
+  never outlive its client and block an installer (the NSIS taskkill hook stays as backstop).

@@ -232,6 +232,71 @@ pub struct SpeakerTurn {
 }
 
 // ---------------------------------------------------------------------------
+// Extracted meeting items (structured context layer)
+// ---------------------------------------------------------------------------
+
+/// What kind of structured fact a [`MeetingItem`] is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    Decision,
+    ActionItem,
+    Question,
+    Commitment,
+    Figure,
+}
+
+impl ItemKind {
+    pub const ALL: [ItemKind; 5] = [
+        ItemKind::Decision,
+        ItemKind::ActionItem,
+        ItemKind::Question,
+        ItemKind::Commitment,
+        ItemKind::Figure,
+    ];
+
+    /// Stable string form ("decision", "action_item", …) — the DB `kind`
+    /// column and the MCP tool argument both use it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ItemKind::Decision => "decision",
+            ItemKind::ActionItem => "action_item",
+            ItemKind::Question => "question",
+            ItemKind::Commitment => "commitment",
+            ItemKind::Figure => "figure",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ItemKind> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == s)
+    }
+}
+
+/// One typed fact extracted from a meeting transcript (a decision, an action
+/// item, an open question, a commitment, a key figure), carrying provenance:
+/// the meeting, the transcript segments it came from, and who said it.
+/// Extraction runs in the app (LLM); readers (the MCP server) only query.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeetingItem {
+    pub id: String,
+    pub meeting_id: String,
+    pub kind: ItemKind,
+    /// The fact itself, one sentence, in the speakers' own terms.
+    pub text: String,
+    /// Action items / commitments: who owns it (speaker label or name).
+    pub owner: Option<String>,
+    /// Action items: "open" | "done" as stated IN that meeting.
+    pub status: Option<String>,
+    /// Stable speaker key of who said it (`mic`, `spk_0`, …).
+    pub speaker_key: Option<String>,
+    /// Transcript segment ids this item was extracted from.
+    pub segment_ids: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    /// Provider id + model that produced the extraction (auditability).
+    pub extracted_by: String,
+}
+
+// ---------------------------------------------------------------------------
 // Templates
 // ---------------------------------------------------------------------------
 
