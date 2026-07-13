@@ -126,16 +126,34 @@ const TOOLS: &[Artifact] = &[
 ];
 
 #[cfg(target_os = "macos")]
-const TOOLS: &[Artifact] = &[Artifact {
-    id: "sherpa-bin",
-    display: "sherpa-onnx diarization CLI (v1.13.3)",
-    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.3/sherpa-onnx-v1.13.3-osx-universal2-shared.tar.bz2",
-    sha256: "2317b975f42f5edf3e69068809dec456c068b68e48d091e6b578e7a977227361",
-    bytes: 56_024_420,
-    kind: ArtifactKind::Archive,
-    dest_rel: "bin/sherpa",
-    probe_rel: "bin/sherpa/sherpa-onnx-v1.13.3-osx-universal2-shared/bin/sherpa-onnx-offline-speaker-diarization",
-}];
+const TOOLS: &[Artifact] = &[
+    // Upstream whisper.cpp publishes no macOS binary, so we build it ourselves
+    // (static, universal2, Metal embedded — see scripts/build-whisper-sidecar.sh)
+    // and host it as a tools release on the fork. This lets `ensure_tool`
+    // auto-download the engine on first transcribe, exactly like Windows,
+    // instead of requiring a `whisper-cli` on PATH (e.g. `brew install
+    // whisper-cpp`). A brew/PATH build is still honored first when present.
+    Artifact {
+        id: "whisper-bin",
+        display: "whisper.cpp CLI (macOS universal2, v1.9.1)",
+        url: "https://github.com/iansumner/fly-on-the-wall/releases/download/tools-whisper-v1.9.1/whisper-bin-macos-universal2-v1.9.1.tar.bz2",
+        sha256: "93ef2fcc116212ac69866657709a5ce279ae3ecf57c40bbb161528a670014f90",
+        bytes: 2_367_839,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/whisper",
+        probe_rel: "bin/whisper/whisper-cli",
+    },
+    Artifact {
+        id: "sherpa-bin",
+        display: "sherpa-onnx diarization CLI (v1.13.3)",
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.3/sherpa-onnx-v1.13.3-osx-universal2-shared.tar.bz2",
+        sha256: "2317b975f42f5edf3e69068809dec456c068b68e48d091e6b578e7a977227361",
+        bytes: 56_024_420,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/sherpa",
+        probe_rel: "bin/sherpa/sherpa-onnx-v1.13.3-osx-universal2-shared/bin/sherpa-onnx-offline-speaker-diarization",
+    },
+];
 
 /// OS-independent model weights. Checksums pinned from upstream release
 /// digests / HF LFS metadata, re-verified locally on 2026-07-01.

@@ -71,8 +71,10 @@ ready-to-paste `Artifact { .. }`. Then:
 2. Paste the emitted `Artifact` into the macOS / Linux `TOOLS` array in
    `src-tauri/src/models.rs` (id `whisper-bin`, `probe_rel` `bin/whisper/whisper-cli`).
 
-Until those artifacts are pinned, macOS/Linux still resolve a `whisper-cli` on
-`PATH` if present; if neither is available the app now shows an actionable
+Status: the **macOS universal2** engine is built, hosted (`tools-whisper-v1.9.1`),
+and pinned in `models.rs`, so first transcribe auto-downloads it. **Linux** still
+resolves a `whisper-cli` on `PATH` until its archive is built (run the same script
+on Linux) and pinned. Where no engine is resolvable, the app shows an actionable
 "engine not installed" prompt (Install / Settings) rather than a raw error.
 
 ## GPU transcription (post-meeting only)
