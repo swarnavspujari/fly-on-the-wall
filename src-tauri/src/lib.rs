@@ -11,6 +11,7 @@ mod import_commands;
 mod live;
 mod llm_commands;
 pub mod models;
+pub mod ollama;
 pub mod pipeline;
 pub mod recording;
 pub mod scheduler;
@@ -134,6 +135,8 @@ pub fn run() {
             llm_commands::get_llm_settings,
             llm_commands::set_llm_settings,
             llm_commands::test_llm_connection,
+            ollama::ollama_status,
+            ollama::ollama_pull,
             calendar_commands::get_calendar_settings,
             calendar_commands::set_calendar_settings,
             calendar_commands::connect_calendar,
@@ -147,6 +150,12 @@ pub fn run() {
             screen_commands::stop_screen_recording,
             import_commands::import_media,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Fly on the Wall");
+        .build(tauri::generate_context!())
+        .expect("error while building Fly on the Wall")
+        .run(|app, event| {
+            // The managed `ollama serve` child must not outlive the app.
+            if let tauri::RunEvent::Exit = event {
+                ollama::shutdown(&app.state::<state::AppState>());
+            }
+        });
 }

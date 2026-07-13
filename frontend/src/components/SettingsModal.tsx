@@ -9,6 +9,7 @@ import type {
   CalendarToggle,
   LlmSettings,
   ModelProgress,
+  OllamaStatus,
   Template,
 } from "../types";
 import {
@@ -203,6 +204,11 @@ export default function SettingsModal({
   const [llmTest, setLlmTest] = useState<string | null>(null);
   const [llmBusy, setLlmBusy] = useState(false);
 
+  // managed Ollama (local provider) state
+  const [ollama, setOllama] = useState<OllamaStatus | null>(null);
+  const [ollamaBusy, setOllamaBusy] = useState<"install" | "pull" | null>(null);
+  const [ollamaMsg, setOllamaMsg] = useState<string | null>(null);
+
   // templates state
   const [templates, setTemplates] = useState<Template[]>([]);
   const [editingTpl, setEditingTpl] = useState<Template | null>(null);
@@ -322,9 +328,40 @@ export default function SettingsModal({
       setLlmBaseUrl(info?.base_url ?? "");
     });
 
+  const loadOllama = () => api.ollamaStatus().then(setOllama);
+
+  const installOllama = async () => {
+    setOllamaBusy("install");
+    setOllamaMsg(null);
+    try {
+      await api.downloadModel("ollama-bin");
+      setOllamaMsg("installed ✓");
+    } catch (e) {
+      setOllamaMsg(`✗ ${e}`);
+    } finally {
+      setOllamaBusy(null);
+      loadOllama().catch(console.error);
+    }
+  };
+
+  const pullOllamaModel = async (model: string) => {
+    setOllamaBusy("pull");
+    setOllamaMsg(null);
+    try {
+      await api.ollamaPull(model);
+      setOllamaMsg(`${model} ready ✓`);
+    } catch (e) {
+      setOllamaMsg(`✗ ${e}`);
+    } finally {
+      setOllamaBusy(null);
+      loadOllama().catch(console.error);
+    }
+  };
+
   useEffect(() => {
     load().catch(console.error);
     loadLlm().catch(console.error);
+    loadOllama().catch(console.error);
     api.listTemplates().then(setTemplates).catch(console.error);
     loadCal().catch(console.error);
     loadCalList().catch(console.error);
@@ -382,6 +419,8 @@ export default function SettingsModal({
       setLlmTest(`✗ ${e}`);
     } finally {
       setLlmBusy(false);
+      // Testing the ollama provider may have started the managed server.
+      loadOllama().catch(console.error);
     }
   };
 
@@ -759,9 +798,99 @@ export default function SettingsModal({
                   )}
                 </div>
                 {p.is_local ? (
-                  <span className="text-text-2" style={{ fontSize: 12 }}>
-                    Runs entirely on this machine — no API key needed.
-                  </span>
+                  (() => {
+                    // Managed Ollama block: install → auto-managed server → model.
+                    const effModel = (llmModel || p.default_model || "llama3.1").trim();
+                    const modelReady = !!ollama?.models.some(
+                      (m) => m === effModel || m.split(":")[0] === effModel.split(":")[0],
+                    );
+                    // Progress for the runtime install or the model pull.
+                    const prog =
+                      modelProgress &&
+                      (modelProgress.id === "ollama-bin" ||
+                        modelProgress.id === `ollama:${effModel}`) &&
+                      ollamaBusy !== null &&
+                      modelProgress.total > 0
+                        ? modelProgress
+                        : null;
+                    const pct = prog ? Math.round((prog.downloaded / prog.total) * 100) : null;
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {ollama ? (
+                            <>
+                              <Badge tone={ollama.running ? "success" : "neutral"} size="sm">
+                                {ollama.running
+                                  ? ollama.managed
+                                    ? "server running (managed by app)"
+                                    : "server running"
+                                  : ollama.installed
+                                    ? "server off — starts automatically"
+                                    : "not installed"}
+                              </Badge>
+                              {ollama.running && (
+                                <Badge tone={modelReady ? "success" : "warning"} size="sm">
+                                  {modelReady ? `${effModel} ready` : `${effModel} not downloaded`}
+                                </Badge>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-text-3" style={{ fontSize: 12 }}>
+                              checking Ollama…
+                            </span>
+                          )}
+                        </div>
+                        <span className="block text-text-2" style={{ fontSize: 12 }}>
+                          Runs entirely on this machine — no API key needed. The app starts and
+                          stops the server for you and keeps its models in the app data folder.
+                        </span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {ollama && !ollama.installed && ollama.can_install && (
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              disabled={ollamaBusy !== null}
+                              onClick={() => void installOllama()}
+                            >
+                              {ollamaBusy === "install"
+                                ? "Installing…"
+                                : "Install Ollama (1.5 GB download)"}
+                            </Button>
+                          )}
+                          {ollama && !ollama.installed && !ollama.can_install && (
+                            <span className="text-text-2" style={{ fontSize: 12 }}>
+                              Install Ollama from ollama.com, then Test connection.
+                            </span>
+                          )}
+                          {ollama && ollama.installed && !modelReady && (
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              disabled={ollamaBusy !== null}
+                              onClick={() => void pullOllamaModel(effModel)}
+                            >
+                              {ollamaBusy === "pull"
+                                ? "Downloading…"
+                                : `Download ${effModel} model`}
+                            </Button>
+                          )}
+                          {ollamaMsg && (
+                            <span className="text-text-2" style={{ fontSize: 12 }}>
+                              {ollamaMsg}
+                            </span>
+                          )}
+                        </div>
+                        {pct !== null && (
+                          <div className="flex items-center gap-2">
+                            <ProgressBar value={pct} style={{ width: 180 }} />
+                            <span className="text-text-3" style={{ fontSize: 11 }}>
+                              {pct}%
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()
                 ) : (
                   <Input
                     type="password"

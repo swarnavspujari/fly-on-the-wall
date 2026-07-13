@@ -21,6 +21,7 @@ import type {
   Meeting,
   Note,
   NoteSummary,
+  OllamaStatus,
   PolishResult,
   RecordingStatus,
   SearchHit,
@@ -113,6 +114,12 @@ export const api = {
   getLlmSettings: () => invoke<LlmSettings>("get_llm_settings"),
   setLlmSettings: (update: LlmSettingsUpdate) => invoke<void>("set_llm_settings", { update }),
   testLlmConnection: () => invoke<string>("test_llm_connection"),
+
+  // managed Ollama (local AI provider)
+  ollamaStatus: () => invoke<OllamaStatus>("ollama_status"),
+  // Pulls a model into the local server; progress arrives as model:progress
+  // events with id "ollama:<model>".
+  ollamaPull: (model: string) => invoke<void>("ollama_pull", { model }),
 
   // calendars
   getCalendarSettings: () => invoke<CalendarStatus>("get_calendar_settings"),

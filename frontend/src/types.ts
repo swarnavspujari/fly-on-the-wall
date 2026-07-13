@@ -219,6 +219,19 @@ export interface LlmSettings {
   providers: LlmProviderInfo[];
 }
 
+export interface OllamaStatus {
+  /** An Ollama executable is available (managed install or on PATH). */
+  installed: boolean;
+  /** This OS has a managed download (show the Install button). */
+  can_install: boolean;
+  running: boolean;
+  /** The running server is a child this app spawned. */
+  managed: boolean;
+  base_url: string;
+  /** Local model names ("llama3.1:latest", …) when the server is running. */
+  models: string[];
+}
+
 export interface LlmSettingsUpdate {
   provider: string;
   model: string | null;

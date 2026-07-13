@@ -30,6 +30,26 @@ fn secret_key_for(provider: &str) -> Option<&'static str> {
     }
 }
 
+/// Preflight for the local provider: when the user selected Ollama, make
+/// sure a server is reachable — starting the managed one if needed — before
+/// any chat call. Cloud providers need no preflight.
+pub async fn ensure_provider_ready(state: &AppState) -> Result<(), String> {
+    let provider = state
+        .storage
+        .lock()
+        .unwrap()
+        .get_setting("llm.provider")
+        .ok()
+        .flatten()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "ollama".to_string());
+    if provider == "ollama" {
+        crate::ollama::ensure_running(state).await
+    } else {
+        Ok(())
+    }
+}
+
 /// Build the active provider from settings + keychain.
 pub fn build_provider(state: &AppState) -> Result<Box<dyn LLMProvider>, String> {
     let storage = state.storage.lock().unwrap();
@@ -101,6 +121,7 @@ pub async fn enhance_note(
     note_id: String,
     template_id: String,
 ) -> CmdResult<Note> {
+    ensure_provider_ready(&state).await?;
     let provider = build_provider(&state)?;
     let (prompt, template) = {
         let storage = state.storage.lock().unwrap();
@@ -206,6 +227,7 @@ pub async fn polish_transcript(
 /// The polish pass itself, callable outside the command layer — the
 /// transcription scheduler chains it after every successful pipeline run.
 pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResult, String> {
+    ensure_provider_ready(state).await?;
     let provider = build_provider(state)?;
     let raw = {
         let storage = state.storage.lock().unwrap();
@@ -300,6 +322,7 @@ pub async fn ask_meeting(
     note_id: String,
     history: Vec<AskMessage>,
 ) -> CmdResult<String> {
+    ensure_provider_ready(&state).await?;
     let provider = build_provider(&state)?;
     let context = {
         let storage = state.storage.lock().unwrap();
@@ -495,6 +518,7 @@ pub fn set_llm_settings(state: State<'_, AppState>, update: LlmSettingsUpdate) -
 
 #[tauri::command]
 pub async fn test_llm_connection(state: State<'_, AppState>) -> CmdResult<String> {
+    ensure_provider_ready(&state).await?;
     let provider = build_provider(&state)?;
     let id = provider.id();
     provider
