@@ -281,6 +281,62 @@ function EngineMissingNotice({
           transcribe again.
         </div>
       )}
+      <GroqHint onOpenSettings={onOpenSettings} />
+    </div>
+  );
+}
+
+/** Shared footer: the cloud escape hatch, with its privacy trade-off named. */
+function GroqHint({ onOpenSettings }: { onOpenSettings: () => void }) {
+  return (
+    <div className="mt-2" style={{ fontSize: 12, lineHeight: 1.5 }}>
+      Or use{" "}
+      <span
+        role="button"
+        className="cursor-pointer underline"
+        onClick={onOpenSettings}
+      >
+        Groq cloud transcription
+      </span>{" "}
+      (Settings) — works without local models, but audio leaves this machine.
+    </div>
+  );
+}
+
+/** Actionable notice for a failed model download (offline, CDN outage): the
+ *  raw error is collapsed to its human part (signed CDN URLs can be hundreds
+ *  of characters) and paired with a retry, a Settings deep-link, and the
+ *  Groq escape hatch. */
+function DownloadFailedNotice({
+  error,
+  onRetry,
+  onOpenSettings,
+}: {
+  error: string;
+  onRetry: () => void;
+  onOpenSettings: () => void;
+}) {
+  const brief = error.replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim();
+  const shown = brief.length > 260 ? `${brief.slice(0, 260)}…` : brief;
+  return (
+    <div
+      className="mt-2 rounded-lg border border-line px-3 py-2.5 text-[13px]"
+      style={{ background: "var(--error-soft)", color: "var(--error-text)" }}
+      role="alert"
+    >
+      <div className="font-semibold">Model download failed</div>
+      <div className="mt-1" style={{ lineHeight: 1.5 }}>
+        {shown}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button variant="primary" size="sm" onClick={onRetry}>
+          Try again
+        </Button>
+        <Button variant="outline" size="sm" onClick={onOpenSettings}>
+          Set up in Settings
+        </Button>
+      </div>
+      <GroqHint onOpenSettings={onOpenSettings} />
     </div>
   );
 }
@@ -324,6 +380,10 @@ export default function TranscriptPanel({
   // the whisper-cli engine isn't resolvable — turn the raw error into an
   // install/setup prompt. `engine` is null only until the first settings load.
   const engineMissing = (!!pipelineError || engineInstalling) && !!engine && !engine.installed;
+  // A model download that failed (offline, CDN outage) with the engine fine —
+  // same actionable treatment instead of a raw error string.
+  const downloadFailed =
+    !engineMissing && !!pipelineError && /download (failed|interrupted)/i.test(pipelineError);
   const installPct =
     modelProgress && modelProgress.id === WHISPER_ENGINE_ID && modelProgress.total > 0
       ? Math.round((modelProgress.downloaded / modelProgress.total) * 100)
@@ -390,6 +450,12 @@ export default function TranscriptPanel({
             installing={engineInstalling}
             installPct={installPct}
             onInstall={onInstallEngine}
+            onOpenSettings={onOpenSettings}
+          />
+        ) : downloadFailed ? (
+          <DownloadFailedNotice
+            error={pipelineError!}
+            onRetry={onTranscribe}
             onOpenSettings={onOpenSettings}
           />
         ) : (
