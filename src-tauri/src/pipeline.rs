@@ -790,7 +790,11 @@ mod tests {
         let notes = std::sync::Mutex::new(Vec::new());
         let notify = |d: String| notes.lock().unwrap().push(d);
         let raw = asr
-            .transcribe(Path::new("unused.wav"), &TranscribeOptions::default(), &notify)
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &notify,
+            )
             .await
             .expect("fallback must rescue the meeting");
         assert_eq!(raw.words[0].text, "local");

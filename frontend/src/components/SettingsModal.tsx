@@ -1213,9 +1213,10 @@ export default function SettingsModal({
 
         {/* MCP */}
         <section className="space-y-2">
-          {/* the dark card needs more cushion than space-y-2 gives the
-              tight (lineHeight 1) label — same idiom as the View section */}
-          <SectionLabel style={{ display: "block", marginBottom: 4 }}>
+          {/* SectionLabel's inline margin:0 overrides the space-y-2 gap
+              (Tailwind v4 puts it on the label as margin-bottom), leaving the
+              label flush against the dark card — restore the 8px here */}
+          <SectionLabel style={{ display: "block", marginBottom: 8 }}>
             Chat with your notes (MCP)
           </SectionLabel>
           <Card
