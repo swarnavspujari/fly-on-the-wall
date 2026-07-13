@@ -17,10 +17,11 @@ use crate::{AsrError, RawTranscript, Result, TranscribeOptions, TranscriptionEng
 /// invocations bounded.
 const MAX_BATCH_SPEECH_MS: u64 = 120_000;
 /// Batches are boosted so their peak reaches this (never attenuated) —
-/// system-loopback audio routinely peaks below −12 dBFS.
-const NORMALIZE_TARGET_PEAK: f32 = 0.85;
+/// system-loopback audio routinely peaks below −12 dBFS. Shared with the
+/// Groq engine so both tiers apply identical preprocessing.
+pub(crate) const NORMALIZE_TARGET_PEAK: f32 = 0.85;
 /// …but a nearly-silent batch is never boosted more than this (~30 dB).
-const NORMALIZE_MAX_GAIN: f32 = 31.6;
+pub(crate) const NORMALIZE_MAX_GAIN: f32 = 31.6;
 
 pub struct WhisperCppEngine {
     /// Path to whisper-cli(.exe).
@@ -220,8 +221,9 @@ pub fn parse_whisper_json(json: &str) -> Result<RawTranscript> {
 
 /// Group speech spans into transcription batches: consecutive spans join a
 /// batch until its total speech reaches `max_speech_ms`; a single span longer
-/// than the cap gets its own batch (contiguous speech is never cut).
-fn plan_batches(spans: &[SpeechSpan], max_speech_ms: u64) -> Vec<Vec<SpeechSpan>> {
+/// than the cap gets its own batch (contiguous speech is never cut). Also
+/// used by the Groq engine to prefer cutting uploads at speech gaps.
+pub(crate) fn plan_batches(spans: &[SpeechSpan], max_speech_ms: u64) -> Vec<Vec<SpeechSpan>> {
     let mut batches: Vec<Vec<SpeechSpan>> = Vec::new();
     let mut current: Vec<SpeechSpan> = Vec::new();
     let mut current_ms = 0u64;

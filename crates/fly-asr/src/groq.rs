@@ -2,20 +2,24 @@
 //! device when this engine runs; the UI must show a privacy notice before
 //! enabling it. Returns no speaker labels — diarization still runs locally
 //! and is merged with these word timestamps (spec §6.3).
+//!
+//! Preprocessing mirrors the local whisper.cpp path: adaptive VAD strips long
+//! non-speech before upload (anti-hallucination + smaller payloads), audio is
+//! peak-normalized with the same constants, and returned word timestamps are
+//! mapped back to the original timeline for the local aligner/diarizer.
 
 use std::path::Path;
 
+use fly_audio::vad::{detect_speech_spans, map_to_original, stitch_spans, VadConfig};
 use fly_core::Word;
 
+use crate::whisper_cpp::{plan_batches, NORMALIZE_MAX_GAIN, NORMALIZE_TARGET_PEAK};
 use crate::{AsrError, RawTranscript, Result, TranscribeOptions, TranscriptionEngine};
 
 pub const GROQ_DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
 
-/// Groq rejects uploads over 25 MB with 413 on the free tier. Anything over
-/// this threshold is transcribed in overlapping chunks and stitched.
-const MAX_UPLOAD_BYTES: u64 = 20 * 1024 * 1024;
-/// Per-chunk payload cap when splitting (16-bit mono WAV data), with headroom
-/// under the 25 MB limit. ~9.8 min of 16 kHz audio.
+/// Per-upload payload cap (16-bit mono WAV data), with headroom under Groq's
+/// free-tier 25 MB / 413 limit. ~9.8 min of 16 kHz audio.
 const MAX_CHUNK_BYTES: u64 = 18 * 1024 * 1024;
 /// Adjacent chunks share this much audio so no word is cut mid-utterance at a
 /// boundary; the overlap is kept from exactly one side when stitching.
@@ -48,50 +52,104 @@ impl TranscriptionEngine for GroqEngine {
     }
 
     async fn transcribe(&self, wav_path: &Path, opts: &TranscribeOptions) -> Result<RawTranscript> {
-        let size = std::fs::metadata(wav_path)?.len();
-        if size <= MAX_UPLOAD_BYTES {
-            let bytes = std::fs::read(wav_path)?;
-            let file_name = wav_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "audio.wav".into());
-            return self.transcribe_bytes(bytes, file_name, opts).await;
-        }
-
-        // Oversized recording (~13+ min at 16 kHz): transcribe in overlapping
-        // chunks, offset each chunk's word timestamps by its start, and keep
-        // every overlap region from exactly one chunk.
+        // Same preprocessing as the local whisper.cpp path: VAD strips long
+        // non-speech (silence reaching a Whisper decoder is how repetition
+        // hallucination starts — and it's wasted upload bytes), each payload
+        // is peak-normalized, and word timestamps are mapped back to the
+        // original timeline so local diarization alignment stays correct.
         let (samples, rate) = fly_audio::mix::read_wav_mono(wav_path)
-            .map_err(|e| AsrError::BadAudio(e.to_string()))?;
-        let total_ms = samples.len() as u64 * 1000 / rate as u64;
+            .map_err(|e| AsrError::BadAudio(format!("{}: {e}", wav_path.display())))?;
+        let spans = detect_speech_spans(&samples, rate, &VadConfig::default());
         let segment_ms = MAX_CHUNK_BYTES / 2 * 1000 / rate as u64;
-        let chunks = plan_chunks(total_ms, segment_ms, OVERLAP_MS);
-        tracing::info!(
-            bytes = size,
-            chunks = chunks.len(),
-            total_ms,
-            "recording exceeds groq upload limit — transcribing in chunks"
+        tracing::debug!(
+            file = %wav_path.display(),
+            spans = spans.len(),
+            speech_ms = spans.iter().map(|s| s.end_ms - s.start_ms).sum::<u64>(),
+            total_ms = samples.len() as u64 * 1000 / rate.max(1) as u64,
+            "vad segmentation (groq)"
         );
 
         let mut language = None;
-        let mut per_chunk: Vec<Vec<Word>> = Vec::new();
-        for (i, &(start_ms, end_ms)) in chunks.iter().enumerate() {
-            let s = (start_ms * rate as u64 / 1000) as usize;
-            let e = ((end_ms * rate as u64 / 1000) as usize).min(samples.len());
-            let bytes = wav_bytes_mono_16(&samples[s..e], rate);
-            let raw = self
-                .transcribe_bytes(bytes, format!("chunk-{i}.wav"), opts)
-                .await?;
-            language = language.or(raw.language);
-            per_chunk.push(raw.words);
+        let mut words = Vec::new();
+        // Uploads are cut at speech-span gaps (plan_batches). Only a single
+        // contiguous speech span longer than the payload cap falls back to
+        // fixed overlapping chunks stitched at the overlap midpoint.
+        for (bi, batch) in plan_batches(&spans, segment_ms).into_iter().enumerate() {
+            let oversized =
+                batch.len() == 1 && batch[0].end_ms - batch[0].start_ms > segment_ms;
+            if oversized {
+                let span = batch[0];
+                let s0 = (span.start_ms * rate as u64 / 1000) as usize;
+                let e0 = ((span.end_ms * rate as u64 / 1000) as usize).min(samples.len());
+                let mut span_samples = samples[s0..e0].to_vec();
+                fly_audio::mix::normalize_peak(
+                    &mut span_samples,
+                    NORMALIZE_TARGET_PEAK,
+                    NORMALIZE_MAX_GAIN,
+                );
+                let chunks = plan_chunks(span.end_ms - span.start_ms, segment_ms, OVERLAP_MS);
+                let mut per_chunk: Vec<Vec<Word>> = Vec::new();
+                for (i, &(cs, ce)) in chunks.iter().enumerate() {
+                    let s = (cs * rate as u64 / 1000) as usize;
+                    let e = ((ce * rate as u64 / 1000) as usize).min(span_samples.len());
+                    let raw = self
+                        .transcribe_bytes(
+                            wav_bytes_mono_16(&span_samples[s..e], rate),
+                            format!("speech-{bi}-{i}.wav"),
+                            opts,
+                        )
+                        .await?;
+                    language = language.or(raw.language);
+                    per_chunk.push(raw.words);
+                }
+                // stitched timestamps are relative to the span; shift to
+                // absolute original-file time
+                words.extend(offset_words(
+                    stitch_chunk_words(&chunks, per_chunk),
+                    span.start_ms,
+                ));
+            } else {
+                let (mut chunk, map) = stitch_spans(&samples, rate, &batch)
+                    .map_err(|e| AsrError::BadAudio(e.to_string()))?;
+                fly_audio::mix::normalize_peak(
+                    &mut chunk,
+                    NORMALIZE_TARGET_PEAK,
+                    NORMALIZE_MAX_GAIN,
+                );
+                let raw = self
+                    .transcribe_bytes(
+                        wav_bytes_mono_16(&chunk, rate),
+                        format!("speech-{bi}.wav"),
+                        opts,
+                    )
+                    .await?;
+                language = language.or(raw.language);
+                words.extend(raw.words.into_iter().map(|mut w| {
+                    w.start_ms = map_to_original(w.start_ms, &map);
+                    w.end_ms = map_to_original(w.end_ms, &map);
+                    w
+                }));
+            }
         }
 
         Ok(RawTranscript {
-            language,
-            words: stitch_chunk_words(&chunks, per_chunk),
+            language: language.or_else(|| opts.language.clone()),
+            words,
             segments: vec![],
         })
     }
+}
+
+/// Shift word timestamps by a constant offset (span-relative → absolute).
+fn offset_words(words: Vec<Word>, offset_ms: u64) -> Vec<Word> {
+    words
+        .into_iter()
+        .map(|mut w| {
+            w.start_ms += offset_ms;
+            w.end_ms += offset_ms;
+            w
+        })
+        .collect()
 }
 
 impl GroqEngine {
@@ -112,10 +170,17 @@ impl GroqEngine {
             )
             .text("model", self.model.clone())
             .text("response_format", "verbose_json")
-            .text("timestamp_granularities[]", "word");
+            .text("timestamp_granularities[]", "word")
+            // greedy decode — matches whisper.cpp's default; sampling adds
+            // transcript variance and helps hallucination loops take hold
+            .text("temperature", "0");
         if let Some(lang) = &opts.language {
             form = form.text("language", lang.clone());
         }
+        // The pipeline deliberately passes prompt: None: the local path runs
+        // context-free (-mc 0) because carried text context is the fuel for
+        // repetition hallucination, and prompt biasing was measured inert.
+        // Don't synthesize a prompt here.
         if let Some(prompt) = &opts.prompt {
             form = form.text("prompt", prompt.clone());
         }
@@ -359,5 +424,75 @@ mod tests {
         // "before" (< 3_500) came from chunk 0; "after" (>= 3_500) from chunk 1
         assert_eq!(stitched[0].start_ms, 3_200);
         assert_eq!(stitched[1].start_ms, 3_700);
+    }
+
+    #[test]
+    fn oversized_span_words_shift_to_absolute_time() {
+        // A contiguous span starting at 60s, chunked span-relative: stitched
+        // words must land back on the original timeline.
+        let chunks = plan_chunks(10_000, 4_000, 1_000);
+        let stitched = stitch_chunk_words(
+            &chunks,
+            vec![vec![word("a", 500)], vec![word("b", 2_000)], vec![word("c", 3_000)]],
+        );
+        let abs = offset_words(stitched, 60_000);
+        assert_eq!(abs[0].start_ms, 60_500);
+        assert_eq!(abs[1].start_ms, 65_000); // chunk1 start 3_000 + 2_000 + 60_000
+        assert_eq!(abs[2].start_ms, 69_000); // chunk2 start 6_000 + 3_000 + 60_000
+        assert_eq!(abs[2].end_ms, 69_200);
+    }
+
+    #[test]
+    fn vad_stitched_word_timestamps_round_trip_to_original_timeline() {
+        // Synthetic WAV layout: 10s silence, 2s speech, 20s silence, 3s
+        // speech, 5s silence. Words transcribed on the stitched (silence-
+        // stripped) audio must map back inside the original speech windows.
+        use fly_audio::vad::{detect_speech_spans, map_to_original, stitch_spans, VadConfig};
+        let rate = 16_000u32;
+        let mut audio = vec![0.0f32; (rate as usize) * 10];
+        let tone = |out: &mut Vec<f32>, secs: usize| {
+            let start = out.len();
+            out.extend((0..rate as usize * secs).map(|i| {
+                ((start + i) as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.3
+            }));
+        };
+        tone(&mut audio, 2); // speech A: 10s..12s
+        audio.resize(audio.len() + rate as usize * 20, 0.0);
+        tone(&mut audio, 3); // speech B: 32s..35s
+        audio.resize(audio.len() + rate as usize * 5, 0.0);
+
+        let spans = detect_speech_spans(&audio, rate, &VadConfig::default());
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        let (stitched, map) = stitch_spans(&audio, rate, &spans).unwrap();
+        // stitched audio holds only speech (+pads): far shorter than 40s
+        assert!(stitched.len() < rate as usize * 7, "{}", stitched.len());
+
+        // a "word" 1s into stitched audio lies inside speech A's window
+        let w1 = map_to_original(1_000, &map);
+        assert!((9_500..=12_500).contains(&w1), "w1={w1}");
+        // a "word" just after span A's stitched length falls in speech B
+        let span_a_len = map[0].len_ms;
+        let w2 = map_to_original(span_a_len + 1_000, &map);
+        assert!((31_500..=35_500).contains(&w2), "w2={w2}");
+        // exact interior offsets are preserved sample-accurately
+        assert_eq!(
+            map_to_original(map[1].concat_start_ms, &map),
+            spans[1].start_ms
+        );
+    }
+
+    #[test]
+    fn uploads_prefer_cuts_at_speech_gaps() {
+        use fly_audio::vad::SpeechSpan;
+        let s = |a: u64, b: u64| SpeechSpan {
+            start_ms: a * 1000,
+            end_ms: b * 1000,
+        };
+        // three spans, 200s speech total, 300s cap per upload: the first two
+        // (150s) share an upload; the third starts a new one at the gap
+        let batches = plan_batches(&[s(0, 100), s(150, 200), s(400, 500)], 160_000);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], vec![s(0, 100), s(150, 200)]);
+        assert_eq!(batches[1], vec![s(400, 500)]);
     }
 }
