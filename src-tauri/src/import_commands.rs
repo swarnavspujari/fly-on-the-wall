@@ -100,6 +100,7 @@ pub async fn import_media(
                     mic_path: None,
                     system_path: None,
                     mixed_path: Some(mixed_rel),
+                    playback_path: None,
                     duration_ms,
                 },
             )

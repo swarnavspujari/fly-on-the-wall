@@ -15,6 +15,7 @@ async-trait.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 uuid.workspace = true
+hound.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

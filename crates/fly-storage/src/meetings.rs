@@ -169,6 +169,7 @@ impl Storage {
                 mic_path: rebase(&rec.mic_path),
                 system_path: rebase(&rec.system_path),
                 mixed_path: rebase(&rec.mixed_path),
+                playback_path: rebase(&rec.playback_path),
                 duration_ms: rec.duration_ms,
             };
             self.conn.execute(
@@ -218,14 +219,38 @@ mod tests {
             mic_path: Some("recordings/x/recording.mic.wav".into()),
             system_path: Some("recordings/x/recording.system.wav".into()),
             mixed_path: Some("recordings/x/recording.mixed.wav".into()),
+            playback_path: Some("recordings/x/recording.playback.wav".into()),
             duration_ms: 61_000,
         };
         let ended = s.end_meeting(&meeting.id, &rec).unwrap();
         assert!(ended.ended_at.is_some());
-        assert_eq!(ended.recording.unwrap().duration_ms, 61_000);
+        let stored = ended.recording.unwrap();
+        assert_eq!(stored.duration_ms, 61_000);
+        assert_eq!(
+            stored.playback_path.as_deref(),
+            Some("recordings/x/recording.playback.wav")
+        );
 
         let by_note = s.get_meeting_for_note(&note.id).unwrap().unwrap();
         assert_eq!(by_note.id, meeting.id);
+    }
+
+    /// recording_json rows written before playback_path existed must keep
+    /// deserializing (players fall back to the mixed track).
+    #[test]
+    fn legacy_recording_json_without_playback_path_still_parses() {
+        let legacy = r#"{
+            "mic_path": "recordings/x/recording.mic.wav",
+            "system_path": null,
+            "mixed_path": "recordings/x/recording.mixed.wav",
+            "duration_ms": 5000
+        }"#;
+        let rec: RecordingRef = serde_json::from_str(legacy).unwrap();
+        assert_eq!(rec.playback_path, None);
+        assert_eq!(
+            rec.mixed_path.as_deref(),
+            Some("recordings/x/recording.mixed.wav")
+        );
     }
 
     /// Renaming a note renames its meeting folder and rewrites the
@@ -250,6 +275,7 @@ mod tests {
                 mic_path: None,
                 system_path: None,
                 mixed_path: Some(rel),
+                playback_path: None,
                 duration_ms: 1000,
             },
         )

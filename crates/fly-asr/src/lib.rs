@@ -25,11 +25,21 @@ pub enum AsrError {
     Engine(String),
     #[error("network error talking to cloud ASR: {0}")]
     Network(String),
+    /// Cloud ASR rejected the request (4xx) — retrying the identical payload
+    /// can never succeed. Display starts with [`REJECTED_MARKER`] so
+    /// string-typed layers (the app's job scheduler) can stop retrying.
+    #[error("cloud ASR rejected the request: {0}")]
+    Rejected(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, AsrError>;
+
+/// Substring of [`AsrError::Rejected`]'s Display text. The pipeline reduces
+/// errors to strings before they reach the scheduler, which matches on this
+/// to mark 4xx request failures permanent (no retry).
+pub const REJECTED_MARKER: &str = "cloud ASR rejected the request";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TranscribeOptions {

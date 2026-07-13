@@ -51,6 +51,13 @@ futures-util = "0.3"
 sha2 = "0.10"
 cpal = "0.18"
 hound = "3.5"
+# in-process archive extraction (src-tauri models.rs): Windows' bundled bsdtar
+# can't open .tar.bz2 without an external bzip2 on PATH, which clean machines
+# lack. zip 4.x matches tauri-plugin-updater's copy so nothing new compiles.
+zip = { version = "4", default-features = false, features = ["deflate"] }
+tar = "0.4"
+bzip2 = "0.6"
+xz2 = { version = "0.1", features = ["static"] }
 
 [profile.release]
 lto = "thin"

@@ -23,6 +23,7 @@ impl fly_audio::CaptureSession for FakeSession {
             mic_path: None,
             system_path: None,
             mixed_path: None,
+            playback_path: None,
             duration_ms: 0,
         })
     }
@@ -196,6 +197,7 @@ fn missing_recording_files_give_up_without_retry() {
                     mic_path: Some("recordings/gone/recording.mic.wav".into()),
                     system_path: None,
                     mixed_path: None,
+                    playback_path: None,
                     duration_ms: 1000,
                 },
             )

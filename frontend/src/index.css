@@ -398,6 +398,9 @@
   body,
   #root {
     height: 100%;
+    /* scrolling belongs to inner panes (notes list, transcript, modals);
+       the window itself must never scroll into blank space */
+    overflow: hidden;
   }
 
   body {

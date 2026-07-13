@@ -135,8 +135,13 @@ pub struct RecordingRef {
     pub mic_path: Option<String>,
     /// System-loopback channel (them), WAV.
     pub system_path: Option<String>,
-    /// Mixed track, used for playback and single-file pipelines.
+    /// Mixed track (16 kHz mono ASR downmix), used by single-file pipelines
+    /// and as the playback fallback for recordings made before `playback_path`.
     pub mixed_path: Option<String>,
+    /// Full-quality playback mix (mic + system at native rate). Absent on
+    /// recordings made before it existed — players must fall back.
+    #[serde(default)]
+    pub playback_path: Option<String>,
     pub duration_ms: u64,
 }
 

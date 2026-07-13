@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::mix::write_mixdown;
+use crate::mix::{write_mixdown, write_playback_mix};
 use crate::{
     AudioCapture, AudioDevice, AudioError, CaptureConfig, CaptureOutput, CaptureSession,
     CaptureState, Result,
@@ -91,7 +91,7 @@ impl AudioCapture for CpalAudioCapture {
         std::fs::create_dir_all(&cfg.out_dir)?;
         let clock = Arc::new(Clock::new());
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Command>();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<Vec<String>>>();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<CaptureOutput>>();
 
         let thread_clock = clock.clone();
@@ -100,8 +100,9 @@ impl AudioCapture for CpalAudioCapture {
             .spawn(move || audio_thread(cfg, thread_clock, cmd_rx, ready_tx, done_tx))
             .map_err(|e| AudioError::Backend(e.to_string()))?;
 
-        // Surface stream-construction errors synchronously to the caller.
-        ready_rx
+        // Surface stream-construction errors synchronously to the caller;
+        // a degraded start (mic ok, loopback failed) comes back as warnings.
+        let warnings = ready_rx
             .recv()
             .map_err(|_| AudioError::Backend("audio thread died during startup".into()))??;
 
@@ -110,6 +111,7 @@ impl AudioCapture for CpalAudioCapture {
             done_rx,
             clock,
             state: CaptureState::Recording,
+            warnings,
         }))
     }
 }
@@ -125,6 +127,8 @@ struct CpalSession {
     done_rx: Receiver<Result<CaptureOutput>>,
     clock: Arc<Clock>,
     state: CaptureState,
+    /// Startup degradations (loopback failed → mic-only), set once.
+    warnings: Vec<String>,
 }
 
 impl CaptureSession for CpalSession {
@@ -165,6 +169,10 @@ impl CaptureSession for CpalSession {
 
     fn elapsed_ms(&self) -> u64 {
         self.clock.elapsed_ms()
+    }
+
+    fn warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 }
 
@@ -284,7 +292,7 @@ fn audio_thread(
     cfg: CaptureConfig,
     clock: Arc<Clock>,
     cmd_rx: Receiver<Command>,
-    ready_tx: Sender<Result<()>>,
+    ready_tx: Sender<Result<Vec<String>>>,
     done_tx: Sender<Result<CaptureOutput>>,
 ) {
     let host = cpal::default_host();
@@ -299,12 +307,18 @@ fn audio_thread(
     };
 
     // --- system loopback channel (best effort: recording proceeds mic-only
-    //     if loopback can't be built, e.g. non-Windows or exotic devices) ---
+    //     if loopback can't be built, e.g. non-Windows or exotic devices —
+    //     but the degradation must be visible to the person recording) ---
+    let mut warnings = Vec::new();
     let system: Option<LoopbackChannel> = if cfg.capture_system {
         match build_loopback_channel(&host, &cfg, &clock) {
             Ok(r) => Some(r),
             Err(e) => {
                 tracing::warn!("system loopback unavailable, recording mic only: {e}");
+                warnings.push(format!(
+                    "System audio capture couldn't start ({e}) — only your microphone is \
+                     being recorded, so the other participants won't be in this recording."
+                ));
                 None
             }
         }
@@ -312,7 +326,7 @@ fn audio_thread(
         None
     };
 
-    let _ = ready_tx.send(Ok(()));
+    let _ = ready_tx.send(Ok(warnings));
 
     let streams: Vec<&cpal::Stream> = std::iter::once(&mic._stream)
         .chain(system.iter().filter_map(|s| s.cpal_stream()))
@@ -370,13 +384,30 @@ fn audio_thread(
         return;
     }
 
-    // 16 kHz mono mixdown for playback + the ASR pipeline
+    // 16 kHz mono mixdown for the ASR pipeline (untouched — ASR depends on it)
     let mixed_path = cfg.out_dir.join(format!("{}.mixed.wav", cfg.base_name));
     let result = write_mixdown(Some(&mic_path), system_path.as_deref(), &mixed_path).map(|_| {
+        // Full-quality listening copy: only worth a second file when there
+        // are two tracks to combine; a mic-only recording's best listening
+        // copy IS the native-rate mic WAV.
+        let playback_path = match &system_path {
+            Some(sys) => {
+                let out = cfg.out_dir.join(format!("{}.playback.wav", cfg.base_name));
+                match write_playback_mix(Some(&mic_path), Some(sys), &out) {
+                    Ok(_) => Some(out),
+                    Err(e) => {
+                        tracing::warn!("playback mix failed (falling back to ASR mix): {e}");
+                        None
+                    }
+                }
+            }
+            None => Some(mic_path.clone()),
+        };
         CaptureOutput {
             mic_path: Some(mic_path),
             system_path,
             mixed_path: Some(mixed_path),
+            playback_path,
             duration_ms,
         }
     });

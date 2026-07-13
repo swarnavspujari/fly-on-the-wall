@@ -424,6 +424,7 @@ mod tests {
                 mic_path: None,
                 system_path: None,
                 mixed_path: Some(rel),
+                playback_path: None,
                 duration_ms: 1000,
             },
         )

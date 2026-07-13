@@ -29,6 +29,7 @@ impl fly_audio::CaptureSession for StubSession {
             mic_path: None,
             system_path: None,
             mixed_path: None,
+            playback_path: None,
             duration_ms: 0,
         })
     }
@@ -115,6 +116,7 @@ fn transcription_defers_to_recording_then_completes() {
                     mic_path: None,
                     system_path: None,
                     mixed_path: Some(format!("recordings/{}/recording.mixed.wav", meeting.id)),
+                    playback_path: None,
                     duration_ms: 27_540,
                 },
             )
@@ -197,6 +199,37 @@ fn transcription_defers_to_recording_then_completes() {
             output.duration_ms,
             mic.display()
         );
+
+        // Fix 5: the capture must yield a full-quality playback mix at the
+        // native device rate; the 16 kHz ASR mixdown must stay untouched.
+        let playback = output
+            .playback_path
+            .as_ref()
+            .expect("playback mix missing from capture output");
+        assert!(playback.exists(), "playback wav not on disk");
+        let (pb_samples, pb_rate) = fly_audio::mix::read_wav_mono(playback).unwrap();
+        let (_, mixed_rate) =
+            fly_audio::mix::read_wav_mono(output.mixed_path.as_ref().unwrap()).unwrap();
+        assert_eq!(mixed_rate, 16_000, "ASR mixdown must stay 16 kHz");
+        if output.system_path.is_some() {
+            // combined mic+system mix in its own file at the higher native rate
+            assert_ne!(playback, mic, "two-channel capture needs a real mix file");
+            assert!(
+                pb_rate > 16_000,
+                "playback mix must keep native quality, got {pb_rate} Hz"
+            );
+        } else {
+            // mic-only: the native mic WAV is the listening copy, no duplicate
+            assert_eq!(playback, mic);
+        }
+        let peak = pb_samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        eprintln!(
+            "playback mix: {} Hz, {} samples, peak {peak:.4} at {}",
+            pb_rate,
+            pb_samples.len(),
+            playback.display()
+        );
+
         let to_rel = |p: &std::path::PathBuf| -> Option<String> {
             p.strip_prefix(&data_dir)
                 .ok()
@@ -210,6 +243,7 @@ fn transcription_defers_to_recording_then_completes() {
                     mic_path: output.mic_path.as_ref().and_then(to_rel),
                     system_path: output.system_path.as_ref().and_then(to_rel),
                     mixed_path: output.mixed_path.as_ref().and_then(to_rel),
+                    playback_path: output.playback_path.as_ref().and_then(to_rel),
                     duration_ms: output.duration_ms,
                 },
             )

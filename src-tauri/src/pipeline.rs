@@ -198,7 +198,38 @@ pub async fn run_with(
         None
     };
     let asr: GuardedAsr = if let Some(key) = groq_key {
-        GuardedAsr::single(Box::new(fly_asr::groq::GroqEngine::new(key)))
+        let groq = Box::new(fly_asr::groq::GroqEngine::new(key));
+        // A Groq request failure (rate limit, outage, rejected payload) must
+        // not sink the meeting — mirror the GPU→CPU guard below with a
+        // fully-local fallback engine. Best-effort: if the local model can't
+        // be ensured (e.g. offline), Groq still runs alone.
+        let model_id = model_override
+            .unwrap_or_else(|| hw::default_model_for_tier(&tier, max_quality).to_string());
+        let local = async {
+            let exe = models::ensure_tool(
+                on_model,
+                &data_dir,
+                "whisper-bin",
+                &["whisper-cli"],
+                "install whisper.cpp so cloud transcription has a local fallback",
+            )
+            .await?;
+            let model = models::ensure(on_model, &data_dir, &model_id).await?;
+            Ok::<_, String>(fly_asr::whisper_cpp::WhisperCppEngine {
+                exe,
+                model,
+                threads,
+                force_cpu: !use_gpu,
+            })
+        }
+        .await;
+        match local {
+            Ok(engine) => GuardedAsr::with_cpu_fallback(groq, "groq", Box::new(engine), None),
+            Err(e) => {
+                tracing::warn!(error = %e, "no local fallback for Groq available — cloud only");
+                GuardedAsr::single(groq)
+            }
+        }
     } else {
         let model_id = model_override
             .unwrap_or_else(|| hw::default_model_for_tier(&tier, max_quality).to_string());
@@ -266,7 +297,7 @@ pub async fn run_with(
                     threads,
                     force_cpu: false,
                 }),
-                model_id,
+                Some(model_id),
             ),
             None => GuardedAsr::single(Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
                 exe: whisper_exe,
@@ -492,13 +523,13 @@ impl GuardedAsr {
         primary: Box<dyn TranscriptionEngine>,
         primary_label: &'static str,
         cpu: Box<dyn TranscriptionEngine>,
-        gpu_model_id: String,
+        gpu_model_id: Option<String>,
     ) -> Self {
         Self {
             primary,
             primary_label: Some(primary_label),
             cpu_fallback: Some(cpu),
-            gpu_model_id: Some(gpu_model_id),
+            gpu_model_id,
             failure: std::sync::Mutex::new(None),
         }
     }
@@ -537,8 +568,13 @@ impl GuardedAsr {
                         return Err(e.to_string());
                     };
                     let msg = e.to_string();
-                    tracing::warn!(error = %msg, "GPU transcription failed — falling back to CPU");
-                    notify("GPU transcription failed — continuing on CPU".into());
+                    let ui = if self.primary.is_local() {
+                        "GPU transcription failed — continuing on CPU"
+                    } else {
+                        "Cloud transcription failed — continuing with local transcription"
+                    };
+                    tracing::warn!(error = %msg, "{ui}");
+                    notify(ui.into());
                     *self.failure.lock().unwrap() = Some(msg);
                     cpu.transcribe(wav, opts).await.map_err(|e| e.to_string())
                 }
@@ -661,6 +697,7 @@ mod tests {
             mic_path: Some("recordings/2026-07-02 TB 1 1/recording.mic.wav".into()),
             system_path: None,
             mixed_path: None,
+            playback_path: None,
             duration_ms: 1000,
         };
         let parked = dir.path().join("recordings/_unlinked/2026-07-02 TB 1 1");
@@ -692,5 +729,100 @@ mod tests {
         assert_eq!(label("spk_1"), "Speaker 1");
         assert_eq!(label("spk_3"), "Speaker 2");
         assert_eq!(label("spk_unknown"), "Unknown");
+    }
+
+    /// Cloud engine whose every request is rejected (413-style).
+    struct RejectingCloud;
+    #[async_trait::async_trait]
+    impl TranscriptionEngine for RejectingCloud {
+        fn id(&self) -> &'static str {
+            "groq"
+        }
+        fn is_local(&self) -> bool {
+            false
+        }
+        async fn transcribe(
+            &self,
+            _wav: &Path,
+            _opts: &TranscribeOptions,
+        ) -> fly_asr::Result<RawTranscript> {
+            Err(fly_asr::AsrError::Rejected(
+                "groq returned 413 Payload Too Large: {}".into(),
+            ))
+        }
+    }
+
+    /// Local engine returning a fixed one-word transcript.
+    struct FixedLocal;
+    #[async_trait::async_trait]
+    impl TranscriptionEngine for FixedLocal {
+        fn id(&self) -> &'static str {
+            "whisper.cpp"
+        }
+        fn is_local(&self) -> bool {
+            true
+        }
+        async fn transcribe(
+            &self,
+            _wav: &Path,
+            _opts: &TranscribeOptions,
+        ) -> fly_asr::Result<RawTranscript> {
+            Ok(RawTranscript {
+                language: Some("en".into()),
+                words: vec![fly_core::Word {
+                    text: "local".into(),
+                    start_ms: 0,
+                    end_ms: 100,
+                }],
+                segments: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_cloud_request_falls_back_to_local_engine() {
+        let asr = GuardedAsr::with_cpu_fallback(
+            Box::new(RejectingCloud),
+            "groq",
+            Box::new(FixedLocal),
+            None,
+        );
+        let notes = std::sync::Mutex::new(Vec::new());
+        let notify = |d: String| notes.lock().unwrap().push(d);
+        let raw = asr
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &notify,
+            )
+            .await
+            .expect("fallback must rescue the meeting");
+        assert_eq!(raw.words[0].text, "local");
+        assert!(asr.failed_over());
+        assert_eq!(asr.engine_id(), "whisper.cpp");
+        // no GPU model involved — nothing to re-pin
+        assert!(asr.runtime_failure().is_none());
+        let notes = notes.lock().unwrap();
+        assert!(
+            notes[0].contains("Cloud transcription failed"),
+            "user-visible detail should name the cloud, got: {notes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_cloud_without_fallback_surfaces_marker_for_scheduler() {
+        let asr = GuardedAsr::single(Box::new(RejectingCloud));
+        let err = asr
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &|_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains(fly_asr::REJECTED_MARKER),
+            "scheduler must see the non-retryable marker, got: {err}"
+        );
     }
 }

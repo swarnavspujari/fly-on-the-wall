@@ -167,6 +167,7 @@ fn golden_fixture_transcribes_and_diarizes() {
                     mic_path: None,
                     system_path: None,
                     mixed_path: Some(format!("recordings/{}/recording.mixed.wav", meeting.id)),
+                    playback_path: None,
                     duration_ms: 27_540,
                 },
             )
@@ -339,6 +340,7 @@ fn gpu_failure_falls_back_to_cpu() {
                     mic_path: None,
                     system_path: None,
                     mixed_path: Some(format!("recordings/{}/recording.mixed.wav", meeting.id)),
+                    playback_path: None,
                     duration_ms: 27_540,
                 },
             )

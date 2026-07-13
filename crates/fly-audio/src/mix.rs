@@ -134,6 +134,31 @@ pub fn write_mixdown(mic: Option<&Path>, system: Option<&Path>, out: &Path) -> R
     Ok(mixed.len() as u64 * 1000 / MIX_SAMPLE_RATE as u64)
 }
 
+/// Build the full-quality playback mix: mic + system at the HIGHER of their
+/// native rates (no 16 kHz downsample — that one is for ASR, this one is for
+/// human ears). Returns the duration in milliseconds.
+pub fn write_playback_mix(mic: Option<&Path>, system: Option<&Path>, out: &Path) -> Result<u64> {
+    let load = |p: Option<&Path>| -> Result<Option<(Vec<f32>, u32)>> {
+        match p {
+            Some(p) if p.exists() => Ok(Some(read_wav_mono(p)?)),
+            _ => Ok(None),
+        }
+    };
+    let (mixed, rate) = match (load(mic)?, load(system)?) {
+        (Some((m, mr)), Some((s, sr))) => {
+            let rate = mr.max(sr);
+            let m = resample_linear(&m, mr, rate);
+            let s = resample_linear(&s, sr, rate);
+            (mix_tracks(&m, &s), rate)
+        }
+        (Some((m, mr)), None) => (m, mr),
+        (None, Some((s, sr))) => (s, sr),
+        (None, None) => return Err(AudioError::Backend("no channel recordings to mix".into())),
+    };
+    write_wav_mono_16(out, &mixed, rate)?;
+    Ok(mixed.len() as u64 * 1000 / rate as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +240,52 @@ mod tests {
         assert!((mixed.len() as i64 - 16_000).abs() <= 5);
         // energy present in the overlap region
         assert!(mixed[..8000].iter().any(|s| s.abs() > 0.1));
+    }
+
+    #[test]
+    fn playback_mix_keeps_native_rate_and_carries_both_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mic = dir.path().join("mic.wav");
+        let sys = dir.path().join("sys.wav");
+        let out = dir.path().join("playback.wav");
+
+        // mic: tone only in the FIRST second (48 kHz); system: tone only in
+        // the SECOND second (44.1 kHz). Both must survive into the mix.
+        let mic_samples: Vec<f32> = (0..96_000)
+            .map(|i| {
+                if i < 48_000 {
+                    (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.4
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let sys_samples: Vec<f32> = (0..88_200)
+            .map(|i| {
+                if i >= 44_100 {
+                    (i as f32 * 220.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.4
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        write_wav_mono_16(&mic, &mic_samples, 48_000).unwrap();
+        write_wav_mono_16(&sys, &sys_samples, 44_100).unwrap();
+
+        let dur = write_playback_mix(Some(&mic), Some(&sys), &out).unwrap();
+        assert!((dur as i64 - 2000).abs() <= 5, "duration was {dur}ms");
+
+        let (mixed, rate) = read_wav_mono(&out).unwrap();
+        // native quality: the HIGHER input rate, not the 16 kHz ASR rate
+        assert_eq!(rate, 48_000);
+        let peak = |s: &[f32]| s.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(
+            peak(&mixed[..48_000]) > 0.3,
+            "mic track missing from playback mix"
+        );
+        assert!(
+            peak(&mixed[48_000..]) > 0.3,
+            "system track missing from playback mix"
+        );
     }
 }

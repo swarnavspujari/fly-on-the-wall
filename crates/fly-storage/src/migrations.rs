@@ -133,6 +133,7 @@ fn remap_into(rec: &RecordingRef, new_rel_dir: &str) -> RecordingRef {
         mic_path: rebase(&rec.mic_path),
         system_path: rebase(&rec.system_path),
         mixed_path: rebase(&rec.mixed_path),
+        playback_path: rebase(&rec.playback_path),
         duration_ms: rec.duration_ms,
     }
 }

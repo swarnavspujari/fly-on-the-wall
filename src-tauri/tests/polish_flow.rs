@@ -69,6 +69,7 @@ fn seed(storage: &Storage) -> String {
                 mic_path: None,
                 system_path: None,
                 mixed_path: Some("recordings/x/mixed.wav".into()),
+                playback_path: None,
                 duration_ms: 60_000,
             },
         )

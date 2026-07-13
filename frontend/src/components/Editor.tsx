@@ -853,7 +853,10 @@ export default function Editor({
   };
 
   const rec = meeting?.recording ?? null;
-  const audioPath = rec?.mixed_path || rec?.mic_path || rec?.system_path || null;
+  // full-quality playback mix first; older recordings fall back to the
+  // 16 kHz ASR mixdown, then raw channels
+  const audioPath =
+    rec?.playback_path || rec?.mixed_path || rec?.mic_path || rec?.system_path || null;
   // Absolute path → asset URL so the <audio> element can stream it in-app.
   const audioSrc =
     dataDir && audioPath

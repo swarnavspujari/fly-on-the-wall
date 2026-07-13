@@ -44,13 +44,17 @@ impl RecordingStatus {
     }
 
     fn from_active(rec: &ActiveRecording, warnings: Vec<String>) -> Self {
+        // session warnings first: "loopback never started" outranks
+        // "system volume is low" when both apply
+        let mut all = rec.session.warnings();
+        all.extend(warnings);
         Self {
             active: true,
             state: Some(rec.session.state()),
             elapsed_ms: rec.session.elapsed_ms(),
             meeting_id: Some(rec.meeting_id.clone()),
             note_id: Some(rec.note_id.clone()),
-            warnings,
+            warnings: all,
         }
     }
 }
@@ -193,6 +197,7 @@ pub async fn stop_recording(state: State<'_, AppState>) -> CmdResult<Meeting> {
         mic_path: output.mic_path.as_ref().and_then(to_rel),
         system_path: output.system_path.as_ref().and_then(to_rel),
         mixed_path: output.mixed_path.as_ref().and_then(to_rel),
+        playback_path: output.playback_path.as_ref().and_then(to_rel),
         duration_ms: output.duration_ms,
     };
 

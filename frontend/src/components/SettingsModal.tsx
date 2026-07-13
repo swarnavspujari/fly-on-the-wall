@@ -189,6 +189,7 @@ export default function SettingsModal({
   const [groqKey, setGroqKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
+  const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
 
   // Presentational view mode — Technical reveals model installs, GPU + OAuth details.
   const [technical, setTechnical] = useState(false);
@@ -374,12 +375,28 @@ export default function SettingsModal({
   }, []);
 
   const pickProvider = (id: string) => {
+    const prev = llmProvider;
     setLlmProvider(id);
     const info = llm?.providers.find((p) => p.id === id);
     setLlmModel(info?.model ?? "");
     setLlmBaseUrl(info?.base_url ?? "");
     setLlmKey("");
     setLlmTest(null);
+    // Persist the pick immediately (optimistic, like toggleCalendar). The
+    // Save button is far below the Ollama panel, so users routinely picked a
+    // provider, never hit Save, and reopened the modal to persisted Ollama.
+    // Save still owns model / base-url / key edits.
+    api
+      .setLlmSettings({
+        provider: id,
+        model: info?.model ?? null,
+        base_url: info?.base_url ?? null,
+        api_key: null,
+      })
+      .catch((e) => {
+        setLlmProvider(prev);
+        setLlmTest(String(e));
+      });
   };
 
   const saveLlm = async () => {
@@ -456,11 +473,17 @@ export default function SettingsModal({
 
   const download = async (id: string) => {
     setDownloading(id);
+    setDownloadErrors((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     try {
       await api.downloadModel(id);
       await load();
     } catch (e) {
       console.error(e);
+      setDownloadErrors((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setDownloading(null);
     }
@@ -722,6 +745,11 @@ export default function SettingsModal({
                       <div className="text-text-3" style={{ fontSize: 11 }}>
                         {gb(m.bytes)}
                       </div>
+                      {downloadErrors[m.id] && (
+                        <div style={{ fontSize: 11, color: "var(--error-text)" }}>
+                          {downloadErrors[m.id]}
+                        </div>
+                      )}
                     </div>
                     <span className="flex shrink-0 items-center gap-2">
                       {m.installed ? (
@@ -1185,7 +1213,12 @@ export default function SettingsModal({
 
         {/* MCP */}
         <section className="space-y-2">
-          <SectionLabel>Chat with your notes (MCP)</SectionLabel>
+          {/* SectionLabel's inline margin:0 overrides the space-y-2 gap
+              (Tailwind v4 puts it on the label as margin-bottom), leaving the
+              label flush against the dark card — restore the 8px here */}
+          <SectionLabel style={{ display: "block", marginBottom: 8 }}>
+            Chat with your notes (MCP)
+          </SectionLabel>
           <Card
             pad="lg"
             style={{

@@ -62,6 +62,8 @@ export interface RecordingRef {
   mic_path: string | null;
   system_path: string | null;
   mixed_path: string | null;
+  /** Full-quality playback mix; null on recordings made before it existed. */
+  playback_path?: string | null;
   duration_ms: number;
 }
 

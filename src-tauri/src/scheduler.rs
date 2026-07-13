@@ -64,6 +64,14 @@ pub fn enqueue(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> R
     Ok(())
 }
 
+/// True for failures that retrying the identical job can never fix:
+/// missing recording files never come back on their own, and a 4xx
+/// request rejection (413 payload too large, 401 bad key) reproduces
+/// byte-for-byte on every retry.
+fn permanent_failure(error: &str) -> bool {
+    error.contains(pipeline::ERR_NO_RECORDING_FILES) || error.contains(fly_asr::REJECTED_MARKER)
+}
+
 /// Run at most one queued job to completion. Never starts a pipeline while
 /// audio or screen capture is active.
 pub async fn tick(
@@ -99,9 +107,7 @@ pub async fn tick(
             tracing::error!(meeting_id, error = %error, "transcription pipeline failed");
             state.pipeline_stage.lock().unwrap().remove(&meeting_id);
             let attempts = job.attempts + 1;
-            // Missing recording files never come back on their own — retrying
-            // only makes the user watch two more doomed attempts.
-            let permanent = error.contains(pipeline::ERR_NO_RECORDING_FILES);
+            let permanent = permanent_failure(&error);
             if attempts < MAX_ATTEMPTS && !permanent {
                 set_job_state(state, |s| {
                     s.requeue_transcription(&meeting_id, attempts, &error)
@@ -297,5 +303,28 @@ fn set_job_state(
 ) {
     if let Err(e) = f(&state.storage.lock().unwrap()) {
         tracing::error!(error = %e, "updating transcription job state failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_cloud_errors_are_permanent() {
+        // exactly what the pipeline hands the scheduler: AsrError stringified
+        let e = fly_asr::AsrError::Rejected("groq returned 413 Payload Too Large: {}".into());
+        assert!(permanent_failure(&e.to_string()));
+        let e = fly_asr::AsrError::Rejected("groq returned 401 Unauthorized: {}".into());
+        assert!(permanent_failure(&e.to_string()));
+    }
+
+    #[test]
+    fn transient_errors_still_retry() {
+        let e = fly_asr::AsrError::Network("connection reset by peer".into());
+        assert!(!permanent_failure(&e.to_string()));
+        let e = fly_asr::AsrError::Engine("groq returned 500 Internal Server Error".into());
+        assert!(!permanent_failure(&e.to_string()));
+        assert!(permanent_failure(pipeline::ERR_NO_RECORDING_FILES));
     }
 }

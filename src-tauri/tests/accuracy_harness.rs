@@ -1036,6 +1036,7 @@ fn accuracy_harness() {
                     mic_path: Some(format!("recordings/{}/recording.mic.wav", meeting.id)),
                     system_path: Some(format!("recordings/{}/recording.system.wav", meeting.id)),
                     mixed_path: None,
+                    playback_path: None,
                     duration_ms: dur_mic.max(dur_sys),
                 },
             )

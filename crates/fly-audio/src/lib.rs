@@ -61,12 +61,14 @@ pub enum CaptureState {
 }
 
 /// What a finished capture produced. Paths are absolute; `mixed_path` is the
-/// mono mixdown used for playback and single-track pipelines.
+/// 16 kHz mono mixdown the ASR pipeline consumes; `playback_path` is the
+/// full-quality (native rate) mix meant for human listening.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureOutput {
     pub mic_path: Option<PathBuf>,
     pub system_path: Option<PathBuf>,
     pub mixed_path: Option<PathBuf>,
+    pub playback_path: Option<PathBuf>,
     pub duration_ms: u64,
 }
 
@@ -78,6 +80,12 @@ pub trait CaptureSession: Send {
     fn state(&self) -> CaptureState;
     /// Recorded time, excluding paused stretches.
     fn elapsed_ms(&self) -> u64;
+    /// Conditions that degraded THIS session at startup (e.g. system
+    /// loopback failed to build, so only the mic is being recorded).
+    /// Surfaced alongside [`AudioCapture::capture_warnings`].
+    fn warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Platform audio capture. One impl per OS; selected in src-tauri at

@@ -371,7 +371,7 @@ pub async fn ensure(
             tokio::fs::create_dir_all(&dest)
                 .await
                 .map_err(|e| e.to_string())?;
-            extract_archive(&tmp, &dest).await?;
+            extract_archive(&tmp, &dest, a.url).await?;
             let _ = tokio::fs::remove_file(&tmp).await;
         }
     }
@@ -394,27 +394,121 @@ pub async fn ensure(
     Ok(probe)
 }
 
-/// Extract zip/tar.bz2 with the system bsdtar (ships with Windows 10+ and
-/// handles both formats).
-async fn extract_archive(archive: &Path, dest: &Path) -> Result<(), String> {
-    let tar = if cfg!(windows) {
-        r"C:\Windows\System32\tar.exe"
-    } else {
-        "tar"
-    };
-    let out = tokio::process::Command::new(tar)
-        .arg("-xf")
-        .arg(archive)
-        .arg("-C")
-        .arg(dest)
-        .output()
-        .await
-        .map_err(|e| format!("failed to run tar: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "extraction failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+/// Extract zip/tar.bz2/tar.xz fully in-process — no external tools. Windows'
+/// bundled bsdtar delegates bzip2 to an external binary most machines lack,
+/// so shelling out breaks .tar.bz2 artifacts on clean installs. The format
+/// comes from `src_name` (the artifact URL) because the downloaded temp file
+/// is named `{id}.download`.
+async fn extract_archive(archive: &Path, dest: &Path, src_name: &str) -> Result<(), String> {
+    let archive = archive.to_path_buf();
+    let dest = dest.to_path_buf();
+    let name = src_name.to_ascii_lowercase();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&archive)
+            .map_err(|e| format!("extraction failed: cannot open archive: {e}"))?;
+        let reader = std::io::BufReader::new(file);
+        if name.ends_with(".zip") {
+            zip::ZipArchive::new(reader)
+                .and_then(|mut z| z.extract(&dest))
+                .map_err(|e| format!("extraction failed: {e}"))
+        } else if name.ends_with(".tar.bz2") {
+            tar::Archive::new(bzip2::read::BzDecoder::new(reader))
+                .unpack(&dest)
+                .map_err(|e| format!("extraction failed: {e}"))
+        } else if name.ends_with(".tar.xz") {
+            tar::Archive::new(xz2::read::XzDecoder::new(reader))
+                .unpack(&dest)
+                .map_err(|e| format!("extraction failed: {e}"))
+        } else {
+            Err(format!(
+                "extraction failed: unsupported archive format: {name}"
+            ))
+        }
+    })
+    .await
+    .map_err(|e| format!("extraction task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A tar stream holding `inner/dir/probe.txt`, mirroring the nested
+    /// layout of the real artifacts (archive root dir + probe file below it).
+    fn tar_bytes() -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let data = b"probe";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        b.append_data(&mut header, "inner/dir/probe.txt", &data[..])
+            .unwrap();
+        b.into_inner().unwrap()
     }
-    Ok(())
+
+    /// Extract `bytes` (written to a `{id}.download`-style temp name, like
+    /// `ensure` does) and assert the probe file appears under dest.
+    async fn assert_extracts(bytes: Vec<u8>, src_name: &str, probe: &str) {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("fixture.download");
+        std::fs::write(&archive, bytes).unwrap();
+        let dest = tmp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        extract_archive(&archive, &dest, src_name).await.unwrap();
+        let probe = dest.join(probe);
+        assert!(probe.is_file(), "missing probe file {}", probe.display());
+        assert_eq!(std::fs::read(&probe).unwrap(), b"probe");
+    }
+
+    #[tokio::test]
+    async fn extracts_tar_bz2_in_process() {
+        let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        enc.write_all(&tar_bytes()).unwrap();
+        assert_extracts(
+            enc.finish().unwrap(),
+            "https://example.com/sherpa-onnx-v1.13.3.tar.bz2",
+            "inner/dir/probe.txt",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn extracts_tar_xz_in_process() {
+        let mut enc = xz2::write::XzEncoder::new(Vec::new(), 6);
+        enc.write_all(&tar_bytes()).unwrap();
+        assert_extracts(
+            enc.finish().unwrap(),
+            "https://example.com/ffmpeg-n8.1.tar.xz",
+            "inner/dir/probe.txt",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn extracts_zip_in_process() {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zw.start_file("inner/dir/probe.txt", opts).unwrap();
+        zw.write_all(b"probe").unwrap();
+        assert_extracts(
+            zw.finish().unwrap().into_inner(),
+            "https://example.com/whisper-bin-x64.zip",
+            "inner/dir/probe.txt",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_archive_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("fixture.download");
+        std::fs::write(&archive, b"junk").unwrap();
+        let err = extract_archive(&archive, tmp.path(), "https://example.com/model.7z")
+            .await
+            .unwrap_err();
+        assert!(err.contains("unsupported archive format"), "{err}");
+    }
 }
