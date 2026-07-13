@@ -200,11 +200,17 @@ pub async fn polish_transcript(
     state: State<'_, AppState>,
     meeting_id: String,
 ) -> CmdResult<PolishResult> {
-    let provider = build_provider(&state)?;
+    run_polish(&state, &meeting_id).await
+}
+
+/// The polish pass itself, callable outside the command layer — the
+/// transcription scheduler chains it after every successful pipeline run.
+pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResult, String> {
+    let provider = build_provider(state)?;
     let raw = {
         let storage = state.storage.lock().unwrap();
         storage
-            .get_transcript(&meeting_id)
+            .get_transcript(meeting_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| {
                 "no transcript to polish yet — transcribe the meeting first".to_string()

@@ -65,6 +65,21 @@ impl Storage {
         Ok(())
     }
 
+    /// Drop the polished variant and its on-disk mirrors. A NEW transcription
+    /// run must call this: segment ids are freshly generated every run, so a
+    /// cleaned variant from a previous run no longer corresponds to anything
+    /// (its ids resolve to no segment, its text to an old decode).
+    pub fn clear_cleaned_transcript(&self, meeting_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE transcripts SET cleaned_json = NULL WHERE meeting_id = ?1",
+            [meeting_id],
+        )?;
+        let (md, json) = self.transcript_mirror_paths(meeting_id, ".cleaned");
+        let _ = std::fs::remove_file(md);
+        let _ = std::fs::remove_file(json);
+        Ok(())
+    }
+
     /// The polished variant if the polish pass has run, else `None` (the raw
     /// transcript is always available via `get_transcript`).
     pub fn get_cleaned_transcript(&self, meeting_id: &str) -> Result<Option<Transcript>> {
@@ -82,33 +97,39 @@ impl Storage {
         }
     }
 
-    /// Rename a speaker's display label (stable keys never change).
+    /// Rename a speaker's display label (stable keys never change). The
+    /// cleaned variant shares the raw's speaker keys, so the rename is
+    /// mirrored there too — whichever variant the UI shows stays consistent.
     pub fn relabel_speaker(
         &self,
         meeting_id: &str,
         speaker_key: &str,
         label: &str,
     ) -> Result<Transcript> {
+        let relabel =
+            |t: &mut Transcript| match t.speakers.iter_mut().find(|s| s.key == speaker_key) {
+                Some(s) => s.label = label.to_string(),
+                None => t.speakers.push(fly_core::Speaker {
+                    key: speaker_key.to_string(),
+                    label: label.to_string(),
+                }),
+            };
         let mut transcript = self
             .get_transcript(meeting_id)?
             .ok_or_else(|| StorageError::NotFound(format!("transcript for {meeting_id}")))?;
-        match transcript
-            .speakers
-            .iter_mut()
-            .find(|s| s.key == speaker_key)
-        {
-            Some(s) => s.label = label.to_string(),
-            None => transcript.speakers.push(fly_core::Speaker {
-                key: speaker_key.to_string(),
-                label: label.to_string(),
-            }),
-        }
+        relabel(&mut transcript);
         self.save_transcript(&transcript)?;
+        if let Some(mut cleaned) = self.get_cleaned_transcript(meeting_id)? {
+            relabel(&mut cleaned);
+            self.save_cleaned_transcript(&cleaned)?;
+        }
         Ok(transcript)
     }
 
     /// Edit a segment's text in place (stable ids never change); re-syncs FTS
-    /// and the on-disk markdown/JSON mirrors so an edit survives reload.
+    /// and the on-disk markdown/JSON mirrors so an edit survives reload. A
+    /// manual edit is the user's final word on that line, so it lands in the
+    /// cleaned variant too (same segment id) when one exists.
     pub fn edit_segment_text(
         &self,
         meeting_id: &str,
@@ -125,6 +146,12 @@ impl Storage {
             .ok_or_else(|| StorageError::NotFound(format!("segment {segment_id}")))?;
         seg.text = text.to_string();
         self.save_transcript(&transcript)?;
+        if let Some(mut cleaned) = self.get_cleaned_transcript(meeting_id)? {
+            if let Some(seg) = cleaned.segments.iter_mut().find(|s| s.id == segment_id) {
+                seg.text = text.to_string();
+                self.save_cleaned_transcript(&cleaned)?;
+            }
+        }
         Ok(transcript)
     }
 
@@ -296,6 +323,28 @@ mod tests {
         );
     }
 
+    /// A new transcription run clears the polished variant — its segment ids
+    /// belong to the previous run and resolve to nothing.
+    #[test]
+    fn clear_cleaned_removes_variant_and_mirrors() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("m", None).unwrap();
+        let meeting = s.create_meeting("m", &note.id, &[]).unwrap();
+        let raw = sample_transcript(&meeting.id);
+        s.save_transcript(&raw).unwrap();
+        s.save_cleaned_transcript(&raw).unwrap();
+        assert!(s.get_cleaned_transcript(&meeting.id).unwrap().is_some());
+
+        s.clear_cleaned_transcript(&meeting.id).unwrap();
+        assert!(s.get_cleaned_transcript(&meeting.id).unwrap().is_none());
+        let tdir = dir.path().join("transcripts");
+        assert!(!tdir.join(format!("{}.cleaned.md", meeting.id)).exists());
+        assert!(!tdir.join(format!("{}.cleaned.json", meeting.id)).exists());
+        // the raw transcript and its mirrors are untouched
+        assert!(s.get_transcript(&meeting.id).unwrap().is_some());
+        assert!(tdir.join(format!("{}.md", meeting.id)).exists());
+    }
+
     /// Polishing before the raw transcript exists is an error, not a silent
     /// insert — the polish pass reads the raw transcript as its source.
     #[test]
@@ -307,6 +356,33 @@ mod tests {
             .save_cleaned_transcript(&sample_transcript(&meeting.id))
             .unwrap_err();
         assert!(matches!(err, crate::StorageError::NotFound(_)));
+    }
+
+    /// A manual segment edit or speaker rename is the user's final word, so
+    /// it lands in BOTH variants — otherwise the polished view would keep
+    /// showing the pre-edit text.
+    #[test]
+    fn edits_and_relabels_propagate_to_cleaned_variant() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("m", None).unwrap();
+        let meeting = s.create_meeting("m", &note.id, &[]).unwrap();
+        let raw = sample_transcript(&meeting.id);
+        s.save_transcript(&raw).unwrap();
+        let mut cleaned = raw.clone();
+        cleaned.segments[0].text = "The budget is approved.".into();
+        s.save_cleaned_transcript(&cleaned).unwrap();
+
+        s.edit_segment_text(&meeting.id, "seg-1", "the budget is NOT approved")
+            .unwrap();
+        s.relabel_speaker(&meeting.id, "spk_0", "Dana").unwrap();
+
+        for t in [
+            s.get_transcript(&meeting.id).unwrap().unwrap(),
+            s.get_cleaned_transcript(&meeting.id).unwrap().unwrap(),
+        ] {
+            assert_eq!(t.segments[0].text, "the budget is NOT approved");
+            assert_eq!(t.speakers[0].label, "Dana");
+        }
     }
 
     #[test]

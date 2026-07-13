@@ -39,6 +39,7 @@ sysinfo = "0.39"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs.workspace = true
+tauri-plugin-clipboard-manager = "2"
 
 # Auto-update + relaunch + single-instance are desktop-only plugins; keep them
 # out of a future mobile build of this lib.

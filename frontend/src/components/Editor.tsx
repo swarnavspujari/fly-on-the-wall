@@ -15,7 +15,9 @@ import type {
 import {
   AudioWaveform,
   Calendar,
+  Check,
   ChevronDown,
+  Copy,
   FileDown,
   Folder as FolderIcon,
   LayoutTemplate,
@@ -45,6 +47,8 @@ interface Props {
   note: Note;
   meeting: Meeting | null;
   transcript: Transcript | null;
+  /** LLM-polished variant (null until the cleanup pass has run). */
+  cleanedTranscript: Transcript | null;
   pipeStage: string | null;
   pipeDetail: string | null;
   pipelineError: string | null;
@@ -681,6 +685,7 @@ export default function Editor({
   note,
   meeting,
   transcript,
+  cleanedTranscript,
   pipeStage,
   pipeDetail,
   pipelineError,
@@ -711,6 +716,8 @@ export default function Editor({
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
   const [askOpen, setAskOpen] = useState(false);
   const [zoomIds, setZoomIds] = useState<string[]>([]);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [exportState, setExportState] = useState<"idle" | "saved" | "failed">("idle");
   const saveTimer = useRef<number | null>(null);
   const noteIdRef = useRef(note.id);
 
@@ -799,6 +806,40 @@ export default function Editor({
     scheduleSave(title, md);
   };
 
+  // Copy the whole note as plain markdown (the same flattened document that
+  // lives in the notes/ folder on disk). The clipboard write happens on the
+  // native side (webview clipboard APIs are patchy); feedback is inline on
+  // the button.
+  const copyTimer = useRef<number | null>(null);
+  const copyMarkdown = async () => {
+    try {
+      await api.copyNoteMarkdown(note.id);
+      setCopyState("copied");
+    } catch (e) {
+      console.error("copy markdown failed", e);
+      setCopyState("failed");
+    }
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopyState("idle"), 1800);
+  };
+
+  // Save-as copy of the note's markdown mirror (native save dialog).
+  const exportTimer = useRef<number | null>(null);
+  const exportMarkdown = async () => {
+    let next: "idle" | "saved" | "failed";
+    try {
+      const path = await api.exportNote(note.id);
+      if (path == null) return; // user cancelled the dialog — no feedback
+      next = "saved";
+    } catch (e) {
+      console.error("export markdown failed", e);
+      next = "failed";
+    }
+    setExportState(next);
+    if (exportTimer.current !== null) window.clearTimeout(exportTimer.current);
+    exportTimer.current = window.setTimeout(() => setExportState("idle"), 1800);
+  };
+
   const insertFromAsk = (content: string) => {
     const next = scratchpad ? `${scratchpad}\n\n${content}` : content;
     setScratchpad(next);
@@ -881,11 +922,54 @@ export default function Editor({
           <Button
             variant="ghost"
             size="sm"
-            title="Save this note as a Markdown file"
-            onClick={() => void api.exportNote(note.id).catch((e) => alert(String(e)))}
+            title="Copy this note as Markdown"
+            onClick={() => void copyMarkdown()}
             className="!px-2"
+            style={
+              copyState === "copied"
+                ? { color: "var(--success-text)" }
+                : copyState === "failed"
+                  ? { color: "var(--error-text)" }
+                  : undefined
+            }
           >
-            <FileDown size={15} strokeWidth={1.75} />
+            {copyState === "copied" ? (
+              <>
+                <Check size={15} strokeWidth={2} /> Copied
+              </>
+            ) : copyState === "failed" ? (
+              <>
+                <Copy size={15} strokeWidth={1.75} /> Copy failed
+              </>
+            ) : (
+              <Copy size={15} strokeWidth={1.75} />
+            )}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            title="Save this note as a Markdown file"
+            onClick={() => void exportMarkdown()}
+            className="!px-2"
+            style={
+              exportState === "saved"
+                ? { color: "var(--success-text)" }
+                : exportState === "failed"
+                  ? { color: "var(--error-text)" }
+                  : undefined
+            }
+          >
+            {exportState === "saved" ? (
+              <>
+                <Check size={15} strokeWidth={2} /> Saved
+              </>
+            ) : exportState === "failed" ? (
+              <>
+                <FileDown size={15} strokeWidth={1.75} /> Save failed
+              </>
+            ) : (
+              <FileDown size={15} strokeWidth={1.75} />
+            )}
           </Button>
           <Button
             variant="ghost"
@@ -962,6 +1046,7 @@ export default function Editor({
                 <TranscriptPanel
                   meeting={meeting}
                   transcript={transcript}
+                  cleaned={cleanedTranscript}
                   stage={pipeStage}
                   stageDetail={pipeDetail}
                   modelProgress={modelProgress}

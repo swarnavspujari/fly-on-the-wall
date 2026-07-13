@@ -330,7 +330,11 @@ export default function Sidebar({
           <List size={15} strokeWidth={1.75} className="flex-none text-text-3" />
           All notes
         </div>
-        <SectionLabel className="mt-4 px-2.5 pb-1.5">Up next</SectionLabel>
+        {/* marginTop via style: SectionLabel inlines `margin: 0`, which beats
+            any mt-* class — spacing must come through the style prop. */}
+        <SectionLabel className="px-2.5 pb-1.5" style={{ marginTop: 26 }}>
+          Up next
+        </SectionLabel>
         {upcoming.length === 0 ? (
           <div className="px-2.5 py-1.5 text-[12.5px] text-text-3">
             Nothing scheduled for today.

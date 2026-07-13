@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Fly on the Wall",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "identifier": "com.flyonthewall.app",
   "build": {
     "beforeDevCommand": "npm run prepare-sidecars && npm run dev",

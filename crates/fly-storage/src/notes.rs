@@ -197,6 +197,12 @@ impl Storage {
         Ok(())
     }
 
+    /// Absolute path of a note's markdown mirror, for callers that hand the
+    /// file itself to the user (export). Same resolution as the writer side.
+    pub fn note_mirror_abs(&self, id: &str) -> std::path::PathBuf {
+        self.note_mirror_path(id)
+    }
+
     /// Absolute path of a note's markdown mirror. Reads `disk_path`; a row
     /// without one (can't happen after the v2 migration) falls back to the
     /// legacy `notes/<id>.md` name.

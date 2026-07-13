@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { X } from "lucide-react";
+import { PanelLeft, X } from "lucide-react";
 import { api } from "./api";
 import type {
   AppInfo,
@@ -31,6 +31,9 @@ import FirstRunNotice from "./components/FirstRunNotice";
 import UpdateBanner from "./components/UpdateBanner";
 import { useUpdater } from "./updater";
 
+/** Window width (px) under which the sidebars collapse into a menu button. */
+const NARROW_BREAKPOINT = 880;
+
 const IDLE_STATUS: RecordingStatus = {
   active: false,
   state: null,
@@ -51,6 +54,9 @@ export default function App() {
   const [openNote, setOpenNote] = useState<Note | null>(null);
   const [openMeeting, setOpenMeeting] = useState<Meeting | null>(null);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
+  // The LLM-polished variant (same segment ids/speakers/timestamps as the raw
+  // transcript, cleaner text). Null until the cleanup pass has run.
+  const [cleanedTranscript, setCleanedTranscript] = useState<Transcript | null>(null);
   const [pipeStage, setPipeStage] = useState<string | null>(null);
   const [pipeDetail, setPipeDetail] = useState<string | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
@@ -72,6 +78,12 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showFirstRun, setShowFirstRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Notepad mode: below this width both sidebars fold into a menu button and
+  // only the note itself stays visible, so the app works docked in a corner.
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.innerWidth < NARROW_BREAKPOINT,
+  );
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   // Auto-update (Windows-only). Recording is sacred: while anything records,
   // the banner is unmounted and Settings disables install/restart.
@@ -88,16 +100,16 @@ export default function App() {
   }, []);
 
   const firstNotesLogged = useRef(false);
+  // A slow fetch for a previous selection must not overwrite a newer one.
+  const notesSeq = useRef(0);
   const refreshNotes = useCallback(async () => {
-    if (selection.view === "all") {
-      const fresh = await api.listRecentNotes(200);
-      setNotes(fresh);
-      writeNotesCache(fresh);
-    } else if (selection.view === "unfiled") {
-      setNotes(await api.listNotesInFolder(null));
-    } else {
-      setNotes(await api.listNotesInFolder(selection.id));
-    }
+    const seq = ++notesSeq.current;
+    const fresh = await (selection.view === "all"
+      ? api.listRecentNotes(200)
+      : api.listNotesInFolder(selection.view === "unfiled" ? null : selection.id));
+    if (notesSeq.current !== seq) return;
+    setNotes(fresh);
+    if (selection.view === "all") writeNotesCache(fresh);
     if (!firstNotesLogged.current) {
       firstNotesLogged.current = true;
       console.info(`[startup] fresh notes list at ${Math.round(performance.now())} ms`);
@@ -146,6 +158,33 @@ export default function App() {
     return () => window.clearInterval(t);
   }, []);
 
+  // Collapse the sidebars into a menu button when the window gets narrow
+  // (someone using the app as a small notepad on a corner of the screen).
+  useEffect(() => {
+    // Plain resize listener (not matchMedia): some webviews don't dispatch
+    // media-query change events on window resize.
+    const apply = () => {
+      const isNarrow = window.innerWidth < NARROW_BREAKPOINT;
+      setNarrow(isNarrow);
+      if (!isNarrow) setDrawerOpen(false);
+    };
+    apply();
+    window.addEventListener("resize", apply);
+    return () => window.removeEventListener("resize", apply);
+  }, []);
+
+  // Ctrl+K (Cmd+K on macOS) opens Settings from anywhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setShowSettings(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // pipeline + model download progress events
   useEffect(() => {
     const unPipeline = listen<PipelineProgress>("pipeline:progress", (e) => {
@@ -156,12 +195,34 @@ export default function App() {
         setPipeDetail(null);
         setPipelineError(p.error);
         if (!p.error) {
-          api.getTranscript(p.meeting_id).then(setTranscript).catch(console.error);
+          void (async () => {
+            const [raw, cleaned] = await Promise.all([
+              api.getTranscript(p.meeting_id),
+              api.getCleanedTranscript(p.meeting_id).catch(() => null),
+            ]);
+            // The user may have switched notes while these fetched.
+            if (openMeetingIdRef.current !== p.meeting_id) return;
+            setTranscript(raw);
+            setCleanedTranscript(cleaned);
+          })().catch(console.error);
         }
       } else {
         setPipeStage(p.stage);
         setPipeDetail(p.detail);
         setPipelineError(null);
+        // By the polish stage the new raw transcript is already saved — fetch
+        // it now so the user reads it while the AI cleanup runs.
+        if (p.stage === "polishing") {
+          api
+            .getTranscript(p.meeting_id)
+            .then((t) => {
+              if (openMeetingIdRef.current === p.meeting_id) {
+                setTranscript(t);
+                setCleanedTranscript(null);
+              }
+            })
+            .catch(console.error);
+        }
       }
     });
     const unModel = listen<ModelProgress>("model:progress", (e) => setModelProgress(e.payload));
@@ -184,18 +245,34 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [searchQuery]);
 
+  // Monotonic token: rapid note switches fire overlapping fetch chains, and
+  // only the newest one may write state (otherwise note B can end up showing
+  // note A's meeting/transcript).
+  const openSeq = useRef(0);
   const openNoteById = useCallback(async (id: string) => {
+    const seq = ++openSeq.current;
+    const fresh = () => openSeq.current === seq;
     const note = await api.getNote(id);
+    if (!fresh()) return;
     setOpenNote(note);
     const meeting = await api.getMeetingForNote(id);
+    if (!fresh()) return;
     setOpenMeeting(meeting);
     setPipelineError(null);
     setPipeDetail(null);
     if (meeting) {
-      setTranscript(await api.getTranscript(meeting.id));
-      setPipeStage(await api.pipelineStage(meeting.id));
+      const [raw, cleaned, stage] = await Promise.all([
+        api.getTranscript(meeting.id),
+        api.getCleanedTranscript(meeting.id).catch(() => null),
+        api.pipelineStage(meeting.id),
+      ]);
+      if (!fresh()) return;
+      setTranscript(raw);
+      setCleanedTranscript(cleaned);
+      setPipeStage(stage);
     } else {
       setTranscript(null);
+      setCleanedTranscript(null);
       setPipeStage(null);
     }
   }, []);
@@ -203,10 +280,12 @@ export default function App() {
   const newNote = async () => {
     const folderId = selection.view === "folder" ? selection.id : null;
     const note = await api.createNote("Untitled", folderId);
+    openSeq.current++; // invalidate any in-flight openNoteById
     await refreshNotes();
     setOpenNote(note);
     setOpenMeeting(null);
     setTranscript(null);
+    setCleanedTranscript(null);
     setPipeStage(null);
     setPipeDetail(null);
   };
@@ -214,9 +293,11 @@ export default function App() {
   const deleteNote = async (id: string) => {
     await api.deleteNote(id);
     if (openNote?.id === id) {
+      openSeq.current++;
       setOpenNote(null);
       setOpenMeeting(null);
       setTranscript(null);
+      setCleanedTranscript(null);
     }
     await refreshNotes();
   };
@@ -284,15 +365,28 @@ export default function App() {
     await api.transcribeMeeting(openMeeting.id);
   };
 
+  // Edits and renames apply to both variants backend-side; refresh the
+  // cleaned copy so whichever view is showing reflects the change.
+  const refreshCleaned = async (meetingId: string) => {
+    const cleaned = await api.getCleanedTranscript(meetingId).catch(() => null);
+    if (openMeetingIdRef.current === meetingId) setCleanedTranscript(cleaned);
+  };
+
   const relabel = async (speakerKey: string, label: string) => {
     if (!openMeeting) return;
-    setTranscript(await api.relabelSpeaker(openMeeting.id, speakerKey, label));
+    const meetingId = openMeeting.id;
+    const updated = await api.relabelSpeaker(meetingId, speakerKey, label);
+    if (openMeetingIdRef.current === meetingId) setTranscript(updated);
+    await refreshCleaned(meetingId);
   };
 
   const editSegment = async (segmentId: string, text: string) => {
     if (!openMeeting) return;
+    const meetingId = openMeeting.id;
     try {
-      setTranscript(await api.editTranscriptSegment(openMeeting.id, segmentId, text));
+      const updated = await api.editTranscriptSegment(meetingId, segmentId, text);
+      if (openMeetingIdRef.current === meetingId) setTranscript(updated);
+      await refreshCleaned(meetingId);
     } catch (e) {
       setError(String(e));
     }
@@ -342,6 +436,54 @@ export default function App() {
         (openNote?.id === recStatus.note_id ? openNote.title : null))
       : null;
 
+  // Shared by the docked layout and the narrow-mode drawer.
+  const sidebarEl = (
+    <Sidebar
+      folders={folders}
+      upcoming={upcoming}
+      selection={selection}
+      onSelect={setSelection}
+      onCreateFolder={(name, parentId) =>
+        void api.createFolder(name, parentId).then(refreshFolders)
+      }
+      onRenameFolder={(id, name) => void api.renameFolder(id, name).then(refreshFolders)}
+      onDeleteFolder={(id) =>
+        void api.deleteFolder(id).then(async () => {
+          if (selection.view === "folder" && selection.id === id) {
+            setSelection({ view: "all" });
+          }
+          await refreshFolders();
+          await refreshNotes();
+        })
+      }
+      onStartFromEvent={(ev) => void startFromEvent(ev)}
+      onOpenSettings={() => {
+        setDrawerOpen(false);
+        setShowSettings(true);
+      }}
+      theme={resolved}
+      onMoveNote={(id, fid) => void moveNoteToFolder(id, fid)}
+    />
+  );
+  const noteListEl = (
+    <NoteList
+      notes={notes}
+      searchQuery={searchQuery}
+      searchHits={searchHits}
+      selectedNoteId={openNote?.id ?? null}
+      onSearchChange={setSearchQuery}
+      onOpenNote={(id) => {
+        setDrawerOpen(false);
+        void openNoteById(id);
+      }}
+      onNewNote={() => {
+        setDrawerOpen(false);
+        void newNote();
+      }}
+      onDeleteNote={(id) => void deleteNote(id)}
+    />
+  );
+
   return (
     <div className="flex h-screen flex-col bg-shell font-sans text-text">
       <RecordingBar
@@ -354,45 +496,31 @@ export default function App() {
         onStop={() => void stopRecording()}
         onOpenNote={() => recStatus.note_id && void openNoteById(recStatus.note_id)}
       />
+      {narrow && (
+        <div className="print:hidden flex items-center gap-2 border-b border-line bg-shell px-2 py-1.5">
+          <button
+            onClick={() => setDrawerOpen(true)}
+            title="Show folders & notes"
+            aria-label="Show folders & notes"
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[12.5px] font-semibold text-text-2 hover:bg-surface-3 hover:text-text"
+          >
+            <PanelLeft size={15} strokeWidth={1.75} />
+            Menu
+          </button>
+          <span className="min-w-0 truncate text-[13px] font-semibold text-text-2">
+            {openNote?.title ?? "Fly on the Wall"}
+          </span>
+        </div>
+      )}
       <div className="flex min-h-0 flex-1">
-        <Sidebar
-          folders={folders}
-          upcoming={upcoming}
-          selection={selection}
-          onSelect={setSelection}
-          onCreateFolder={(name, parentId) =>
-            void api.createFolder(name, parentId).then(refreshFolders)
-          }
-          onRenameFolder={(id, name) => void api.renameFolder(id, name).then(refreshFolders)}
-          onDeleteFolder={(id) =>
-            void api.deleteFolder(id).then(async () => {
-              if (selection.view === "folder" && selection.id === id) {
-                setSelection({ view: "all" });
-              }
-              await refreshFolders();
-              await refreshNotes();
-            })
-          }
-          onStartFromEvent={(ev) => void startFromEvent(ev)}
-          onOpenSettings={() => setShowSettings(true)}
-          theme={resolved}
-          onMoveNote={(id, fid) => void moveNoteToFolder(id, fid)}
-        />
-        <NoteList
-          notes={notes}
-          searchQuery={searchQuery}
-          searchHits={searchHits}
-          selectedNoteId={openNote?.id ?? null}
-          onSearchChange={setSearchQuery}
-          onOpenNote={(id) => void openNoteById(id)}
-          onNewNote={() => void newNote()}
-          onDeleteNote={(id) => void deleteNote(id)}
-        />
+        {!narrow && sidebarEl}
+        {!narrow && noteListEl}
         {openNote ? (
           <Editor
             note={openNote}
             meeting={openMeeting}
             transcript={transcript}
+            cleanedTranscript={cleanedTranscript}
             pipeStage={pipeStage}
             pipeDetail={pipeDetail}
             pipelineError={pipelineError}
@@ -435,6 +563,25 @@ export default function App() {
           </div>
         )}
       </div>
+      {narrow && drawerOpen && (
+        <div className="print:hidden fixed inset-0 z-40">
+          <div
+            className="absolute inset-0"
+            style={{ background: "var(--overlay)" }}
+            onClick={() => setDrawerOpen(false)}
+            aria-hidden="true"
+          />
+          <div
+            className="absolute left-0 top-0 flex h-full max-w-[92vw] overflow-x-auto border-r border-line bg-shell"
+            style={{ boxShadow: "var(--shadow-lg)" }}
+            role="dialog"
+            aria-label="Folders and notes"
+          >
+            {sidebarEl}
+            {noteListEl}
+          </div>
+        </div>
+      )}
       {error && (
         <div
           className="print:hidden fixed bottom-4 left-4 z-50 flex w-80 items-start gap-2.5 rounded-2xl border border-line bg-error-soft px-4 py-3 text-[13px] leading-relaxed text-error-text"

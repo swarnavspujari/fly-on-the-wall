@@ -48,6 +48,7 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // Updater + relaunch only exist on desktop targets.
             #[cfg(desktop)]
@@ -98,6 +99,7 @@ pub fn run() {
             commands::delete_note,
             commands::attach_file,
             commands::export_note,
+            commands::copy_note_markdown,
             commands::remove_attachment,
             commands::open_attachment,
             commands::reveal_attachment,

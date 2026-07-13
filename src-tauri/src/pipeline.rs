@@ -25,6 +25,10 @@ use crate::{gpu, hw, models};
 
 pub const MIC_SPEAKER_KEY: &str = "mic";
 
+/// Marker for the one failure retrying can never fix: the recording files are
+/// gone from disk. The scheduler matches on this prefix to skip its retries.
+pub const ERR_NO_RECORDING_FILES: &str = "recording files not found on disk";
+
 #[derive(Clone, Serialize)]
 pub struct PipelineProgress {
     pub meeting_id: String,
@@ -98,11 +102,26 @@ pub async fn run_with(
             .map(|r| data_dir.join(r))
             .filter(|p| p.exists())
     };
-    let mic_wav = abs(&recording.mic_path);
-    let system_wav = abs(&recording.system_path);
-    let mixed_wav = abs(&recording.mixed_path);
+    let mut mic_wav = abs(&recording.mic_path);
+    let mut system_wav = abs(&recording.system_path);
+    let mut mixed_wav = abs(&recording.mixed_path);
     if mic_wav.is_none() && system_wav.is_none() && mixed_wav.is_none() {
-        return Err("no recording files found on disk".into());
+        // Self-heal: a referenced folder can end up parked under
+        // recordings/_unlinked/ (the pre-1.0.2 multi-instance launch could
+        // race the v2 migration's orphan sweep). If the parked folder is
+        // still there under the same name, move it back and carry on.
+        if restore_parked_recording(&data_dir, &recording) {
+            mic_wav = abs(&recording.mic_path);
+            system_wav = abs(&recording.system_path);
+            mixed_wav = abs(&recording.mixed_path);
+        }
+    }
+    if mic_wav.is_none() && system_wav.is_none() && mixed_wav.is_none() {
+        let dir = fly_storage::recording_dir_rel(&recording).unwrap_or_default();
+        return Err(format!(
+            "{ERR_NO_RECORDING_FILES} — expected them under \"{dir}\" in the app data folder. \
+             If the audio files were moved or deleted, this meeting can't be re-transcribed."
+        ));
     }
 
     // ---- settings → engines ----
@@ -153,12 +172,32 @@ pub async fn run_with(
         max_context: Some(0),
     };
 
-    let asr: GuardedAsr = if use_groq || tier == "cloud" {
+    // Cloud ASR only with a stored key. A Groq toggle left on with no key
+    // (e.g. the key never survived a settings change) must not sink the
+    // pipeline — fall back to fully-local transcription, visibly.
+    let groq_key = if use_groq || tier == "cloud" {
         let key = state
             .secrets
             .get(fly_secrets::keys::GROQ_API_KEY)
-            .map_err(|e| e.to_string())?
-            .ok_or("Groq transcription is enabled but no Groq API key is set")?;
+            .ok()
+            .flatten();
+        if key.is_none() {
+            tracing::warn!("Groq transcription enabled but no API key stored — using local ASR");
+            emit_stage(
+                state,
+                on_stage,
+                meeting_id,
+                "ensuring-models",
+                Some(
+                    "Groq is enabled but no API key is saved — transcribing locally instead".into(),
+                ),
+            );
+        }
+        key
+    } else {
+        None
+    };
+    let asr: GuardedAsr = if let Some(key) = groq_key {
         GuardedAsr::single(Box::new(fly_asr::groq::GroqEngine::new(key)))
     } else {
         let model_id = model_override
@@ -396,12 +435,17 @@ pub async fn run_with(
     };
 
     emit_stage(state, on_stage, meeting_id, "saving", None);
-    state
-        .storage
-        .lock()
-        .unwrap()
-        .save_transcript(&transcript)
-        .map_err(|e| e.to_string())?;
+    {
+        let storage = state.storage.lock().unwrap();
+        storage
+            .save_transcript(&transcript)
+            .map_err(|e| e.to_string())?;
+        // A previous run's polished variant references segment ids that no
+        // longer exist — drop it (the chained polish pass rebuilds it).
+        storage
+            .clear_cleaned_transcript(meeting_id)
+            .map_err(|e| e.to_string())?;
+    }
 
     // 16 kHz intermediates are pure derived data — drop them once the
     // transcript is saved so meeting folders hold only the real recordings.
@@ -509,6 +553,39 @@ impl GuardedAsr {
     }
 }
 
+/// Recovery for a meeting folder wrongly parked under `recordings/_unlinked/`:
+/// if the folder `recording_json` points at is missing but a folder with the
+/// same name sits in `_unlinked/`, move it back. Returns whether a restore
+/// happened (the caller then re-resolves paths). Restoring is safe: parking
+/// was a plain rename, and the relative paths in `recording_json` are
+/// unchanged by the round trip.
+fn restore_parked_recording(data_dir: &Path, rec: &fly_core::RecordingRef) -> bool {
+    let Some(rel) = fly_storage::recording_dir_rel(rec) else {
+        return false;
+    };
+    let expected = data_dir.join(&rel);
+    let Some(name) = expected.file_name() else {
+        return false;
+    };
+    let parked = data_dir.join("recordings").join("_unlinked").join(name);
+    if expected.exists() || !parked.is_dir() {
+        return false;
+    }
+    match std::fs::rename(&parked, &expected) {
+        Ok(()) => {
+            tracing::info!(
+                dir = %rel,
+                "restored meeting folder from recordings/_unlinked (was parked by a raced migration)"
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(dir = %rel, error = %e, "could not restore parked meeting folder");
+            false
+        }
+    }
+}
+
 /// Engine-agnostic hallucination guard: collapse consecutive-repetition loops
 /// in the raw word stream (whisper and cloud engines both produce them) so a
 /// stuck decoder can never flood a transcript. Collapses are logged — they
@@ -572,6 +649,32 @@ mod tests {
             text: String::new(),
             words: vec![],
         }
+    }
+
+    /// A meeting folder wrongly parked under `recordings/_unlinked/` (raced
+    /// migration) is moved back so the recording paths resolve again; a
+    /// second call (or a genuinely missing folder) is a no-op.
+    #[test]
+    fn parked_recording_folder_is_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = fly_core::RecordingRef {
+            mic_path: Some("recordings/2026-07-02 TB 1 1/recording.mic.wav".into()),
+            system_path: None,
+            mixed_path: None,
+            duration_ms: 1000,
+        };
+        let parked = dir.path().join("recordings/_unlinked/2026-07-02 TB 1 1");
+        std::fs::create_dir_all(&parked).unwrap();
+        std::fs::write(parked.join("recording.mic.wav"), b"RIFF").unwrap();
+
+        assert!(restore_parked_recording(dir.path(), &rec));
+        assert!(dir
+            .path()
+            .join("recordings/2026-07-02 TB 1 1/recording.mic.wav")
+            .exists());
+        assert!(!parked.exists());
+        // already restored → nothing left to do
+        assert!(!restore_parked_recording(dir.path(), &rec));
     }
 
     #[test]

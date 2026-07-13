@@ -26,6 +26,9 @@ export default function AskPanel({ noteId, onInsert, onClose }: Props) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Answers already saved to the note (by history index) — their button stops
+  // pulsing and reads "Saved".
+  const [saved, setSaved] = useState<Set<number>>(new Set());
 
   const send = async (text: string) => {
     const content = text.trim();
@@ -59,10 +62,15 @@ export default function AskPanel({ noteId, onInsert, onClose }: Props) {
         </Button>
       </div>
       <div
-        className="border-b border-line px-3 py-2 text-[11px] leading-snug"
-        style={{ color: "var(--text-3)" }}
+        className="border-b px-3 py-2.5 text-[12px] font-medium leading-snug"
+        style={{
+          color: "var(--primary-soft-text)",
+          background: "var(--primary-soft)",
+          borderColor: "var(--primary-border)",
+        }}
       >
-        Chat is ephemeral — insert an answer to keep it.
+        This chat isn’t saved — it clears when you leave. Click <strong>Save to note</strong> under
+        an answer to keep it.
       </div>
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
         {history.length === 0 && (
@@ -92,11 +100,34 @@ export default function AskPanel({ noteId, onInsert, onClose }: Props) {
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
               </div>
             </div>
-            {m.role === "assistant" && (
-              <Button variant="soft" size="xs" onClick={() => onInsert(m.content)}>
-                Insert into note
-              </Button>
-            )}
+            {m.role === "assistant" &&
+              (saved.has(i) ? (
+                <span
+                  className="px-1 text-[11.5px] font-semibold"
+                  style={{ color: "var(--success-text)" }}
+                >
+                  ✓ Saved to note
+                </span>
+              ) : (
+                <Button
+                  variant="soft"
+                  size="xs"
+                  title="Append this answer to your note so it isn’t lost"
+                  onClick={() => {
+                    onInsert(m.content);
+                    setSaved((s) => new Set(s).add(i));
+                  }}
+                  style={
+                    // The newest answer breathes gently so it's clear this is
+                    // how you keep it; earlier answers sit quiet.
+                    i === history.length - 1 && !busy
+                      ? { animation: "fly-pulse-glow 2s ease-in-out infinite" }
+                      : undefined
+                  }
+                >
+                  Save to note
+                </Button>
+              ))}
           </div>
         ))}
         {busy && (

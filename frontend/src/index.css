@@ -499,6 +499,17 @@
     opacity: 1;
   }
 }
+/* Gentle attention pulse (Ask panel "Save to note"): a soft primary glow that
+   breathes without moving the layout. */
+@keyframes fly-pulse-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--primary) 0%, transparent);
+  }
+}
 
 /* Legacy aliases (un-migrated screens). */
 @keyframes pulse-dot {

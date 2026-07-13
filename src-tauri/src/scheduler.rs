@@ -99,7 +99,10 @@ pub async fn tick(
             tracing::error!(meeting_id, error = %error, "transcription pipeline failed");
             state.pipeline_stage.lock().unwrap().remove(&meeting_id);
             let attempts = job.attempts + 1;
-            if attempts < MAX_ATTEMPTS {
+            // Missing recording files never come back on their own — retrying
+            // only makes the user watch two more doomed attempts.
+            let permanent = error.contains(pipeline::ERR_NO_RECORDING_FILES);
+            if attempts < MAX_ATTEMPTS && !permanent {
                 set_job_state(state, |s| {
                     s.requeue_transcription(&meeting_id, attempts, &error)
                 });
@@ -134,7 +137,10 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         loop {
             let state = app.state::<AppState>();
             match tick(&state, &on_stage, &on_model).await {
-                Tick::Completed(meeting_id) => emit_final(&on_stage, &meeting_id, None),
+                Tick::Completed(meeting_id) => {
+                    polish_after_transcribe(&state, &on_stage, &meeting_id).await;
+                    emit_final(&on_stage, &meeting_id, None)
+                }
                 Tick::Retrying {
                     meeting_id,
                     attempts,
@@ -157,6 +163,65 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 }
             }
         }
+    });
+}
+
+/// How long the chained AI-cleanup pass may run before the queue moves on.
+/// LLM providers have no client-side timeout; without a cap here a hung
+/// provider would stall every queued transcription behind it.
+const POLISH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Best-effort AI cleanup chained after every successful transcription, so a
+/// (re)transcribe delivers the full pipeline: ASR → diarization → polish. It
+/// must never fail the job — no provider running / no key configured just
+/// means the raw transcript stands (exactly the pre-polish behavior);
+/// re-running the transcription re-runs the cleanup too.
+async fn polish_after_transcribe(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) {
+    emit_stage_marker(state, on_stage, meeting_id, "polishing");
+    let outcome = tokio::time::timeout(
+        POLISH_TIMEOUT,
+        crate::llm_commands::run_polish(state, meeting_id),
+    )
+    .await;
+    match outcome {
+        Ok(Ok(r)) => tracing::info!(
+            meeting_id,
+            cleaned = r.segments_cleaned,
+            kept_raw = r.segments_kept_raw,
+            "transcript cleanup done"
+        ),
+        Ok(Err(e)) => {
+            tracing::info!(meeting_id, error = %e, "transcript cleanup skipped (raw transcript stands)")
+        }
+        Err(_) => {
+            tracing::warn!(
+                meeting_id,
+                "transcript cleanup timed out (raw transcript stands)"
+            )
+        }
+    }
+    // Clear only OUR marker: if the user re-enqueued this meeting while the
+    // polish ran, the map now says "waiting" and that must survive.
+    let mut stages = state.pipeline_stage.lock().unwrap();
+    if stages.get(meeting_id).map(String::as_str) == Some("polishing") {
+        stages.remove(meeting_id);
+    }
+}
+
+/// Surface an intermediate stage owned by the scheduler (not the pipeline):
+/// tracked in `pipeline_stage` for late joiners and emitted as progress.
+fn emit_stage_marker(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str, stage: &str) {
+    state
+        .pipeline_stage
+        .lock()
+        .unwrap()
+        .insert(meeting_id.to_string(), stage.to_string());
+    on_stage(PipelineProgress {
+        meeting_id: meeting_id.to_string(),
+        stage: stage.into(),
+        detail: None,
+        done: false,
+        error: None,
     });
 }
 

@@ -277,7 +277,9 @@ pub async fn export_note(
             .collect();
         (
             format!("{}.md", safe.trim()),
-            state.data_dir.join("notes").join(format!("{note_id}.md")),
+            // The mirror lives at `disk_path` (`notes/<date> <title>.md`
+            // since the v2 migration), never at the legacy uuid name.
+            storage.note_mirror_abs(&note_id),
         )
     };
     if !src.exists() {
@@ -295,6 +297,28 @@ pub async fn export_note(
     let dest = picked.into_path().map_err(err_str)?;
     std::fs::copy(&src, &dest).map_err(err_str)?;
     Ok(Some(dest.display().to_string()))
+}
+
+/// Copy the note to the clipboard as plain markdown (enhanced doc when it
+/// exists, else the scratchpad) — built fresh from the note, not read from
+/// the mirror, so the copy can never be stale. The write happens natively
+/// (clipboard plugin): webview clipboard APIs are patchy across platforms.
+#[tauri::command]
+pub fn copy_note_markdown(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    note_id: String,
+) -> CmdResult<String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    let note = state
+        .storage
+        .lock()
+        .unwrap()
+        .get_note(&note_id)
+        .map_err(err_str)?;
+    let md = note.to_markdown(false);
+    app.clipboard().write_text(md.clone()).map_err(err_str)?;
+    Ok(md)
 }
 
 #[tauri::command]

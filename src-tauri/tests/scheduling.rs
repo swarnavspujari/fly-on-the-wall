@@ -179,6 +179,56 @@ fn failing_job_is_retried_then_parked_as_failed() {
     assert_eq!(job.attempts, 0);
 }
 
+/// Recording files gone from disk is a permanent failure: retrying can't
+/// bring them back, so the job parks as failed on the FIRST attempt instead
+/// of making the user watch two more doomed retries.
+#[test]
+fn missing_recording_files_give_up_without_retry() {
+    let (_dir, state) = test_state();
+    let meeting_id = {
+        let storage = state.storage.lock().unwrap();
+        let note = storage.create_note("t", None).unwrap();
+        let meeting = storage.create_meeting("t", &note.id, &[]).unwrap();
+        storage
+            .end_meeting(
+                &meeting.id,
+                &fly_core::RecordingRef {
+                    mic_path: Some("recordings/gone/recording.mic.wav".into()),
+                    system_path: None,
+                    mixed_path: None,
+                    duration_ms: 1000,
+                },
+            )
+            .unwrap();
+        meeting.id
+    };
+    let stage = on_stage();
+    let model = on_model();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    scheduler::enqueue(&state, &stage, &meeting_id).unwrap();
+    match rt.block_on(scheduler::tick(&state, &stage, &model)) {
+        Tick::GaveUp {
+            meeting_id: id,
+            error,
+        } => {
+            assert_eq!(id, meeting_id);
+            assert!(
+                error.contains(fly_app_lib::pipeline::ERR_NO_RECORDING_FILES),
+                "unexpected error: {error}"
+            );
+        }
+        Tick::Retrying { error, .. } => {
+            panic!("missing files must not be retried (error was: {error})")
+        }
+        _ => panic!("expected the job to be attempted"),
+    }
+    let storage = state.storage.lock().unwrap();
+    let job = storage.transcription_job(&meeting_id).unwrap().unwrap();
+    assert_eq!(job.status, fly_storage::JOB_FAILED);
+    assert_eq!(job.attempts, 1);
+}
+
 /// A job the app died on (or never got to) must come back schedulable and
 /// visible after a restart — reopen the same data dir with a fresh state,
 /// as app startup does, and run the worker's recovery step.

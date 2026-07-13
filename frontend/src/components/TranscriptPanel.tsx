@@ -7,6 +7,9 @@ import { Avatar, Button, ProgressBar, SectionLabel, speakerColor } from "./ui";
 interface Props {
   meeting: Meeting;
   transcript: Transcript | null;
+  /** LLM-polished variant, shown by default when it exists (same segment
+   *  ids/speakers/timestamps as the raw transcript — only the text differs). */
+  cleaned: Transcript | null;
   /** Current pipeline stage, or null when idle. */
   stage: string | null;
   /** One-line stage detail (channel being transcribed, GPU benchmark result, CPU fallback notice). */
@@ -31,6 +34,7 @@ const STAGE_LABELS: Record<string, string> = {
   diarizing: "Detecting speakers…",
   aligning: "Assigning words to speakers…",
   saving: "Saving transcript…",
+  polishing: "AI cleanup — polishing the transcript…",
 };
 
 /** Editable speaker name: quiet dashed underline on hover, click renames it
@@ -94,6 +98,7 @@ function SpeakerName({
 export default function TranscriptPanel({
   meeting,
   transcript,
+  cleaned,
   stage,
   stageDetail,
   modelProgress,
@@ -104,6 +109,9 @@ export default function TranscriptPanel({
   onEditSegment,
 }: Props) {
   const segRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // Cleaned-by-default when the polish pass has run; "Raw" shows the exact
+  // ASR output. Edits apply to both variants (same segment ids).
+  const [showRaw, setShowRaw] = useState(false);
 
   // Zoom-in: scroll the first highlighted source segment into view.
   useEffect(() => {
@@ -112,49 +120,48 @@ export default function TranscriptPanel({
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [highlightIds]);
 
-  // Stable per-speaker index (position in the transcript's speaker list).
-  const speakerIndex = (key: string) => {
-    const idx = transcript?.speakers.findIndex((s) => s.key === key) ?? 0;
-    return Math.max(idx, 0);
-  };
-
-  if (stage) {
-    const pct =
-      modelProgress && modelProgress.stage === "downloading" && modelProgress.total > 0
-        ? Math.round((modelProgress.downloaded / modelProgress.total) * 100)
-        : null;
-    return (
+  const pct =
+    modelProgress && modelProgress.stage === "downloading" && modelProgress.total > 0
+      ? Math.round((modelProgress.downloaded / modelProgress.total) * 100)
+      : null;
+  const stageBanner = stage ? (
+    <div
+      className="print:hidden mb-4 rounded-lg border px-3.5 py-3"
+      style={{ background: "var(--primary-soft)", borderColor: "var(--primary-border)" }}
+    >
       <div
-        className="print:hidden mb-4 rounded-lg border px-3.5 py-3"
-        style={{ background: "var(--primary-soft)", borderColor: "var(--primary-border)" }}
+        className="flex flex-wrap items-center gap-2 text-[13px] font-medium"
+        style={{ color: "var(--primary-soft-text)" }}
       >
-        <div
-          className="flex flex-wrap items-center gap-2 text-[13px] font-medium"
-          style={{ color: "var(--primary-soft-text)" }}
-        >
-          <span
-            className="h-2 w-2 shrink-0 rounded-full"
-            style={{ background: "var(--primary)", animation: "fly-pulse-dot 1.2s ease infinite" }}
-          />
-          <span>{STAGE_LABELS[stage] ?? stage}</span>
-          {stageDetail && (
-            <span className="font-normal" style={{ color: "var(--text-3)" }}>
-              — {stageDetail}
-            </span>
-          )}
-          {pct !== null && (
-            <span className="font-normal" style={{ color: "var(--text-3)" }}>
-              downloading {modelProgress?.id} — {pct}%
-            </span>
-          )}
-        </div>
+        <span
+          className="h-2 w-2 shrink-0 rounded-full"
+          style={{ background: "var(--primary)", animation: "fly-pulse-dot 1.2s ease infinite" }}
+        />
+        <span>{STAGE_LABELS[stage] ?? stage}</span>
+        {stageDetail && (
+          <span className="font-normal" style={{ color: "var(--text-3)" }}>
+            — {stageDetail}
+          </span>
+        )}
         {pct !== null && (
-          <div className="mt-2">
-            <ProgressBar value={pct} />
-          </div>
+          <span className="font-normal" style={{ color: "var(--text-3)" }}>
+            downloading {modelProgress?.id} — {pct}%
+          </span>
         )}
       </div>
-    );
+      {pct !== null && (
+        <div className="mt-2">
+          <ProgressBar value={pct} />
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  // During AI cleanup the new raw transcript is already saved and readable —
+  // show the banner ABOVE it instead of hiding the transcript. Every earlier
+  // stage still replaces the view (there's nothing current to show yet).
+  if (stage && !(stage === "polishing" && transcript)) {
+    return stageBanner;
   }
 
   if (!transcript) {
@@ -184,39 +191,81 @@ export default function TranscriptPanel({
     );
   }
 
+  const shown = !showRaw && cleaned ? cleaned : transcript;
+  // Stable per-speaker index (position in the transcript's speaker list).
+  const speakerIndex = (key: string) => {
+    const idx = shown.speakers.findIndex((s) => s.key === key);
+    return Math.max(idx, 0);
+  };
+
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between gap-2">
+      {stage === "polishing" && stageBanner}
+      {pipelineError && (
+        <div
+          className="print:hidden mb-4 rounded-lg border border-line px-3 py-2 text-[13px]"
+          style={{ background: "var(--error-soft)", color: "var(--error-text)" }}
+          role="alert"
+        >
+          Re-transcription failed — showing the previous transcript. {pipelineError}
+        </div>
+      )}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-baseline gap-2">
           <SectionLabel>Transcript</SectionLabel>
           <span className="text-[11px]" style={{ color: "var(--text-3)" }}>
             · click any line or name to edit
           </span>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          title="Re-process this recording with the current model settings"
-          startIcon={<RefreshCw size={13} strokeWidth={1.75} />}
-          onClick={() => {
-            if (
-              confirm(
-                "Re-run transcription for this meeting?\n\nThis reprocesses the recording with your current model settings and replaces the transcript — manual line edits and speaker renames for this meeting will be lost.",
-              )
-            ) {
-              onTranscribe();
-            }
-          }}
-        >
-          Re-run transcription
-        </Button>
+        <div className="flex items-center gap-2">
+          {cleaned && (
+            <div
+              className="flex items-center gap-[2px] rounded-full border border-line bg-surface p-[2px]"
+              title="AI cleanup ran on this transcript — toggle between the polished text and the original transcription (edits apply to both)"
+            >
+              {(
+                [
+                  [false, "AI-cleaned"],
+                  [true, "Raw"],
+                ] as const
+              ).map(([raw, label]) => (
+                <button
+                  key={label}
+                  onClick={() => setShowRaw(raw)}
+                  className={`cursor-pointer rounded-full border-0 px-2.5 py-1 text-[11.5px] font-semibold ${
+                    showRaw === raw ? "bg-primary text-on-primary" : "bg-transparent text-text-2"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            title="Re-process this recording with the current model settings"
+            startIcon={<RefreshCw size={13} strokeWidth={1.75} />}
+            onClick={() => {
+              if (
+                confirm(
+                  "Re-run transcription for this meeting?\n\nThis reprocesses the recording with your current model settings and replaces the transcript — manual line edits and speaker renames for this meeting will be lost.",
+                )
+              ) {
+                onTranscribe();
+              }
+            }}
+          >
+            Re-run transcription
+          </Button>
+        </div>
       </div>
-      {transcript.segments.map((seg) => {
+      {shown.segments.map((seg) => {
         const isSelf = seg.speaker_key === "mic";
         const idx = speakerIndex(seg.speaker_key);
         const color = speakerColor(seg.speaker_key, idx);
         const label =
-          transcript.speakers.find((s) => s.key === seg.speaker_key)?.label ?? seg.speaker_key;
+          shown.speakers.find((s) => s.key === seg.speaker_key)?.label ?? seg.speaker_key;
         const hot = highlightIds.includes(seg.id);
         return (
           <div

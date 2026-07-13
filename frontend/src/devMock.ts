@@ -365,7 +365,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "pong";
     case "app_info":
       return {
-        version: "1.0.2",
+        version: "1.0.3",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
         os: "windows",
       };
@@ -403,6 +403,22 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return meeting(String(args.noteId));
     case "get_transcript":
       return transcript;
+    case "get_cleaned_transcript":
+      // Polished variant: same ids/speakers/timestamps, tidied text.
+      return {
+        ...transcript,
+        segments: transcript.segments.map((s) => ({
+          ...s,
+          text: s.text.replace(/\b(um|uh),?\s*/gi, "").replace(/^\w/, (c) => c.toUpperCase()),
+        })),
+      };
+    case "copy_note_markdown": {
+      // The real command writes the clipboard natively; mirror that here so
+      // the dev browser behaves the same (best effort — may need focus).
+      const md = `# ${note(String(args.noteId ?? "n1")).title}\n\n${scratchpad}`;
+      void navigator.clipboard?.writeText(md).catch(() => {});
+      return md;
+    }
     case "relabel_speaker":
       return transcript;
     case "edit_transcript_segment": {
@@ -462,8 +478,9 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       }
       return null;
     case "download_model":
-    case "export_note":
       return "";
+    case "export_note":
+      return "C:\\Users\\you\\Desktop\\note.md";
     default:
       return null;
   }
