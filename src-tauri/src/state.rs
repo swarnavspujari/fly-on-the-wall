@@ -30,6 +30,9 @@ pub struct AppState {
     /// Nudges the transcription queue worker (job enqueued, recording
     /// stopped). The worker also polls, so a missed nudge only delays it.
     pub jobs_notify: tokio::sync::Notify,
+    /// Managed `ollama serve` child (None when a user-run server is used or
+    /// the ollama provider isn't active). Killed on app exit (ollama.rs).
+    pub ollama: Mutex<Option<std::process::Child>>,
 }
 
 impl AppState {
@@ -62,6 +65,7 @@ impl AppState {
             pipeline_stage: Mutex::new(HashMap::new()),
             screen: Mutex::new(None),
             jobs_notify: tokio::sync::Notify::new(),
+            ollama: Mutex::new(None),
         })
     }
 

@@ -365,7 +365,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "pong";
     case "app_info":
       return {
-        version: "1.0.3",
+        version: "1.0.4",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
         os: "windows",
       };
@@ -469,6 +469,17 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
     case "test_llm_connection":
       return "ok";
+    case "ollama_status":
+      return {
+        installed: true,
+        can_install: true,
+        running: true,
+        managed: true,
+        base_url: "http://localhost:11434",
+        models: ["llama3.1:latest"],
+      };
+    case "ollama_pull":
+      return null;
     case "get_app_setting":
       if (args.key === "consent.recording_notice_accepted") {
         return typeof localStorage !== "undefined" &&

@@ -146,6 +146,9 @@ pub async fn get_asr_settings(state: State<'_, AppState>) -> CmdResult<AsrSettin
     let get = |k: &str| storage.get_setting(k).ok().flatten();
 
     let models = models::registry()
+        // The Ollama runtime belongs to the AI-provider section, not the
+        // transcription models list.
+        .filter(|a| a.id != crate::ollama::ARTIFACT_ID)
         .map(|a| ModelStatus {
             id: a.id.to_string(),
             display: a.display.to_string(),

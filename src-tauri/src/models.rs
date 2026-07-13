@@ -84,6 +84,21 @@ const TOOLS: &[Artifact] = &[
         dest_rel: "bin/ffmpeg",
         probe_rel: "bin/ffmpeg/ffmpeg-n8.1.2-21-gce3c09c101-win64-gpl-shared-8.1/bin/ffmpeg.exe",
     },
+    // Local LLM runtime for the "ollama" provider (Enhance / Ask / polish).
+    // Strictly opt-in from Settings — 1.5 GB (bundles CUDA runners); the app
+    // manages `ollama serve` itself (see ollama.rs). The zip's root holds
+    // ollama.exe + lib/ollama/ (verified against the release's central
+    // directory), digest from the GitHub asset like the pins above.
+    Artifact {
+        id: "ollama-bin",
+        display: "Ollama (local AI runtime, v0.31.2)",
+        url: "https://github.com/ollama/ollama/releases/download/v0.31.2/ollama-windows-amd64.zip",
+        sha256: "6988b58d2223ae3f9d5766b46b0be614dec36524b80317159718b5adf3006f3b",
+        bytes: 1_502_730_186,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/ollama",
+        probe_rel: "bin/ollama/ollama.exe",
+    },
 ];
 
 #[cfg(target_os = "linux")]
