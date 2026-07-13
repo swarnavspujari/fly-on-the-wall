@@ -105,7 +105,8 @@ fn polish_harness() {
         let mut map = HashMap::new();
         for (bi, range) in batches.iter().enumerate() {
             let batch = &raw.segments[range.clone()];
-            let prompt = enhance::build_cleanup_prompt(batch);
+            let prompt =
+                enhance::build_cleanup_prompt(batch, &fly_core::prompt_profile::DEFAULT_PROFILE);
             let output = chat_with_retry(
                 provider.as_ref(),
                 ChatRequest {

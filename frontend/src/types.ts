@@ -221,6 +221,13 @@ export interface LlmSettings {
   providers: LlmProviderInfo[];
 }
 
+export interface OllamaModel {
+  /** Full name with tag ("llama3.1:latest", "qwen3.5:4b", …). */
+  name: string;
+  /** On-disk size in bytes. */
+  size: number;
+}
+
 export interface OllamaStatus {
   /** An Ollama executable is available (managed install or on PATH). */
   installed: boolean;
@@ -230,8 +237,8 @@ export interface OllamaStatus {
   /** The running server is a child this app spawned. */
   managed: boolean;
   base_url: string;
-  /** Local model names ("llama3.1:latest", …) when the server is running. */
-  models: string[];
+  /** Installed models (name + size) when the server is running. */
+  models: OllamaModel[];
 }
 
 export interface LlmSettingsUpdate {

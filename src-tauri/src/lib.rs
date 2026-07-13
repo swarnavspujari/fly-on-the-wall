@@ -10,7 +10,7 @@ pub mod gpu;
 pub mod hw;
 mod import_commands;
 mod live;
-mod llm_commands;
+pub mod llm_commands;
 pub mod models;
 pub mod ollama;
 pub mod pipeline;
@@ -140,6 +140,7 @@ pub fn run() {
             extraction::backfill_meeting_items,
             ollama::ollama_status,
             ollama::ollama_pull,
+            ollama::ollama_delete,
             calendar_commands::get_calendar_settings,
             calendar_commands::set_calendar_settings,
             calendar_commands::connect_calendar,

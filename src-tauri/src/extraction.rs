@@ -7,6 +7,7 @@
 //! plumbing as polish/enhance; the MCP server only ever READS the results
 //! from the `meeting_items` table.
 
+use fly_core::prompt_profile::{profile_for, PromptProfile};
 use fly_core::{enhance, ItemKind, Meeting, MeetingItem, Transcript};
 use fly_llm::{ChatMessage, ChatRequest, LLMProvider, ThinkingMode};
 use serde::Deserialize;
@@ -29,14 +30,8 @@ pub struct ExtractionPrompt {
     pub user: String,
 }
 
-/// Build the prompt for one batch of segments. Every line carries the
-/// segment id and stable speaker key so the model can cite provenance.
-pub fn build_extraction_prompt(
-    meeting: &Meeting,
-    transcript: &Transcript,
-    range: std::ops::Range<usize>,
-) -> ExtractionPrompt {
-    let system = r#"You extract structured facts from a meeting transcript.
+/// The strict extraction contract (default profile).
+const EXTRACT_CONTRACT_FULL: &str = r#"You extract structured facts from a meeting transcript.
 
 Return ONLY a JSON array (no prose, no code fences). Each element:
 {
@@ -59,8 +54,33 @@ Rules:
 - Only facts explicitly present in the transcript — never infer or embellish.
 - segment_ids MUST be ids that appear in [brackets] below.
 - Skip small talk. An empty array [] is the correct answer for a meeting
-  with no such facts."#
-        .to_string();
+  with no such facts."#;
+
+/// Terser contract for models whose profile sets `simplified_contract`: same
+/// schema and kinds, shorter rules, an inline example, explicit no-preamble.
+const EXTRACT_CONTRACT_SIMPLE: &str = r#"Extract facts from a meeting transcript.
+
+Output ONLY a JSON array. No text before or after it, no code fences.
+Each element: {"kind": "decision" | "action_item" | "question" | "commitment" | "figure", "text": "one sentence", "owner": "who or null", "status": "open"/"done" for action items else null, "speaker_key": "key in parentheses or null", "segment_ids": ["ids from [brackets]"]}
+Example: [{"kind":"decision","text":"Ship v2 on Friday.","owner":null,"status":null,"speaker_key":"spk_0","segment_ids":["seg004"]}]
+
+kind meanings: decision = settled; action_item = a task someone will do; question = raised but unanswered; commitment = promise to a person/date; figure = a number that matters.
+Only facts explicitly in the transcript. segment_ids must be ids that appear in [brackets] below. [] is correct when there are none."#;
+
+/// Build the prompt for one batch of segments. Every line carries the
+/// segment id and stable speaker key so the model can cite provenance.
+pub fn build_extraction_prompt(
+    meeting: &Meeting,
+    transcript: &Transcript,
+    range: std::ops::Range<usize>,
+    profile: &PromptProfile,
+) -> ExtractionPrompt {
+    let contract = if profile.simplified_contract {
+        EXTRACT_CONTRACT_SIMPLE
+    } else {
+        EXTRACT_CONTRACT_FULL
+    };
+    let system = profile.apply_preamble(contract.to_string());
 
     let mut user = format!(
         "Meeting: {}\nDate: {}\nAttendees: {}\n\nTranscript:\n",
@@ -180,13 +200,14 @@ pub async fn extract_items(
     transcript: &Transcript,
 ) -> Result<Vec<MeetingItem>, String> {
     let extracted_by = provider.id().to_string();
+    let profile = profile_for(provider.model());
     let mut raw_all = Vec::new();
     for range in enhance::plan_cleanup_batches(
         &transcript.segments,
         EXTRACT_MAX_BATCH_WORDS,
         EXTRACT_MAX_BATCH_SEGMENTS,
     ) {
-        let prompt = build_extraction_prompt(meeting, transcript, range);
+        let prompt = build_extraction_prompt(meeting, transcript, range, profile);
         let output = provider
             .chat(ChatRequest {
                 messages: vec![
@@ -197,7 +218,7 @@ pub async fn extract_items(
                 // (reasoning tokens would eat the budget and truncate the
                 // JSON) — same contract as the polish pass.
                 temperature: None,
-                max_tokens: Some(8192),
+                max_tokens: Some(profile.max_tokens.extract.unwrap_or(8192)),
                 thinking: ThinkingMode::Disabled,
             })
             .await
@@ -364,7 +385,12 @@ mod tests {
     #[test]
     fn prompt_carries_segment_ids_speaker_keys_and_labels() {
         let t = transcript();
-        let p = build_extraction_prompt(&meeting(), &t, 0..t.segments.len());
+        let p = build_extraction_prompt(
+            &meeting(),
+            &t,
+            0..t.segments.len(),
+            &fly_core::prompt_profile::DEFAULT_PROFILE,
+        );
         assert!(p.user.contains("[s1] You (mic):"));
         assert!(p.user.contains("[s2] Dana (spk_0):"));
         assert!(p.user.contains("Renewal sync"));

@@ -129,6 +129,10 @@ pub struct ProviderSettings {
 pub trait LLMProvider: Send + Sync {
     /// Stable id: "openai", "anthropic", "nim", "ollama".
     fn id(&self) -> &'static str;
+    /// The resolved model this provider was built with (e.g. "llama3.1",
+    /// "claude-sonnet-5"). Callers use it to look up per-model prompt
+    /// profiles (`fly_core::prompt_profile`) at prompt-build time.
+    fn model(&self) -> &str;
     /// True when inference happens on this machine (Ollama).
     fn is_local(&self) -> bool;
     async fn chat(&self, req: ChatRequest) -> Result<String>;

@@ -60,6 +60,10 @@ impl LLMProvider for OpenAiCompatProvider {
         self.provider_id
     }
 
+    fn model(&self) -> &str {
+        &self.model
+    }
+
     fn is_local(&self) -> bool {
         self.local
     }

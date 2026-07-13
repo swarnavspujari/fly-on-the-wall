@@ -125,6 +125,9 @@ export const api = {
   // Pulls a model into the local server; progress arrives as model:progress
   // events with id "ollama:<model>".
   ollamaPull: (model: string) => invoke<void>("ollama_pull", { model }),
+  // Deletes a local model; the backend refuses to delete the model the app
+  // is currently configured to use.
+  ollamaDelete: (model: string) => invoke<void>("ollama_delete", { model }),
 
   // calendars
   getCalendarSettings: () => invoke<CalendarStatus>("get_calendar_settings"),

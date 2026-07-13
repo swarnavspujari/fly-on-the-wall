@@ -122,6 +122,10 @@ impl LLMProvider for AnthropicProvider {
         "anthropic"
     }
 
+    fn model(&self) -> &str {
+        &self.model
+    }
+
     fn is_local(&self) -> bool {
         false
     }

@@ -34,6 +34,10 @@ impl LLMProvider for MockLLMProvider {
         "mock"
     }
 
+    fn model(&self) -> &str {
+        "mock"
+    }
+
     fn is_local(&self) -> bool {
         true
     }
