@@ -58,6 +58,39 @@ pub fn disk_label(when: DateTime<Utc>, title: &str) -> String {
     )
 }
 
+/// Best-effort inverse of [`disk_label`]: strip the leading `YYYY-MM-DD `
+/// (and a trailing ` (n)` dedup suffix) to recover a display title from a
+/// folder name. Used when resurrecting a meeting whose database row is gone.
+pub fn strip_date_prefix(name: &str) -> String {
+    let mut s = name;
+    let bytes = s.as_bytes();
+    let dateish = bytes.len() >= 11
+        && bytes[..10].iter().enumerate().all(|(i, b)| {
+            if i == 4 || i == 7 {
+                *b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+        && bytes[10] == b' ';
+    if dateish {
+        s = &s[11..];
+    }
+    // trailing " (n)" dedup suffix
+    if let Some(idx) = s.rfind(" (") {
+        let rest = &s[idx + 2..];
+        if rest.ends_with(')') && rest[..rest.len() - 1].chars().all(|c| c.is_ascii_digit()) {
+            s = &s[..idx];
+        }
+    }
+    let s = s.trim();
+    if s.is_empty() {
+        "Recovered meeting".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// Does `name` already carry `base` (allowing a ` (n)` dedup suffix)? Lets
 /// rename paths and migration reruns skip artifacts already in shape.
 pub(crate) fn already_labeled(name: &str, base: &str) -> bool {
@@ -118,6 +151,15 @@ mod tests {
         assert_eq!(sanitize_title("con"), "con_");
         assert_eq!(sanitize_title("LPT1"), "LPT1_");
         assert_eq!(sanitize_title("console"), "console");
+    }
+
+    #[test]
+    fn strip_date_prefix_inverts_disk_label() {
+        assert_eq!(strip_date_prefix("2026-07-13 Big meeting"), "Big meeting");
+        assert_eq!(strip_date_prefix("2026-07-13 Standup (2)"), "Standup");
+        assert_eq!(strip_date_prefix("no date here"), "no date here");
+        assert_eq!(strip_date_prefix("2026-07-13 "), "Recovered meeting");
+        assert_eq!(strip_date_prefix(""), "Recovered meeting");
     }
 
     #[test]

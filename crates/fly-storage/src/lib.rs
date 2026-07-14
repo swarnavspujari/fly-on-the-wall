@@ -22,6 +22,7 @@ mod meetings;
 mod migrations;
 pub mod naming;
 mod notes;
+mod recovery;
 mod search;
 mod settings;
 mod templates;
@@ -31,6 +32,7 @@ pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::recording_dir_rel;
 pub use notes::NoteSummary;
+pub use recovery::{HealReport, RecordingManifest, RECORDING_MANIFEST};
 pub use search::{SearchFilter, SearchHit, SearchHitKind};
 pub use transcripts::SpeakerSnapshot;
 

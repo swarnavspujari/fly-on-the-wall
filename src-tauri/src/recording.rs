@@ -187,6 +187,7 @@ pub async fn stop_recording(state: State<'_, AppState>) -> CmdResult<Meeting> {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let meeting_id = rec.meeting_id.clone();
+    let note_id = rec.note_id.clone();
     let session = rec.session;
 
     let output = tauri::async_runtime::spawn_blocking(move || session.stop())
@@ -207,12 +208,24 @@ pub async fn stop_recording(state: State<'_, AppState>) -> CmdResult<Meeting> {
         duration_ms: output.duration_ms,
     };
 
-    let meeting = state
-        .storage
-        .lock()
-        .unwrap()
-        .end_meeting(&meeting_id, &recording_ref)
-        .map_err(|e| e.to_string())?;
+    // Stash a filesystem-only manifest BEFORE the database write: if that
+    // write fails (corrupted/replaced database — seen in the wild after a
+    // 2.8-hour recording), the startup self-heal re-attaches the recording
+    // from this file. The audio must never depend on SQLite being healthy.
+    let meeting = {
+        let storage = state.storage.lock().unwrap();
+        if let Err(e) = storage.stash_recording_manifest(&meeting_id, &note_id, &recording_ref) {
+            tracing::warn!(meeting_id, error = %e, "could not write recording manifest");
+        }
+        storage
+            .end_meeting(&meeting_id, &recording_ref)
+            .map_err(|e| {
+                format!(
+                    "{e} — the recording files are safe in the meeting folder and \
+                     will be re-attached automatically on the next launch"
+                )
+            })?
+    };
     // recording over → the transcription queue may proceed
     state.jobs_notify.notify_one();
     Ok(meeting)
