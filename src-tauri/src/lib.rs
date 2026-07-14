@@ -122,6 +122,10 @@ pub fn run() {
             asr_commands::get_cleaned_transcript,
             asr_commands::relabel_speaker,
             asr_commands::edit_transcript_segment,
+            asr_commands::update_meeting_attendees,
+            asr_commands::re_diarize_meeting,
+            asr_commands::revert_speaker_assignment,
+            asr_commands::speaker_undo_state,
             asr_commands::pipeline_stage,
             asr_commands::get_asr_settings,
             asr_commands::set_asr_settings,
@@ -151,6 +155,7 @@ pub fn run() {
             screen_commands::screen_status,
             screen_commands::start_screen_recording,
             screen_commands::stop_screen_recording,
+            screen_commands::ensure_video_thumbnail,
             import_commands::import_media,
         ])
         .build(tauri::generate_context!())

@@ -107,8 +107,14 @@ pub fn start_recording_impl(
                     .map_err(|e| e.to_string())?
             }
         };
+        // Calendar attendees arrive as raw emails; the struct form carries
+        // them as name = email until the user renames them in the editor.
+        let attendees: Vec<fly_core::Attendee> = attendees
+            .iter()
+            .map(|s| fly_core::Attendee::from_legacy(s))
+            .collect();
         let meeting = storage
-            .create_meeting(&note.title, &note.id, attendees)
+            .create_meeting(&note.title, &note.id, &attendees)
             .map_err(|e| e.to_string())?;
         // human-readable meeting folder ("recordings/<date> <title>/");
         // the relative paths stored at stop_recording tie it to the meeting

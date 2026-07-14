@@ -120,12 +120,30 @@ function note(id: string) {
               mime: "application/pdf",
               added_at: ago(30),
             },
+            // Screen recording: in the browser this URL 404s, which exercises
+            // the thumbnail placeholder and the lightbox's playback fallback.
+            {
+              id: "a2",
+              file_name: "screen-20260713-101530.mp4",
+              rel_path: "attachments/n1/screen-20260713-101530.mp4",
+              mime: "video/mp4",
+              added_at: ago(25),
+            },
           ]
         : [],
     created_at: ago(200),
     updated_at: m.updated_at,
   };
 }
+
+// Mutable so the attendee editor round-trips in the dev browser. One entry
+// is calendar-seeded (name = email, unconfirmed) to exercise design state 3.
+let mockAttendees: { name: string; email?: string | null }[] = [
+  { name: "Dana Osei", email: "dana.osei@acme.com" },
+  { name: "marc.reyes@acme.com", email: "marc.reyes@acme.com" },
+];
+let mockAttendeesConfirmed = false;
+let mockUndo: { taken_at: string; changed_segments: number } | null = null;
 
 function meeting(noteId: string) {
   const m = noteMeta.find((n) => n.id === noteId);
@@ -134,7 +152,8 @@ function meeting(noteId: string) {
     id: m.meeting_id,
     title: m.title,
     note_id: m.id,
-    attendees: ["Dana Osei", "Marc Reyes"],
+    attendees: mockAttendees,
+    attendees_confirmed: mockAttendeesConfirmed,
     started_at: ago(30),
     ended_at: ago(17),
     recording: {
@@ -365,7 +384,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "pong";
     case "app_info":
       return {
-        version: "1.1.0",
+        version: "1.2.0",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
         os: "windows",
       };
@@ -419,8 +438,30 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       void navigator.clipboard?.writeText(md).catch(() => {});
       return md;
     }
-    case "relabel_speaker":
+    case "relabel_speaker": {
+      const sp = transcript.speakers.find((s) => s.key === args.speakerKey);
+      if (sp) sp.label = String(args.label ?? sp.label);
+      else
+        transcript.speakers.push({
+          key: String(args.speakerKey),
+          label: String(args.label ?? ""),
+        });
       return transcript;
+    }
+    case "update_meeting_attendees": {
+      mockAttendees = (args.attendees as typeof mockAttendees) ?? [];
+      mockAttendeesConfirmed = true;
+      return meeting("n1");
+    }
+    case "re_diarize_meeting": {
+      mockUndo = { taken_at: nowIso(), changed_segments: 3 };
+      return { changed_segments: 3, transcript };
+    }
+    case "revert_speaker_assignment":
+      mockUndo = null;
+      return transcript;
+    case "speaker_undo_state":
+      return mockUndo;
     case "edit_transcript_segment": {
       const s = transcript.segments.find((x) => x.id === args.segmentId);
       if (s) s.text = String(args.text ?? s.text);
@@ -492,6 +533,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "";
     case "export_note":
       return "C:\\Users\\you\\Desktop\\note.md";
+    case "ensure_video_thumbnail":
+      return `${String(args.relPath ?? "")}.jpg`;
     default:
       return null;
   }

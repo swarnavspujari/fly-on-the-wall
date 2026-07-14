@@ -372,6 +372,19 @@ export default function App() {
     if (openMeetingIdRef.current === meetingId) setCleanedTranscript(cleaned);
   };
 
+  // Attendee edits (editor Save / "Someone else…") return the updated meeting.
+  const meetingChanged = (m: Meeting) => {
+    if (openMeetingIdRef.current === m.id) setOpenMeeting(m);
+  };
+
+  // Undo of a re-diarize hands back the restored raw transcript; the cleaned
+  // variant was restored backend-side too, so refetch it.
+  const transcriptRestored = (t: Transcript) => {
+    if (openMeetingIdRef.current !== t.meeting_id) return;
+    setTranscript(t);
+    void refreshCleaned(t.meeting_id);
+  };
+
   const relabel = async (speakerKey: string, label: string) => {
     if (!openMeeting) return;
     const meetingId = openMeeting.id;
@@ -531,6 +544,8 @@ export default function App() {
             templates={templates}
             dataDir={info?.data_dir ?? null}
             onNoteChanged={onNoteChanged}
+            onMeetingChanged={meetingChanged}
+            onTranscriptRestored={transcriptRestored}
             onMoveNote={(folderId) => void moveOpenNote(folderId)}
             onStartRecording={() => void startRecording()}
             onStartScreen={(target) => void startScreen(target)}

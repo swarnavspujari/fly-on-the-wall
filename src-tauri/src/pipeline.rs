@@ -25,6 +25,60 @@ use crate::{gpu, hw, models};
 
 pub const MIC_SPEAKER_KEY: &str = "mic";
 
+/// Speaker-count hint for diarization, derived from the meeting's attendee
+/// list ONLY when the user confirmed it in the attendee editor. Calendar
+/// rosters are unreliable count proxies (MS Graph omits the organizer,
+/// rosters carry rooms/declines — forcing a wrong count MERGES real voices,
+/// see the E2 findings), so an unconfirmed list never drives the engine.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpeakerHint {
+    /// User said it's just them: no diarization needed, everything is "You".
+    JustYou,
+    /// Total speaker count INCLUDING the user.
+    Total(usize),
+    /// No trustworthy count — engine default (threshold clustering).
+    Unknown,
+}
+
+pub fn speaker_hint(meeting: &fly_core::Meeting) -> SpeakerHint {
+    if !meeting.attendees_confirmed {
+        return SpeakerHint::Unknown;
+    }
+    match meeting.attendees.len() {
+        0 => SpeakerHint::JustYou,
+        n => SpeakerHint::Total(n + 1),
+    }
+}
+
+impl SpeakerHint {
+    fn just_you(self) -> bool {
+        matches!(self, SpeakerHint::JustYou)
+    }
+    /// Cluster count for the system-only channel: the mic channel is already
+    /// pre-labeled "You", so the far end is attendees-minus-one — the same
+    /// arithmetic the E2 1:1 experiment validated (2 attendees → 1 cluster).
+    fn system_clusters(self) -> Option<usize> {
+        match self {
+            SpeakerHint::Total(n) => Some(n.saturating_sub(1).max(1)),
+            _ => None,
+        }
+    }
+    /// Cluster count for a single mixed track (the user is in the mix).
+    fn mixed_clusters(self) -> Option<usize> {
+        match self {
+            SpeakerHint::Total(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
+fn diarize_opts(num_speakers: Option<usize>) -> DiarizeOptions {
+    DiarizeOptions {
+        num_speakers,
+        ..DiarizeOptions::default()
+    }
+}
+
 /// Marker for the one failure retrying can never fix: the recording files are
 /// gone from disk. The scheduler matches on this prefix to skip its retries.
 pub const ERR_NO_RECORDING_FILES: &str = "recording files not found on disk";
@@ -88,13 +142,14 @@ pub async fn run_with(
     }
     emit_stage(state, on_stage, meeting_id, "starting", None);
 
-    let (recording, data_dir) = {
+    let (recording, hint, data_dir) = {
         let storage = state.storage.lock().unwrap();
         let meeting = storage.get_meeting(meeting_id).map_err(|e| e.to_string())?;
+        let hint = speaker_hint(&meeting);
         let recording = meeting
             .recording
             .ok_or("meeting has no recording to transcribe")?;
-        (recording, state.data_dir.clone())
+        (recording, hint, state.data_dir.clone())
     };
 
     let abs = |rel: &Option<String>| -> Option<PathBuf> {
@@ -377,12 +432,18 @@ pub async fn run_with(
         language = language.or(sys_raw.language.clone());
 
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
-        let turns = fly_diarize::drop_dust_clusters(
-            diarizer
-                .diarize(&sys_16k, &DiarizeOptions::default())
-                .await
-                .map_err(|e| e.to_string())?,
-        );
+        // "Just you": no far-end speakers exist, so the engine run is skipped
+        // entirely and any surviving far-end speech is attributed to You.
+        let turns = if hint.just_you() {
+            Vec::new()
+        } else {
+            fly_diarize::drop_dust_clusters(
+                diarizer
+                    .diarize(&sys_16k, &diarize_opts(hint.system_clusters()))
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
+        };
 
         // Cross-talk de-dup (§6.4, E1). Without a headset the built-in mic
         // re-captures the far-end played through the speakers, so the far-end
@@ -412,11 +473,11 @@ pub async fn run_with(
             MIC_SPEAKER_KEY,
             &align_opts,
         ));
-        channels.push(align_words_to_speakers(
-            &split.far_words,
-            &turns,
-            &align_opts,
-        ));
+        channels.push(if hint.just_you() {
+            segments_from_single_speaker(&split.far_words, MIC_SPEAKER_KEY, &align_opts)
+        } else {
+            align_words_to_speakers(&split.far_words, &turns, &align_opts)
+        });
 
         speakers.push(Speaker {
             key: MIC_SPEAKER_KEY.into(),
@@ -437,17 +498,28 @@ pub async fn run_with(
         language = raw.language.clone();
 
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
-        let turns = fly_diarize::drop_dust_clusters(
-            diarizer
-                .diarize(&track_16k, &DiarizeOptions::default())
-                .await
-                .map_err(|e| e.to_string())?,
-        );
+        if hint.just_you() {
+            // single track, just the user: everything is You, no engine run
+            emit_stage(state, on_stage, meeting_id, "aligning", None);
+            let segments = segments_from_single_speaker(&raw.words, MIC_SPEAKER_KEY, &align_opts);
+            speakers.push(Speaker {
+                key: MIC_SPEAKER_KEY.into(),
+                label: "You".into(),
+            });
+            channels.push(segments);
+        } else {
+            let turns = fly_diarize::drop_dust_clusters(
+                diarizer
+                    .diarize(&track_16k, &diarize_opts(hint.mixed_clusters()))
+                    .await
+                    .map_err(|e| e.to_string())?,
+            );
 
-        emit_stage(state, on_stage, meeting_id, "aligning", None);
-        let segments = align_words_to_speakers(&raw.words, &turns, &align_opts);
-        collect_speakers(&mut speakers, &segments);
-        channels.push(segments);
+            emit_stage(state, on_stage, meeting_id, "aligning", None);
+            let segments = align_words_to_speakers(&raw.words, &turns, &align_opts);
+            collect_speakers(&mut speakers, &segments);
+            channels.push(segments);
+        }
     }
 
     // A GPU that failed mid-run gets pinned back to CPU so the next meeting
@@ -490,6 +562,188 @@ pub async fn run_with(
     // release the per-meeting guard (on failure the scheduler clears it)
     state.pipeline_stage.lock().unwrap().remove(meeting_id);
     Ok(transcript)
+}
+
+/// What a re-diarize did, for the UI's toast ("N lines re-attributed").
+#[derive(Clone, Serialize)]
+pub struct ReDiarizeOutcome {
+    pub changed_segments: usize,
+    pub transcript: Transcript,
+}
+
+/// Re-run ONLY diarize → align → save on the existing audio + existing
+/// transcript. ASR output and the polished text are never touched: segments
+/// keep their ids, boundaries, words, and text — only per-segment speaker
+/// keys and the label map change (fly_core::rediarize), mirrored onto the
+/// cleaned variant via the shared segment ids. The pre-existing assignment
+/// is snapshotted first so `revert_speaker_assignment` can restore it.
+/// The caller chains extraction (best-effort) after this returns.
+pub async fn re_diarize_with(
+    state: &AppState,
+    on_stage: StageSink<'_>,
+    on_model: models::ProgressSink<'_>,
+    meeting_id: &str,
+) -> Result<ReDiarizeOutcome, String> {
+    // shares the per-meeting guard with the full pipeline
+    {
+        let stages = state.pipeline_stage.lock().unwrap();
+        if stages.contains_key(meeting_id) {
+            return Err("a pipeline is already running for this meeting".into());
+        }
+    }
+    let result = re_diarize_inner(state, on_stage, on_model, meeting_id).await;
+    state.pipeline_stage.lock().unwrap().remove(meeting_id);
+    result
+}
+
+async fn re_diarize_inner(
+    state: &AppState,
+    on_stage: StageSink<'_>,
+    on_model: models::ProgressSink<'_>,
+    meeting_id: &str,
+) -> Result<ReDiarizeOutcome, String> {
+    let (meeting, mut raw) = {
+        let storage = state.storage.lock().unwrap();
+        let meeting = storage.get_meeting(meeting_id).map_err(|e| e.to_string())?;
+        let raw = storage
+            .get_transcript(meeting_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("transcribe this meeting before re-analyzing speakers")?;
+        (meeting, raw)
+    };
+    let hint = speaker_hint(&meeting);
+    let snapshot = fly_storage::SpeakerSnapshot::capture(&raw);
+    let data_dir = state.data_dir.clone();
+
+    let changed: Vec<String> = if hint.just_you() {
+        // No engine run: attribute every segment to You.
+        emit_stage(state, on_stage, meeting_id, "aligning", None);
+        let mut changed = Vec::new();
+        for seg in &mut raw.segments {
+            if seg.speaker_key != MIC_SPEAKER_KEY {
+                changed.push(seg.id.clone());
+                seg.speaker_key = MIC_SPEAKER_KEY.to_string();
+            }
+        }
+        raw.speakers = vec![Speaker {
+            key: MIC_SPEAKER_KEY.into(),
+            label: "You".into(),
+        }];
+        changed
+    } else {
+        let recording = meeting
+            .recording
+            .clone()
+            .ok_or("meeting has no recording to re-analyze")?;
+        emit_stage(state, on_stage, meeting_id, "ensuring-models", None);
+        let sherpa_exe = models::ensure_tool(
+            on_model,
+            &data_dir,
+            "sherpa-bin",
+            &["sherpa-onnx-offline-speaker-diarization"],
+            "install sherpa-onnx or report this platform in an issue",
+        )
+        .await?;
+        let seg_model = models::ensure(on_model, &data_dir, "pyannote-seg").await?;
+        let emb_model = models::ensure(on_model, &data_dir, "campplus-embedding").await?;
+        let diarizer = fly_diarize::sherpa::SherpaDiarizeEngine {
+            exe: sherpa_exe,
+            segmentation_model: seg_model,
+            embedding_model: emb_model,
+            threads: sidecar_threads(),
+        };
+
+        let abs = |rel: &Option<String>| -> Option<PathBuf> {
+            rel.as_ref()
+                .map(|r| data_dir.join(r))
+                .filter(|p| p.exists())
+        };
+        let mut mic_wav = abs(&recording.mic_path);
+        let mut system_wav = abs(&recording.system_path);
+        let mut mixed_wav = abs(&recording.mixed_path);
+        if mic_wav.is_none()
+            && system_wav.is_none()
+            && mixed_wav.is_none()
+            && restore_parked_recording(&data_dir, &recording)
+        {
+            mic_wav = abs(&recording.mic_path);
+            system_wav = abs(&recording.system_path);
+            mixed_wav = abs(&recording.mixed_path);
+        }
+        // Same channel strategy as the full pipeline: with both channels the
+        // mic is a known speaker and only the system channel is diarized.
+        let per_channel = mic_wav.is_some() && system_wav.is_some();
+        let (src, num_clusters) = if per_channel {
+            (system_wav.clone().unwrap(), hint.system_clusters())
+        } else {
+            let src = mixed_wav
+                .or(mic_wav)
+                .or(system_wav)
+                .ok_or_else(|| ERR_NO_RECORDING_FILES.to_string())?;
+            (src, hint.mixed_clusters())
+        };
+
+        emit_stage(state, on_stage, meeting_id, "preparing-audio", None);
+        let work_dir = src
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or("recording has no parent folder")?;
+        let track_16k = work_dir.join("rediarize.16k.wav");
+        let (samples, rate) = fly_audio::mix::read_wav_mono(&src).map_err(|e| e.to_string())?;
+        let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
+        fly_audio::mix::write_wav_mono_16(&track_16k, &resampled, 16_000)
+            .map_err(|e| e.to_string())?;
+
+        emit_stage(state, on_stage, meeting_id, "diarizing", None);
+        let diarized = diarizer
+            .diarize(&track_16k, &diarize_opts(num_clusters))
+            .await
+            .map_err(|e| e.to_string());
+        if let Err(e) = std::fs::remove_file(&track_16k) {
+            tracing::warn!(path = %track_16k.display(), error = %e, "could not remove 16k intermediate");
+        }
+        let turns = fly_diarize::drop_dust_clusters(diarized?);
+
+        emit_stage(state, on_stage, meeting_id, "aligning", None);
+        let protected = per_channel.then_some(MIC_SPEAKER_KEY);
+        fly_core::rediarize::apply_turns(&mut raw, &turns, protected).changed
+    };
+
+    emit_stage(state, on_stage, meeting_id, "saving", None);
+    {
+        let storage = state.storage.lock().unwrap();
+        storage.save_transcript(&raw).map_err(|e| e.to_string())?;
+        // Mirror the new assignment onto the polished variant: it shares the
+        // raw's segment ids, so its text stays exactly as polished.
+        if let Some(mut cleaned) = storage
+            .get_cleaned_transcript(meeting_id)
+            .map_err(|e| e.to_string())?
+        {
+            let keys: std::collections::HashMap<&str, &str> = raw
+                .segments
+                .iter()
+                .map(|s| (s.id.as_str(), s.speaker_key.as_str()))
+                .collect();
+            for seg in &mut cleaned.segments {
+                if let Some(k) = keys.get(seg.id.as_str()) {
+                    seg.speaker_key = (*k).to_string();
+                }
+            }
+            cleaned.speakers = raw.speakers.clone();
+            storage
+                .save_cleaned_transcript(&cleaned)
+                .map_err(|e| e.to_string())?;
+        }
+        let mut snap = snapshot;
+        snap.changed_segments = changed.len();
+        storage
+            .save_speaker_snapshot(meeting_id, &snap)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(ReDiarizeOutcome {
+        changed_segments: changed.len(),
+        transcript: raw,
+    })
 }
 
 /// The pipeline's ASR with an automatic, visible CPU fallback: a GPU engine

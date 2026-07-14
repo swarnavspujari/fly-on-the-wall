@@ -1,11 +1,11 @@
 //! Commands for transcription, transcripts, ASR settings, and models.
 
-use fly_core::Transcript;
+use fly_core::{Attendee, Meeting, Transcript};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 use crate::state::AppState;
-use crate::{gpu, hw, models, scheduler};
+use crate::{gpu, hw, models, pipeline, scheduler};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -79,6 +79,113 @@ pub fn edit_transcript_segment(
         .unwrap()
         .edit_segment_text(&meeting_id, &segment_id, &text)
         .map_err(|e| e.to_string())
+}
+
+/// Replace a meeting's attendees (the attendee editor's Save). Saving marks
+/// the list user-confirmed, which is what allows the attendee count to feed
+/// DiarizeOptions::num_speakers on the next (re-)diarize. Never triggers any
+/// transcription work by itself.
+#[tauri::command]
+pub fn update_meeting_attendees(
+    state: State<'_, AppState>,
+    meeting_id: String,
+    attendees: Vec<Attendee>,
+) -> CmdResult<Meeting> {
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .update_attendees(&meeting_id, &attendees)
+        .map_err(|e| e.to_string())
+}
+
+/// User-triggered "Re-analyze speakers": re-runs ONLY diarize → align → save
+/// on the existing audio and transcript (ASR output and polished text are
+/// untouched), snapshots the prior assignment for undo, then chains a
+/// best-effort re-extraction in the background. Progress arrives via the
+/// same `pipeline:progress` events as transcription.
+#[tauri::command]
+pub async fn re_diarize_meeting(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> CmdResult<pipeline::ReDiarizeOutcome> {
+    let on_stage = scheduler::stage_emitter(&app);
+    let on_model = {
+        let app = app.clone();
+        move |p: models::ModelProgress| {
+            use tauri::Emitter;
+            let _ = app.emit("model:progress", p);
+        }
+    };
+    let result = pipeline::re_diarize_with(&state, &on_stage, &on_model, &meeting_id).await;
+    // terminal event so the transcript view refreshes (same shape the
+    // scheduler emits after a full pipeline run)
+    on_stage(pipeline::PipelineProgress {
+        meeting_id: meeting_id.clone(),
+        stage: if result.is_ok() { "done" } else { "error" }.into(),
+        detail: None,
+        done: true,
+        error: result.as_ref().err().cloned(),
+    });
+    if result.is_ok() {
+        spawn_extraction(app, meeting_id);
+    }
+    result
+}
+
+/// Undo the last re-diarize: restores the snapshotted per-segment speaker
+/// keys + label map on both transcript variants (text edits made since are
+/// kept), then re-extracts in the background so items match again.
+#[tauri::command]
+pub fn revert_speaker_assignment(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> CmdResult<Transcript> {
+    let transcript = state
+        .storage
+        .lock()
+        .unwrap()
+        .revert_speaker_assignment(&meeting_id)
+        .map_err(|e| e.to_string())?;
+    spawn_extraction(app, meeting_id);
+    Ok(transcript)
+}
+
+/// Best-effort background re-extraction after a speaker-assignment change —
+/// mirrors the scheduler's post-transcription chaining, never blocks the UI.
+fn spawn_extraction(app: tauri::AppHandle, meeting_id: String) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        crate::extraction::extract_after_transcribe(&state, &meeting_id).await;
+    });
+}
+
+/// Whether an undo of the last re-diarize is available, and for how it
+/// should be presented ("N lines re-attributed", taken_at for the 10-minute
+/// affordance window).
+#[derive(Serialize)]
+pub struct SpeakerUndoState {
+    pub taken_at: String,
+    pub changed_segments: usize,
+}
+
+#[tauri::command]
+pub fn speaker_undo_state(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> CmdResult<Option<SpeakerUndoState>> {
+    Ok(state
+        .storage
+        .lock()
+        .unwrap()
+        .get_speaker_snapshot(&meeting_id)
+        .map_err(|e| e.to_string())?
+        .map(|s| SpeakerUndoState {
+            taken_at: s.taken_at.to_rfc3339(),
+            changed_segments: s.changed_segments,
+        }))
 }
 
 /// Current stage of a running pipeline (None = not running).

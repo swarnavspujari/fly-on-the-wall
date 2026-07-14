@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
   AskMessage,
+  Attendee,
   AudioDevice,
   CalendarEvent,
   CalendarSettingsUpdate,
@@ -24,7 +25,9 @@ import type {
   OllamaStatus,
   PolishResult,
   RecordingStatus,
+  ReDiarizeOutcome,
   SearchHit,
+  SpeakerUndoState,
   Template,
   Transcript,
 } from "./types";
@@ -64,6 +67,9 @@ export const api = {
   removeAttachment: (noteId: string, attachmentId: string) =>
     invoke<Note>("remove_attachment", { noteId, attachmentId }),
   openAttachment: (relPath: string) => invoke<void>("open_attachment", { relPath }),
+  // Lazily generates (native side, ffmpeg sidecar) and caches a poster .jpg
+  // next to a video attachment; returns the poster's rel path.
+  ensureVideoThumbnail: (relPath: string) => invoke<string>("ensure_video_thumbnail", { relPath }),
   revealAttachment: (relPath: string) => invoke<void>("reveal_attachment", { relPath }),
   revealDataDir: () => invoke<void>("reveal_data_dir"),
   mcpConfig: () => invoke<string>("mcp_config"),
@@ -95,6 +101,19 @@ export const api = {
   editTranscriptSegment: (meetingId: string, segmentId: string, text: string) =>
     invoke<Transcript>("edit_transcript_segment", { meetingId, segmentId, text }),
   pipelineStage: (meetingId: string) => invoke<string | null>("pipeline_stage", { meetingId }),
+
+  // attendees & attendee-informed diarization
+  // Replaces the list and marks it user-confirmed. Never re-transcribes.
+  updateMeetingAttendees: (meetingId: string, attendees: Attendee[]) =>
+    invoke<Meeting>("update_meeting_attendees", { meetingId, attendees }),
+  // Re-runs ONLY diarize → align → save (+ background re-extraction) on the
+  // existing audio/transcript; snapshots the prior assignment for undo.
+  reDiarizeMeeting: (meetingId: string) =>
+    invoke<ReDiarizeOutcome>("re_diarize_meeting", { meetingId }),
+  revertSpeakerAssignment: (meetingId: string) =>
+    invoke<Transcript>("revert_speaker_assignment", { meetingId }),
+  speakerUndoState: (meetingId: string) =>
+    invoke<SpeakerUndoState | null>("speaker_undo_state", { meetingId }),
 
   // ASR settings & models
   getAsrSettings: () => invoke<AsrSettings>("get_asr_settings"),
