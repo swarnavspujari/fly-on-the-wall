@@ -22,7 +22,7 @@ quantization — negligible accuracy loss, big RAM/disk savings, especially on L
 |---|---|---|---|
 | **whisper.cpp** | primary ASR | CPU, CUDA, Metal, Vulkan; desktop + mobile | MIT (weights: OpenAI Whisper, MIT) — 99 languages |
 | **NVIDIA Parakeet** | optional ASR | NVIDIA GPUs; Apple ANE via FluidAudio (macOS port) | weights CC-BY-4.0 — En + 25 EU languages; near-zero silence hallucination |
-| **Groq** | cloud ASR **fallback only** | network | free tier ~2k req/day, ~7,200 audio-s/hour; word+segment timestamps |
+| **Groq** | cloud ASR **fallback only** | network | free tier ~2k req/day, ~7,200 audio-s/hour; word+segment timestamps. Preprocessing matches the local path: VAD strips non-speech before upload (anti-hallucination, smaller payloads), peak normalization, greedy decode (temperature 0); word timestamps are mapped back to the original timeline so local diarization stays aligned |
 | **sherpa-onnx** | diarization, **always local** | CPU everywhere incl. phones | Apache-2.0 |
 
 ## Diarization models (always downloaded, all tiers)
