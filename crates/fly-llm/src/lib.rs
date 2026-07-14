@@ -106,7 +106,7 @@ pub enum ThinkingMode {
     Disabled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f32>,
@@ -115,6 +115,12 @@ pub struct ChatRequest {
     /// support thinking.
     #[serde(default)]
     pub thinking: ThinkingMode,
+    /// Optional JSON schema for structured output (grammar-constrained
+    /// decoding). Honored by the Ollama native path (`format` field — the
+    /// server compiles it to a llama.cpp grammar, making malformed JSON
+    /// impossible); ignored by other providers. `None` = free-form text.
+    #[serde(default)]
+    pub format: Option<serde_json::Value>,
 }
 
 /// Per-provider connection settings, editable in the app's Settings screen.

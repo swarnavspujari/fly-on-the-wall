@@ -220,6 +220,7 @@ pub async fn extract_items(
                 temperature: None,
                 max_tokens: Some(profile.max_tokens.extract.unwrap_or(8192)),
                 thinking: ThinkingMode::Disabled,
+                format: None,
             })
             .await
             .map_err(|e| e.to_string())?;

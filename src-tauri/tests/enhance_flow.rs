@@ -103,6 +103,7 @@ fn enhance_flow_with_mock_provider_offline() {
             temperature: Some(0.2),
             max_tokens: None,
             thinking: fly_llm::ThinkingMode::Default,
+            format: None,
         }))
         .unwrap();
 

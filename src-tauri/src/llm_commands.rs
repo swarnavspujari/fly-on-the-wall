@@ -153,7 +153,15 @@ pub async fn enhance_note(
             ],
             temperature: Some(0.2),
             max_tokens: Some(profile.max_tokens.enhance.unwrap_or(4096)),
-            thinking: ThinkingMode::Default,
+            // Adaptive thinking helps cloud models here; local thinking
+            // models opt out via their profile (the trace would eat the
+            // output budget — see prompt_profile.rs).
+            thinking: if profile.thinking_disabled() {
+                ThinkingMode::Disabled
+            } else {
+                ThinkingMode::Default
+            },
+            format: None,
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -276,6 +284,7 @@ pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResu
                 // tokens don't eat the budget and truncate the JSON mid-array
                 // (claude-sonnet-5 thinks by default — see AnthropicProvider).
                 thinking: ThinkingMode::Disabled,
+                format: None,
             })
             .await
             .map_err(|e| e.to_string())?;
@@ -388,7 +397,13 @@ pub async fn ask_meeting(
             messages,
             temperature: Some(0.3),
             max_tokens: Some(profile.max_tokens.ask.unwrap_or(2048)),
-            thinking: ThinkingMode::Default,
+            // Same profile-driven opt-out as enhance_note above.
+            thinking: if profile.thinking_disabled() {
+                ThinkingMode::Disabled
+            } else {
+                ThinkingMode::Default
+            },
+            format: None,
         })
         .await
         .map_err(|e| e.to_string())

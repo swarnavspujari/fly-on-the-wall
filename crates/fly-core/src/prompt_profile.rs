@@ -27,7 +27,10 @@
 //!      no-loss contract is load-bearing for the retention guard);
 //!    - `max_tokens` overrides per task when the model truncates output
 //!      (or wastes budget) at the shared defaults (4096 enhance / 8192
-//!      polish / 8192 extract / 2048 ask).
+//!      polish / 8192 extract / 2048 ask);
+//!    - `disable_thinking: true` for local thinking models whose reasoning
+//!      trace eats the output budget (empty/truncated answers on the
+//!      `ThinkingMode::Default` call sites — Enhance and Ask).
 //! 3. Re-run the benchmark with the profile applied and record the delta
 //!    in `docs/BENCHMARKS.md` before changing any default-model constant.
 //! 4. If the model becomes a provider default, update the `PROVIDERS`
@@ -44,7 +47,7 @@ pub struct TaskMaxTokens {
     pub ask: Option<u32>,
 }
 
-/// Prompt adjustments for one model family. Deliberately minimal — three
+/// Prompt adjustments for one model family. Deliberately minimal — four
 /// knobs, no templating. If a model needs more than this, the shared prompt
 /// probably needs fixing for everyone instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +58,13 @@ pub struct PromptProfile {
     pub simplified_contract: bool,
     /// Per-task output token budget overrides.
     pub max_tokens: TaskMaxTokens,
+    /// Turn model "thinking" off on EVERY task, including the two call sites
+    /// that ship `ThinkingMode::Default` (Enhance, Ask). For local thinking
+    /// models (qwen3.5, deepseek-r1) the reasoning trace otherwise consumes
+    /// the whole output budget and the answer comes back empty/truncated —
+    /// measured in docs/BENCHMARKS.md §3.0/§6. Leave false for cloud models:
+    /// Anthropic's adaptive thinking helps Enhance/Ask quality there.
+    pub disable_thinking: bool,
 }
 
 impl PromptProfile {
@@ -64,6 +74,14 @@ impl PromptProfile {
             Some(p) => format!("{p}\n\n{system}"),
             None => system,
         }
+    }
+
+    /// Whether a call site that would ship `thinking_default` should disable
+    /// thinking instead. Returns `true` when the profile turns thinking off;
+    /// call sites map that to `ThinkingMode::Disabled`. (Kept as a bool so
+    /// fly-core needs no dependency on fly-llm's `ThinkingMode`.)
+    pub fn thinking_disabled(&self) -> bool {
+        self.disable_thinking
     }
 }
 
@@ -77,15 +95,28 @@ pub const DEFAULT_PROFILE: PromptProfile = PromptProfile {
         extract: None,
         ask: None,
     },
+    disable_thinking: false,
 };
 
 /// The registry: `(model base name, profile)`. Keys match the model string
-/// with any `:tag` suffix stripped. Intentionally empty today — see the
-/// module docs for the checklist before adding an entry. (llm_bench measured
-/// llama3.1 contract failures, but the candidate fix — the simplified
-/// contract — leaked its inline example into llama3.1's output and scored
-/// WORSE on quality, so no profile earned its way in; docs/BENCHMARKS.md §5.)
-const PROFILES: &[(&str, PromptProfile)] = &[];
+/// with any `:tag` suffix stripped. See the module docs for the checklist
+/// before adding an entry. (llm_bench also measured llama3.1 contract
+/// failures, but the candidate fix — the simplified contract — leaked its
+/// inline example into llama3.1's output and scored WORSE on quality, so no
+/// llama3.1 profile earned its way in; docs/BENCHMARKS.md §5.)
+const PROFILES: &[(&str, PromptProfile)] = &[
+    // qwen3.5 reasons unconditionally; with thinking on, Enhance came back
+    // EMPTY (0/3 contract) and 3/15 Ask answers were empty because the trace
+    // consumed the output budget. With thinking off it posts the best local
+    // scores in the benchmark (docs/BENCHMARKS.md §6). Measured 2026-07-14.
+    (
+        "qwen3.5",
+        PromptProfile {
+            disable_thinking: true,
+            ..DEFAULT_PROFILE
+        },
+    ),
+];
 
 /// Look up the profile for a resolved model string (`"llama3.1:latest"`,
 /// `"claude-sonnet-5"`). Unknown models get `DEFAULT_PROFILE`.
@@ -107,6 +138,20 @@ mod tests {
         for m in ["llama3.1", "llama3.1:latest", "claude-sonnet-5", "", "mock"] {
             assert_eq!(profile_for(m), &DEFAULT_PROFILE, "model {m:?}");
         }
+    }
+
+    #[test]
+    fn qwen35_profile_disables_thinking_and_nothing_else() {
+        for m in ["qwen3.5", "qwen3.5:4b", "qwen3.5:latest"] {
+            let p = profile_for(m);
+            assert!(p.disable_thinking, "model {m:?}");
+            // Prompts stay byte-identical to the default profile.
+            assert_eq!(p.system_preamble, None);
+            assert!(!p.simplified_contract);
+            assert_eq!(p.max_tokens, DEFAULT_PROFILE.max_tokens);
+        }
+        // The qwen3 (non-3.5) family is NOT matched by the qwen3.5 key.
+        assert_eq!(profile_for("qwen3:4b"), &DEFAULT_PROFILE);
     }
 
     #[test]

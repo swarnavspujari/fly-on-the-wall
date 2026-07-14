@@ -122,6 +122,7 @@ impl LLMProvider for OpenAiCompatProvider {
             temperature: Some(0.0),
             max_tokens: Some(5),
             thinking: crate::ThinkingMode::Default,
+            format: None,
         })
         .await
         .map(|_| ())
@@ -139,13 +140,16 @@ impl OpenAiCompatProvider {
 
     /// Ollama native `POST {root}/api/chat`. Retries once without `think`
     /// when an older server rejects the field (they answer 400 mentioning
-    /// thinking support).
+    /// thinking support), and once without `num_ctx` when a raised context
+    /// crashes the model runner (some models 500 on constrained hardware —
+    /// gemma4:e4b at num_ctx 8192 on 4 GB VRAM kills llama-server outright).
     async fn chat_ollama_native(&self, req: &ChatRequest) -> Result<String> {
         let root = self.ollama_root();
         let client = reqwest::Client::new();
         let mut include_think = req.thinking == ThinkingMode::Disabled;
+        let mut num_ctx = Some(estimate_num_ctx(req));
         loop {
-            let body = native_chat_body(&self.model, req, include_think);
+            let body = native_chat_body(&self.model, req, include_think, num_ctx);
             let resp = client
                 .post(format!("{root}/api/chat"))
                 .json(&body)
@@ -167,6 +171,18 @@ impl OpenAiCompatProvider {
                     include_think = false;
                     continue;
                 }
+                if num_ctx.is_some() && status.as_u16() >= 500 {
+                    // Runner crash (observed: 0xc0000409 loading big models
+                    // with a raised context on small VRAM). Retry with the
+                    // server's default context — a possibly-truncated answer
+                    // beats no answer; the truncation risk is the status quo.
+                    tracing::warn!(
+                        model = %self.model,
+                        "ollama runner failed with num_ctx set; retrying with server default"
+                    );
+                    num_ctx = None;
+                    continue;
+                }
                 return Err(LlmError::Provider(format!(
                     "{status}: {}",
                     text.chars().take(300).collect::<String>()
@@ -175,6 +191,20 @@ impl OpenAiCompatProvider {
             return parse_native_chat(&text);
         }
     }
+}
+
+/// Context window to request for this call. Ollama's server default can be
+/// as low as ~2048 tokens and overflow is trimmed SILENTLY from the front —
+/// killing the system prompt first (docs/BENCHMARKS.md §8.1). Estimate the
+/// prompt at chars/3 (≈33 % over the ~4 chars/token English average, so the
+/// margin absorbs tokenizer variance), add the response budget, and clamp:
+/// floor 4096 keeps short chats on a known-good size, cap 32768 bounds the
+/// KV-cache allocation on small machines.
+fn estimate_num_ctx(req: &ChatRequest) -> u32 {
+    let prompt_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
+    let prompt_tokens = (prompt_chars / 3) as u32;
+    let response = req.max_tokens.unwrap_or(4096);
+    (prompt_tokens + response + 512).clamp(4096, 32768)
 }
 
 /// Request body for the OpenAI-compatible `/chat/completions` endpoint
@@ -199,10 +229,17 @@ fn openai_chat_body(model: &str, req: &ChatRequest) -> serde_json::Value {
 }
 
 /// Request body for Ollama's native `/api/chat`. `max_tokens` maps to
-/// `options.num_predict`, `temperature` to `options.temperature`;
+/// `options.num_predict`, `temperature` to `options.temperature`,
+/// `num_ctx` sizes the context window (see `estimate_num_ctx`);
 /// `include_think` adds `"think": false` (we never ask for MORE thinking —
-/// `ThinkingMode::Default` leaves the model's own default in place).
-fn native_chat_body(model: &str, req: &ChatRequest, include_think: bool) -> serde_json::Value {
+/// `ThinkingMode::Default` leaves the model's own default in place);
+/// `req.format` passes a JSON schema for grammar-constrained decoding.
+fn native_chat_body(
+    model: &str,
+    req: &ChatRequest,
+    include_think: bool,
+    num_ctx: Option<u32>,
+) -> serde_json::Value {
     let messages: Vec<_> = req
         .messages
         .iter()
@@ -216,12 +253,18 @@ fn native_chat_body(model: &str, req: &ChatRequest, include_think: bool) -> serd
     if include_think {
         body["think"] = json!(false);
     }
+    if let Some(schema) = &req.format {
+        body["format"] = schema.clone();
+    }
     let mut options = serde_json::Map::new();
     if let Some(t) = req.temperature {
         options.insert("temperature".into(), json!(t));
     }
     if let Some(mt) = req.max_tokens {
         options.insert("num_predict".into(), json!(mt));
+    }
+    if let Some(ctx) = num_ctx {
+        options.insert("num_ctx".into(), json!(ctx));
     }
     if !options.is_empty() {
         body["options"] = serde_json::Value::Object(options);
@@ -275,18 +318,20 @@ mod tests {
             temperature: Some(0.2),
             max_tokens: Some(4096),
             thinking,
+            format: None,
         }
     }
 
     #[test]
     fn native_body_maps_options_and_disables_thinking() {
-        let body = native_chat_body("qwen3.5:4b", &req(ThinkingMode::Disabled), true);
+        let body = native_chat_body("qwen3.5:4b", &req(ThinkingMode::Disabled), true, Some(4096));
         assert_eq!(body["model"], "qwen3.5:4b");
         assert_eq!(body["stream"], false);
         assert_eq!(body["think"], false);
         let temp = body["options"]["temperature"].as_f64().unwrap();
         assert!((temp - 0.2).abs() < 1e-6, "temperature was {temp}");
         assert_eq!(body["options"]["num_predict"], 4096);
+        assert_eq!(body["options"]["num_ctx"], 4096);
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "hi");
         assert_eq!(body["messages"][2]["role"], "assistant");
@@ -295,8 +340,9 @@ mod tests {
     #[test]
     fn native_body_default_thinking_omits_think_field() {
         // ThinkingMode::Default is a no-op: the model keeps its own default.
-        let body = native_chat_body("llama3.1", &req(ThinkingMode::Default), false);
+        let body = native_chat_body("llama3.1", &req(ThinkingMode::Default), false, None);
         assert!(body.get("think").is_none());
+        assert!(body["options"].get("num_ctx").is_none());
     }
 
     #[test]
@@ -304,8 +350,36 @@ mod tests {
         let mut r = req(ThinkingMode::Default);
         r.temperature = None;
         r.max_tokens = None;
-        let body = native_chat_body("llama3.1", &r, false);
+        let body = native_chat_body("llama3.1", &r, false, None);
         assert!(body.get("options").is_none());
+    }
+
+    #[test]
+    fn native_body_passes_format_schema_through() {
+        let mut r = req(ThinkingMode::Default);
+        r.format = Some(json!({"type": "array"}));
+        let body = native_chat_body("llama3.1", &r, false, None);
+        assert_eq!(body["format"]["type"], "array");
+        // And absent by default.
+        let body = native_chat_body("llama3.1", &req(ThinkingMode::Default), false, None);
+        assert!(body.get("format").is_none());
+    }
+
+    #[test]
+    fn num_ctx_estimate_covers_prompt_plus_response_and_clamps() {
+        // Short prompt + small response budget → floor.
+        let mut r = req(ThinkingMode::Default);
+        r.max_tokens = Some(100);
+        assert_eq!(estimate_num_ctx(&r), 4096);
+        // Prompt + response budget always fit: ~30k chars ≈ 10k estimated
+        // prompt tokens + 4096 response + margin.
+        let mut r = req(ThinkingMode::Default);
+        r.messages = vec![ChatMessage::system("x".repeat(30_000))];
+        let est = estimate_num_ctx(&r);
+        assert!(est > 14_000 && est < 16_000, "est was {est}");
+        // Enormous prompt → cap.
+        r.messages = vec![ChatMessage::system("x".repeat(400_000))];
+        assert_eq!(estimate_num_ctx(&r), 32_768);
     }
 
     #[test]
@@ -324,6 +398,43 @@ mod tests {
         let json = r#"{"message":{"role":"assistant","thinking":"...","content":"[{\"k\":1}]"},"done":true}"#;
         assert_eq!(parse_native_chat(json).unwrap(), r#"[{"k":1}]"#);
         assert!(parse_native_chat(r#"{"done":true}"#).is_err());
+    }
+
+    /// Live marker test for the num_ctx fix: a fact at the FRONT of a ~6k-token
+    /// prompt must survive (Ollama trims overflow from the front silently;
+    /// before the fix this prompt truncated to ~2048 tokens and the model
+    /// hallucinated the answer). Needs a local Ollama with llama3.1.
+    #[test]
+    #[ignore = "needs a running Ollama with llama3.1"]
+    fn ollama_num_ctx_marker_live() {
+        let filler = "Sam: The quarterly infrastructure review covered database sharding, \
+                      cache invalidation strategy, and the migration timeline.\n"
+            .repeat(220); // ≈ 6k tokens
+        let system = format!(
+            "The secret code is FLYWHEEL-7391. Remember it. You are a meeting assistant; \
+             answer questions about the transcript below.\n\nTRANSCRIPT:\n{filler}"
+        );
+        let provider = OpenAiCompatProvider::ollama(None, "llama3.1".into());
+        let out = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(provider.chat(ChatRequest {
+                messages: vec![
+                    ChatMessage::system(system),
+                    ChatMessage::user(
+                        "What is the secret code stated at the very beginning of your \
+                         instructions? Reply with the code only.",
+                    ),
+                ],
+                temperature: Some(0.0),
+                max_tokens: Some(30),
+                thinking: ThinkingMode::Default,
+                format: None,
+            }))
+            .expect("chat succeeds");
+        assert!(
+            out.contains("FLYWHEEL-7391"),
+            "front of prompt was truncated — num_ctx sizing failed; got: {out:?}"
+        );
     }
 
     #[test]

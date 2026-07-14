@@ -120,6 +120,7 @@ fn polish_harness() {
                     // Mechanical cleanup: no thinking, so the full budget goes
                     // to the JSON answer (see AnthropicProvider::request_body).
                     thinking: fly_llm::ThinkingMode::Disabled,
+                    format: None,
                 },
             )
             .await;

@@ -13,9 +13,12 @@
 //!   LLM_BENCH_MODELS="ollama:llama3.1"            # required
 //!   LLM_BENCH_OUT=target/llm-bench                # default
 //!   LLM_BENCH_TASKS=enhance,polish,extract,ask    # default all
-//!   LLM_BENCH_VARIANT=default|simple|fewshot|nopreamble   # profile experiment
+//!   LLM_BENCH_VARIANT=default|simple|fewshot|nopreamble|engineered  # experiment
+//!       ("engineered" = community harness: Ollama format JSON schemas on the
+//!        three JSON tasks + temperature 0 for polish/extract; prompts unchanged)
 //!   LLM_BENCH_THINKING=disabled   # force ThinkingMode::Disabled on ALL tasks
 //!                                 # (thinking-model ceiling; "-nothink" slug)
+//!   LLM_BENCH_RUN=2               # repeat-run tag ("-r2" slug) for ≥3 samples
 //!   ANTHROPIC_API_KEY=sk-ant-...   # anthropic models; falls back to the
 //!                                  # app keychain (service com.flyonthewall.app)
 //!     cargo test -p fly-app --test llm_bench -- --ignored --nocapture
@@ -210,8 +213,69 @@ fn variant_profile(variant: &str) -> PromptProfile {
             system_preamble: Some(NOPREAMBLE_PREAMBLE),
             ..DEFAULT_PROFILE
         },
+        // "engineered" keeps the default prompts; its changes are request-
+        // level (format schemas + temperature 0), applied in run_generate.
         _ => DEFAULT_PROFILE,
     }
+}
+
+// ---------------------------------------------------------------------------
+// "engineered" variant: community harness techniques — grammar-constrained
+// decoding (Ollama `format` JSON schemas) for the three JSON tasks, plus
+// temperature 0 for the extraction-shaped ones. Prompts stay identical.
+// ---------------------------------------------------------------------------
+
+fn enhance_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["user", "ai"]},
+                "markdown": {"type": "string"},
+                "sources": {"type": "array", "items": {"type": "integer"}}
+            },
+            "required": ["type", "markdown", "sources"]
+        }
+    })
+}
+
+fn polish_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "segments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "text": {"type": "string"}
+                    },
+                    "required": ["id", "text"]
+                }
+            }
+        },
+        "required": ["segments"]
+    })
+}
+
+fn extract_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["decision", "action_item", "question", "commitment", "figure"]},
+                "text": {"type": "string"},
+                "owner": {"type": ["string", "null"]},
+                "status": {"type": ["string", "null"]},
+                "speaker_key": {"type": ["string", "null"]},
+                "segment_ids": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["kind", "text", "owner", "status", "speaker_key", "segment_ids"]
+        }
+    })
 }
 
 async fn chat_with_retry(provider: &dyn LLMProvider, req: ChatRequest) -> Result<String, String> {
@@ -402,6 +466,7 @@ async fn run_generate(
     fixtures: &[Fixture],
     tasks: &[String],
     force_no_think: bool,
+    engineered: bool,
     out: &mut RunResult,
 ) {
     let local = provider.is_local();
@@ -445,6 +510,7 @@ async fn run_generate(
                     temperature: Some(0.2),
                     max_tokens: Some(profile.max_tokens.enhance.unwrap_or(4096)),
                     thinking: th(ThinkingMode::Default),
+                    format: engineered.then(enhance_schema),
                 },
             )
             .await;
@@ -512,9 +578,10 @@ async fn run_generate(
                             ChatMessage::system(prompt.system),
                             ChatMessage::user(prompt.user),
                         ],
-                        temperature: None,
+                        temperature: if engineered { Some(0.0) } else { None },
                         max_tokens: Some(profile.max_tokens.polish.unwrap_or(8192)),
                         thinking: th(ThinkingMode::Disabled),
+                        format: engineered.then(polish_schema),
                     },
                 )
                 .await
@@ -586,9 +653,10 @@ async fn run_generate(
                             ChatMessage::system(prompt.system),
                             ChatMessage::user(prompt.user),
                         ],
-                        temperature: None,
+                        temperature: if engineered { Some(0.0) } else { None },
                         max_tokens: Some(profile.max_tokens.extract.unwrap_or(8192)),
                         thinking: th(ThinkingMode::Disabled),
+                        format: engineered.then(extract_schema),
                     },
                 )
                 .await
@@ -655,6 +723,7 @@ async fn run_generate(
                         temperature: Some(0.3),
                         max_tokens: Some(profile.max_tokens.ask.unwrap_or(2048)),
                         thinking: ThinkingMode::Default,
+                        format: None,
                     },
                 )
                 .await;
@@ -724,6 +793,7 @@ async fn judge_one(
             temperature: None,
             max_tokens: Some(300),
             thinking: ThinkingMode::Disabled,
+            format: None,
         },
     )
     .await?;
@@ -890,6 +960,10 @@ fn llm_bench() {
     // Experiment knob: force ThinkingMode::Disabled on ALL tasks (the app
     // ships Default for enhance/ask). Runs get a distinct "-nothink" slug.
     let force_no_think = std::env::var("LLM_BENCH_THINKING").as_deref() == Ok("disabled");
+    let engineered = variant == "engineered";
+    // Repeat-run support: LLM_BENCH_RUN=2 → "-r2" slug suffix, results kept
+    // side by side so cells can be sampled ≥3 times.
+    let run_no = std::env::var("LLM_BENCH_RUN").ok();
     let tasks: Vec<String> = std::env::var("LLM_BENCH_TASKS")
         .unwrap_or_else(|_| "enhance,polish,extract,ask".into())
         .split(',')
@@ -908,6 +982,9 @@ fn llm_bench() {
         if force_no_think {
             run_slug.push_str("-nothink");
         }
+        if let Some(n) = &run_no {
+            run_slug.push_str(&format!("-r{n}"));
+        }
         eprintln!("=== {run_slug} (tasks: {}) ===", tasks.join(","));
         let mut result = RunResult {
             provider: provider_id.into(),
@@ -923,6 +1000,7 @@ fn llm_bench() {
             &fixtures,
             &tasks,
             force_no_think,
+            engineered,
             &mut result,
         ));
         eprintln!(

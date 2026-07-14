@@ -103,6 +103,7 @@ fn run_polish(storage: &Storage, meeting_id: &str, canned: &str) -> enhance::Pol
             temperature: None,
             max_tokens: Some(8192),
             thinking: fly_llm::ThinkingMode::Disabled,
+            format: None,
         }))
         .unwrap();
 
