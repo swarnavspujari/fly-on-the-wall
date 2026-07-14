@@ -1,7 +1,7 @@
 {
   "name": "flyonthewall-notetaker",
   "private": true,
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Fly on the Wall — local-first meeting notetaker",
   "scripts": {
     "dev": "npm --prefix frontend run dev",
