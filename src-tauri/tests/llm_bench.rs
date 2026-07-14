@@ -471,11 +471,12 @@ async fn run_generate(
 ) {
     let local = provider.is_local();
     let want = |t: &str| tasks.iter().any(|x| x == t);
-    // LLM_BENCH_THINKING=disabled experiment: force ThinkingMode::Disabled on
-    // ALL tasks (the app ships Default for enhance/ask) to measure a thinking
-    // model's ceiling when its reasoning is off everywhere.
+    // Thinking control mirrors the app's call sites: the model's profile can
+    // disable thinking everywhere (llm_commands does exactly this for the
+    // Default-thinking tasks), and LLM_BENCH_THINKING=disabled forces it as
+    // an experiment override.
     let th = |shipped: ThinkingMode| {
-        if force_no_think {
+        if force_no_think || profile.thinking_disabled() {
             ThinkingMode::Disabled
         } else {
             shipped
