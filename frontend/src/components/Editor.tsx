@@ -36,7 +36,8 @@ import {
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import { fmtElapsed } from "./RecordingBar";
-import { Avatar, Button, Modal, SectionLabel } from "./ui";
+import { Button, Modal, SectionLabel } from "./ui";
+import AttendeeEditor from "./AttendeeEditor";
 import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
@@ -60,6 +61,10 @@ interface Props {
   /** Absolute app data dir — lets the audio player stream local recordings. */
   dataDir: string | null;
   onNoteChanged: (note: Note) => void;
+  /** Attendee edits (editor Save, "Someone else…") update the open meeting. */
+  onMeetingChanged: (meeting: Meeting) => void;
+  /** Undo of a re-diarize restored this transcript (cleaned refreshes too). */
+  onTranscriptRestored: (transcript: Transcript) => void;
   onMoveNote: (folderId: string | null) => void;
   onStartRecording: () => void;
   onStartScreen: (target: CaptureTarget) => void;
@@ -492,22 +497,28 @@ function ScreenControl({
 function MetaRow({
   note,
   meeting,
+  hasTranscript,
   folders,
   templates,
   templateId,
   setTemplateId,
   onMoveNote,
+  onMeetingChanged,
+  onTranscriptRestored,
   onShowInFolder,
   onOpenAttachment,
   onRemoveAttachment,
 }: {
   note: Note;
   meeting: Meeting | null;
+  hasTranscript: boolean;
   folders: Folder[];
   templates: Template[];
   templateId: string;
   setTemplateId: (id: string) => void;
   onMoveNote: (folderId: string | null) => void;
+  onMeetingChanged: (meeting: Meeting) => void;
+  onTranscriptRestored: (transcript: Transcript) => void;
   onShowInFolder: () => void;
   onOpenAttachment: (relPath: string) => void;
   onRemoveAttachment: (attachmentId: string) => void;
@@ -590,23 +601,13 @@ function MetaRow({
         </select>
       </span>
 
-      {meeting && meeting.attendees.length > 0 && (
-        <span className={CHIP}>
-          <span className="flex">
-            {meeting.attendees.slice(0, 4).map((a, i) => (
-              <Avatar
-                key={i}
-                name={a}
-                index={i}
-                shape="circle"
-                size="xs"
-                style={{ marginLeft: i ? -6 : 0, boxShadow: "0 0 0 2px var(--surface-2)" }}
-              />
-            ))}
-          </span>
-          {meeting.attendees[0]}
-          {meeting.attendees.length > 1 ? ` +${meeting.attendees.length - 1}` : ""}
-        </span>
+      {meeting && (
+        <AttendeeEditor
+          meeting={meeting}
+          hasTranscript={hasTranscript}
+          onMeetingChanged={onMeetingChanged}
+          onTranscriptRestored={onTranscriptRestored}
+        />
       )}
 
       {rec && (
@@ -782,6 +783,8 @@ export default function Editor({
   templates,
   dataDir,
   onNoteChanged,
+  onMeetingChanged,
+  onTranscriptRestored,
   onMoveNote,
   onStartRecording,
   onStartScreen,
@@ -960,6 +963,28 @@ export default function Editor({
     if (hasMeeting) setView("transcript");
   };
 
+  // "Someone else…" in the transcript speaker dropdown: add the person to the
+  // attendee list AND assign them to the speaker in one step. The attendee
+  // update marks the list user-confirmed (they're telling us who was there).
+  const assignNewAttendee = async (speakerKey: string, name: string) => {
+    if (!meeting) return;
+    onRelabel(speakerKey, name);
+    const already = meeting.attendees.some(
+      (a) => (a.name.trim() || a.email || "").toLowerCase() === name.toLowerCase(),
+    );
+    if (!already && name.toLowerCase() !== "you") {
+      try {
+        const updated = await api.updateMeetingAttendees(meeting.id, [
+          ...meeting.attendees,
+          { name },
+        ]);
+        onMeetingChanged(updated);
+      } catch (e) {
+        console.error("adding attendee failed", e);
+      }
+    }
+  };
+
   const rec = meeting?.recording ?? null;
   // full-quality playback mix first; older recordings fall back to the
   // 16 kHz ASR mixdown, then raw channels
@@ -1121,11 +1146,14 @@ export default function Editor({
             <MetaRow
               note={note}
               meeting={meeting}
+              hasTranscript={transcript != null}
               folders={folders}
               templates={templates}
               templateId={templateId}
               setTemplateId={setTemplateId}
               onMoveNote={onMoveNote}
+              onMeetingChanged={onMeetingChanged}
+              onTranscriptRestored={onTranscriptRestored}
               onShowInFolder={showInFolder}
               onOpenAttachment={openAttachmentRel}
               onRemoveAttachment={(id) => void removeAttachment(id)}
@@ -1177,6 +1205,7 @@ export default function Editor({
                   highlightIds={zoomIds}
                   onTranscribe={onTranscribe}
                   onRelabel={onRelabel}
+                  onAssignNewAttendee={(key, name) => void assignNewAttendee(key, name)}
                   onEditSegment={onEditSegment}
                 />
               </div>

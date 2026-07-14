@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Meeting, ModelProgress, Transcript } from "../types";
-import { Pencil, RefreshCw } from "lucide-react";
+import { ChevronDown, Plus, RefreshCw } from "lucide-react";
 import { fmtElapsed } from "./RecordingBar";
 import { Avatar, Button, ProgressBar, SectionLabel, speakerColor } from "./ui";
 
@@ -20,8 +20,17 @@ interface Props {
   highlightIds: string[];
   onTranscribe: () => void;
   onRelabel: (speakerKey: string, label: string) => void;
+  /** "Someone else…" in the speaker dropdown: adds a new attendee AND
+   *  assigns them to the speaker in one step. */
+  onAssignNewAttendee: (speakerKey: string, name: string) => void;
   /** Persist an edited transcript line (called on blur when the text changed). */
   onEditSegment: (segmentId: string, text: string) => void;
+}
+
+/** App-generated labels ("Speaker 3", "Unknown", raw key) — mirrors the
+ *  backend's is_generic_label; anything else is a user assignment. */
+export function isGenericLabel(key: string, label: string): boolean {
+  return label === key || label === "Unknown" || /^Speaker \d+$/.test(label);
 }
 
 const STAGE_LABELS: Record<string, string> = {
@@ -37,60 +46,165 @@ const STAGE_LABELS: Record<string, string> = {
   polishing: "AI cleanup — polishing the transcript…",
 };
 
-/** Editable speaker name: quiet dashed underline on hover, click renames it
- *  everywhere (commit calls the existing onRelabel handler). */
-function SpeakerName({
+/** One choice in the speaker dropdown. */
+interface SpeakerOption {
+  name: string;
+  color: string;
+}
+
+/** Speaker label as a dropdown of the attendee list (design state 5).
+ *  Assigned labels render as name + speaker color; unassigned stay muted in
+ *  a quiet box. Choosing a name applies to ALL of that speaker's lines (it's
+ *  a label set on the stable key). "Someone else…" adds a new attendee and
+ *  assigns them in one step. */
+function SpeakerMenu({
+  speakerKey,
   label,
   color,
-  onRename,
+  options,
+  onAssign,
+  onAssignNew,
 }: {
+  speakerKey: string;
   label: string;
   color: string;
-  onRename: (name: string) => void;
+  options: SpeakerOption[];
+  onAssign: (name: string) => void;
+  onAssignNew: (name: string) => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(label);
-  const [hov, setHov] = useState(false);
-  useEffect(() => setVal(label), [label]);
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState("");
+  const generic = isGenericLabel(speakerKey, label);
 
-  if (editing) {
-    return (
-      <input
-        autoFocus
-        value={val}
-        onChange={(e) => setVal(e.target.value)}
-        onBlur={() => {
-          setEditing(false);
-          if (val.trim()) onRename(val.trim());
-          else setVal(label);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            e.currentTarget.blur();
-          }
-          if (e.key === "Escape") {
-            setVal(label);
-            setEditing(false);
-          }
-        }}
-        className="rounded-md border bg-surface px-1.5 py-px text-xs font-semibold outline-none"
-        style={{ color, borderColor: "var(--primary)", width: Math.max(56, val.length * 7.5) }}
-      />
-    );
-  }
+  useEffect(() => {
+    if (!open) {
+      setAdding(false);
+      setNewName("");
+    }
+  }, [open]);
+
+  const commit = (name: string) => {
+    setOpen(false);
+    if (name && name !== label) onAssign(name);
+  };
+  const commitNew = () => {
+    const name = newName.trim();
+    setOpen(false);
+    if (name) onAssignNew(name);
+  };
+
   return (
-    <span
-      role="button"
-      title="Click to rename"
-      onClick={() => setEditing(true)}
-      onMouseEnter={() => setHov(true)}
-      onMouseLeave={() => setHov(false)}
-      className="inline-flex cursor-text items-center gap-1 text-xs font-semibold"
-      style={{ color, borderBottom: `1px dashed ${hov ? "currentColor" : "transparent"}` }}
-    >
-      {label}
-      {hov && <Pencil size={11} strokeWidth={1.75} style={{ opacity: 0.65 }} />}
+    <span className="relative inline-flex">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        title="Who is this? Applies to all of this speaker's lines"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="inline-flex cursor-pointer items-center gap-1 border-0 text-xs font-semibold"
+        style={
+          generic
+            ? {
+                background: "var(--surface-3)",
+                color: "var(--text-2)",
+                padding: "1px 7px",
+                borderRadius: "var(--radius-sm)",
+              }
+            : {
+                background: "transparent",
+                color,
+                padding: 0,
+                borderBottom: "1px dashed transparent",
+              }
+        }
+        onMouseEnter={(e) => {
+          if (!generic) e.currentTarget.style.borderBottomColor = "currentcolor";
+        }}
+        onMouseLeave={(e) => {
+          if (!generic) e.currentTarget.style.borderBottomColor = "transparent";
+        }}
+      >
+        {label}
+        <ChevronDown size={9} strokeWidth={2} />
+      </button>
+      {open && (
+        <>
+          <span className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden="true" />
+          <div
+            role="menu"
+            className="absolute left-0 z-20 p-1"
+            style={{
+              top: "calc(100% + 5px)",
+              width: 236,
+              background: "var(--surface)",
+              border: "1px solid var(--line)",
+              borderRadius: "var(--radius-lg)",
+              boxShadow: "var(--shadow-pop)",
+            }}
+          >
+            <div
+              className="px-2.5 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase"
+              style={{ letterSpacing: ".09em", color: "var(--text-3)" }}
+            >
+              Who is this?
+            </div>
+            {options.map((o) => (
+              <button
+                key={o.name}
+                role="menuitem"
+                onClick={() => commit(o.name)}
+                className="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-2.5 py-[7px] text-left text-[13px] text-text hover:bg-surface-3"
+                style={{
+                  borderRadius: "var(--radius-sm)",
+                  background: o.name === label ? "var(--surface-3)" : undefined,
+                }}
+              >
+                <span
+                  className="h-[9px] w-[9px] flex-none rounded-full"
+                  style={{ background: o.color }}
+                />
+                {o.name}
+              </button>
+            ))}
+            <div className="mx-1.5 mt-1 border-t border-line pb-1 pt-1.5">
+              {adding ? (
+                <input
+                  autoFocus
+                  value={newName}
+                  placeholder="Name"
+                  aria-label="New attendee name"
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      commitNew();
+                    }
+                    if (e.key === "Escape") setAdding(false);
+                  }}
+                  onBlur={() => (newName.trim() ? commitNew() : setAdding(false))}
+                  className="w-full rounded-md border border-primary bg-surface px-2 py-1 text-[13px] outline-none"
+                  style={{ boxSizing: "border-box" }}
+                />
+              ) : (
+                <button
+                  role="menuitem"
+                  onClick={() => setAdding(true)}
+                  className="inline-flex w-full cursor-pointer items-center gap-1 border-0 bg-transparent px-1 py-0.5 text-left text-[12.5px] font-semibold"
+                  style={{ color: "var(--primary-text)" }}
+                >
+                  <Plus size={12} strokeWidth={2.25} /> Someone else…
+                </button>
+              )}
+            </div>
+            <div
+              className="mx-1.5 border-t px-1 pb-1 pt-1.5 font-mono text-[10px]"
+              style={{ borderColor: "var(--line-2)", color: "var(--text-3)" }}
+            >
+              applies to all {label} lines
+            </div>
+          </div>
+        </>
+      )}
     </span>
   );
 }
@@ -106,6 +220,7 @@ export default function TranscriptPanel({
   highlightIds,
   onTranscribe,
   onRelabel,
+  onAssignNewAttendee,
   onEditSegment,
 }: Props) {
   const segRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -197,6 +312,17 @@ export default function TranscriptPanel({
     const idx = shown.speakers.findIndex((s) => s.key === key);
     return Math.max(idx, 0);
   };
+  // Dropdown choices: You first, then the attendee list (colors follow the
+  // same rotation the avatars use).
+  const speakerOptions: SpeakerOption[] = [
+    { name: "You", color: "var(--spk-self)" },
+    ...meeting.attendees
+      .map((a, i) => ({
+        name: (a.name.trim() || a.email || "").trim(),
+        color: speakerColor(`att_${i}`, i),
+      }))
+      .filter((o) => o.name),
+  ];
 
   return (
     <div>
@@ -287,12 +413,31 @@ export default function TranscriptPanel({
           >
             <div className="min-w-0" style={{ maxWidth: "86%" }}>
               <div className={`mb-1 flex items-center gap-1.5 ${isSelf ? "justify-end" : ""}`}>
-                <Avatar name={label} color={color} shape="circle" size="xs" />
-                <SpeakerName
-                  label={label}
-                  color={color}
-                  onRename={(name) => onRelabel(seg.speaker_key, name)}
-                />
+                {!isSelf && isGenericLabel(seg.speaker_key, label) ? (
+                  // unassigned: muted, dashed avatar (design state 5)
+                  <span
+                    className="grid h-5 w-5 flex-none place-items-center rounded-full font-mono text-[8.5px] font-semibold"
+                    style={{ color: "var(--text-3)", border: "1.5px dashed var(--line-strong)" }}
+                  >
+                    {`S${speakerIndex(seg.speaker_key)}`}
+                  </span>
+                ) : (
+                  <Avatar name={label} color={color} shape="circle" size="xs" />
+                )}
+                {isSelf ? (
+                  <span className="text-xs font-semibold" style={{ color }}>
+                    {label}
+                  </span>
+                ) : (
+                  <SpeakerMenu
+                    speakerKey={seg.speaker_key}
+                    label={label}
+                    color={color}
+                    options={speakerOptions}
+                    onAssign={(name) => onRelabel(seg.speaker_key, name)}
+                    onAssignNew={(name) => onAssignNewAttendee(seg.speaker_key, name)}
+                  />
+                )}
                 <span className="font-mono text-[11px]" style={{ color: "var(--text-3)" }}>
                   {fmtElapsed(seg.start_ms)}
                 </span>

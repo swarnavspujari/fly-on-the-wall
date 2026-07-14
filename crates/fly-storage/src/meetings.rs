@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use fly_core::{Meeting, RecordingRef};
+use fly_core::{Attendee, Meeting, RecordingRef};
 use rusqlite::OptionalExtension;
 
 use crate::folders::parse_ts;
@@ -25,17 +25,20 @@ pub fn recording_dir_rel(rec: &RecordingRef) -> Option<String> {
 
 impl Storage {
     /// Create a meeting attached to a note and point the note back at it.
+    /// Attendees at creation come from the calendar (or nowhere), so the
+    /// list starts unconfirmed.
     pub fn create_meeting(
         &self,
         title: &str,
         note_id: &str,
-        attendees: &[String],
+        attendees: &[Attendee],
     ) -> Result<Meeting> {
         let meeting = Meeting {
             id: fly_core::new_id(),
             title: title.to_string(),
             note_id: note_id.to_string(),
             attendees: attendees.to_vec(),
+            attendees_confirmed: false,
             started_at: Utc::now(),
             ended_at: None,
             recording: None,
@@ -57,6 +60,20 @@ impl Storage {
         Ok(meeting)
     }
 
+    /// Replace a meeting's attendee list post-creation (the attendee editor's
+    /// Save). Saving is the user's confirmation, so the confirmed flag is set
+    /// — from then on the attendee count may drive diarization.
+    pub fn update_attendees(&self, id: &str, attendees: &[Attendee]) -> Result<Meeting> {
+        let n = self.conn.execute(
+            "UPDATE meetings SET attendees_json = ?1, attendees_confirmed = 1 WHERE id = ?2",
+            (serde_json::to_string(&attendees)?, id),
+        )?;
+        if n == 0 {
+            return Err(StorageError::NotFound(format!("meeting {id}")));
+        }
+        self.get_meeting(id)
+    }
+
     /// Mark a meeting finished and store its recording.
     pub fn end_meeting(&self, id: &str, recording: &RecordingRef) -> Result<Meeting> {
         let n = self.conn.execute(
@@ -76,7 +93,7 @@ impl Storage {
     pub fn get_meeting(&self, id: &str) -> Result<Meeting> {
         self.conn
             .query_row(
-                "SELECT id, title, note_id, attendees_json, started_at, ended_at, recording_json
+                "SELECT id, title, note_id, attendees_json, started_at, ended_at, recording_json, attendees_confirmed
                  FROM meetings WHERE id = ?1",
                 [id],
                 row_to_meeting,
@@ -89,7 +106,7 @@ impl Storage {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, title, note_id, attendees_json, started_at, ended_at, recording_json
+                "SELECT id, title, note_id, attendees_json, started_at, ended_at, recording_json, attendees_confirmed
                  FROM meetings WHERE note_id = ?1 ORDER BY started_at DESC LIMIT 1",
                 [note_id],
                 row_to_meeting,
@@ -100,7 +117,7 @@ impl Storage {
     /// All meetings attached to a note, oldest first.
     pub fn meetings_for_note(&self, note_id: &str) -> Result<Vec<Meeting>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, note_id, attendees_json, started_at, ended_at, recording_json
+            "SELECT id, title, note_id, attendees_json, started_at, ended_at, recording_json, attendees_confirmed
              FROM meetings WHERE note_id = ?1 ORDER BY started_at",
         )?;
         let rows = stmt.query_map([note_id], row_to_meeting)?;
@@ -188,7 +205,10 @@ pub(crate) fn row_to_meeting(r: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting>
         id: r.get(0)?,
         title: r.get(1)?,
         note_id: r.get(2)?,
+        // Attendee's serde accepts both the legacy string form and the
+        // struct form, so pre-feature rows parse without a data migration.
         attendees: serde_json::from_str(&attendees_json).unwrap_or_default(),
+        attendees_confirmed: r.get::<_, i64>(7)? != 0,
         started_at: parse_ts(r.get::<_, String>(4)?),
         ended_at: r.get::<_, Option<String>>(5)?.map(parse_ts),
         recording: recording_json.and_then(|j| serde_json::from_str(&j).ok()),
@@ -198,14 +218,18 @@ pub(crate) fn row_to_meeting(r: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting>
 #[cfg(test)]
 mod tests {
     use crate::test_storage;
-    use fly_core::RecordingRef;
+    use fly_core::{Attendee, RecordingRef};
 
     #[test]
     fn meeting_lifecycle() {
         let (_dir, s) = test_storage();
         let note = s.create_note("Weekly sync", None).unwrap();
         let meeting = s
-            .create_meeting("Weekly sync", &note.id, &["dana@example.com".into()])
+            .create_meeting(
+                "Weekly sync",
+                &note.id,
+                &[Attendee::from_legacy("dana@example.com")],
+            )
             .unwrap();
 
         // note points back at the meeting
@@ -233,6 +257,49 @@ mod tests {
 
         let by_note = s.get_meeting_for_note(&note.id).unwrap().unwrap();
         assert_eq!(by_note.id, meeting.id);
+    }
+
+    /// Attendees are mutable post-creation: the editor's Save replaces the
+    /// list and marks it user-confirmed. Legacy rows (plain email strings in
+    /// attendees_json) keep parsing.
+    #[test]
+    fn attendees_update_and_legacy_rows() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("m", None).unwrap();
+        let meeting = s.create_meeting("m", &note.id, &[]).unwrap();
+        assert!(!meeting.attendees_confirmed);
+
+        // simulate a pre-feature row: raw email strings
+        s.conn
+            .execute(
+                "UPDATE meetings SET attendees_json = ?1 WHERE id = ?2",
+                (r#"["priya@acme.com","jordan@acme.com"]"#, &meeting.id),
+            )
+            .unwrap();
+        let legacy = s.get_meeting(&meeting.id).unwrap();
+        assert_eq!(legacy.attendees.len(), 2);
+        assert_eq!(legacy.attendees[0].email.as_deref(), Some("priya@acme.com"));
+        assert!(!legacy.attendees_confirmed);
+
+        // the editor renames + confirms
+        let updated = s
+            .update_attendees(
+                &meeting.id,
+                &[Attendee {
+                    name: "Priya Kapoor".into(),
+                    email: Some("priya@acme.com".into()),
+                }],
+            )
+            .unwrap();
+        assert!(updated.attendees_confirmed);
+        assert_eq!(updated.attendees[0].display_name(), "Priya Kapoor");
+        // round-trips through the row parser
+        let again = s.get_meeting(&meeting.id).unwrap();
+        assert_eq!(again.attendees, updated.attendees);
+        assert!(again.attendees_confirmed);
+
+        // unknown meeting errors
+        assert!(s.update_attendees("nope", &[]).is_err());
     }
 
     /// recording_json rows written before playback_path existed must keep

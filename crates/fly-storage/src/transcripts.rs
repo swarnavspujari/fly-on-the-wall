@@ -2,12 +2,57 @@
 //! markdown/JSON mirrors inside the meeting's folder (`transcript.md`,
 //! `transcript.json`), so one folder holds a meeting's audio + transcript.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use fly_core::Transcript;
+use fly_core::{Speaker, Transcript};
 use rusqlite::OptionalExtension;
+use serde::{Deserialize, Serialize};
 
 use crate::{Result, Storage, StorageError};
+
+/// The speaker-assignment state captured right before a re-diarize overwrote
+/// it — one level of undo for "Re-analyze speakers". Only assignment data is
+/// snapshotted (per-segment speaker keys + the label map); text edits made
+/// after the re-diarize survive a revert.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpeakerSnapshot {
+    pub taken_at: chrono::DateTime<chrono::Utc>,
+    /// segment id → speaker key at snapshot time.
+    pub segment_keys: HashMap<String, String>,
+    pub speakers: Vec<Speaker>,
+    /// How many segments the re-diarize that displaced this snapshot changed
+    /// (the UI's "N lines re-attributed").
+    pub changed_segments: usize,
+}
+
+impl SpeakerSnapshot {
+    /// Capture a transcript's current assignment state.
+    pub fn capture(t: &Transcript) -> Self {
+        Self {
+            taken_at: chrono::Utc::now(),
+            segment_keys: t
+                .segments
+                .iter()
+                .map(|s| (s.id.clone(), s.speaker_key.clone()))
+                .collect(),
+            speakers: t.speakers.clone(),
+            changed_segments: 0,
+        }
+    }
+
+    /// Write this snapshot's assignment back onto a transcript (ids that no
+    /// longer exist are ignored; segments the snapshot doesn't know keep
+    /// their current key).
+    pub fn apply_to(&self, t: &mut Transcript) {
+        for seg in &mut t.segments {
+            if let Some(key) = self.segment_keys.get(&seg.id) {
+                seg.speaker_key = key.clone();
+            }
+        }
+        t.speakers = self.speakers.clone();
+    }
+}
 
 impl Storage {
     /// Upsert a meeting's transcript; keeps FTS and on-disk mirrors in sync.
@@ -152,6 +197,68 @@ impl Storage {
                 self.save_cleaned_transcript(&cleaned)?;
             }
         }
+        Ok(transcript)
+    }
+
+    /// Persist the pre-re-diarize speaker snapshot. One level: each save
+    /// replaces the previous snapshot.
+    pub fn save_speaker_snapshot(&self, meeting_id: &str, snap: &SpeakerSnapshot) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE transcripts SET speaker_undo_json = ?1 WHERE meeting_id = ?2",
+            (serde_json::to_string(snap)?, meeting_id),
+        )?;
+        if n == 0 {
+            return Err(StorageError::NotFound(format!(
+                "transcript for {meeting_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The snapshot a revert would restore, if a re-diarize has run and not
+    /// been reverted since.
+    pub fn get_speaker_snapshot(&self, meeting_id: &str) -> Result<Option<SpeakerSnapshot>> {
+        let json: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT speaker_undo_json FROM transcripts WHERE meeting_id = ?1",
+                [meeting_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match json.flatten() {
+            Some(j) => Ok(Some(serde_json::from_str(&j)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn clear_speaker_snapshot(&self, meeting_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE transcripts SET speaker_undo_json = NULL WHERE meeting_id = ?1",
+            [meeting_id],
+        )?;
+        Ok(())
+    }
+
+    /// Undo the last re-diarize: restore the snapshotted per-segment speaker
+    /// keys and label map onto BOTH transcript variants (they share segment
+    /// ids), then consume the snapshot. Returns the restored raw transcript.
+    pub fn revert_speaker_assignment(&self, meeting_id: &str) -> Result<Transcript> {
+        let snap = self.get_speaker_snapshot(meeting_id)?.ok_or_else(|| {
+            StorageError::Invalid(format!(
+                "no speaker assignment to revert for meeting {meeting_id}"
+            ))
+        })?;
+        let mut transcript = self
+            .get_transcript(meeting_id)?
+            .ok_or_else(|| StorageError::NotFound(format!("transcript for {meeting_id}")))?;
+        snap.apply_to(&mut transcript);
+        self.save_transcript(&transcript)?;
+        if let Some(mut cleaned) = self.get_cleaned_transcript(meeting_id)? {
+            snap.apply_to(&mut cleaned);
+            self.save_cleaned_transcript(&cleaned)?;
+        }
+        self.clear_speaker_snapshot(meeting_id)?;
         Ok(transcript)
     }
 
@@ -383,6 +490,51 @@ mod tests {
             assert_eq!(t.segments[0].text, "the budget is NOT approved");
             assert_eq!(t.speakers[0].label, "Dana");
         }
+    }
+
+    /// Snapshot → mutate assignment → revert restores keys and labels
+    /// exactly, on both variants, and consumes the snapshot (one level).
+    /// Text edits made between re-diarize and revert survive.
+    #[test]
+    fn speaker_snapshot_revert_is_exact_and_single_level() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("m", None).unwrap();
+        let meeting = s.create_meeting("m", &note.id, &[]).unwrap();
+        let raw = sample_transcript(&meeting.id);
+        s.save_transcript(&raw).unwrap();
+        let mut cleaned = raw.clone();
+        cleaned.segments[0].text = "The budget is approved.".into();
+        s.save_cleaned_transcript(&cleaned).unwrap();
+
+        // nothing to revert yet
+        assert!(s.get_speaker_snapshot(&meeting.id).unwrap().is_none());
+        assert!(s.revert_speaker_assignment(&meeting.id).is_err());
+
+        // snapshot, then simulate a re-diarize (new key + new label map)
+        let snap = crate::SpeakerSnapshot::capture(&raw);
+        s.save_speaker_snapshot(&meeting.id, &snap).unwrap();
+        let mut rediarized = raw.clone();
+        rediarized.segments[0].speaker_key = "spk_9".into();
+        rediarized.speakers = vec![fly_core::Speaker {
+            key: "spk_9".into(),
+            label: "Speaker 1".into(),
+        }];
+        s.save_transcript(&rediarized).unwrap();
+        // a text edit after the re-diarize
+        s.edit_segment_text(&meeting.id, "seg-1", "edited after re-analyze")
+            .unwrap();
+
+        let restored = s.revert_speaker_assignment(&meeting.id).unwrap();
+        assert_eq!(restored.segments[0].speaker_key, "spk_0");
+        assert_eq!(restored.speakers, raw.speakers);
+        assert_eq!(restored.segments[0].text, "edited after re-analyze");
+        // cleaned variant restored too
+        let cleaned_back = s.get_cleaned_transcript(&meeting.id).unwrap().unwrap();
+        assert_eq!(cleaned_back.segments[0].speaker_key, "spk_0");
+        assert_eq!(cleaned_back.speakers, raw.speakers);
+        // snapshot consumed — a second revert has nothing to restore
+        assert!(s.get_speaker_snapshot(&meeting.id).unwrap().is_none());
+        assert!(s.revert_speaker_assignment(&meeting.id).is_err());
     }
 
     #[test]

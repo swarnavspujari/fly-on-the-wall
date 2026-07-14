@@ -32,10 +32,10 @@ fn participant_overlap(a: &Meeting, b: &Meeting) -> f64 {
     if a.attendees.is_empty() || b.attendees.is_empty() {
         return 1.0;
     }
-    let sa: std::collections::HashSet<String> =
-        a.attendees.iter().map(|s| s.to_lowercase()).collect();
-    let sb: std::collections::HashSet<String> =
-        b.attendees.iter().map(|s| s.to_lowercase()).collect();
+    // Match on the stable identity (email when present) so renaming an
+    // attendee in the editor doesn't break series detection.
+    let sa: std::collections::HashSet<String> = a.attendees.iter().map(|s| s.match_key()).collect();
+    let sb: std::collections::HashSet<String> = b.attendees.iter().map(|s| s.match_key()).collect();
     let inter = sa.intersection(&sb).count() as f64;
     let union = sa.union(&sb).count() as f64;
     if union == 0.0 {
@@ -181,8 +181,9 @@ pub fn build_briefing(
     let mut participants: Vec<String> = Vec::new();
     for m in &meetings {
         for a in &m.attendees {
-            if !participants.iter().any(|p| p.eq_ignore_ascii_case(a)) {
-                participants.push(a.clone());
+            let name = a.display_name();
+            if !name.is_empty() && !participants.iter().any(|p| p.eq_ignore_ascii_case(name)) {
+                participants.push(name.to_string());
             }
         }
         if let Ok(Some(t)) = storage.get_transcript(&m.id) {
@@ -294,7 +295,11 @@ mod tests {
             id: format!("m-{title}-{days_ago}"),
             title: title.into(),
             note_id: "n".into(),
-            attendees: attendees.iter().map(|s| s.to_string()).collect(),
+            attendees: attendees
+                .iter()
+                .map(|s| fly_core::Attendee::from_legacy(s))
+                .collect(),
+            attendees_confirmed: false,
             started_at: Utc::now() - chrono::Duration::days(days_ago),
             ended_at: None,
             recording: None,

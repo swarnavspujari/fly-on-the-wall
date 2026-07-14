@@ -172,7 +172,7 @@ impl Storage {
         limit: usize,
     ) -> Result<Vec<Meeting>> {
         let mut sql = String::from(
-            "SELECT id, title, note_id, attendees_json, started_at, ended_at, recording_json
+            "SELECT id, title, note_id, attendees_json, started_at, ended_at, recording_json, attendees_confirmed
              FROM meetings",
         );
         if since.is_some() {

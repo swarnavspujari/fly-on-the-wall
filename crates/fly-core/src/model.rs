@@ -145,15 +145,102 @@ pub struct RecordingRef {
     pub duration_ms: u64,
 }
 
+/// One meeting participant besides the user: a display name plus the
+/// calendar email it came from (kept through renames, so "priya@acme.com"
+/// renamed to "Priya Kapoor" still matches the next event's roster).
+///
+/// Serialized as `{ "name": …, "email": … }`; deserialization also accepts
+/// the legacy plain-string form (pre-feature rows stored `Vec<String>` of
+/// calendar emails), mapping a string to name = the string, email = the
+/// string when it looks like an address.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(from = "AttendeeCompat")]
+pub struct Attendee {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AttendeeCompat {
+    Full {
+        name: String,
+        #[serde(default)]
+        email: Option<String>,
+    },
+    Legacy(String),
+}
+
+impl From<AttendeeCompat> for Attendee {
+    fn from(c: AttendeeCompat) -> Self {
+        match c {
+            AttendeeCompat::Full { name, email } => Attendee { name, email },
+            AttendeeCompat::Legacy(s) => Attendee::from_legacy(&s),
+        }
+    }
+}
+
+impl Attendee {
+    /// Build from a legacy string (calendar flow stores raw emails).
+    pub fn from_legacy(s: &str) -> Self {
+        let s = s.trim();
+        Attendee {
+            name: s.to_string(),
+            email: s.contains('@').then(|| s.to_string()),
+        }
+    }
+
+    /// What to show for this attendee (name, falling back to email).
+    pub fn display_name(&self) -> &str {
+        let name = self.name.trim();
+        if name.is_empty() {
+            self.email.as_deref().unwrap_or("")
+        } else {
+            name
+        }
+    }
+
+    /// Identity for cross-meeting matching (series detection): the stable
+    /// email when present — a rename must not break the match — else the
+    /// name. Lowercased.
+    pub fn match_key(&self) -> String {
+        self.email
+            .as_deref()
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or(&self.name)
+            .trim()
+            .to_lowercase()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Meeting {
     pub id: String,
     pub title: String,
     pub note_id: String,
-    pub attendees: Vec<String>,
+    pub attendees: Vec<Attendee>,
+    /// True once the user explicitly confirmed the attendee list in the
+    /// attendee editor. Calendar-seeded lists stay unconfirmed: rosters are
+    /// unreliable speaker-count proxies (organizer omitted, resources,
+    /// declines — see the E2 findings), so only a confirmed list may drive
+    /// `DiarizeOptions::num_speakers`.
+    #[serde(default)]
+    pub attendees_confirmed: bool,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub recording: Option<RecordingRef>,
+}
+
+impl Meeting {
+    /// Attendee display names joined for prompts and text output.
+    pub fn attendee_names(&self) -> Vec<String> {
+        self.attendees
+            .iter()
+            .map(|a| a.display_name().to_string())
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +399,47 @@ pub struct Template {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Legacy rows store `["email", …]`; the struct form is `[{name, email}]`.
+    /// Both must deserialize — a parse failure would silently empty the list
+    /// (see fly-storage row_to_meeting).
+    #[test]
+    fn attendees_deserialize_from_legacy_and_struct_forms() {
+        let legacy: Vec<Attendee> =
+            serde_json::from_str(r#"["dana@example.com", "Room 4A"]"#).unwrap();
+        assert_eq!(legacy[0].name, "dana@example.com");
+        assert_eq!(legacy[0].email.as_deref(), Some("dana@example.com"));
+        assert_eq!(legacy[1].name, "Room 4A");
+        assert_eq!(legacy[1].email, None);
+
+        let full: Vec<Attendee> = serde_json::from_str(
+            r#"[{"name":"Priya Kapoor","email":"priya@acme.com"},{"name":"Taylor"}]"#,
+        )
+        .unwrap();
+        assert_eq!(full[0].display_name(), "Priya Kapoor");
+        assert_eq!(full[0].match_key(), "priya@acme.com");
+        assert_eq!(full[1].email, None);
+        assert_eq!(full[1].match_key(), "taylor");
+
+        // round-trip: emailless attendees serialize without the field
+        let json = serde_json::to_string(&full).unwrap();
+        assert!(json.contains(r#""email":"priya@acme.com""#));
+        assert!(!json.contains(r#""email":null"#));
+        let back: Vec<Attendee> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, full);
+    }
+
+    #[test]
+    fn meeting_without_confirmed_flag_still_parses() {
+        let json = r#"{
+            "id":"m1","title":"t","note_id":"n1",
+            "attendees":["a@x.com"],
+            "started_at":"2026-07-01T10:00:00Z","ended_at":null,"recording":null
+        }"#;
+        let m: Meeting = serde_json::from_str(json).unwrap();
+        assert!(!m.attendees_confirmed);
+        assert_eq!(m.attendee_names(), vec!["a@x.com"]);
+    }
 
     #[test]
     fn editing_an_ai_block_reclaims_it_as_user() {

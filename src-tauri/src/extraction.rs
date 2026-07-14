@@ -69,7 +69,7 @@ Rules:
         if meeting.attendees.is_empty() {
             "(not recorded)".to_string()
         } else {
-            meeting.attendees.join(", ")
+            meeting.attendee_names().join(", ")
         }
     );
     for seg in &transcript.segments[range] {
@@ -354,7 +354,8 @@ mod tests {
             id: "m1".into(),
             title: "Renewal sync".into(),
             note_id: "n1".into(),
-            attendees: vec!["dana@example.com".into()],
+            attendees: vec![fly_core::Attendee::from_legacy("dana@example.com")],
+            attendees_confirmed: false,
             started_at: chrono::Utc::now(),
             ended_at: None,
             recording: None,

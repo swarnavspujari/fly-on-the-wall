@@ -224,7 +224,7 @@ impl Server {
                 m.started_at.format("%Y-%m-%d")
             ));
             if !m.attendees.is_empty() {
-                out.push_str(&format!("Attendees: {}\n", m.attendees.join(", ")));
+                out.push_str(&format!("Attendees: {}\n", attendees_text(&m.attendees)));
             }
         }
         out.push_str(&format!(
@@ -312,7 +312,7 @@ impl Server {
             m.note_id,
             m.started_at.to_rfc3339(),
             m.ended_at.map(|e| e.to_rfc3339()).unwrap_or_else(|| "(in progress)".into()),
-            if m.attendees.is_empty() { "(none)".into() } else { m.attendees.join(", ") },
+            if m.attendees.is_empty() { "(none)".into() } else { attendees_text(&m.attendees) },
             m.recording
                 .as_ref()
                 .map(|r| format!("{} ms", r.duration_ms))
@@ -578,6 +578,19 @@ fn arg_str(args: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
+}
+
+/// Render attendees for text output: "Name <email>" when a rename kept the
+/// original calendar address, else just the display name.
+fn attendees_text(attendees: &[fly_core::Attendee]) -> String {
+    attendees
+        .iter()
+        .map(|a| match a.email.as_deref() {
+            Some(e) if e != a.display_name() => format!("{} <{e}>", a.display_name()),
+            _ => a.display_name().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn arg_limit(args: &Value, default: usize) -> usize {
@@ -907,7 +920,11 @@ mod tests {
         {
             let note = storage.create_note(title, None).unwrap();
             let meeting = storage
-                .create_meeting(title, &note.id, &["dana@acme.com".into()])
+                .create_meeting(
+                    title,
+                    &note.id,
+                    &[fly_core::Attendee::from_legacy("dana@acme.com")],
+                )
                 .unwrap();
             storage
                 .save_transcript(&fly_core::Transcript {

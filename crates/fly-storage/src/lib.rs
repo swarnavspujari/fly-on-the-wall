@@ -32,6 +32,7 @@ pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::recording_dir_rel;
 pub use notes::NoteSummary;
 pub use search::{SearchFilter, SearchHit, SearchHitKind};
+pub use transcripts::SpeakerSnapshot;
 
 use std::path::{Path, PathBuf};
 
@@ -134,6 +135,9 @@ impl Storage {
                 title          TEXT NOT NULL,
                 note_id        TEXT NOT NULL,
                 attendees_json TEXT NOT NULL DEFAULT '[]',
+                -- 1 once the user confirmed the list in the attendee editor;
+                -- calendar-seeded lists stay 0 (unreliable count proxies).
+                attendees_confirmed INTEGER NOT NULL DEFAULT 0,
                 started_at     TEXT NOT NULL,
                 ended_at       TEXT,
                 recording_json TEXT
@@ -145,7 +149,11 @@ impl Storage {
                 -- LLM-polished variant, stored ALONGSIDE the raw `json` (never
                 -- overwriting it). NULL until the polish pass runs; a re-run
                 -- replaces it from the raw source. See transcripts.rs.
-                cleaned_json TEXT
+                cleaned_json TEXT,
+                -- One-level undo for "Re-analyze speakers": the speaker
+                -- assignment (segment id → key + label map) captured right
+                -- before the last re-diarize overwrote it. See transcripts.rs.
+                speaker_undo_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS templates (
@@ -241,6 +249,7 @@ impl Storage {
                 "meetings",
                 &[
                     ("attendees_json", "TEXT NOT NULL DEFAULT '[]'"),
+                    ("attendees_confirmed", "INTEGER NOT NULL DEFAULT 0"),
                     ("started_at", "TEXT NOT NULL DEFAULT ''"),
                     ("ended_at", "TEXT"),
                     ("recording_json", "TEXT"),
@@ -254,9 +263,13 @@ impl Storage {
                     ("built_in", "INTEGER NOT NULL DEFAULT 0"),
                 ],
             ),
-            // Added with the transcript-polish feature; older DBs get it via
-            // ALTER so the polished-variant column exists before first write.
-            ("transcripts", &[("cleaned_json", "TEXT")]),
+            // Added with the transcript-polish feature (cleaned_json) and the
+            // attendee editor's re-diarize undo (speaker_undo_json); older DBs
+            // get them via ALTER so the columns exist before first write.
+            (
+                "transcripts",
+                &[("cleaned_json", "TEXT"), ("speaker_undo_json", "TEXT")],
+            ),
         ];
         for (table, cols) in EXPECTED {
             let existing: std::collections::HashSet<String> = conn

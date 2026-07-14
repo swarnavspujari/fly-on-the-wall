@@ -67,11 +67,21 @@ export interface RecordingRef {
   duration_ms: number;
 }
 
+/** One participant besides the user. Calendar-seeded attendees start with
+ * name = email; renaming keeps the email so the next event still matches. */
+export interface Attendee {
+  name: string;
+  email?: string | null;
+}
+
 export interface Meeting {
   id: string;
   title: string;
   note_id: string;
-  attendees: string[];
+  attendees: Attendee[];
+  /** True once the user confirmed the list in the attendee editor — only a
+   * confirmed count may drive diarization. */
+  attendees_confirmed: boolean;
   started_at: string;
   ended_at: string | null;
   recording: RecordingRef | null;
@@ -135,6 +145,18 @@ export interface PolishResult {
   segments_cleaned: number;
   segments_kept_raw: number;
   flags: PolishFlag[];
+}
+
+/** Result of a "Re-analyze speakers" run. */
+export interface ReDiarizeOutcome {
+  changed_segments: number;
+  transcript: Transcript;
+}
+
+/** Undo availability for the last re-diarize (null = nothing to revert). */
+export interface SpeakerUndoState {
+  taken_at: string;
+  changed_segments: number;
 }
 
 export interface PipelineProgress {
