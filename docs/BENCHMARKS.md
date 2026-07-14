@@ -1,6 +1,6 @@
 # LLM Benchmarks — default local model decision
 
-*Last run: 2026-07-13/14, on a Windows 11 laptop — RTX 3050 Laptop (4 GB VRAM), 32 GB RAM,
+*Last run: 2026-07-13 → 07-14 (follow-up §6–§9), on a Windows 11 laptop — RTX 3050 Laptop (4 GB VRAM), 32 GB RAM,
 12 cores. All local models served by Ollama 0.x on this machine; latency numbers are
 end-to-end (prompt → full response) on this hardware and will differ on other machines.*
 
@@ -69,9 +69,9 @@ model never finishes reasoning, so **`content` comes back empty**:
   reach that switch today.
 
 The remaining qwen3.5 harness tasks were **skipped explicitly** (each call is ~20 min of
-guaranteed contract failure; the failure mode is fully characterized above). Consequence:
-qwen3.5 can only become the default after `fly-llm` grows Ollama-native `think` control
-(or Ollama exposes it over the OpenAI-compat API) — see §5.
+guaranteed contract failure; the failure mode is fully characterized above).
+**Superseded 2026-07-14:** fly-llm now has native `think` control and the full qwen3.5:4b
+rows were run — see §6.
 
 ### 3.1 Score tables
 
@@ -168,7 +168,7 @@ array; serde rejects the batch, 0 items extracted:
 **gemma4:e4b, Polish (budget)** — returned a bare `[{"id","text"}…]` array instead of the
 required `{"segments":[…]}` wrapper; batch dropped losslessly.
 
-## 5. Recommendation: don't switch (and what would change that)
+## 5. Recommendation as of 2026-07-13: don't switch (superseded by §9 after the follow-up run)
 
 **Recommendation: keep `llama3.1` as the default local model for now.**
 
@@ -208,15 +208,146 @@ another reason not to over-fit profiles to single runs. **The registry ships emp
 adjustment produced an unambiguous quality win for the current default model, and
 per the registry's own rule, profiles are added only for measured, reproducible failures.
 
-## 4. Contract-failure examples (verbatim)
+## 6. Follow-up run (2026-07-14): qwen3.5 unblocked via native `think` control
 
-TBD-FAILURES
+`fly-llm` now drives Ollama through its **native `POST /api/chat`**
+(`OpenAiCompatProvider::chat_ollama_native`): `ThinkingMode::Disabled` maps to
+`"think": false`, `Default` omits the field, `temperature`/`max_tokens` map to
+`options.{temperature,num_predict}`. Non-thinking models ignore `think: false` on current
+Ollama (probed on 0.32.0 against llama3.1 and gemma3:4b); a 400 mentioning thinking gets
+one retry with the field stripped (that fallback is unit-tested but **not live-verified —
+no old server on this machine**). OpenAI/NIM keep the compat path. 13/13 fly-llm unit
+tests pass, covering both request-body shapes and both response parsers.
 
-## 5. Recommendation
+With that plumbing, the previously-skipped qwen3.5:4b rows (same fixtures, same judge):
 
-TBD-RECOMMENDATION
+| qwen3.5:4b run | Enhance | Polish | Extraction | Ask | Judge enh / ask | Mean latency (enh/pol/ext/ask) |
+|---|---|---|---|---|---|---|
+| as-shipped (thinking on for Enhance/Ask) | **0/3** (2 fully EMPTY) | ≡ nothink | ≡ nothink | 3/15 answers empty | 1.33 / 3.87 | 279 s / – / – / 88 s |
+| `think:false` everywhere (`LLM_BENCH_THINKING=disabled`) | 2/3 | 2/3 | 2/3 | 1/15 empty | **3.00 / 4.47** | **62 s / 118 s / 75 s / 78 s** |
 
-## 6. Reproducing
+Peak RSS 3.2–5.2 GB (sampler now correctly includes Ollama's `llama-server` runner).
+
+Read against §3.1: qwen3.5:4b with `think:false` posts **the best local judge scores in
+the whole benchmark** (Enhance 3.00 vs 2.67 gemmas / 2.00 llama3.1; Ask 4.47 vs 4.2–4.3)
+at **3–8× lower latency** (polish 118 s vs 626–891 s), with contract rates in the same
+2/3 band as every other small model. It also handled the spoken-number questions best —
+the only local model to answer "$3,200/month" correctly on q09 (all others corrupted it
+10×) — though Enhance synthesis still fabricated figures ("~$6M pipeline" for $600k,
+"$201,000" transposition), so §3.2's caveat stands in weakened form. Its failures:
+one empty Ask answer and one truncated Enhance even with thinking off, and the polish
+`product` batch failed to parse once (a replay of the identical prompt parsed fine —
+stochastic, like the gemma polish failures; every polish failure remained lossless).
+
+**Caveat:** thinking stays ON for Enhance/Ask as shipped (they use
+`ThinkingMode::Default`, correct for Anthropic where adaptive thinking helps). The 3.00 /
+4.47 numbers require flipping those two call sites to `Disabled` *for thinking local
+models* — a one-line-per-site change once a `thinking` knob is added to the prompt-profile
+registry (or the call sites branch on `provider.is_local()`). Not done here: it changes
+app behavior beyond the plumbing this run needed.
+
+## 7. Harness techniques for small models (researched + probed 2026-07-14)
+
+What the community does to get reliable output from 4–8B local models, tested against
+this app's actual failure cases where possible:
+
+1. **Grammar-constrained decoding (Ollama structured outputs)** — pass a JSON schema in
+   the native API's `format` field; Ollama compiles it to a llama.cpp GBNF grammar that
+   masks invalid tokens, making malformed JSON *mechanically impossible*
+   ([how it works](https://blog.danielclayton.co.uk/posts/ollama-structured-outputs/),
+   [guide](https://llmconfigurator.com/en/guides/llm-json-structured-output),
+   [llama.cpp grammars](https://deepwiki.com/ggml-org/llama.cpp/8.1-grammar-and-structured-output)).
+   **Probed on llama3.1's exact failing Enhance case (budget fixture): 3/3 parses across
+   repeats vs FAIL default, no example leakage, and 28–56 s vs 261 s average — ~5×
+   faster** because constrained sampling stops the rambling. **BUT it does not fix
+   content**: the constrained output still read "$84,400" and "$32,200/month" — §3.2's
+   number corruption is comprehension, not formatting. Caveats: constrained decoding can
+   dent reasoning-heavy tasks ([Let Me Speak Freely?, EMNLP 2024](https://arxiv.org/abs/2408.02442));
+   Ollama Cloud models don't support it; and quality under constraint should be judged,
+   not assumed (probe n=3, unjudged).
+2. **Validate-and-retry loops** — parse/validate every response (the app already parses);
+   on failure, re-ask once *including the validator error*. Community data puts 3 retries
+   at ~70 % → 95 %+ success on 7–8B models ([failure patterns](https://explore.n1n.ai/blog/local-llm-json-output-failure-patterns-fix-2026-04-24),
+   [instructor pattern](https://mljourney.com/how-to-get-reliable-structured-output-from-llms/)).
+   The app currently falls back silently (Enhance → untraced paragraphs; Polish → raw
+   segments); a single corrective retry before falling back is the cheapest upgrade and
+   fits the existing `LlmError` plumbing. **Not measured here** — recommend measuring via
+   a `LLM_BENCH_RETRY=1` harness knob before shipping.
+3. **Flat schemas / two-step extraction** — small models handle nesting poorly; prefer
+   flat arrays (the app's contracts are already flat — good) and split "find the facts"
+   from "format the facts" when quality lags ([techniques](https://mychen76.medium.com/practical-techniques-to-constraint-llm-output-in-json-format-e3e72396c670)).
+4. **temperature 0 for extraction-shaped tasks** — measurably improves field accuracy on
+   7–8B models ([guide](https://llmconfigurator.com/en/guides/llm-json-structured-output)).
+   Polish/Extraction already omit temperature; Ollama's default is 0.8 — pinning
+   `options.temperature: 0` for those two tasks is a plausible free win (**unmeasured**).
+5. **Explicit context sizing** — see §8: without `num_ctx`, everything else on this list
+   is moot for long meetings.
+
+Priority order for this app, grounded in the probes: fix `num_ctx` (§8) → structured
+outputs for Extraction (pure extraction, negligible reasoning cost, probe-proven parse
+fix) → corrective retry for Polish/Enhance → temperature 0 for Polish/Extraction.
+Structured outputs for Enhance need a judged quality pass first (the EMNLP caveat applies
+— Enhance is the most synthesis-heavy task).
+
+## 8. Ollama component code review (2026-07-14, against current Ollama docs)
+
+Surgical review of `src-tauri/src/ollama.rs`, `src-tauri/src/models.rs` (ollama artifact)
+and `crates/fly-llm/src/openai_compat.rs` against docs.ollama.com:
+
+1. **PROVEN BUG — silent context truncation.** Neither the old compat path nor the new
+   native path sets `options.num_ctx`; the effective default on this machine is **~2048
+   tokens** (marker test: 6k-token prompt → `prompt_eval_count=2050`, the system-prompt
+   front was silently dropped and llama3.1 *hallucinated* the missing fact; with
+   `num_ctx: 8000` the same prompt answered correctly). Ollama trims from the FRONT —
+   exactly where the app puts the system prompt and (for Ask) the transcript. Impact
+   today: **Ask** with any transcript beyond ~10–15 min of speech, and **Extraction**
+   batches (3000 words ≈ 4k tokens) silently degrade; Enhance/Polish batches mostly fit
+   (~1.8k tokens — verified, so the §3/§6 benchmark numbers are NOT contaminated).
+   Recommended fix: size `options.num_ctx` from the prompt length (chars/3 + response
+   budget, clamped to the model's `context_length` from `/api/show`) in the native path.
+   ([community reports](https://github.com/ollama/ollama/issues/14259),
+   [analysis](https://jangwook.net/en/blog/en/ollama-num-ctx-silent-truncation-experiment/))
+   **Caution:** on this 4 GB-VRAM machine, `gemma4:e4b` with `num_ctx` 8192/16384 crashed
+   the `llama-server` runner outright (HTTP 500, `0xc0000409` stack-buffer overrun) —
+   raising num_ctx must degrade gracefully (retry at a smaller size on 500).
+2. **Thinking control** — fixed this run (§6). Detection alternative: `/api/show`
+   `capabilities` includes `"thinking"` (verified: qwen3.5 lists it, llama3.1 doesn't) if
+   the retry-on-400 heuristic ever proves insufficient.
+3. **Cross-platform posture is coherent.** Managed install (`ollama-bin` artifact) is
+   Windows-only by design — macOS/Linux fall back to `find_on_path` + "install from
+   ollama.com" UI, and `CREATE_NO_WINDOW` is correctly `#[cfg(windows)]`-guarded;
+   `OLLAMA_MODELS` env and the spawn/kill lifecycle are OS-agnostic. No changes needed.
+4. **Pinned runtime `v0.31.2` (Windows artifact) is current enough**: native `think`
+   (≥0.9) and `format` structured outputs (≥0.5) both predate it. The user-run server
+   probed here is 0.32.0. No action.
+5. **Endpoints match the docs**: `/api/tags` (+`size` now read), `/api/pull` streaming
+   shape, `/api/delete` (DELETE + `{"model"}` — verified live, 200/404 handling correct),
+   `/api/version` liveness. `normalize_root`'s `/v1`-stripping matches what the native
+   path needs and `ollama_root()` mirrors it.
+6. **Minor, optional**: (a) chat requests have no client timeout — a hung runner blocks
+   forever; consider a generous (10–15 min) ceiling now that latencies are measured;
+   (b) `keep_alive` defaults to 5 min — the post-transcription polish→extract chain stays
+   warm, but a user returning to Ask after idle pays a cold reload (llama3.1: ~16–20 s
+   observed); (c) the docs' cloud-model deprecation table (e.g. `gemma3:4b` cloud retiring
+   2026-07-15) does not affect local tags — no action.
+
+## 9. Updated recommendation
+
+**Short term: still don't switch.** The as-shipped default (llama3.1) works everywhere
+today, and qwen3.5:4b's headline numbers require flipping Enhance/Ask to
+`ThinkingMode::Disabled` for local thinking models — an app change that should ride with
+the switch, not precede it silently.
+
+**The switch now has a concrete, evidenced path** (in order):
+1. Ship the `num_ctx` fix (§8.1) — it improves every local model including the current
+   default, and real meetings are hurt by it today.
+2. Add a thinking knob to the per-model profile seam (or branch the two `Default` call
+   sites on local thinking models), making qwen3.5:4b run at its measured 3.00/4.47.
+3. Re-run this benchmark on ≥3 samples per cell (polish failures proved stochastic) and,
+   if the qwen edge holds, switch the default to `qwen3.5:4b` with a profile entry.
+4. Independently: structured outputs for Extraction (§7.1), corrective retry (§7.2).
+
+## 10. Reproducing
 
 ```
 # 1) reference outputs (needs the Anthropic key in env or the app keychain)
@@ -233,6 +364,10 @@ LLM_BENCH_PHASE=judge \
 
 # 4) prompt-profile experiments (rerun a candidate with a profile variant)
 LLM_BENCH_MODELS="ollama:<best>" LLM_BENCH_VARIANT=simple LLM_BENCH_TASKS=enhance,extract \
+  cargo test -p fly-app --test llm_bench -- --ignored --nocapture
+
+# 5) thinking-model ceiling (forces ThinkingMode::Disabled on all tasks, "-nothink" slug)
+LLM_BENCH_MODELS="ollama:qwen3.5:4b" LLM_BENCH_THINKING=disabled \
   cargo test -p fly-app --test llm_bench -- --ignored --nocapture
 ```
 
