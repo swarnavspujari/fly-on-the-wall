@@ -75,8 +75,7 @@ impl TranscriptionEngine for GroqEngine {
         // contiguous speech span longer than the payload cap falls back to
         // fixed overlapping chunks stitched at the overlap midpoint.
         for (bi, batch) in plan_batches(&spans, segment_ms).into_iter().enumerate() {
-            let oversized =
-                batch.len() == 1 && batch[0].end_ms - batch[0].start_ms > segment_ms;
+            let oversized = batch.len() == 1 && batch[0].end_ms - batch[0].start_ms > segment_ms;
             if oversized {
                 let span = batch[0];
                 let s0 = (span.start_ms * rate as u64 / 1000) as usize;
@@ -433,7 +432,11 @@ mod tests {
         let chunks = plan_chunks(10_000, 4_000, 1_000);
         let stitched = stitch_chunk_words(
             &chunks,
-            vec![vec![word("a", 500)], vec![word("b", 2_000)], vec![word("c", 3_000)]],
+            vec![
+                vec![word("a", 500)],
+                vec![word("b", 2_000)],
+                vec![word("c", 3_000)],
+            ],
         );
         let abs = offset_words(stitched, 60_000);
         assert_eq!(abs[0].start_ms, 60_500);
