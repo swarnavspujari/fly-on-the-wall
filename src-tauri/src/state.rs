@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use fly_audio::cpal_backend::CpalAudioCapture;
 use fly_audio::AudioCapture;
 use fly_secrets::{KeychainSecretStore, SecretStore};
-use fly_storage::Storage;
+use fly_storage::{OpenRetry, Storage};
 
 use crate::recording::ActiveRecording;
 use crate::screen_commands::ActiveScreenRecording;
@@ -54,7 +54,12 @@ impl AppState {
 
     /// Composition with explicit data dir + secret store — used by tests.
     pub fn init_with(data_dir: PathBuf, secrets: Arc<dyn SecretStore>) -> anyhow::Result<Self> {
-        let storage = Storage::open(&data_dir)?;
+        // Retry a transient open failure before treating it as fatal: twice the
+        // startup "database disk image is malformed" error came from an external
+        // process interfering at the moment of open and cleared within seconds
+        // (see the db-corruption incident). Only after the retries are exhausted
+        // does the caller reach the startup error dialog.
+        let storage = Storage::open_with_retry(&data_dir, OpenRetry::STARTUP)?;
         tracing::info!(dir = %data_dir.display(), "storage ready");
         Ok(Self {
             storage: Mutex::new(storage),

@@ -37,6 +37,7 @@ pub use search::{SearchFilter, SearchHit, SearchHitKind};
 pub use transcripts::SpeakerSnapshot;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::Connection;
 
@@ -55,6 +56,33 @@ pub enum StorageError {
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
+
+/// Retry policy for [`Storage::open_with_retry`].
+///
+/// The startup DB open has twice failed with "database disk image is malformed"
+/// against a file that was provably fine — `integrity_check` passed on copies
+/// both times (WAL applied), and relaunching minutes later worked with zero
+/// repair. Some external process interferes at the exact moment of open, then
+/// clears. We can't tell a transient from real corruption at open time, so we
+/// retry a handful of times over a short window before surfacing the failure;
+/// a genuinely corrupt DB just fails every attempt and still ends up reported.
+#[derive(Debug, Clone, Copy)]
+pub struct OpenRetry {
+    /// Total number of open attempts (clamped to at least 1).
+    pub attempts: u32,
+    /// Delay slept between attempts.
+    pub backoff: Duration,
+}
+
+impl OpenRetry {
+    /// Startup policy: 6 attempts, 2.5s apart — up to ~12.5s of retrying, which
+    /// covers the observed transient (cleared well within a minute both times)
+    /// without making a truly corrupt DB wait long before the error dialog.
+    pub const STARTUP: Self = Self {
+        attempts: 6,
+        backoff: Duration::from_millis(2500),
+    };
+}
 
 pub struct Storage {
     conn: Connection,
@@ -83,6 +111,43 @@ impl Storage {
         };
         storage.seed_builtin_templates()?;
         Ok(storage)
+    }
+
+    /// Like [`open`](Self::open) but retries transient failures with backoff
+    /// per `retry` before giving up. Each failed attempt is logged with its
+    /// number and error text so a recurring interferer finally leaves evidence.
+    /// The last attempt's error is returned unchanged, so the caller's fatal
+    /// path (e.g. the startup error dialog) is reached only after retrying.
+    pub fn open_with_retry(data_dir: &Path, retry: OpenRetry) -> Result<Self> {
+        Self::retry_open(retry, || Self::open(data_dir))
+    }
+
+    /// Retry core, generic over the open closure so a test can drive the
+    /// "fails N times, then succeeds" path without an external interferer.
+    fn retry_open<F>(retry: OpenRetry, mut open: F) -> Result<Self>
+    where
+        F: FnMut() -> Result<Self>,
+    {
+        let attempts = retry.attempts.max(1);
+        let mut last_err = None;
+        for attempt in 1..=attempts {
+            match open() {
+                Ok(storage) => return Ok(storage),
+                Err(e) => {
+                    tracing::warn!(
+                        attempt,
+                        attempts,
+                        error = %e,
+                        "storage open failed"
+                    );
+                    last_err = Some(e);
+                    if attempt < attempts {
+                        std::thread::sleep(retry.backoff);
+                    }
+                }
+            }
+        }
+        Err(last_err.expect("attempts >= 1 guarantees at least one error"))
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -309,6 +374,53 @@ mod tests {
         // reopen works (migrations are idempotent)
         drop(storage);
         Storage::open(dir.path()).unwrap();
+    }
+
+    /// The transient-open bug: open fails a few times (some external process
+    /// interfering, as in the db-corruption incidents) then succeeds. Retry
+    /// must swallow the early failures and return the eventually-opened DB.
+    #[test]
+    fn open_with_retry_succeeds_after_transient_failures() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Cell::new(0u32);
+        let retry = OpenRetry {
+            attempts: 5,
+            backoff: Duration::from_millis(1),
+        };
+        let storage = Storage::retry_open(retry, || {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n < 3 {
+                Err(StorageError::Invalid(
+                    "database disk image is malformed".into(),
+                ))
+            } else {
+                Storage::open(dir.path())
+            }
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 4, "3 failures then 1 success");
+        assert!(dir.path().join("flyonthewall.db").exists());
+        drop(storage);
+    }
+
+    /// If every attempt fails, the final error is returned unchanged so the
+    /// startup dialog (the fatal fallback) still fires.
+    #[test]
+    fn open_with_retry_surfaces_error_after_exhausting_attempts() {
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let retry = OpenRetry {
+            attempts: 3,
+            backoff: Duration::from_millis(1),
+        };
+        let result = Storage::retry_open(retry, || {
+            calls.set(calls.get() + 1);
+            Err::<Storage, _>(StorageError::Invalid("still malformed".into()))
+        });
+        assert_eq!(calls.get(), 3, "all attempts made before giving up");
+        assert!(matches!(result, Err(StorageError::Invalid(m)) if m == "still malformed"));
     }
 
     /// A looma.db created by an older build (missing later columns) must be
