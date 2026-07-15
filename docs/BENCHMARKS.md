@@ -406,7 +406,33 @@ meeting-notes outputs into a llama3.1 LoRA published on HF is viable, but it's a
 effort with dataset, eval, and licensing work — only justified if (a)+(b) leave the gap
 unacceptable.
 
-## 11. Reproducing
+## 11. Shipped (2026-07-14): the §10 recommendation, proven as the release config
+
+The harness adoption shipped behind the profile registry — `constrained_json`
+(Polish/Extraction schemas + temperature 0; llama3.1 AND qwen3.5) and
+`constrained_enhance` (Enhance schema; llama3.1 only — §10's qwen empty-array failure
+makes it per-model by necessity). Unmeasured models (gemmas, cloud, anything user-typed)
+resolve the DEFAULT profile and keep byte-identical requests, asserted in unit tests.
+
+Proof runs of the exact shipped configuration (bench "default" variant = the app's
+resolved profile), fresh runs after the change:
+
+| Shipped config | Contracts E/P/X | Judge Enh/Ask | Latency E/P/X/Ask | Empty Asks |
+|---|---|---|---|---|
+| llama3.1 (default model), n=3 | **9/9 · 9/9 · 9/9** | **2.56** / 4.29 | 68/108/88/**11 s** | **0/45** |
+| qwen3.5:4b, n=2 | 5/6 · **6/6** · **6/6** | **3.33** / 4.17 | 60/88/53/81 s | 4/30 |
+
+Against the pre-change shipped behavior (§3.1/§10 baselines): llama3.1 contract passes
+7/9 → 27/27, Enhance judge 1.67 → 2.56, polish latency 626 s (compat) → 108 s, Ask
+36 s → 11 s, zero empty or fallback responses across 45 questions. qwen3.5's known
+empty-Ask intermittent persists (4/30) and remains its blocking defect as a default.
+
+Release verification: full workspace suite 233/233 green (the Defender-blocked unit-test
+binary was recovered with a distinct `-C metadata` fingerprint), clippy `-D warnings`
+clean, rustfmt clean, `tsc` clean, live num_ctx marker test green through the shipped
+provider. No UI, settings, or provider-selection changes in this release.
+
+## 12. Reproducing
 
 ```
 # 1) reference outputs (needs the Anthropic key in env or the app keychain)
