@@ -31,6 +31,13 @@
   enables GPU with no verdict so the real in-pipeline benchmark + gate run. Built to validate the
   anti-hallucination work against a real 1-hour meeting (a 1881×-repetition loop and 68 phantom
   speakers in the baseline).
+- **LLM benchmark harness** (`src-tauri/tests/llm_bench.rs`, `#[ignore]`d): runs the four LLM
+  tasks (Enhance / Polish / Extraction / Ask) over the committed fixture transcripts
+  (`src-tauri/fixtures/bench/`) against a real provider+model and scores contract compliance,
+  latency, and peak Ollama RSS; a judge phase scores candidate outputs against a reference
+  model with claude-sonnet-5. Drives the shipped prompt/parse/guard code paths. Results and
+  the default-local-model decision live in `docs/BENCHMARKS.md`, which documents how to run
+  it. (Its `bench_fixtures_parse` test runs in CI to keep the fixtures honest.)
 - **Integration test** (`src-tauri/tests/enhance_flow.rs`, runs in CI): the enhance flow
   offline with the deterministic `MockLLMProvider` — note + transcript → prompt (numbered
   segments) → canned block JSON → provenance-tagged storage, zoom-in id mapping, FTS

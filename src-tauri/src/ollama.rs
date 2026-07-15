@@ -145,6 +145,15 @@ pub fn shutdown(state: &AppState) {
 // Commands (status + model pull)
 // ---------------------------------------------------------------------------
 
+/// One installed model as reported by `/api/tags`.
+#[derive(Serialize, Clone)]
+pub struct OllamaModel {
+    /// Full name with tag (`llama3.1:latest`, `qwen3.5:4b`, …).
+    pub name: String,
+    /// On-disk size in bytes.
+    pub size: u64,
+}
+
 #[derive(Serialize)]
 pub struct OllamaStatus {
     /// An executable is available (managed install or PATH).
@@ -155,8 +164,8 @@ pub struct OllamaStatus {
     /// The running server is a child this app spawned.
     pub managed: bool,
     pub base_url: String,
-    /// Local model names (`llama3.1:latest`, …) when the server is running.
-    pub models: Vec<String>,
+    /// Installed models (name + size) when the server is running.
+    pub models: Vec<OllamaModel>,
 }
 
 #[tauri::command]
@@ -178,7 +187,7 @@ pub async fn ollama_status(state: State<'_, AppState>) -> CmdResult<OllamaStatus
     })
 }
 
-async fn list_models(root: &str) -> Result<Vec<String>, String> {
+async fn list_models(root: &str) -> Result<Vec<OllamaModel>, String> {
     #[derive(Deserialize)]
     struct Tags {
         #[serde(default)]
@@ -187,6 +196,8 @@ async fn list_models(root: &str) -> Result<Vec<String>, String> {
     #[derive(Deserialize)]
     struct Tag {
         name: String,
+        #[serde(default)]
+        size: u64,
     }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
@@ -202,7 +213,79 @@ async fn list_models(root: &str) -> Result<Vec<String>, String> {
         .json()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(tags.models.into_iter().map(|m| m.name).collect())
+    Ok(tags
+        .models
+        .into_iter()
+        .map(|m| OllamaModel {
+            name: m.name,
+            size: m.size,
+        })
+        .collect())
+}
+
+/// Tag-insensitive model-name match: `llama3.1` names the same model as
+/// `llama3.1:latest` (Ollama reports the tagged form; settings usually store
+/// the bare form). Distinct tags of the same family (`qwen3.5:4b` vs
+/// `qwen3.5:9b`) do NOT match unless one side is bare.
+fn same_model(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let base = |s: &str| s.split(':').next().unwrap_or(s).trim().to_string();
+    let (ab, bb) = (base(a), base(b));
+    // A bare name matches any tag of its family; two explicit tags must agree.
+    (a == ab || b == bb) && ab == bb
+}
+
+/// Delete a local model (`DELETE /api/delete`). Refuses to remove the model
+/// the app is currently configured to use — switch models first, then delete.
+/// Server handling matches `ollama_pull`: the managed server is started if
+/// needed; a custom (user-run) base URL is never touched when unreachable.
+#[tauri::command]
+pub async fn ollama_delete(state: State<'_, AppState>, model: String) -> CmdResult<()> {
+    let (provider, selected) = {
+        let storage = state.storage.lock().unwrap();
+        let get = |k: &str| {
+            storage
+                .get_setting(k)
+                .ok()
+                .flatten()
+                .filter(|v| !v.is_empty())
+        };
+        let default_model = crate::llm_commands::PROVIDERS
+            .iter()
+            .find(|(id, _, _)| *id == "ollama")
+            .map(|(_, m, _)| m.to_string())
+            .unwrap_or_default();
+        (
+            get("llm.provider").unwrap_or_else(|| "ollama".to_string()),
+            get("llm.ollama.model").unwrap_or(default_model),
+        )
+    };
+    if provider == "ollama" && same_model(&model, &selected) {
+        return Err(format!(
+            "{model} is the model the app is currently using — switch to another model in Settings first, then delete it."
+        ));
+    }
+
+    ensure_running(&state).await?;
+    let root = root_url(&state);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .delete(format!("{root}/api/delete"))
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(format!("model {model} is not installed"));
+    }
+    resp.error_for_status().map_err(|e| e.to_string())?;
+    tracing::info!(model, "deleted ollama model");
+    Ok(())
 }
 
 /// Pull a model into the (started-if-needed) server, streaming progress as
@@ -312,7 +395,19 @@ pub async fn pull_model(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_root;
+    use super::{normalize_root, same_model};
+
+    #[test]
+    fn same_model_is_tag_insensitive_for_bare_names() {
+        assert!(same_model("llama3.1", "llama3.1:latest"));
+        assert!(same_model("llama3.1:latest", "llama3.1"));
+        assert!(same_model("qwen3.5:4b", "qwen3.5:4b"));
+        assert!(same_model("qwen3.5", "qwen3.5:4b"));
+        // Two explicit, different tags are different models.
+        assert!(!same_model("qwen3.5:4b", "qwen3.5:9b"));
+        assert!(!same_model("llama3.1", "llama3.2:3b"));
+        assert!(!same_model("gemma3", "gemma3n:e4b"));
+    }
 
     #[test]
     fn root_urls_normalize_to_no_v1_no_slash() {

@@ -122,6 +122,10 @@ impl LLMProvider for AnthropicProvider {
         "anthropic"
     }
 
+    fn model(&self) -> &str {
+        &self.model
+    }
+
     fn is_local(&self) -> bool {
         false
     }
@@ -164,6 +168,7 @@ impl LLMProvider for AnthropicProvider {
             temperature: Some(0.0),
             max_tokens: Some(5),
             thinking: crate::ThinkingMode::Default,
+            format: None,
         })
         .await
         .map(|_| ())
@@ -208,6 +213,7 @@ mod tests {
             temperature: temp,
             max_tokens: Some(1000),
             thinking,
+            format: None,
         }
     }
 
@@ -289,6 +295,7 @@ mod tests {
             temperature: None,
             max_tokens: Some(8192),
             thinking: crate::ThinkingMode::Disabled,
+            format: None,
         });
         assert_eq!(body["thinking"], json!({ "type": "disabled" }));
         assert!(body.get("temperature").is_none());

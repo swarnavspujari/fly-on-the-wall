@@ -482,6 +482,21 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return asrSettings;
     case "get_llm_settings":
       return llmSettings;
+    // Stateful so the Settings save/guided-swap flow is testable in the mock.
+    case "set_llm_settings": {
+      const u = args.update as {
+        provider: string;
+        model: string | null;
+        base_url: string | null;
+      };
+      llmSettings.provider = u.provider;
+      const info = llmSettings.providers.find((p) => p.id === u.provider);
+      if (info) {
+        info.model = u.model;
+        info.base_url = u.base_url;
+      }
+      return null;
+    }
     case "get_calendar_settings":
       return calendarStatus;
     case "list_calendars":
@@ -517,9 +532,14 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         running: true,
         managed: true,
         base_url: "http://localhost:11434",
-        models: ["llama3.1:latest"],
+        models: [
+          { name: "llama3.1:latest", size: 4_920_000_000 },
+          { name: "qwen3.5:4b", size: 3_650_000_000 },
+        ],
       };
     case "ollama_pull":
+      return null;
+    case "ollama_delete":
       return null;
     case "get_app_setting":
       if (args.key === "consent.recording_notice_accepted") {

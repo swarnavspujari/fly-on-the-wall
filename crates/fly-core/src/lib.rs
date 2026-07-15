@@ -8,6 +8,7 @@ pub mod align;
 pub mod crosstalk;
 pub mod enhance;
 pub mod model;
+pub mod prompt_profile;
 pub mod rediarize;
 pub mod repeat;
 pub mod seams;

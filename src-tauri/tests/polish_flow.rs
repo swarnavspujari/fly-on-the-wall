@@ -85,7 +85,8 @@ fn run_polish(storage: &Storage, meeting_id: &str, canned: &str) -> enhance::Pol
     let raw = storage.get_transcript(meeting_id).unwrap().unwrap();
 
     // build_cleanup_prompt sends the runtime contract verbatim + the segments.
-    let prompt = enhance::build_cleanup_prompt(&raw.segments);
+    let prompt =
+        enhance::build_cleanup_prompt(&raw.segments, &fly_core::prompt_profile::DEFAULT_PROFILE);
     assert_eq!(prompt.system, enhance::CLEANUP_SYSTEM_PROMPT);
     assert!(prompt.user.contains(r#""id":"t1""#));
     assert!(prompt.user.contains(r#""id":"t2""#));
@@ -102,6 +103,7 @@ fn run_polish(storage: &Storage, meeting_id: &str, canned: &str) -> enhance::Pol
             temperature: None,
             max_tokens: Some(8192),
             thinking: fly_llm::ThinkingMode::Disabled,
+            format: None,
         }))
         .unwrap();
 

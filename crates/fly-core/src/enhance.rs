@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Note, NoteBlock, Template, Transcript, TranscriptSegment};
+use crate::prompt_profile::PromptProfile;
 
 /// System + user prompt, plus the index→segment-id map for source mapping.
 pub struct EnhancePrompt {
@@ -19,10 +20,32 @@ pub struct EnhancePrompt {
     pub segment_ids: Vec<String>,
 }
 
+/// The strict JSON block contract (default). Ends with the lead-in line for
+/// the template's structure hint, which the builder appends.
+const ENHANCE_CONTRACT_FULL: &str = "\
+You MUST respond with ONLY a JSON array (no prose, no code fences). Each element:\n\
+{\"type\": \"user\" | \"ai\", \"markdown\": \"...\", \"sources\": [segment numbers]}\n\
+Rules:\n\
+- \"user\" blocks restate lines from MY NOTES (lightly cleaned up); keep my wording. Use an empty sources array.\n\
+- \"ai\" blocks add structure or content derived from the TRANSCRIPT; cite the segment numbers they came from in sources.\n\
+- Markdown inside blocks may use headings, bullet lists, and bold.\n\
+- Follow this target structure where it fits:";
+
+/// Terser contract for models whose profile sets `simplified_contract`: same
+/// schema, shorter rules, an inline example, and an explicit no-preamble
+/// instruction — measured to help small local models stay inside the JSON.
+const ENHANCE_CONTRACT_SIMPLE: &str = "\
+Output ONLY a JSON array. No text before or after it, no code fences, no preamble.\n\
+Each element: {\"type\": \"user\" | \"ai\", \"markdown\": \"...\", \"sources\": [segment numbers]}\n\
+Example: [{\"type\":\"user\",\"markdown\":\"- my note\",\"sources\":[]},{\"type\":\"ai\",\"markdown\":\"## Decisions\\n- Ship Friday\",\"sources\":[2,3]}]\n\
+\"user\" = lines from MY NOTES, my wording, empty sources. \"ai\" = derived from the TRANSCRIPT, cite segment numbers.\n\
+Follow this target structure where it fits:";
+
 pub fn build_enhance_prompt(
     note: &Note,
     transcript: Option<&Transcript>,
     template: &Template,
+    profile: &PromptProfile,
 ) -> EnhancePrompt {
     let mut segment_ids = Vec::new();
     let transcript_text = match transcript {
@@ -42,17 +65,15 @@ pub fn build_enhance_prompt(
         None => String::new(),
     };
 
-    let system = format!(
-        "{}\n\n\
-        You MUST respond with ONLY a JSON array (no prose, no code fences). Each element:\n\
-        {{\"type\": \"user\" | \"ai\", \"markdown\": \"...\", \"sources\": [segment numbers]}}\n\
-        Rules:\n\
-        - \"user\" blocks restate lines from MY NOTES (lightly cleaned up); keep my wording. Use an empty sources array.\n\
-        - \"ai\" blocks add structure or content derived from the TRANSCRIPT; cite the segment numbers they came from in sources.\n\
-        - Markdown inside blocks may use headings, bullet lists, and bold.\n\
-        - Follow this target structure where it fits:\n{}",
-        template.system_prompt, template.structure_hint
-    );
+    let contract = if profile.simplified_contract {
+        ENHANCE_CONTRACT_SIMPLE
+    } else {
+        ENHANCE_CONTRACT_FULL
+    };
+    let system = profile.apply_preamble(format!(
+        "{}\n\n{}\n{}",
+        template.system_prompt, contract, template.structure_hint
+    ));
 
     let user = if transcript_text.is_empty() {
         format!(
@@ -71,6 +92,25 @@ pub fn build_enhance_prompt(
         user,
         segment_ids,
     }
+}
+
+/// JSON schema of the Enhance block array — the machine-readable twin of the
+/// contract above. Models whose profile sets `constrained_enhance` get it as
+/// an Ollama `format` grammar, making malformed output impossible. Keep it in
+/// lockstep with `RawBlock`/`parse_enhanced_blocks`.
+pub fn enhance_blocks_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["user", "ai"]},
+                "markdown": {"type": "string"},
+                "sources": {"type": "array", "items": {"type": "integer"}}
+            },
+            "required": ["type", "markdown", "sources"]
+        }
+    })
 }
 
 #[derive(Deserialize)]
@@ -231,7 +271,14 @@ struct PromptSegment<'a> {
 /// transcripts (one call per chunk) and merge the cleaned text by id; the
 /// prompt sends id/speaker/start/text so the model has the context it needs to
 /// disambiguate proper nouns without ever being asked to alter structure.
-pub fn build_cleanup_prompt(segments: &[TranscriptSegment]) -> CleanupPrompt {
+///
+/// Only the profile's `system_preamble` applies here — `simplified_contract`
+/// is deliberately ignored: the cleanup contract's no-loss guarantees are
+/// load-bearing for the retention guard and are never weakened per model.
+pub fn build_cleanup_prompt(
+    segments: &[TranscriptSegment],
+    profile: &PromptProfile,
+) -> CleanupPrompt {
     let prompt_segments: Vec<PromptSegment> = segments
         .iter()
         .map(|s| PromptSegment {
@@ -255,7 +302,7 @@ pub fn build_cleanup_prompt(segments: &[TranscriptSegment]) -> CleanupPrompt {
     );
 
     CleanupPrompt {
-        system: CLEANUP_SYSTEM_PROMPT.to_string(),
+        system: profile.apply_preamble(CLEANUP_SYSTEM_PROMPT.to_string()),
         user,
         segment_ids: segments.iter().map(|s| s.id.clone()).collect(),
     }
@@ -300,6 +347,29 @@ struct CleanupResponse {
 struct CleanedSegment {
     id: String,
     text: String,
+}
+
+/// JSON schema of the cleanup response — machine-readable twin of the
+/// `{"segments":[{"id","text"}…]}` shape `parse_cleanup_response` expects.
+/// Applied as an Ollama `format` grammar for profiles with `constrained_json`.
+pub fn cleanup_response_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "segments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "text": {"type": "string"}
+                    },
+                    "required": ["id", "text"]
+                }
+            }
+        },
+        "required": ["segments"]
+    })
 }
 
 /// Parse a cleanup response into (id, cleaned-text) pairs, tolerating code
@@ -486,11 +556,48 @@ mod tests {
             &note_with_scratchpad("- budget!"),
             Some(&transcript()),
             &tpl,
+            &crate::prompt_profile::DEFAULT_PROFILE,
         );
         assert!(p.user.contains("[0] You: we should approve the budget"));
         assert!(p.user.contains("[1] Dana: agreed, fifty thousand"));
         assert_eq!(p.segment_ids, vec!["seg-a", "seg-b"]);
         assert!(p.system.contains("## Summary"));
+        // The default profile keeps the exact historical system prompt:
+        // template system prompt, blank line, strict contract, structure hint.
+        assert_eq!(
+            p.system,
+            format!("sys\n\n{ENHANCE_CONTRACT_FULL}\n## Summary")
+        );
+        assert!(p.system.contains("You MUST respond with ONLY a JSON array"));
+    }
+
+    #[test]
+    fn profile_preamble_and_simplified_contract_change_enhance_system() {
+        let tpl = Template {
+            id: "t".into(),
+            name: "General".into(),
+            system_prompt: "sys".into(),
+            structure_hint: "## Summary".into(),
+            built_in: true,
+        };
+        let profile = crate::prompt_profile::PromptProfile {
+            system_preamble: Some("Answer directly, no preamble."),
+            simplified_contract: true,
+            ..crate::prompt_profile::DEFAULT_PROFILE
+        };
+        let p = build_enhance_prompt(
+            &note_with_scratchpad("- budget!"),
+            Some(&transcript()),
+            &tpl,
+            &profile,
+        );
+        assert!(p.system.starts_with("Answer directly, no preamble.\n\n"));
+        assert!(p.system.contains("Output ONLY a JSON array"));
+        assert!(!p.system.contains("You MUST respond with ONLY a JSON array"));
+        // The structure hint still applies with the simple contract.
+        assert!(p
+            .system
+            .ends_with("Follow this target structure where it fits:\n## Summary"));
     }
 
     #[test]
@@ -573,7 +680,7 @@ mod tests {
     #[test]
     fn cleanup_prompt_is_verbatim_and_lists_segments() {
         let src = polish_source();
-        let p = build_cleanup_prompt(&src.segments);
+        let p = build_cleanup_prompt(&src.segments, &crate::prompt_profile::DEFAULT_PROFILE);
         // system prompt is the runtime contract, used verbatim
         assert_eq!(p.system, CLEANUP_SYSTEM_PROMPT);
         assert!(p.system.contains("WITHOUT losing a single word"));

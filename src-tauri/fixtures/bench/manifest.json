@@ -1,0 +1,52 @@
+{
+  "template": {
+    "id": "bench-general",
+    "name": "General",
+    "system_prompt": "You are an expert meeting-notes editor. Merge the user's raw notes with the transcript into clear, well-structured meeting notes.",
+    "structure_hint": "## Summary\n## Decisions\n## Action items\n## Open questions",
+    "built_in": true
+  },
+  "fixtures": [
+    {
+      "id": "standup",
+      "file": "standup.transcript.json",
+      "meeting_title": "Sprint 42 standup",
+      "attendees": ["Sam", "Priya", "Marcus"],
+      "note_title": "Sprint 42 standup",
+      "scratchpad": "- velocity behind?\n- migration status\n- ab test results\n- cutover date??"
+    },
+    {
+      "id": "budget",
+      "file": "budget.transcript.json",
+      "meeting_title": "Q3 budget review",
+      "attendees": ["Alex", "Dana"],
+      "note_title": "Q3 budget w/ Dana",
+      "scratchpad": "- runway check\n- marketing ask 120k\n- lease renewal\n- board deliverable"
+    },
+    {
+      "id": "product",
+      "file": "product.transcript.json",
+      "meeting_title": "Monthly product review",
+      "attendees": ["Jordan", "Elena", "Raj", "Tom"],
+      "note_title": "Product review — July",
+      "scratchpad": "- acme pilot #s\n- northwind renewal risk\n- 2.4 scope decision\n- scim?"
+    }
+  ],
+  "questions": [
+    { "fixture": "standup", "id": "q01", "kind": "numbers", "text": "How many points did we commit to this sprint and how many are we tracking at?" },
+    { "fixture": "standup", "id": "q02", "kind": "decision", "text": "What did we decide about the database cutover date, and why?" },
+    { "fixture": "standup", "id": "q03", "kind": "action_items", "text": "List every action item from this standup with its owner and deadline." },
+    { "fixture": "standup", "id": "q04", "kind": "who_said", "text": "What did Marcus say about the A/B test results?" },
+    { "fixture": "standup", "id": "q05", "kind": "open_question", "text": "Was the SOC 2 question resolved in the meeting? What happens next with it?" },
+    { "fixture": "budget", "id": "q06", "kind": "numbers", "text": "What is our monthly burn and how many months of runway do we have?" },
+    { "fixture": "budget", "id": "q07", "kind": "decision", "text": "How much did marketing ask for and what was actually approved?" },
+    { "fixture": "budget", "id": "q08", "kind": "who_said", "text": "What did Dana say about the smaller office suites?" },
+    { "fixture": "budget", "id": "q09", "kind": "numbers", "text": "How much will cancelling the unused SaaS subscriptions save, and who is doing it by when?" },
+    { "fixture": "budget", "id": "q10", "kind": "action_items", "text": "What did Dana commit to delivering to the board, and by what date?" },
+    { "fixture": "product", "id": "q11", "kind": "numbers", "text": "What is the Acme pilot's extraction accuracy now versus at kickoff?" },
+    { "fixture": "product", "id": "q12", "kind": "decision", "text": "What was decided about the 2.4 release scope?" },
+    { "fixture": "product", "id": "q13", "kind": "who_said", "text": "What did Elena say about Northwind's usage and renewal?" },
+    { "fixture": "product", "id": "q14", "kind": "action_items", "text": "Who committed to sending Acme the security review document, and by when?" },
+    { "fixture": "product", "id": "q15", "kind": "open_question", "text": "What pricing question was raised but left undecided?" }
+  ]
+}

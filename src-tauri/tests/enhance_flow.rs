@@ -76,7 +76,12 @@ fn enhance_flow_with_mock_provider_offline() {
     let loaded_note = storage.get_note(&note.id).unwrap();
     let template = storage.get_template("tpl-general").unwrap();
     let transcript = storage.get_transcript(&meeting.id).unwrap();
-    let prompt = enhance::build_enhance_prompt(&loaded_note, transcript.as_ref(), &template);
+    let prompt = enhance::build_enhance_prompt(
+        &loaded_note,
+        transcript.as_ref(),
+        &template,
+        &fly_core::prompt_profile::DEFAULT_PROFILE,
+    );
     assert!(prompt.user.contains("[0] You: marketing needs"));
     assert!(prompt.user.contains("[1] Dana: I will share"));
 
@@ -98,6 +103,7 @@ fn enhance_flow_with_mock_provider_offline() {
             temperature: Some(0.2),
             max_tokens: None,
             thinking: fly_llm::ThinkingMode::Default,
+            format: None,
         }))
         .unwrap();
 

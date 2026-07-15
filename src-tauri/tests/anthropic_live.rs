@@ -31,6 +31,7 @@ fn temperature_request_succeeds_on_sonnet5() {
             temperature: Some(0.2),
             max_tokens: Some(1024),
             thinking: ThinkingMode::Default,
+            format: None,
         }))
         .expect("chat with temperature must succeed on claude-sonnet-5 after the fix");
 

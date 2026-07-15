@@ -211,6 +211,12 @@ export default function SettingsModal({
   const [ollama, setOllama] = useState<OllamaStatus | null>(null);
   const [ollamaBusy, setOllamaBusy] = useState<"install" | "pull" | null>(null);
   const [ollamaMsg, setOllamaMsg] = useState<string | null>(null);
+  // Guided model swap: `swapOffer` = the user saved an Ollama model that
+  // isn't installed (offer pull-with-progress instead of failing at first
+  // use); `deleteOffer` = a swap completed and the old model still sits on
+  // disk (offer — never force — deleting it).
+  const [swapOffer, setSwapOffer] = useState<{ to: string; from: string | null } | null>(null);
+  const [deleteOffer, setDeleteOffer] = useState<{ name: string; size: number } | null>(null);
 
   // templates state
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -347,16 +353,51 @@ export default function SettingsModal({
     }
   };
 
+  /** Tag-insensitive match, mirroring the backend: a bare name ("llama3.1")
+   *  matches any tag of its family ("llama3.1:latest"); two explicit tags
+   *  must be identical. */
+  const sameOllamaModel = (a: string, b: string) => {
+    if (a === b) return true;
+    const ab = a.split(":")[0];
+    const bb = b.split(":")[0];
+    return (a === ab || b === bb) && ab === bb;
+  };
+
+  const installedOllamaModel = (name: string) =>
+    ollama?.models.find((m) => sameOllamaModel(m.name, name)) ?? null;
+
   const pullOllamaModel = async (model: string) => {
     setOllamaBusy("pull");
     setOllamaMsg(null);
     try {
       await api.ollamaPull(model);
       setOllamaMsg(`${model} ready ✓`);
+      // A guided swap just finished downloading its target: close the offer
+      // and, if the previous model is still on disk, offer to reclaim it.
+      if (swapOffer && sameOllamaModel(model, swapOffer.to)) {
+        const from = swapOffer.from;
+        setSwapOffer(null);
+        const old = from ? installedOllamaModel(from) : null;
+        if (old && !sameOllamaModel(old.name, model)) setDeleteOffer(old);
+      }
     } catch (e) {
       setOllamaMsg(`✗ ${e}`);
     } finally {
       setOllamaBusy(null);
+      loadOllama().catch(console.error);
+    }
+  };
+
+  const deleteOllamaModel = async (model: string) => {
+    if (!confirm(`Delete model "${model}" from this machine?`)) return;
+    setOllamaMsg(null);
+    try {
+      await api.ollamaDelete(model);
+      setOllamaMsg(`${model} deleted`);
+      setDeleteOffer((d) => (d && sameOllamaModel(d.name, model) ? null : d));
+    } catch (e) {
+      setOllamaMsg(`✗ ${e}`);
+    } finally {
       loadOllama().catch(console.error);
     }
   };
@@ -404,6 +445,10 @@ export default function SettingsModal({
   const saveLlm = async () => {
     setLlmBusy(true);
     setLlmTest(null);
+    // The Ollama model that was saved BEFORE this save — the "old" side of a
+    // guided swap (llm state is reloaded below).
+    const ollamaInfo = llm?.providers.find((p) => p.id === "ollama");
+    const prevModel = (ollamaInfo?.model ?? ollamaInfo?.default_model ?? "").trim() || null;
     try {
       await api.setLlmSettings({
         provider: llmProvider,
@@ -414,6 +459,19 @@ export default function SettingsModal({
       setLlmKey("");
       await loadLlm();
       setLlmTest("saved ✓");
+      // Guided swap: a just-saved Ollama model that isn't installed would
+      // fail at first use — offer the pull (with progress) right here.
+      if (llmProvider === "ollama") {
+        const target = (llmModel || ollamaInfo?.default_model || "llama3.1").trim();
+        const from = prevModel && !sameOllamaModel(prevModel, target) ? prevModel : null;
+        if (!installedOllamaModel(target)) {
+          setSwapOffer({ to: target, from });
+        } else if (from) {
+          // Swap to an already-installed model: offer reclaiming the old one.
+          const old = installedOllamaModel(from);
+          if (old) setDeleteOffer(old);
+        }
+      }
     } catch (e) {
       setLlmTest(String(e));
     } finally {
@@ -850,7 +908,7 @@ export default function SettingsModal({
                     // Managed Ollama block: install → auto-managed server → model.
                     const effModel = (llmModel || p.default_model || "llama3.1").trim();
                     const modelReady = !!ollama?.models.some(
-                      (m) => m === effModel || m.split(":")[0] === effModel.split(":")[0],
+                      (m) => m.name === effModel || m.name.split(":")[0] === effModel.split(":")[0],
                     );
                     // Progress for the runtime install or the model pull.
                     const prog =
@@ -934,6 +992,84 @@ export default function SettingsModal({
                             <span className="text-text-3" style={{ fontSize: 11 }}>
                               {pct}%
                             </span>
+                          </div>
+                        )}
+                        {swapOffer && !modelReady && (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-text-2" style={{ fontSize: 12 }}>
+                              “{swapOffer.to}” isn’t downloaded yet — Enhance and Ask would fail
+                              until it is.
+                            </span>
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              disabled={ollamaBusy !== null}
+                              onClick={() => void pullOllamaModel(swapOffer.to)}
+                            >
+                              {ollamaBusy === "pull" ? "Downloading…" : `Download ${swapOffer.to}`}
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => setSwapOffer(null)}>
+                              Later
+                            </Button>
+                          </div>
+                        )}
+                        {deleteOffer && (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-text-2" style={{ fontSize: 12 }}>
+                              Switched models — delete “{deleteOffer.name}” to free{" "}
+                              {gb(deleteOffer.size)}?
+                            </span>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                const d = deleteOffer;
+                                setDeleteOffer(null);
+                                void deleteOllamaModel(d.name);
+                              }}
+                            >
+                              Delete
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => setDeleteOffer(null)}>
+                              Keep
+                            </Button>
+                          </div>
+                        )}
+                        {ollama && ollama.running && ollama.models.length > 0 && (
+                          <div className="space-y-1">
+                            <span className="block text-text-3" style={{ fontSize: 11 }}>
+                              Models on disk
+                            </span>
+                            {ollama.models.map((m) => {
+                              const inUse =
+                                m.name === effModel ||
+                                m.name.split(":")[0] === effModel.split(":")[0];
+                              return (
+                                <div key={m.name} className="flex items-center gap-2">
+                                  <span className="text-text-2" style={{ fontSize: 12 }}>
+                                    {m.name}
+                                  </span>
+                                  <span className="text-text-3" style={{ fontSize: 11 }}>
+                                    {gb(m.size)}
+                                  </span>
+                                  {inUse ? (
+                                    <Badge tone="neutral" size="sm">
+                                      in use
+                                    </Badge>
+                                  ) : (
+                                    <Button
+                                      variant="ghost"
+                                      size="xs"
+                                      disabled={ollamaBusy !== null}
+                                      title="Remove this model from disk"
+                                      onClick={() => void deleteOllamaModel(m.name)}
+                                    >
+                                      Delete
+                                    </Button>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </div>

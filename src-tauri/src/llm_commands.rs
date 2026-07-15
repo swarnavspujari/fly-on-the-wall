@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use fly_core::prompt_profile::{profile_for, PromptProfile};
 use fly_core::{enhance, Note, Template, Transcript};
 use fly_llm::{ChatMessage, ChatRequest, LLMProvider, ThinkingMode};
 use serde::{Deserialize, Serialize};
@@ -123,6 +124,7 @@ pub async fn enhance_note(
 ) -> CmdResult<Note> {
     ensure_provider_ready(&state).await?;
     let provider = build_provider(&state)?;
+    let profile = profile_for(provider.model());
     let (prompt, template) = {
         let storage = state.storage.lock().unwrap();
         let note = storage.get_note(&note_id).map_err(|e| e.to_string())?;
@@ -137,7 +139,7 @@ pub async fn enhance_note(
             return Err("nothing to enhance yet — jot some notes or record a meeting".into());
         }
         (
-            enhance::build_enhance_prompt(&note, transcript.as_ref(), &template),
+            enhance::build_enhance_prompt(&note, transcript.as_ref(), &template, profile),
             template,
         )
     };
@@ -150,8 +152,20 @@ pub async fn enhance_note(
                 ChatMessage::user(prompt.user.clone()),
             ],
             temperature: Some(0.2),
-            max_tokens: Some(4096),
-            thinking: ThinkingMode::Default,
+            max_tokens: Some(profile.max_tokens.enhance.unwrap_or(4096)),
+            // Adaptive thinking helps cloud models here; local thinking
+            // models opt out via their profile (the trace would eat the
+            // output budget — see prompt_profile.rs).
+            thinking: if profile.thinking_disabled() {
+                ThinkingMode::Disabled
+            } else {
+                ThinkingMode::Default
+            },
+            // Grammar-constrained output for profiled models (llama3.1);
+            // ignored by non-Ollama providers.
+            format: profile
+                .constrained_enhance
+                .then(enhance::enhance_blocks_schema),
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -250,13 +264,14 @@ pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResu
     );
 
     // One provider call per batch; merge cleaned text by segment id.
+    let profile = profile_for(provider.model());
     let mut cleaned_map: HashMap<String, String> = HashMap::new();
     for range in enhance::plan_cleanup_batches(
         &raw.segments,
         POLISH_MAX_BATCH_WORDS,
         POLISH_MAX_BATCH_SEGMENTS,
     ) {
-        let prompt = enhance::build_cleanup_prompt(&raw.segments[range]);
+        let prompt = enhance::build_cleanup_prompt(&raw.segments[range], profile);
         let output = provider
             .chat(ChatRequest {
                 messages: vec![
@@ -267,12 +282,18 @@ pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResu
                 // lives in the system prompt, and the default model
                 // (claude-sonnet-5) rejects an explicit `temperature` with a
                 // 400. Omitting it works across every provider.
-                temperature: None,
-                max_tokens: Some(8192),
+                // Profiled models add temperature 0 (measured as a pair
+                // with the schema below); the Anthropic allowlist still
+                // strips temperature where the model rejects it.
+                temperature: profile.constrained_json.then_some(0.0),
+                max_tokens: Some(profile.max_tokens.polish.unwrap_or(8192)),
                 // Cleanup is mechanical; disable thinking so adaptive reasoning
                 // tokens don't eat the budget and truncate the JSON mid-array
                 // (claude-sonnet-5 thinks by default — see AnthropicProvider).
                 thinking: ThinkingMode::Disabled,
+                format: profile
+                    .constrained_json
+                    .then(enhance::cleanup_response_schema),
             })
             .await
             .map_err(|e| e.to_string())?;
@@ -316,6 +337,42 @@ pub struct AskMessage {
     pub content: String,
 }
 
+/// Assemble the Ask system prompt (assistant instruction + meeting context)
+/// from a note and its transcript. Pure — shared by `ask_meeting` and the
+/// llm_bench harness so both exercise the shipped prompt.
+pub fn build_ask_system(
+    note: &Note,
+    transcript: Option<&Transcript>,
+    profile: &PromptProfile,
+) -> String {
+    let mut ctx = format!(
+        "NOTE TITLE: {}\n\nUSER'S NOTES:\n{}\n",
+        note.title, note.scratchpad
+    );
+    if !note.blocks.is_empty() {
+        ctx.push_str("\nENHANCED NOTES:\n");
+        for b in &note.blocks {
+            ctx.push_str(&b.markdown);
+            ctx.push('\n');
+        }
+    }
+    if let Some(t) = transcript {
+        ctx.push_str("\nFULL TRANSCRIPT:\n");
+        for seg in &t.segments {
+            ctx.push_str(&format!(
+                "{}: {}\n",
+                t.label_for(&seg.speaker_key),
+                seg.text.trim()
+            ));
+        }
+    }
+    profile.apply_preamble(format!(
+        "You are Fly on the Wall's meeting assistant. Answer questions about THIS meeting using only the \
+         context below. Be concrete and cite who said what when relevant. If the answer is not \
+         in the meeting, say so.\n\n{ctx}"
+    ))
+}
+
 #[tauri::command]
 pub async fn ask_meeting(
     state: State<'_, AppState>,
@@ -324,42 +381,18 @@ pub async fn ask_meeting(
 ) -> CmdResult<String> {
     ensure_provider_ready(&state).await?;
     let provider = build_provider(&state)?;
-    let context = {
+    let profile = profile_for(provider.model());
+    let system = {
         let storage = state.storage.lock().unwrap();
         let note = storage.get_note(&note_id).map_err(|e| e.to_string())?;
         let transcript = match &note.meeting_id {
             Some(mid) => storage.get_transcript(mid).map_err(|e| e.to_string())?,
             None => None,
         };
-        let mut ctx = format!(
-            "NOTE TITLE: {}\n\nUSER'S NOTES:\n{}\n",
-            note.title, note.scratchpad
-        );
-        if !note.blocks.is_empty() {
-            ctx.push_str("\nENHANCED NOTES:\n");
-            for b in &note.blocks {
-                ctx.push_str(&b.markdown);
-                ctx.push('\n');
-            }
-        }
-        if let Some(t) = &transcript {
-            ctx.push_str("\nFULL TRANSCRIPT:\n");
-            for seg in &t.segments {
-                ctx.push_str(&format!(
-                    "{}: {}\n",
-                    t.label_for(&seg.speaker_key),
-                    seg.text.trim()
-                ));
-            }
-        }
-        ctx
+        build_ask_system(&note, transcript.as_ref(), profile)
     };
 
-    let mut messages = vec![ChatMessage::system(format!(
-        "You are Fly on the Wall's meeting assistant. Answer questions about THIS meeting using only the \
-         context below. Be concrete and cite who said what when relevant. If the answer is not \
-         in the meeting, say so.\n\n{context}"
-    ))];
+    let mut messages = vec![ChatMessage::system(system)];
     for m in history {
         messages.push(if m.role == "assistant" {
             ChatMessage::assistant(m.content)
@@ -372,8 +405,14 @@ pub async fn ask_meeting(
         .chat(ChatRequest {
             messages,
             temperature: Some(0.3),
-            max_tokens: Some(2048),
-            thinking: ThinkingMode::Default,
+            max_tokens: Some(profile.max_tokens.ask.unwrap_or(2048)),
+            // Same profile-driven opt-out as enhance_note above.
+            thinking: if profile.thinking_disabled() {
+                ThinkingMode::Disabled
+            } else {
+                ThinkingMode::Default
+            },
+            format: None,
         })
         .await
         .map_err(|e| e.to_string())

@@ -1,0 +1,42 @@
+{
+  "meeting_id": "bench-product",
+  "language": "en",
+  "engine": "bench-fixture",
+  "segments": [
+    { "id": "seg001", "speaker_key": "mic", "start_ms": 0, "end_ms": 7000, "text": "alright this is the monthly product review um agenda is pilot results renewals and the 2.4 release scope", "words": [] },
+    { "id": "seg002", "speaker_key": "spk_0", "start_ms": 7000, "end_ms": 15000, "text": "I can start with the acme pilot the the extraction accuracy is at ninety four percent now up from eighty eight at kickoff", "words": [] },
+    { "id": "seg003", "speaker_key": "spk_0", "start_ms": 15000, "end_ms": 22000, "text": "their PMs have basically stopped taking manual notes which was the the whole success criterion", "words": [] },
+    { "id": "seg004", "speaker_key": "mic", "start_ms": 22000, "end_ms": 27000, "text": "that's great news anything blocking the conversion to paid", "words": [] },
+    { "id": "seg005", "speaker_key": "spk_3", "start_ms": 27000, "end_ms": 36000, "text": "two things pricing on the renewal and their legal wants data residency language um they asked for a security review document too", "words": [] },
+    { "id": "seg006", "speaker_key": "mic", "start_ms": 36000, "end_ms": 41000, "text": "tom can you own the security doc what's realistic", "words": [] },
+    { "id": "seg007", "speaker_key": "spk_3", "start_ms": 41000, "end_ms": 47000, "text": "I'll commit to getting the security review document to acme by August first", "words": [] },
+    { "id": "seg008", "speaker_key": "spk_0", "start_ms": 47000, "end_ms": 56000, "text": "on churn risk the one I'm watching is northwind forty eight thousand ARR renewal is September fifteenth and they've gone quiet", "words": [] },
+    { "id": "seg009", "speaker_key": "mic", "start_ms": 56000, "end_ms": 62000, "text": "quiet how like no logins or no no replies", "words": [] },
+    { "id": "seg010", "speaker_key": "spk_0", "start_ms": 62000, "end_ms": 70000, "text": "usage is down about forty percent since their champion left in May and my emails get one line replies", "words": [] },
+    { "id": "seg011", "speaker_key": "mic", "start_ms": 70000, "end_ms": 78000, "text": "okay elena let's get proactive can you schedule QBRs with our top ten accounts northwind first", "words": [] },
+    { "id": "seg012", "speaker_key": "spk_0", "start_ms": 78000, "end_ms": 84000, "text": "yes I'll schedule QBRs with the top ten accounts starting with northwind next week", "words": [] },
+    { "id": "seg013", "speaker_key": "mic", "start_ms": 84000, "end_ms": 90000, "text": "raj where are we on the 2.4 release scope", "words": [] },
+    { "id": "seg014", "speaker_key": "spk_1", "start_ms": 90000, "end_ms": 99000, "text": "so 2.4 is tracking for August twelfth um SSO is in good shape SAML works against okta and azure in staging", "words": [] },
+    { "id": "seg015", "speaker_key": "spk_1", "start_ms": 99000, "end_ms": 108000, "text": "the usage dashboard is the risk the charting rework turned out bigger than estimated I I don't think both fit", "words": [] },
+    { "id": "seg016", "speaker_key": "mic", "start_ms": 108000, "end_ms": 116000, "text": "enterprise deals need SSO more than dashboards so decision SSO ships in 2.4 and the usage dashboard slips to 2.5", "words": [] },
+    { "id": "seg017", "speaker_key": "spk_1", "start_ms": 116000, "end_ms": 121000, "text": "agreed that de-risks the date significantly", "words": [] },
+    { "id": "seg018", "speaker_key": "spk_3", "start_ms": 121000, "end_ms": 128000, "text": "sales is fine with that as long as SSO really lands on the twelfth I have three deals waiting on it", "words": [] },
+    { "id": "seg019", "speaker_key": "spk_1", "start_ms": 128000, "end_ms": 136000, "text": "related ask um enterprise buyers keep asking about SCIM provisioning can I spend next sprint prototyping it", "words": [] },
+    { "id": "seg020", "speaker_key": "mic", "start_ms": 136000, "end_ms": 142000, "text": "yes do it raj prototype SCIM next sprint and bring an estimate to the next review", "words": [] },
+    { "id": "seg021", "speaker_key": "spk_0", "start_ms": 142000, "end_ms": 150000, "text": "quick metrics update NPS came in at forty one this quarter up from thirty six and support tickets are down twenty two percent", "words": [] },
+    { "id": "seg022", "speaker_key": "mic", "start_ms": 150000, "end_ms": 155000, "text": "nice the the self serve help center is clearly paying off", "words": [] },
+    { "id": "seg023", "speaker_key": "spk_3", "start_ms": 155000, "end_ms": 163000, "text": "one open question I keep getting what do we charge for the analytics add-on when it ships I've been making up placeholder numbers", "words": [] },
+    { "id": "seg024", "speaker_key": "mic", "start_ms": 163000, "end_ms": 170000, "text": "yeah we haven't decided pricing for the analytics add-on um that needs a real session let's not settle it here", "words": [] },
+    { "id": "seg025", "speaker_key": "spk_3", "start_ms": 170000, "end_ms": 174000, "text": "fine but soon please", "words": [] },
+    { "id": "seg026", "speaker_key": "mic", "start_ms": 174000, "end_ms": 183000, "text": "recap then tom sends acme the security doc by August first elena runs QBRs top ten northwind first raj prototypes SCIM", "words": [] },
+    { "id": "seg027", "speaker_key": "mic", "start_ms": 183000, "end_ms": 190000, "text": "and 2.4 ships August twelfth with SSO dashboard moves to 2.5 thanks everyone", "words": [] },
+    { "id": "seg028", "speaker_key": "spk_1", "start_ms": 190000, "end_ms": 193000, "text": "thanks", "words": [] },
+    { "id": "seg029", "speaker_key": "spk_0", "start_ms": 193000, "end_ms": 196000, "text": "bye all", "words": [] }
+  ],
+  "speakers": [
+    { "key": "mic", "label": "Jordan" },
+    { "key": "spk_0", "label": "Elena" },
+    { "key": "spk_1", "label": "Raj" },
+    { "key": "spk_3", "label": "Tom" }
+  ]
+}
