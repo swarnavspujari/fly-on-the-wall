@@ -384,7 +384,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "pong";
     case "app_info":
       return {
-        version: "1.2.2",
+        version: "1.2.3",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
         os: "windows",
       };
