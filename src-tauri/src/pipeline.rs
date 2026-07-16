@@ -307,7 +307,31 @@ pub async fn run_with(
              in Settings",
         )
         .await?;
-        let model_path = models::ensure(on_model, &data_dir, &model_id).await?;
+        // A wanted-but-absent model that can't be downloaded (offline, CDN
+        // outage) must not sink the meeting when another model is already on
+        // disk — fall back to the best installed one, visibly.
+        let (model_id, model_path) = match models::ensure(on_model, &data_dir, &model_id).await {
+            Ok(path) => (model_id, path),
+            Err(e) => match models::best_installed_asr_model(&data_dir) {
+                Some((fallback_id, path)) => {
+                    tracing::warn!(
+                        wanted = %model_id, using = fallback_id, error = %e,
+                        "model unavailable — using installed model instead"
+                    );
+                    emit_stage(
+                        state,
+                        on_stage,
+                        meeting_id,
+                        "ensuring-models",
+                        Some(format!(
+                            "{model_id} unavailable — using installed {fallback_id}"
+                        )),
+                    );
+                    (fallback_id.to_string(), path)
+                }
+                None => return Err(e),
+            },
+        };
 
         // GPU offload. Windows: the pinned Vulkan build, but only when a
         // one-time benchmark measured it faster on this machine (gpu.rs);

@@ -265,6 +265,112 @@ pub struct ModelProgress {
     pub error: Option<String>,
 }
 
+/// Best already-installed whisper model, if any — the registry lists ASR
+/// models smallest→largest, so the last installed one wins. Lets a meeting
+/// still transcribe when the wanted model can't be downloaded (offline, CDN
+/// outage) but another model is sitting on disk.
+pub fn best_installed_asr_model(data_dir: &Path) -> Option<(&'static str, PathBuf)> {
+    registry()
+        .filter(|a| a.id.starts_with("ggml-"))
+        .filter_map(|a| installed_path(data_dir, a).map(|p| (a.id, p)))
+        .last()
+}
+
+/// Every URL worth trying for an artifact, in order: the pinned primary,
+/// then mirrors derivable from the host. Hugging Face files are also served
+/// by hf-mirror.com under the same path — useful when HF's Xet CDN bridge is
+/// rejecting downloads (a known intermittent failure).
+fn candidate_urls(url: &str) -> Vec<String> {
+    let mut v = vec![url.to_string()];
+    if let Some(rest) = url.strip_prefix("https://huggingface.co/") {
+        v.push(format!("https://hf-mirror.com/{rest}"));
+    }
+    v
+}
+
+/// One download attempt from one URL into `tmp`, streaming progress and
+/// verifying the SHA-256 pin. Returns bytes downloaded; on any failure the
+/// temp file is removed so the next attempt starts clean.
+async fn download_and_verify(
+    progress: ProgressSink<'_>,
+    a: &Artifact,
+    tmp: &Path,
+    url: &str,
+) -> Result<u64, String> {
+    let cleanup = |e: String| async move {
+        let _ = tokio::fs::remove_file(tmp).await;
+        Err::<u64, String>(e)
+    };
+    let client = reqwest::Client::new();
+    let resp = match async {
+        client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("download failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("download failed: {e}"))
+    }
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return cleanup(e).await,
+    };
+    let total = resp.content_length().unwrap_or(a.bytes);
+
+    let mut hasher = Sha256::new();
+    let mut file = match tokio::fs::File::create(tmp).await {
+        Ok(f) => f,
+        Err(e) => return cleanup(e.to_string()).await,
+    };
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    use tokio::io::AsyncWriteExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => return cleanup(format!("download interrupted: {e}")).await,
+        };
+        hasher.update(&chunk);
+        if let Err(e) = file.write_all(&chunk).await {
+            return cleanup(e.to_string()).await;
+        }
+        downloaded += chunk.len() as u64;
+        if last_emit.elapsed().as_millis() > 200 {
+            progress(ModelProgress {
+                id: a.id.into(),
+                downloaded,
+                total,
+                stage: "downloading".into(),
+                error: None,
+            });
+            last_emit = std::time::Instant::now();
+        }
+    }
+    if let Err(e) = file.flush().await {
+        return cleanup(e.to_string()).await;
+    }
+    drop(file);
+
+    progress(ModelProgress {
+        id: a.id.into(),
+        downloaded,
+        total,
+        stage: "verifying".into(),
+        error: None,
+    });
+    let digest = hex::encode(hasher.finalize());
+    if digest != a.sha256 {
+        return cleanup(format!(
+            "checksum mismatch (expected {}, got {digest})",
+            a.sha256
+        ))
+        .await;
+    }
+    Ok(downloaded)
+}
+
 /// Ensure an artifact is installed; returns the probe path. Reports
 /// progress through the sink while downloading/extracting.
 pub async fn ensure(
@@ -284,68 +390,57 @@ pub async fn ensure(
             .map_err(|e| e.to_string())?;
     }
 
-    // ---- download with streaming progress ----
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(a.url)
-        .send()
-        .await
-        .map_err(|e| format!("download failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("download failed: {e}"))?;
-    let total = resp.content_length().unwrap_or(a.bytes);
-
-    let mut hasher = Sha256::new();
-    let mut file = tokio::fs::File::create(&tmp)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut stream = resp.bytes_stream();
+    // ---- download with streaming progress, over every candidate URL ----
+    // Any candidate is safe to try: acceptance is decided by the SHA-256 pin,
+    // so a wrong or compromised mirror can only fail the checksum, never
+    // install bad bytes. Two attempts per URL absorbs transient CDN errors
+    // (Hugging Face's Xet bridge intermittently returns 403 AccessDenied)
+    // without hammering a host that is down.
+    let candidates = candidate_urls(a.url);
+    let mut errors: Vec<String> = Vec::new();
     let mut downloaded: u64 = 0;
-    let mut last_emit = std::time::Instant::now();
-    use tokio::io::AsyncWriteExt;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("download interrupted: {e}"))?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        downloaded += chunk.len() as u64;
-        if last_emit.elapsed().as_millis() > 200 {
-            progress(ModelProgress {
-                id: a.id.into(),
-                downloaded,
-                total,
-                stage: "downloading".into(),
-                error: None,
-            });
-            last_emit = std::time::Instant::now();
+    let mut fetched = false;
+    'sources: for url in &candidates {
+        for attempt in 0..2u8 {
+            if attempt > 0 || !errors.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            }
+            match download_and_verify(progress, a, &tmp, url).await {
+                Ok(bytes) => {
+                    downloaded = bytes;
+                    fetched = true;
+                    break 'sources;
+                }
+                Err(e) => {
+                    tracing::warn!(artifact = a.id, url, attempt, error = %e, "download attempt failed");
+                    errors.push(e);
+                }
+            }
         }
     }
-    file.flush().await.map_err(|e| e.to_string())?;
-    drop(file);
-
-    // ---- checksum ----
-    progress(ModelProgress {
-        id: a.id.into(),
-        downloaded,
-        total,
-        stage: "verifying".into(),
-        error: None,
-    });
-    let digest = hex::encode(hasher.finalize());
-    if digest != a.sha256 {
-        let _ = tokio::fs::remove_file(&tmp).await;
+    if !fetched {
+        let last = errors.last().cloned().unwrap_or_default();
+        let hf_hint = if a.url.starts_with("https://huggingface.co/") {
+            " Hugging Face's CDN sometimes rejects downloads temporarily — retry later, \
+             pick an already-installed model in Settings, or enable Groq cloud transcription."
+        } else {
+            ""
+        };
         let msg = format!(
-            "checksum mismatch for {} (expected {}, got {digest})",
-            a.id, a.sha256
+            "download failed for {} after trying {} source(s) (last error: {last}).{hf_hint}",
+            a.display,
+            candidates.len(),
         );
         progress(ModelProgress {
             id: a.id.into(),
-            downloaded,
-            total,
+            downloaded: 0,
+            total: a.bytes,
             stage: "error".into(),
             error: Some(msg.clone()),
         });
         return Err(msg);
     }
+    let total = a.bytes.max(downloaded);
 
     // ---- install ----
     let dest = data_dir.join(a.dest_rel);
@@ -510,5 +605,37 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("unsupported archive format"), "{err}");
+    }
+
+    /// Hugging Face URLs gain the hf-mirror.com fallback; everything else
+    /// (GitHub-hosted tools) stays single-source.
+    #[test]
+    fn candidate_urls_mirror_only_for_hf() {
+        let hf = candidate_urls("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/x.bin");
+        assert_eq!(
+            hf,
+            vec![
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/x.bin",
+                "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/x.bin",
+            ]
+        );
+        let gh = candidate_urls("https://github.com/k2-fsa/sherpa-onnx/releases/download/x.tar.bz2");
+        assert_eq!(gh.len(), 1);
+    }
+
+    /// The registry lists ASR models smallest→largest, so the best installed
+    /// model wins; a dir with no ggml weights yields None.
+    #[test]
+    fn best_installed_prefers_largest() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(best_installed_asr_model(tmp.path()).is_none());
+        for id in ["ggml-small-q5_1", "ggml-large-v3-q5_0"] {
+            let a = artifact(id).unwrap();
+            let p = tmp.path().join(a.probe_rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"x").unwrap();
+        }
+        let (id, _) = best_installed_asr_model(tmp.path()).unwrap();
+        assert_eq!(id, "ggml-large-v3-q5_0");
     }
 }
