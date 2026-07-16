@@ -237,6 +237,27 @@ pub async fn ensure_tool(
     path_names: &[&str],
     guidance: &str,
 ) -> Result<PathBuf, String> {
+    ensure_tool_with(
+        progress,
+        data_dir,
+        id,
+        path_names,
+        guidance,
+        DownloadEffort::Full,
+    )
+    .await
+}
+
+/// [`ensure_tool`] with an explicit download effort for the managed-download
+/// leg (installed copies and PATH hits are unaffected).
+pub async fn ensure_tool_with(
+    progress: ProgressSink<'_>,
+    data_dir: &Path,
+    id: &str,
+    path_names: &[&str],
+    guidance: &str,
+    effort: DownloadEffort,
+) -> Result<PathBuf, String> {
     if let Some(a) = artifact(id) {
         if let Some(installed) = installed_path(data_dir, a) {
             return Ok(installed);
@@ -246,7 +267,7 @@ pub async fn ensure_tool(
         return Ok(found);
     }
     if artifact(id).is_some() {
-        return ensure(progress, data_dir, id).await;
+        return ensure_with(progress, data_dir, id, effort).await;
     }
     Err(format!("{} is not installed — {}", path_names[0], guidance))
 }
@@ -276,16 +297,42 @@ pub fn best_installed_asr_model(data_dir: &Path) -> Option<(&'static str, PathBu
         .last()
 }
 
+/// Opt-out for the hf-mirror.com fallback (docs/MODELS.md): set
+/// `FLYONTHEWALL_NO_HF_MIRROR` to anything but "0" to only ever contact
+/// huggingface.co. Default is mirror on — integrity is decided by the
+/// SHA-256 pins either way.
+pub const NO_HF_MIRROR_ENV: &str = "FLYONTHEWALL_NO_HF_MIRROR";
+
+fn hf_mirror_disabled() -> bool {
+    std::env::var_os(NO_HF_MIRROR_ENV).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Every URL worth trying for an artifact, in order: the pinned primary,
 /// then mirrors derivable from the host. Hugging Face files are also served
 /// by hf-mirror.com under the same path — useful when HF's Xet CDN bridge is
 /// rejecting downloads (a known intermittent failure).
 fn candidate_urls(url: &str) -> Vec<String> {
+    candidate_urls_with(url, !hf_mirror_disabled())
+}
+
+fn candidate_urls_with(url: &str, allow_mirror: bool) -> Vec<String> {
     let mut v = vec![url.to_string()];
-    if let Some(rest) = url.strip_prefix("https://huggingface.co/") {
-        v.push(format!("https://hf-mirror.com/{rest}"));
+    if allow_mirror {
+        if let Some(rest) = url.strip_prefix("https://huggingface.co/") {
+            v.push(format!("https://hf-mirror.com/{rest}"));
+        }
     }
     v
+}
+
+/// Whether a failed attempt is worth retrying against the SAME url. A
+/// checksum mismatch is deterministic for a given source — the host is
+/// simply serving a file that isn't the pinned one — so retrying it cannot
+/// succeed and would only cost another full download; skip straight to the
+/// next source. Transient failures (network, HTTP 5xx, Xet 403) get one
+/// retry.
+fn retry_same_url(error: &str) -> bool {
+    !error.starts_with("checksum mismatch")
 }
 
 /// One download attempt from one URL into `tmp`, streaming progress and
@@ -371,12 +418,34 @@ async fn download_and_verify(
     Ok(downloaded)
 }
 
+/// How hard [`ensure`] tries when an artifact actually needs downloading.
+#[derive(Clone, Copy, PartialEq)]
+pub enum DownloadEffort {
+    /// Every candidate URL, two attempts each, with backoff — post-meeting
+    /// transcription wants the meeting rescued with patience to spare.
+    Full,
+    /// One attempt at the primary URL only. The live-caption loop wants a
+    /// prompt "unavailable" verdict when offline, not ~12 s of retries;
+    /// the next meeting retries anyway.
+    SingleAttempt,
+}
+
 /// Ensure an artifact is installed; returns the probe path. Reports
 /// progress through the sink while downloading/extracting.
 pub async fn ensure(
     progress: ProgressSink<'_>,
     data_dir: &Path,
     id: &str,
+) -> Result<PathBuf, String> {
+    ensure_with(progress, data_dir, id, DownloadEffort::Full).await
+}
+
+/// [`ensure`] with an explicit download effort.
+pub async fn ensure_with(
+    progress: ProgressSink<'_>,
+    data_dir: &Path,
+    id: &str,
+    effort: DownloadEffort,
 ) -> Result<PathBuf, String> {
     let a = artifact(id).ok_or_else(|| format!("unknown artifact {id}"))?;
     if let Some(path) = installed_path(data_dir, a) {
@@ -396,12 +465,15 @@ pub async fn ensure(
     // install bad bytes. Two attempts per URL absorbs transient CDN errors
     // (Hugging Face's Xet bridge intermittently returns 403 AccessDenied)
     // without hammering a host that is down.
-    let candidates = candidate_urls(a.url);
+    let (candidates, attempts_per_url) = match effort {
+        DownloadEffort::Full => (candidate_urls(a.url), 2u8),
+        DownloadEffort::SingleAttempt => (vec![a.url.to_string()], 1u8),
+    };
     let mut errors: Vec<String> = Vec::new();
     let mut downloaded: u64 = 0;
     let mut fetched = false;
     'sources: for url in &candidates {
-        for attempt in 0..2u8 {
+        for attempt in 0..attempts_per_url {
             if attempt > 0 || !errors.is_empty() {
                 tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             }
@@ -413,7 +485,11 @@ pub async fn ensure(
                 }
                 Err(e) => {
                     tracing::warn!(artifact = a.id, url, attempt, error = %e, "download attempt failed");
+                    let retry = retry_same_url(&e);
                     errors.push(e);
+                    if !retry {
+                        continue 'sources;
+                    }
                 }
             }
         }
@@ -607,6 +683,29 @@ mod tests {
         assert!(err.contains("unsupported archive format"), "{err}");
     }
 
+    /// The opt-out drops the mirror and leaves only the pinned primary.
+    #[test]
+    fn candidate_urls_opt_out_disables_mirror() {
+        let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/x.bin";
+        assert_eq!(candidate_urls_with(url, false), vec![url.to_string()]);
+        assert_eq!(candidate_urls_with(url, true).len(), 2);
+    }
+
+    /// A checksum mismatch (the exact message download_and_verify produces)
+    /// must not be retried against the same URL — the source is
+    /// deterministically serving the wrong file; move to the next source.
+    /// Transient errors keep their same-URL retry.
+    #[test]
+    fn checksum_mismatch_advances_to_next_source() {
+        assert!(!retry_same_url(
+            "checksum mismatch (expected abc123, got def456)"
+        ));
+        assert!(retry_same_url("download failed: connection reset"));
+        assert!(retry_same_url(
+            "download interrupted: unexpected end of stream"
+        ));
+    }
+
     /// Hugging Face URLs gain the hf-mirror.com fallback; everything else
     /// (GitHub-hosted tools) stays single-source.
     #[test]
@@ -619,7 +718,8 @@ mod tests {
                 "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/x.bin",
             ]
         );
-        let gh = candidate_urls("https://github.com/k2-fsa/sherpa-onnx/releases/download/x.tar.bz2");
+        let gh =
+            candidate_urls("https://github.com/k2-fsa/sherpa-onnx/releases/download/x.tar.bz2");
         assert_eq!(gh.len(), 1);
     }
 

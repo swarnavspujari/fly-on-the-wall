@@ -82,12 +82,17 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
             let _ = app.emit("model:progress", p);
         }
     };
-    let exe = match models::ensure_tool(
+    // Single-attempt downloads: when the machine is offline, the loop must
+    // settle on "unavailable" promptly, not after ~12 s of mirror retries —
+    // post-meeting transcription (DownloadEffort::Full) rescues the models
+    // later anyway.
+    let exe = match models::ensure_tool_with(
         &on_model,
         &data_dir,
         "whisper-bin",
         &["whisper-cli"],
         "live transcript needs whisper.cpp",
+        models::DownloadEffort::SingleAttempt,
     )
     .await
     {
@@ -104,7 +109,14 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
             return;
         }
     };
-    let model = match models::ensure(&on_model, &data_dir, LIVE_MODEL).await {
+    let model = match models::ensure_with(
+        &on_model,
+        &data_dir,
+        LIVE_MODEL,
+        models::DownloadEffort::SingleAttempt,
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             let _ = app.emit(
