@@ -157,8 +157,18 @@ chmod +x "${STAGE}/whisper-cli"
 
 OUT="${DIST}/${ASSET}"
 rm -f "${OUT}"
-# Deterministic-ish tar (sorted, no owner metadata) so rebuilds match.
-tar --numeric-owner --owner=0 --group=0 -cjf "${OUT}" -C "${STAGE}" whisper-cli
+# Strip owner metadata from the archive. The flags differ by tar flavor:
+# macOS ships bsdtar (libarchive 3.5.x), which has --uid/--gid but rejects
+# GNU tar's --owner/--group outright — using those kills the script (set -e)
+# right after a successful compile. Note the tarball is NOT bit-reproducible
+# across rebuilds (the staged file's mtime lands in the header); integrity
+# is anchored by the SHA-256 pin of the one hosted artifact, not by rebuild
+# equality.
+if [[ "${target}" == "macos" ]]; then
+  tar --numeric-owner --uid 0 --gid 0 -cjf "${OUT}" -C "${STAGE}" whisper-cli
+else
+  tar --numeric-owner --owner=0 --group=0 -cjf "${OUT}" -C "${STAGE}" whisper-cli
+fi
 
 # Emit the pins.
 if command -v sha256sum >/dev/null 2>&1; then

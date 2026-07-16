@@ -134,7 +134,8 @@ const TOOLS: &[Artifact] = &[
     // release on this repo, like the Windows Vulkan build above. This lets
     // `ensure_tool` auto-download the engine on first transcribe, exactly like
     // Windows, instead of requiring a `whisper-cli` on PATH (e.g. `brew
-    // install whisper-cpp`). A brew/PATH build is still honored first.
+    // install whisper-cpp`). While no managed copy is installed yet, a
+    // brew/PATH build still wins (resolution: installed → PATH → download).
     //
     // MAINTAINER, BEFORE MERGE: run the build-whisper-sidecar workflow
     // (workflow_dispatch, create_release=true), then replace sha256/bytes

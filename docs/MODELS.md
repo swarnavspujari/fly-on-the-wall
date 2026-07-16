@@ -69,10 +69,11 @@ Maintainer flow (all hosted from this repo, never a fork):
    `bin/whisper/whisper-cli`).
 
 The script also runs locally (`scripts/build-whisper-sidecar.sh macos`, needs
-`git` + `cmake`) for reproducing/verifying the CI artifact byte-for-byte
-pinning: it verifies HEAD equals the pinned commit, checks the binary links
-only system libraries, packages it flat (archive root holds just
-`whisper-cli`), and prints the same pin.
+`git` + `cmake`) to reproduce and inspect the build: it verifies HEAD equals
+the pinned commit, checks the binary links only system libraries, packages it
+flat (archive root holds just `whisper-cli`), and prints the same pin.
+(Rebuilds are not bit-identical — timestamps land in the tar header —
+integrity rests on the SHA-256 pin of the one hosted artifact.)
 
 Status: **pending** — the `models.rs` entry ships with a deliberately invalid
 placeholder SHA until the maintainer runs the workflow and pastes the real
