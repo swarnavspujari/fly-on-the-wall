@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { PanelLeft, X } from "lucide-react";
 import { api } from "./api";
+import { WHISPER_ENGINE_ID } from "./types";
 import type {
   AppInfo,
   CalendarEvent,
@@ -61,6 +62,10 @@ export default function App() {
   const [pipeDetail, setPipeDetail] = useState<string | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [modelProgress, setModelProgress] = useState<ModelProgress | null>(null);
+  // Transcription-engine (whisper-cli) readiness — distinct from model
+  // weights. `null` until the first settings fetch resolves.
+  const [engine, setEngine] = useState<{ installed: boolean; managed: boolean } | null>(null);
+  const [installingEngine, setInstallingEngine] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
   const [recStatus, setRecStatus] = useState<RecordingStatus>(IDLE_STATUS);
@@ -76,6 +81,9 @@ export default function App() {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [upcoming, setUpcoming] = useState<CalendarEvent[]>([]);
   const [showSettings, setShowSettings] = useState(false);
+  // When Settings is opened from the transcribe error, deep-link to the engine
+  // row; null for a normal open.
+  const [settingsFocus, setSettingsFocus] = useState<"engine" | "groq" | null>(null);
   const [showFirstRun, setShowFirstRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Notepad mode: below this width both sidebars fold into a menu button and
@@ -97,6 +105,20 @@ export default function App() {
 
   const refreshFolders = useCallback(async () => {
     setFolders(await api.listFolders());
+  }, []);
+
+  // Re-read whisper-cli readiness (managed install or on PATH). Called after an
+  // in-app install and whenever Settings closes, so a manual `brew install`
+  // outside the app is reflected too. ONE fetch-and-set for every AsrSettings
+  // field the app mirrors — a new field added here updates every caller.
+  const refreshAsrState = useCallback(() => {
+    api
+      .getAsrSettings()
+      .then((s) => {
+        setAutoTranscribe(s.auto_transcribe);
+        setEngine({ installed: s.engine_installed, managed: s.engine_managed });
+      })
+      .catch(console.error);
   }, []);
 
   const firstNotesLogged = useRef(false);
@@ -128,16 +150,13 @@ export default function App() {
       .then(setInfo)
       .catch((e) => setError(String(e)));
     refreshFolders().catch((e) => setError(String(e)));
-    api
-      .getAsrSettings()
-      .then((s) => setAutoTranscribe(s.auto_transcribe))
-      .catch(console.error);
+    refreshAsrState();
     api.listTemplates().then(setTemplates).catch(console.error);
     api
       .getAppSetting("consent.recording_notice_accepted")
       .then((v) => setShowFirstRun(v !== "true"))
       .catch(console.error);
-  }, [refreshFolders]);
+  }, [refreshFolders, refreshAsrState]);
 
   // upcoming calendar meetings: on start + every 5 minutes
   useEffect(() => {
@@ -357,6 +376,26 @@ export default function App() {
     }
   };
 
+  // One-click engine install from the transcribe error / Settings. Progress
+  // arrives on the shared `model:progress` stream (id "whisper-bin").
+  const installEngine = useCallback(async () => {
+    setInstallingEngine(true);
+    setPipelineError(null);
+    try {
+      await api.downloadModel(WHISPER_ENGINE_ID);
+      refreshAsrState();
+    } catch (e) {
+      // Tag the failure so the notice selector keeps the actionable engine
+      // notice even for non-download errors (e.g. a failed extraction).
+      setPipelineError(`engine install failed: ${String(e)}`);
+    } finally {
+      setInstallingEngine(false);
+      // Only clear the engine's own progress — `model:progress` is a shared
+      // stream, and a concurrent pipeline download must keep its bar.
+      setModelProgress((p) => (p && p.id === WHISPER_ENGINE_ID ? null : p));
+    }
+  }, [refreshAsrState]);
+
   const transcribeNow = async () => {
     if (!openMeeting) return;
     setPipelineError(null);
@@ -538,6 +577,8 @@ export default function App() {
             pipeDetail={pipeDetail}
             pipelineError={pipelineError}
             modelProgress={modelProgress}
+            engine={engine}
+            engineInstalling={installingEngine}
             recStatus={recStatus}
             screenStatus={screenStatus}
             folders={folders}
@@ -551,6 +592,11 @@ export default function App() {
             onStartScreen={(target) => void startScreen(target)}
             onStopScreen={() => void stopScreen()}
             onTranscribe={() => void transcribeNow()}
+            onInstallEngine={() => void installEngine()}
+            onOpenSettings={(focus) => {
+              setSettingsFocus(focus);
+              setShowSettings(true);
+            }}
             onRelabel={(k, l) => void relabel(k, l)}
             onEditSegment={(id, text) => void editSegment(id, text)}
           />
@@ -629,12 +675,11 @@ export default function App() {
           updater={updater}
           recordingActive={recordingActive}
           appVersion={info?.version ?? null}
+          initialFocus={settingsFocus}
           onClose={() => {
             setShowSettings(false);
-            api
-              .getAsrSettings()
-              .then((s) => setAutoTranscribe(s.auto_transcribe))
-              .catch(console.error);
+            setSettingsFocus(null);
+            refreshAsrState();
             api.listTemplates().then(setTemplates).catch(console.error);
             api.upcomingMeetings().then(setUpcoming).catch(console.error);
           }}

@@ -224,6 +224,15 @@ pub struct AsrSettings {
     pub gpu_bench: Option<gpu::GpuBench>,
     pub hw: hw::HwInfo,
     pub models: Vec<ModelStatus>,
+    /// The whisper.cpp engine (whisper-cli) is resolvable right now — a managed
+    /// install or on PATH. Distinct from model weights: downloaded weights
+    /// cannot transcribe without the engine that runs them.
+    pub engine_installed: bool,
+    /// This OS can install the engine in-app because a managed artifact exists
+    /// for it. False where the user must install it themselves (e.g. macOS /
+    /// Linux before the managed binaries are hosted), which tells the UI to
+    /// show manual guidance instead of an Install button.
+    pub engine_managed: bool,
 }
 
 /// Async so it never queues behind (or in front of) other startup commands
@@ -264,6 +273,13 @@ pub async fn get_asr_settings(state: State<'_, AppState>) -> CmdResult<AsrSettin
         })
         .collect();
 
+    let engine_installed = models::tool_installed(
+        &state.data_dir,
+        models::WHISPER_ENGINE_ID,
+        models::WHISPER_CLI_NAMES,
+    );
+    let engine_managed = models::artifact(models::WHISPER_ENGINE_ID).is_some();
+
     Ok(AsrSettings {
         tier: get("asr.tier").unwrap_or_else(|| hw_info.recommended_tier.clone()),
         model_id: get("asr.model_id").filter(|s| !s.is_empty()),
@@ -280,6 +296,8 @@ pub async fn get_asr_settings(state: State<'_, AppState>) -> CmdResult<AsrSettin
         gpu_bench: gpu::stored(&storage),
         hw: hw_info,
         models,
+        engine_installed,
+        engine_managed,
     })
 }
 

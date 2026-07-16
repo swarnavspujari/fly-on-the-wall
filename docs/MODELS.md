@@ -57,9 +57,13 @@ Per-OS strategy: **Windows** downloads the pinned Vulkan build above (upstream
 whisper.cpp publishes no Vulkan Windows binary — only CPU/BLAS/CUDA-only — so
 this one is built from the upstream v1.9.1 tag with `-DGGML_VULKAN=1` and
 hosted as a tools release on this repo). **macOS** whisper.cpp builds
-(including brew's, found via PATH) default to Metal already, so the setting
-only gates a `-ng` force-CPU flag there. The live transcript loop always stays
-on CPU: it runs during capture, exactly when the GPU is busy with the call.
+(including brew's, found via PATH) default to Metal already; Metal runs as a
+guarded primary with a forced-CPU (`-ng`) fallback, because on GPUs that
+Metal can't serve (e.g. Intel-era Macs) ggml's Metal init aborts — that
+failure falls back to CPU mid-run and pins the machine to CPU like Windows
+does. The live transcript loop always stays on CPU (`-ng` on macOS, the CPU
+build on Windows): it runs during capture, exactly when the GPU is busy
+with the call.
 
 ## Model registry
 
@@ -67,3 +71,17 @@ Exact download URLs, SHA-256 checksums (pinned from upstream release digests / H
 and re-verified locally), and sizes live in `src-tauri/src/models.rs`. Everything downloads
 into `<data dir>/models` and `<data dir>/bin` with streaming progress; nothing is bundled in
 git or the installer.
+
+## Download sources and mirror fallback
+
+Each Hugging Face-hosted artifact is fetched from huggingface.co first (two
+attempts — HF's Xet CDN bridge intermittently rejects downloads). Only if
+both fail is **hf-mirror.com** tried: a community-run Hugging Face proxy
+operated from China that serves the same repository paths. It is not
+affiliated with this project or with Hugging Face. Integrity does not depend
+on the source: every artifact is accepted only if its SHA-256 matches the
+pin in `models.rs`, so the worst a wrong or compromised mirror can do is
+fail the checksum (a checksum mismatch also skips that source immediately
+instead of re-downloading from it). To never contact the mirror, set the
+environment variable `FLYONTHEWALL_NO_HF_MIRROR=1`. GitHub-hosted tool
+binaries are single-source.

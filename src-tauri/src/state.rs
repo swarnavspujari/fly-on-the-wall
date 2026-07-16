@@ -37,9 +37,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn init() -> anyhow::Result<Self> {
-        let data_dir = default_data_dir();
-        // Move a pre-rebrand data dir into place before the DB is opened.
-        migrate_from_legacy_data_dir(&data_dir)?;
+        let data_dir = prepared_data_dir()?;
         let secrets = Arc::new(KeychainSecretStore::new());
         // Best-effort: copy secrets out of the pre-rebrand keychain service. A
         // locked or absent keyring must never block launch, and keys can be
@@ -94,6 +92,17 @@ fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(DATA_DIR)
+}
+
+/// The data dir with the legacy migration already applied — the ONLY safe
+/// way to learn the path before [`AppState::init`]: creating anything inside
+/// a fresh `FlyOnTheWall/` first (e.g. `logs/`) would make the migration
+/// think it already ran and strand a pre-rebrand user's data. Idempotent.
+pub fn prepared_data_dir() -> anyhow::Result<PathBuf> {
+    let data_dir = default_data_dir();
+    // Move a pre-rebrand data dir into place before the DB is opened.
+    migrate_from_legacy_data_dir(&data_dir)?;
+    Ok(data_dir)
 }
 
 /// Move the pre-rebrand data dir (`<data>/Looma`) into place, once, before the

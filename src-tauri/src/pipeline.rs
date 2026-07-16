@@ -260,12 +260,16 @@ pub async fn run_with(
         // be ensured (e.g. offline), Groq still runs alone.
         let model_id = model_override
             .unwrap_or_else(|| hw::default_model_for_tier(&tier, max_quality).to_string());
+        let pinned_cpu = {
+            let storage = state.storage.lock().unwrap();
+            cpu_pinned_for_model(&storage, &model_id)
+        };
         let local = async {
             let exe = models::ensure_tool(
                 on_model,
                 &data_dir,
-                "whisper-bin",
-                &["whisper-cli"],
+                models::WHISPER_ENGINE_ID,
+                models::WHISPER_CLI_NAMES,
                 "install whisper.cpp so cloud transcription has a local fallback",
             )
             .await?;
@@ -274,7 +278,12 @@ pub async fn run_with(
                 exe,
                 model,
                 threads,
-                force_cpu: !use_gpu,
+                // macOS additionally forces CPU even before any pin exists:
+                // an unpinned machine may be exactly the one whose Metal
+                // init aborts, and this rescue path is where reliability
+                // beats speed.
+                force_cpu: cfg!(target_os = "macos")
+                    || local_fallback_force_cpu(use_gpu, pinned_cpu),
             })
         }
         .await;
@@ -291,14 +300,48 @@ pub async fn run_with(
         let whisper_exe = models::ensure_tool(
             on_model,
             &data_dir,
-            "whisper-bin",
-            &["whisper-cli"],
+            models::WHISPER_ENGINE_ID,
+            models::WHISPER_CLI_NAMES,
             "install whisper.cpp (macOS: brew install whisper-cpp; Linux: build from \
              source or use your package manager) or enable the Groq cloud fallback \
              in Settings",
         )
         .await?;
-        let model_path = models::ensure(on_model, &data_dir, &model_id).await?;
+        // A wanted-but-absent model that can't be downloaded (offline, CDN
+        // outage) must not sink the meeting when another model is already on
+        // disk — fall back to the best installed one, visibly.
+        let (model_id, model_path) = match models::ensure(on_model, &data_dir, &model_id).await {
+            Ok(path) => (model_id, path),
+            Err(e) => match models::best_installed_asr_model(&data_dir, &model_id) {
+                Some((fallback_id, path)) => {
+                    tracing::warn!(
+                        wanted = %model_id, using = fallback_id, error = %e,
+                        "model unavailable — using installed model instead"
+                    );
+                    // Human names, and no em-dash: the frontend already
+                    // joins stage and detail with one.
+                    let name = |id: &str| {
+                        models::artifact(id)
+                            .map(|a| a.display)
+                            .unwrap_or(id)
+                            .to_string()
+                    };
+                    emit_stage(
+                        state,
+                        on_stage,
+                        meeting_id,
+                        "ensuring-models",
+                        Some(format!(
+                            "{} unavailable, transcribing with installed {}",
+                            name(&model_id),
+                            name(fallback_id)
+                        )),
+                    );
+                    (fallback_id.to_string(), path)
+                }
+                None => return Err(e),
+            },
+        };
 
         // GPU offload. Windows: the pinned Vulkan build, but only when a
         // one-time benchmark measured it faster on this machine (gpu.rs);
@@ -354,15 +397,57 @@ pub async fn run_with(
                 }),
                 Some(model_id),
             ),
-            None => GuardedAsr::single(Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
-                exe: whisper_exe,
-                model: model_path,
-                threads,
-                // On a GPU-capable build (Metal on macOS) honor the off
-                // switch; the Windows CPU build has no GPU backend and
-                // ignores it.
-                force_cpu: !use_gpu,
-            })),
+            None => {
+                // macOS: whisper.cpp defaults to Metal, and on GPUs that
+                // Metal can't actually serve (e.g. Intel-era Macs) ggml's
+                // Metal init aborts with SIGABRT — that crash must not sink
+                // the meeting. Run Metal as a guarded primary with a
+                // forced-CPU fallback — mirroring the Windows Vulkan guard —
+                // and honor a prior runtime-failure pin so later meetings
+                // skip the doomed Metal attempt entirely (toggling the
+                // Settings switch off→on clears the pin, same as Windows).
+                #[cfg(target_os = "macos")]
+                {
+                    let pinned_cpu = {
+                        let storage = state.storage.lock().unwrap();
+                        cpu_pinned_for_model(&storage, &model_id)
+                    };
+                    if use_gpu && !pinned_cpu {
+                        GuardedAsr::with_cpu_fallback(
+                            Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
+                                exe: whisper_exe.clone(),
+                                model: model_path.clone(),
+                                threads,
+                                force_cpu: false,
+                            }),
+                            "whisper.cpp-metal",
+                            Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
+                                exe: whisper_exe,
+                                model: model_path,
+                                threads,
+                                force_cpu: true,
+                            }),
+                            Some(model_id),
+                        )
+                    } else {
+                        GuardedAsr::single(Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
+                            exe: whisper_exe,
+                            model: model_path,
+                            threads,
+                            force_cpu: true,
+                        }))
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                GuardedAsr::single(Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
+                    exe: whisper_exe,
+                    model: model_path,
+                    threads,
+                    // On a GPU-capable build honor the off switch; the
+                    // Windows CPU build has no GPU backend and ignores it.
+                    force_cpu: !use_gpu,
+                }))
+            }
         }
     };
     let diarizer = fly_diarize::sherpa::SherpaDiarizeEngine {
@@ -403,6 +488,24 @@ pub async fn run_with(
     let on_fallback =
         |detail: String| emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
 
+    // Batch progress from the engine → a live "label (42%)" stage detail.
+    // Percentages are speech-time fractions (silence is never decoded), the
+    // honest measure of remaining work on long recordings. Parentheses, not
+    // an em-dash: the frontend already joins stage and detail with one.
+    let progress_detail = |label: Option<&'static str>| {
+        move |p: fly_asr::TranscribeProgress| {
+            if p.total_ms == 0 {
+                return;
+            }
+            let pct = (p.done_ms * 100 / p.total_ms).min(100);
+            let detail = match label {
+                Some(l) => format!("{l} ({pct}%)"),
+                None => format!("{pct}%"),
+            };
+            emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
+        }
+    };
+
     if per_channel {
         let mic_16k = prep(mic_wav.as_ref().unwrap(), "mic.16k.wav")?;
         let sys_16k = prep(system_wav.as_ref().unwrap(), "system.16k.wav")?;
@@ -415,7 +518,16 @@ pub async fn run_with(
             "transcribing",
             Some("your microphone".into()),
         );
-        let mic_raw = guard_loops(asr.transcribe(&mic_16k, &opts, &on_fallback).await?, "mic");
+        let mic_raw = guard_loops(
+            asr.transcribe(
+                &mic_16k,
+                &opts,
+                &on_fallback,
+                &progress_detail(Some("your microphone")),
+            )
+            .await?,
+            "mic",
+        );
         language = language.or(mic_raw.language.clone());
 
         emit_stage(
@@ -426,7 +538,13 @@ pub async fn run_with(
             Some("other participants".into()),
         );
         let sys_raw = guard_loops(
-            asr.transcribe(&sys_16k, &opts, &on_fallback).await?,
+            asr.transcribe(
+                &sys_16k,
+                &opts,
+                &on_fallback,
+                &progress_detail(Some("other participants")),
+            )
+            .await?,
             "system",
         );
         language = language.or(sys_raw.language.clone());
@@ -492,7 +610,8 @@ pub async fn run_with(
 
         emit_stage(state, on_stage, meeting_id, "transcribing", None);
         let raw = guard_loops(
-            asr.transcribe(&track_16k, &opts, &on_fallback).await?,
+            asr.transcribe(&track_16k, &opts, &on_fallback, &progress_detail(None))
+                .await?,
             "mixed",
         );
         language = raw.language.clone();
@@ -813,9 +932,14 @@ impl GuardedAsr {
         wav: &Path,
         opts: &TranscribeOptions,
         notify: &(dyn Fn(String) + Send + Sync),
+        on_progress: fly_asr::TranscribeProgressFn<'_>,
     ) -> Result<RawTranscript, String> {
         if !self.failed_over() {
-            return match self.primary.transcribe(wav, opts).await {
+            return match self
+                .primary
+                .transcribe_with_progress(wav, opts, on_progress)
+                .await
+            {
                 Ok(raw) => Ok(raw),
                 Err(e) => {
                     let Some(cpu) = &self.cpu_fallback else {
@@ -830,17 +954,45 @@ impl GuardedAsr {
                     tracing::warn!(error = %msg, "{ui}");
                     notify(ui.into());
                     *self.failure.lock().unwrap() = Some(msg);
-                    cpu.transcribe(wav, opts).await.map_err(|e| e.to_string())
+                    // The fallback engine emits an immediate 0% event;
+                    // letting it through would clobber the failover notice
+                    // just shown. Progress resumes with the first batch.
+                    let after_first_batch = move |p: fly_asr::TranscribeProgress| {
+                        if p.done_ms > 0 {
+                            on_progress(p);
+                        }
+                    };
+                    cpu.transcribe_with_progress(wav, opts, &after_first_batch)
+                        .await
+                        .map_err(|e| e.to_string())
                 }
             };
         }
         self.cpu_fallback
             .as_ref()
             .expect("failed_over implies a fallback engine")
-            .transcribe(wav, opts)
+            .transcribe_with_progress(wav, opts, on_progress)
             .await
             .map_err(|e| e.to_string())
     }
+}
+
+/// Whether a stored GPU verdict pins this machine (and model) to CPU — a
+/// benchmark that measured CPU faster, or a recorded GPU runtime failure
+/// (e.g. the macOS Metal abort). Invalidated by a model change, like the
+/// verdict itself.
+fn cpu_pinned_for_model(storage: &fly_storage::Storage, model_id: &str) -> bool {
+    gpu::stored(storage).is_some_and(|b| b.verdict == "cpu" && b.model_id == model_id)
+}
+
+/// `force_cpu` for the local engine backing the Groq cloud fallback. It is
+/// the last engine in the chain — nothing rescues the meeting if it crashes
+/// — so besides the GPU switch it honors a stored CPU pin: a Groq outage
+/// must never land on an engine already known to abort on this machine's
+/// GPU. Harmless where the resolved whisper-bin is the CPU build (Windows),
+/// which ignores `-ng`.
+fn local_fallback_force_cpu(gpu_setting_on: bool, pinned_cpu: bool) -> bool {
+    !gpu_setting_on || pinned_cpu
 }
 
 /// Recovery for a meeting folder wrongly parked under `recordings/_unlinked/`:
@@ -1048,6 +1200,7 @@ mod tests {
                 Path::new("unused.wav"),
                 &TranscribeOptions::default(),
                 &notify,
+                &|_| {},
             )
             .await
             .expect("fallback must rescue the meeting");
@@ -1063,6 +1216,35 @@ mod tests {
         );
     }
 
+    /// A stored CPU pin (benchmark verdict or recorded Metal runtime
+    /// failure) must force the Groq-fallback local engine onto CPU: it is
+    /// the last engine in the chain, so a doomed GPU attempt there would
+    /// sink the meeting a Groq outage already put at risk.
+    #[test]
+    fn pinned_cpu_verdict_forces_cpu_on_groq_fallback_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = fly_storage::Storage::open(dir.path()).unwrap();
+
+        // No verdict stored — only the GPU switch decides.
+        assert!(!cpu_pinned_for_model(&storage, "small-q5"));
+        assert!(!local_fallback_force_cpu(
+            true,
+            cpu_pinned_for_model(&storage, "small-q5")
+        ));
+        assert!(local_fallback_force_cpu(false, false), "switch off → CPU");
+
+        // A Metal runtime failure pins this machine+model to CPU.
+        gpu::record_runtime_failure(&storage, "small-q5", "ggml_metal_init: error");
+        assert!(cpu_pinned_for_model(&storage, "small-q5"));
+        assert!(local_fallback_force_cpu(
+            true,
+            cpu_pinned_for_model(&storage, "small-q5")
+        ));
+
+        // A different model invalidates the pin (same rule as gpu::plan).
+        assert!(!cpu_pinned_for_model(&storage, "large-v3"));
+    }
+
     #[tokio::test]
     async fn rejected_cloud_without_fallback_surfaces_marker_for_scheduler() {
         let asr = GuardedAsr::single(Box::new(RejectingCloud));
@@ -1070,6 +1252,7 @@ mod tests {
             .transcribe(
                 Path::new("unused.wav"),
                 &TranscribeOptions::default(),
+                &|_| {},
                 &|_| {},
             )
             .await

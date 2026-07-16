@@ -1,7 +1,8 @@
 import type { CSSProperties, ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Plus } from "lucide-react";
 import { api } from "../api";
+import { WHISPER_ENGINE_ID } from "../types";
 import type {
   AsrSettings,
   AudioDevice,
@@ -31,6 +32,10 @@ interface Props {
   updater: Updater;
   recordingActive: boolean;
   appVersion: string | null;
+  /** Deep-link from the transcribe error: "engine" opens Technical view
+   *  scrolled to the transcription-engine row; "groq" opens Technical view
+   *  scrolled to the Groq card with the enable checkbox visible. */
+  initialFocus?: "engine" | "groq" | null;
   onClose: () => void;
 }
 
@@ -177,6 +182,7 @@ export default function SettingsModal({
   updater,
   recordingActive,
   appVersion,
+  initialFocus = null,
   onClose,
 }: Props) {
   const [settings, setSettings] = useState<AsrSettings | null>(null);
@@ -194,7 +200,21 @@ export default function SettingsModal({
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
 
   // Presentational view mode — Technical reveals model installs, GPU + OAuth details.
-  const [technical, setTechnical] = useState(false);
+  // A deep-link forces Technical so its target (engine row, or the Groq
+  // enable checkbox under the Groq card) is actually rendered.
+  const [technical, setTechnical] = useState(initialFocus !== null);
+  const engineRowRef = useRef<HTMLDivElement>(null);
+  const groqCardRef = useRef<HTMLDivElement>(null);
+  const didFocusRef = useRef(false);
+  // Deep-link: once settings have loaded (target is rendered), scroll it into
+  // view a single time — not on every later refresh (e.g. post-install).
+  useEffect(() => {
+    if (initialFocus && settings && !didFocusRef.current) {
+      didFocusRef.current = true;
+      const target = initialFocus === "groq" ? groqCardRef : engineRowRef;
+      target.current?.scrollIntoView({ block: "center" });
+    }
+  }, [initialFocus, settings]);
   // Appearance control (System / Light / Dark) — wired to the shared theme hook.
   const { theme, setTheme } = useTheme();
 
@@ -568,10 +588,23 @@ export default function SettingsModal({
   };
 
   const asrModels = settings?.models.filter((m) => m.id.startsWith("ggml-")) ?? [];
-  const otherModels = settings?.models.filter((m) => !m.id.startsWith("ggml-")) ?? [];
+  // The whisper.cpp engine gets a dedicated, friendlier "Transcription
+  // engine" row below instead of a cryptic binary entry here. Exact-id match:
+  // a prefix filter would also hide whisper-bin-vulkan, the Windows GPU
+  // build the benchmark manages, which must stay visible in this list.
+  const otherModels =
+    settings?.models.filter((m) => !m.id.startsWith("ggml-") && m.id !== WHISPER_ENGINE_ID) ?? [];
+  const engineInstalling = downloading === WHISPER_ENGINE_ID;
+  const engineProg =
+    engineInstalling && modelProgress?.id === WHISPER_ENGINE_ID && modelProgress.total > 0
+      ? modelProgress
+      : null;
+  const enginePct = engineProg ? Math.round((engineProg.downloaded / engineProg.total) * 100) : 0;
 
   const groqHasKey = !!settings?.has_groq_key || !!groqKey;
-  const showGroqCard = tier === "cloud" || useGroq;
+  // The Groq deep-link must land somewhere the user can actually enable it,
+  // so it renders the card even before the toggle/tier is on.
+  const showGroqCard = tier === "cloud" || useGroq || initialFocus === "groq";
 
   return (
     <Modal
@@ -698,36 +731,38 @@ export default function SettingsModal({
 
           {/* Cloud tier / Groq fallback → collect the Groq key here */}
           {showGroqCard && (
-            <Card tone="muted" pad="sm" radius="md">
-              <div className="mb-2 flex items-center gap-2">
-                <span className="text-text" style={{ fontSize: "12.5px", fontWeight: 600 }}>
-                  Groq
-                </span>
-                <Badge tone="warning" size="sm">
-                  cloud
-                </Badge>
-                <Badge tone={groqHasKey ? "success" : "warning"} size="sm">
-                  {groqHasKey ? "key ✓" : "needs key"}
-                </Badge>
-              </div>
-              <Input
-                type="password"
-                style={MONO_KEY}
-                placeholder={
-                  settings?.has_groq_key ? "Groq API key saved — enter to replace" : "gsk_…"
-                }
-                value={groqKey}
-                onChange={(e) => setGroqKey(e.target.value)}
-              />
-              <p
-                className="text-text-3"
-                style={{ margin: "8px 0 0", fontSize: 11, lineHeight: 1.5 }}
-              >
-                Cloud transcription uploads meeting audio to Groq — it{" "}
-                <span style={LEAVES_PILL}>LEAVES</span> this machine. Who-said-what (diarization)
-                still runs locally. Applied when you press Save.
-              </p>
-            </Card>
+            <div ref={groqCardRef}>
+              <Card tone="muted" pad="sm" radius="md">
+                <div className="mb-2 flex items-center gap-2">
+                  <span className="text-text" style={{ fontSize: "12.5px", fontWeight: 600 }}>
+                    Groq
+                  </span>
+                  <Badge tone="warning" size="sm">
+                    cloud
+                  </Badge>
+                  <Badge tone={groqHasKey ? "success" : "warning"} size="sm">
+                    {groqHasKey ? "key ✓" : "needs key"}
+                  </Badge>
+                </div>
+                <Input
+                  type="password"
+                  style={MONO_KEY}
+                  placeholder={
+                    settings?.has_groq_key ? "Groq API key saved — enter to replace" : "gsk_…"
+                  }
+                  value={groqKey}
+                  onChange={(e) => setGroqKey(e.target.value)}
+                />
+                <p
+                  className="text-text-3"
+                  style={{ margin: "8px 0 0", fontSize: 11, lineHeight: 1.5 }}
+                >
+                  Cloud transcription uploads meeting audio to Groq — it{" "}
+                  <span style={LEAVES_PILL}>LEAVES</span> this machine. Who-said-what (diarization)
+                  still runs locally. Applied when you press Save.
+                </p>
+              </Card>
+            </div>
           )}
 
           {tier !== "cloud" && (
@@ -774,6 +809,10 @@ export default function SettingsModal({
         {technical && (
           <section className="space-y-3">
             <SectionLabel>Transcription model</SectionLabel>
+            <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
+              A specific choice here overrides the Hardware tier and “Maximum quality” settings.
+              “Auto (per tier)” uses the tier’s default.
+            </p>
             <Select
               style={{ maxWidth: "20rem" }}
               value={modelId}
@@ -799,6 +838,72 @@ export default function SettingsModal({
           <section className="space-y-2">
             <SectionLabel>Models</SectionLabel>
             <div>
+              {/* Transcription engine — the whisper.cpp binary that actually
+                  runs the weights below. Weights alone can't transcribe, so its
+                  state is surfaced explicitly rather than failing at run time. */}
+              {settings && (
+                <div
+                  ref={engineRowRef}
+                  className="flex items-center justify-between gap-3 border-t border-line-2 py-2"
+                >
+                  <div className="min-w-0">
+                    <div
+                      className="truncate text-text"
+                      style={{ fontFamily: "var(--font-mono)", fontSize: "12.5px" }}
+                    >
+                      Transcription engine (whisper.cpp)
+                    </div>
+                    <div className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
+                      {settings.engine_installed
+                        ? "Installed — runs the models above on this machine."
+                        : settings.engine_managed
+                          ? "Required to transcribe. Downloaded weights can't run without it."
+                          : "Required to transcribe. Install whisper.cpp yourself — macOS: brew install whisper-cpp; Linux: your package manager or build from source."}
+                    </div>
+                    {downloadErrors[WHISPER_ENGINE_ID] && (
+                      <div style={{ fontSize: 11, color: "var(--error-text)" }}>
+                        {downloadErrors[WHISPER_ENGINE_ID]}
+                      </div>
+                    )}
+                  </div>
+                  <span className="flex shrink-0 items-center gap-2">
+                    {settings.engine_installed ? (
+                      <Badge tone="success" dot>
+                        ready
+                      </Badge>
+                    ) : engineInstalling ? (
+                      engineProg ? (
+                        <span className="flex items-center gap-2">
+                          <ProgressBar value={enginePct} style={{ width: 96 }} />
+                          <span
+                            className="text-text-3"
+                            style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
+                          >
+                            {enginePct}%
+                          </span>
+                        </span>
+                      ) : (
+                        <span
+                          className="text-text-3"
+                          style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
+                        >
+                          downloading…
+                        </span>
+                      )
+                    ) : settings.engine_managed ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void download(WHISPER_ENGINE_ID)}
+                      >
+                        Install
+                      </Button>
+                    ) : (
+                      <Badge tone="warning">missing</Badge>
+                    )}
+                  </span>
+                </div>
+              )}
               {[...asrModels, ...otherModels].map((m) => {
                 const prog =
                   downloading === m.id &&
@@ -1470,6 +1575,22 @@ export default function SettingsModal({
             </div>
           </Card>
         </section>
+
+        {/* Diagnostics (Technical) — where the rolling log files live */}
+        {technical && (
+          <section className="flex items-center justify-between gap-3">
+            <div>
+              <SectionLabel>Diagnostics</SectionLabel>
+              <p className="text-text-3" style={{ margin: 0, fontSize: 11, lineHeight: 1.5 }}>
+                The app writes local log files (last few days) for troubleshooting. Nothing leaves
+                this machine.
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => void api.revealLogsDir()}>
+              Open logs folder
+            </Button>
+          </section>
+        )}
 
         {/* App updates */}
         <section className="space-y-2">

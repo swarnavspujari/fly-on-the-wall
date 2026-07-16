@@ -365,6 +365,16 @@ pub fn reveal_data_dir(app: tauri::AppHandle, state: State<'_, AppState>) -> Cmd
         .map_err(err_str)
 }
 
+/// "Open logs folder" (Settings → Technical): where the rolling diagnostic
+/// logs land (logging.rs). Created on demand — file logging may have failed
+/// to initialize without taking the app down.
+#[tauri::command]
+pub fn reveal_logs_dir(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let dir = state.data_dir.join(crate::logging::LOGS_DIR);
+    std::fs::create_dir_all(&dir).map_err(err_str)?;
+    app.opener().reveal_item_in_dir(&dir).map_err(err_str)
+}
+
 /// Claude Desktop / MCP client config snippet pointing at the flyonthewall-mcp
 /// binary that ships next to the app executable.
 #[tauri::command]

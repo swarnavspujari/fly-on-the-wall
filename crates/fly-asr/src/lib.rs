@@ -183,6 +183,18 @@ pub struct RawTranscript {
     pub segments: Vec<RawSegment>,
 }
 
+/// Chunk-level progress from engines that decode a recording in batches.
+/// Both fields are speech milliseconds (silence never reaches the decoder),
+/// so `done_ms / total_ms` is an honest fraction of the remaining work.
+#[derive(Debug, Clone, Copy)]
+pub struct TranscribeProgress {
+    pub done_ms: u64,
+    pub total_ms: u64,
+}
+
+/// Sink for [`TranscribeProgress`] events during one transcription run.
+pub type TranscribeProgressFn<'a> = &'a (dyn Fn(TranscribeProgress) + Send + Sync);
+
 #[async_trait::async_trait]
 pub trait TranscriptionEngine: Send + Sync {
     /// Stable id: "whisper.cpp", "parakeet", "groq".
@@ -190,4 +202,15 @@ pub trait TranscriptionEngine: Send + Sync {
     /// False only for cloud engines; the UI shows a privacy notice for those.
     fn is_local(&self) -> bool;
     async fn transcribe(&self, wav_path: &Path, opts: &TranscribeOptions) -> Result<RawTranscript>;
+    /// Like [`transcribe`](Self::transcribe), reporting batch progress where
+    /// the engine can. Default: no progress (single-shot engines like Groq).
+    async fn transcribe_with_progress(
+        &self,
+        wav_path: &Path,
+        opts: &TranscribeOptions,
+        on_progress: TranscribeProgressFn<'_>,
+    ) -> Result<RawTranscript> {
+        let _ = on_progress;
+        self.transcribe(wav_path, opts).await
+    }
 }

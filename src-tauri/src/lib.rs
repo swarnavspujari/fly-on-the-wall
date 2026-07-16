@@ -11,6 +11,7 @@ pub mod hw;
 mod import_commands;
 mod live;
 pub mod llm_commands;
+pub mod logging;
 pub mod models;
 pub mod ollama;
 pub mod pipeline;
@@ -22,11 +23,13 @@ pub mod state;
 use tauri::Manager;
 
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // Resolve (and legacy-migrate) the data dir BEFORE file logging exists:
+    // logging::init creating `FlyOnTheWall/logs` first would make the
+    // migration think it already ran. A migration failure falls back to
+    // stdout-only logging here and surfaces via the startup dialog below
+    // (AppState::init repeats the same idempotent preparation).
+    let data_dir = state::prepared_data_dir();
+    logging::init(data_dir.as_deref().ok());
 
     let mut builder = tauri::Builder::default();
 
@@ -101,6 +104,20 @@ pub fn run() {
                     .await;
                 });
             }
+            // Reclaim disk from download temp files a crashed run stranded
+            // (per-attempt unique names — nothing else ever opens them).
+            {
+                let data_dir = app.state::<state::AppState>().data_dir.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        models::sweep_stale_downloads(
+                            &data_dir,
+                            std::time::Duration::from_secs(60 * 60),
+                        );
+                    })
+                    .await;
+                });
+            }
             // Recording self-heal: re-attach (or fully resurrect) finished
             // recordings whose database write was lost — the manifests written
             // at stop time make this possible even after the database itself
@@ -154,6 +171,7 @@ pub fn run() {
             commands::open_attachment,
             commands::reveal_attachment,
             commands::reveal_data_dir,
+            commands::reveal_logs_dir,
             commands::mcp_config,
             commands::get_app_setting,
             commands::set_app_setting,
@@ -202,6 +220,7 @@ pub fn run() {
             calendar_commands::set_calendar_enabled,
             calendar_commands::start_meeting_from_event,
             screen_commands::screen_status,
+            screen_commands::list_capture_windows,
             screen_commands::start_screen_recording,
             screen_commands::stop_screen_recording,
             screen_commands::ensure_video_thumbnail,

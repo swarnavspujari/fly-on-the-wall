@@ -167,6 +167,10 @@ export interface PipelineProgress {
   error: string | null;
 }
 
+/** Managed-artifact id of the whisper.cpp engine — the ONE frontend copy,
+ *  mirroring models::WHISPER_ENGINE_ID in the backend. */
+export const WHISPER_ENGINE_ID = "whisper-bin";
+
 export interface ModelProgress {
   id: string;
   downloaded: number;
@@ -209,6 +213,12 @@ export interface AsrSettings {
   gpu_bench: GpuBench | null;
   hw: HwInfo;
   models: ModelStatus[];
+  /** whisper-cli engine is resolvable now (managed install or on PATH).
+   *  Downloaded model weights can't transcribe without it. */
+  engine_installed: boolean;
+  /** This OS can install the engine in-app (a managed artifact exists);
+   *  when false the UI shows manual install guidance instead of a button. */
+  engine_managed: boolean;
 }
 
 export interface AsrSettingsUpdate {
