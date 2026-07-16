@@ -97,10 +97,12 @@ Separate branch: `feat/managed-mac-whisper-rehost` (supersedes #26).
   - The "X unavailable, transcribing with installed Y" stage detail is
     overwritten by the next stage emit almost immediately — effectively
     logs-only. A persistent-notice mechanism would be its real fix.
-  - Pre-existing (kept by the rewrite, inherited from main): concurrent
-    `ensure()` calls for the same artifact share one temp file and hash the
-    network stream, not the disk file — two simultaneous downloads can
-    install corrupt bytes. Flagged as a follow-up task.
+  - Pre-existing (inherited from main, kept by the PR's rewrite): concurrent
+    `ensure()` calls for the same artifact shared one temp file while hashing
+    the network stream, not the disk file — two simultaneous downloads could
+    install corrupt bytes. **Fixed on this branch** in a follow-up commit:
+    every attempt gets its own `{id}.download.{pid}.{n}` temp path (+ test
+    `download_tmp_paths_are_unique_per_attempt`).
 
 ## PR #30 — actionable engine/model-download errors + Groq escape hatch
 
@@ -135,8 +137,9 @@ Contains #25 (see below). All nine findings fixed:
   is the sherpa download (ensured before whisper), so the engine notice's
   surfaced error text names sherpa — the engine genuinely is missing and the
   CTA is right, but the mixed messaging is worth knowing. Settings' engine
-  row doesn't know about an install started from the transcript notice
-  (second entry point to the pre-existing concurrent-download hazard above).
+  row doesn't know about an install started from the transcript notice —
+  redundant concurrent downloads are possible (now merely wasteful, no
+  longer corrupting: see the temp-path fix above).
 
 ## PR #25 — close as superseded
 

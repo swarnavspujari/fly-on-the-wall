@@ -473,6 +473,22 @@ pub async fn ensure(
     ensure_with(progress, data_dir, id, DownloadEffort::Full).await
 }
 
+/// A temp path no other download can be writing to. Concurrent `ensure`
+/// calls for the SAME artifact (e.g. the live-caption loop and a pipeline
+/// both resolving whisper-bin) used to share one `{id}.download` file: both
+/// writers interleaved into it, and since the SHA-256 is computed over each
+/// download's network stream — not the file on disk — the first to finish
+/// could verify its own clean stream yet rename/extract the interleaved
+/// bytes. Process id + an in-process counter make every attempt's file its
+/// own; a crashed run leaves at most a small stale `{id}.download.{pid}.{n}`
+/// file, which no later run ever opens.
+fn download_tmp_path(data_dir: &Path, id: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    data_dir.join(format!("{id}.download.{}.{n}", std::process::id()))
+}
+
 /// [`ensure`] with an explicit download effort.
 pub async fn ensure_with(
     progress: ProgressSink<'_>,
@@ -485,7 +501,7 @@ pub async fn ensure_with(
         return Ok(path);
     }
 
-    let tmp = data_dir.join(format!("{}.download", a.id));
+    let tmp = download_tmp_path(data_dir, a.id);
     if let Some(parent) = tmp.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -602,7 +618,7 @@ pub async fn ensure_with(
 /// bundled bsdtar delegates bzip2 to an external binary most machines lack,
 /// so shelling out breaks .tar.bz2 artifacts on clean installs. The format
 /// comes from `src_name` (the artifact URL) because the downloaded temp file
-/// is named `{id}.download`.
+/// carries a `{id}.download.{pid}.{n}` name, not the archive's extension.
 async fn extract_archive(archive: &Path, dest: &Path, src_name: &str) -> Result<(), String> {
     let archive = archive.to_path_buf();
     let dest = dest.to_path_buf();
@@ -714,6 +730,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("unsupported archive format"), "{err}");
+    }
+
+    /// Concurrent downloads of the same artifact must never share a temp
+    /// file — interleaved writers plus stream-side hashing could install
+    /// corrupt bytes. Every attempt gets its own path, under the data dir,
+    /// still recognizably named after the artifact.
+    #[test]
+    fn download_tmp_paths_are_unique_per_attempt() {
+        let dir = Path::new("data");
+        let a = download_tmp_path(dir, "whisper-bin");
+        let b = download_tmp_path(dir, "whisper-bin");
+        assert_ne!(a, b, "two attempts must not share a temp file");
+        for p in [&a, &b] {
+            assert_eq!(p.parent(), Some(dir));
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                name.starts_with("whisper-bin.download."),
+                "temp name should stay attributable to its artifact: {name}"
+            );
+        }
     }
 
     /// The opt-out drops the mirror and leaves only the pinned primary.
