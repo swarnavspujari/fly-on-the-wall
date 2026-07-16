@@ -122,13 +122,24 @@ struct RawBlock {
     sources: Vec<usize>,
 }
 
-/// Parse the LLM's block array; tolerate fences/prose around the JSON.
-/// Fallback: whole output becomes untraced AI paragraphs (never lose work).
+/// Parse the LLM's block array; tolerate fences/prose around the JSON, and
+/// salvage the complete blocks of an array truncated mid-flight (a capped
+/// response — e.g. adaptive thinking eating the token budget — must degrade
+/// to "the tail is missing", never to raw JSON pasted into the note).
+///
+/// Returns an EMPTY vec when the output was clearly attempting the JSON
+/// contract but nothing usable could be recovered — the caller must treat
+/// that as a failure the user sees, not save it. The prose fallback (whole
+/// output as untraced AI paragraphs) only applies to genuinely non-JSON
+/// answers.
 pub fn parse_enhanced_blocks(llm_output: &str, segment_ids: &[String]) -> Vec<NoteBlock> {
     if let Some(blocks) = try_parse_json(llm_output, segment_ids) {
         if !blocks.is_empty() {
             return blocks;
         }
+    }
+    if looks_like_block_json(llm_output) {
+        return Vec::new();
     }
     llm_output
         .split("\n\n")
@@ -140,11 +151,11 @@ pub fn parse_enhanced_blocks(llm_output: &str, segment_ids: &[String]) -> Vec<No
 
 fn try_parse_json(output: &str, segment_ids: &[String]) -> Option<Vec<NoteBlock>> {
     let start = output.find('[')?;
-    let end = output.rfind(']')?;
-    if end <= start {
-        return None;
-    }
-    let raw: Vec<RawBlock> = serde_json::from_str(&output[start..=end]).ok()?;
+    let raw: Vec<RawBlock> = output
+        .rfind(']')
+        .filter(|end| *end > start)
+        .and_then(|end| serde_json::from_str(&output[start..=end]).ok())
+        .or_else(|| salvage_truncated_array(&output[start..]))?;
     Some(
         raw.into_iter()
             .filter(|b| !b.markdown.trim().is_empty())
@@ -162,6 +173,32 @@ fn try_parse_json(output: &str, segment_ids: &[String]) -> Option<Vec<NoteBlock>
             })
             .collect(),
     )
+}
+
+/// Largest parseable prefix of a block array cut off mid-flight: close the
+/// array after each complete top-level object, scanning from the end (the
+/// first candidate that parses keeps the most blocks). Candidates that cut
+/// inside a string simply fail to parse and are skipped; attempts are capped
+/// so pathological outputs stay cheap.
+fn salvage_truncated_array(json: &str) -> Option<Vec<RawBlock>> {
+    json.char_indices()
+        .rev()
+        .filter(|(_, c)| *c == '}')
+        .take(50)
+        .find_map(|(idx, _)| serde_json::from_str(&format!("{}]", &json[..=idx])).ok())
+}
+
+/// Whether an unparseable output was clearly ATTEMPTING the JSON block
+/// contract (fenced or bare array carrying the block fields) — the case
+/// where the prose fallback would paste JSON gibberish into the note.
+fn looks_like_block_json(output: &str) -> bool {
+    let t = output.trim_start();
+    let t = t
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
+        .unwrap_or(t)
+        .trim_start();
+    t.starts_with('[') && output.contains("\"markdown\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +666,35 @@ mod tests {
         assert!(blocks
             .iter()
             .all(|b| matches!(b.origin, BlockOrigin::Ai { .. })));
+    }
+
+    /// The 2026-07-16 field failure: claude-sonnet-5's adaptive thinking ate
+    /// the token budget and the block array arrived fenced AND cut off
+    /// mid-string. The complete leading blocks must be salvaged — the raw
+    /// JSON must never be pasted into the note.
+    #[test]
+    fn truncated_fenced_array_salvages_complete_blocks() {
+        let out = "```json\n[\n  \
+            {\"type\": \"ai\", \"markdown\": \"## Summary\\nStatus call.\", \"sources\": [2, 7]},\n\n\
+            {\"type\": \"ai\", \"markdown\": \"## Decisions\\n- 18pt font\", \"sources\": [19]},\n\n\
+            {\"type\": \"ai\", \"markdown\": \"## Action items\\n- Pull the COI agreement from Aa";
+        let blocks = parse_enhanced_blocks(out, &["s0".into(), "s1".into(), "s2".into()]);
+        assert_eq!(blocks.len(), 2, "the two complete blocks survive");
+        assert!(blocks[0].markdown.starts_with("## Summary"));
+        assert!(blocks[1].markdown.starts_with("## Decisions"));
+        assert!(
+            blocks.iter().all(|b| !b.markdown.contains("{\"type\"")),
+            "no raw JSON may leak into the note"
+        );
+    }
+
+    /// JSON-shaped output with nothing salvageable (cut off inside the very
+    /// first block) must come back EMPTY — the caller fails visibly instead
+    /// of saving a note full of JSON.
+    #[test]
+    fn unsalvageable_json_output_yields_no_blocks() {
+        let out = "```json\n[\n  {\"type\": \"ai\", \"markdown\": \"## Summ";
+        assert!(parse_enhanced_blocks(out, &[]).is_empty());
     }
 
     // -----------------------------------------------------------------------
