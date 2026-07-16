@@ -454,9 +454,10 @@ pub async fn run_with(
     let on_fallback =
         |detail: String| emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
 
-    // Batch progress from the engine → a live "label — 42%" stage detail.
+    // Batch progress from the engine → a live "label (42%)" stage detail.
     // Percentages are speech-time fractions (silence is never decoded), the
-    // honest measure of remaining work on long recordings.
+    // honest measure of remaining work on long recordings. Parentheses, not
+    // an em-dash: the frontend already joins stage and detail with one.
     let progress_detail = |label: Option<&'static str>| {
         move |p: fly_asr::TranscribeProgress| {
             if p.total_ms == 0 {
@@ -464,7 +465,7 @@ pub async fn run_with(
             }
             let pct = (p.done_ms * 100 / p.total_ms).min(100);
             let detail = match label {
-                Some(l) => format!("{l} — {pct}%"),
+                Some(l) => format!("{l} ({pct}%)"),
                 None => format!("{pct}%"),
             };
             emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
@@ -483,7 +484,16 @@ pub async fn run_with(
             "transcribing",
             Some("your microphone".into()),
         );
-        let mic_raw = guard_loops(asr.transcribe(&mic_16k, &opts, &on_fallback, &progress_detail(Some("your microphone"))).await?, "mic");
+        let mic_raw = guard_loops(
+            asr.transcribe(
+                &mic_16k,
+                &opts,
+                &on_fallback,
+                &progress_detail(Some("your microphone")),
+            )
+            .await?,
+            "mic",
+        );
         language = language.or(mic_raw.language.clone());
 
         emit_stage(
@@ -494,7 +504,13 @@ pub async fn run_with(
             Some("other participants".into()),
         );
         let sys_raw = guard_loops(
-            asr.transcribe(&sys_16k, &opts, &on_fallback, &progress_detail(Some("other participants"))).await?,
+            asr.transcribe(
+                &sys_16k,
+                &opts,
+                &on_fallback,
+                &progress_detail(Some("other participants")),
+            )
+            .await?,
             "system",
         );
         language = language.or(sys_raw.language.clone());
@@ -560,7 +576,8 @@ pub async fn run_with(
 
         emit_stage(state, on_stage, meeting_id, "transcribing", None);
         let raw = guard_loops(
-            asr.transcribe(&track_16k, &opts, &on_fallback, &progress_detail(None)).await?,
+            asr.transcribe(&track_16k, &opts, &on_fallback, &progress_detail(None))
+                .await?,
             "mixed",
         );
         language = raw.language.clone();
@@ -884,7 +901,11 @@ impl GuardedAsr {
         on_progress: fly_asr::TranscribeProgressFn<'_>,
     ) -> Result<RawTranscript, String> {
         if !self.failed_over() {
-            return match self.primary.transcribe_with_progress(wav, opts, on_progress).await {
+            return match self
+                .primary
+                .transcribe_with_progress(wav, opts, on_progress)
+                .await
+            {
                 Ok(raw) => Ok(raw),
                 Err(e) => {
                     let Some(cpu) = &self.cpu_fallback else {
@@ -899,7 +920,15 @@ impl GuardedAsr {
                     tracing::warn!(error = %msg, "{ui}");
                     notify(ui.into());
                     *self.failure.lock().unwrap() = Some(msg);
-                    cpu.transcribe_with_progress(wav, opts, on_progress)
+                    // The fallback engine emits an immediate 0% event;
+                    // letting it through would clobber the failover notice
+                    // just shown. Progress resumes with the first batch.
+                    let after_first_batch = move |p: fly_asr::TranscribeProgress| {
+                        if p.done_ms > 0 {
+                            on_progress(p);
+                        }
+                    };
+                    cpu.transcribe_with_progress(wav, opts, &after_first_batch)
                         .await
                         .map_err(|e| e.to_string())
                 }

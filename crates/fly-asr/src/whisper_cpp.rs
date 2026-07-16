@@ -46,8 +46,7 @@ impl TranscriptionEngine for WhisperCppEngine {
     }
 
     async fn transcribe(&self, wav_path: &Path, opts: &TranscribeOptions) -> Result<RawTranscript> {
-        self.transcribe_with_progress(wav_path, opts, &|_| {})
-            .await
+        self.transcribe_with_progress(wav_path, opts, &|_| {}).await
     }
 
     async fn transcribe_with_progress(
@@ -77,14 +76,18 @@ impl TranscriptionEngine for WhisperCppEngine {
 
         let mut words = Vec::new();
         let mut language = None;
-        let mut done_speech_ms: u64 = 0;
-        on_progress(crate::TranscribeProgress {
-            done_ms: 0,
-            total_ms: total_speech_ms,
-        });
-        for batch in plan_batches(&spans, MAX_BATCH_SPEECH_MS) {
-            let batch_ms: u64 = batch.iter().map(|s| s.end_ms - s.start_ms).sum();
-            let (mut chunk, map) = stitch_spans(&samples, rate, &batch)
+        let batches = plan_batches(&spans, MAX_BATCH_SPEECH_MS);
+        // Initial 0% so the UI shows progress before the first — possibly
+        // minutes-long — batch completes. A silent recording (no speech)
+        // emits nothing: there is no work to report a fraction of.
+        if total_speech_ms > 0 {
+            on_progress(crate::TranscribeProgress {
+                done_ms: 0,
+                total_ms: total_speech_ms,
+            });
+        }
+        for (batch, progress) in batches.iter().zip(cumulative_progress(&batches)) {
+            let (mut chunk, map) = stitch_spans(&samples, rate, batch)
                 .map_err(|e| AsrError::BadAudio(e.to_string()))?;
             fly_audio::mix::normalize_peak(&mut chunk, NORMALIZE_TARGET_PEAK, NORMALIZE_MAX_GAIN);
             let raw = self.run_whisper_cli(&chunk, rate, opts).await?;
@@ -94,11 +97,7 @@ impl TranscriptionEngine for WhisperCppEngine {
                 w.end_ms = map_to_original(w.end_ms, &map);
                 w
             }));
-            done_speech_ms += batch_ms;
-            on_progress(crate::TranscribeProgress {
-                done_ms: done_speech_ms,
-                total_ms: total_speech_ms,
-            });
+            on_progress(progress);
         }
 
         Ok(RawTranscript {
@@ -264,6 +263,27 @@ pub(crate) fn plan_batches(spans: &[SpeechSpan], max_speech_ms: u64) -> Vec<Vec<
     batches
 }
 
+/// After-each-batch progress points for a batch plan. The guarantees
+/// consumers rely on: `done_ms` strictly increases, `total_ms` is constant,
+/// and the final point is exactly `total_ms` — the UI reaches 100% with no
+/// rounding drift. Empty for a silent recording (no batches). Extracted from
+/// the decode loop so the accounting is testable without a whisper-cli.
+pub(crate) fn cumulative_progress(batches: &[Vec<SpeechSpan>]) -> Vec<crate::TranscribeProgress> {
+    let total_ms: u64 = batches
+        .iter()
+        .flatten()
+        .map(|s| s.end_ms - s.start_ms)
+        .sum();
+    let mut done_ms = 0u64;
+    batches
+        .iter()
+        .map(|batch| {
+            done_ms += batch.iter().map(|s| s.end_ms - s.start_ms).sum::<u64>();
+            crate::TranscribeProgress { done_ms, total_ms }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +323,33 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0], vec![span(0, 200)]);
         assert_eq!(batches[1], vec![span(300, 310)]);
+    }
+
+    /// Multi-batch input: progress must rise strictly, keep a constant
+    /// total, and land on exactly 100% (no rounding drift at the end).
+    #[test]
+    fn progress_is_monotonic_and_ends_at_exactly_total() {
+        let spans = vec![span(0, 60), span(100, 150), span(200, 230), span(400, 520)];
+        let batches = plan_batches(&spans, 120_000);
+        assert!(batches.len() >= 3, "test needs genuinely multi-batch input");
+        let points = cumulative_progress(&batches);
+        assert_eq!(points.len(), batches.len());
+        let total: u64 = spans.iter().map(|s| s.end_ms - s.start_ms).sum();
+        let mut prev = 0u64;
+        for p in &points {
+            assert_eq!(p.total_ms, total);
+            assert!(p.done_ms > prev, "done_ms must strictly increase");
+            prev = p.done_ms;
+        }
+        assert_eq!(points.last().unwrap().done_ms, total, "must end at 100%");
+    }
+
+    /// A silent recording (VAD finds no speech) plans no batches and yields
+    /// no progress points; combined with the engine skipping the initial
+    /// event when total is 0, consumers never see a 0/0 fraction.
+    #[test]
+    fn silent_recording_yields_no_progress_points() {
+        assert!(cumulative_progress(&plan_batches(&[], 120_000)).is_empty());
     }
 
     #[test]
