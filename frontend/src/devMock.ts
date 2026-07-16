@@ -12,6 +12,13 @@
      fotwMockRecording = "1"  → recording_status returns an active capture
                                  (pinned RecordingBar + muted-output warning)
      fotwMockFirstRun  = "1"  → consent setting unset (shows FirstRunNotice)
+     fotwMockNoTranscript = "1"    → meetings report no transcript yet (the
+                                     "Transcribe recording" box + notices)
+     fotwMockEngineMissing = "1"   → whisper-cli reports not installed
+     fotwMockEngineUnmanaged = "1" → no managed engine artifact (manual UI)
+
+   QA hook: fotwMockEmit(event, payload) fires a mock backend event at the
+   app's listeners (pipeline:progress, model:progress, …) from the console.
    ============================================================ */
 
 const nowIso = () => new Date().toISOString();
@@ -256,6 +263,14 @@ const asrSettings = {
     { id: "whisper-large", display: "whisper large-v3", bytes: 3_100_000_000, installed: false },
     { id: "diarize", display: "pyannote-community-1", bytes: 400_000_000, installed: true },
     { id: "embed", display: "bge-small-en", bytes: 100_000_000, installed: true },
+    // The engine binary is filtered into its own row; the Vulkan GPU build
+    // must stay visible in the Models list (regression QA for the filter).
+    {
+      id: "whisper-bin-vulkan",
+      display: "whisper.cpp CLI (Vulkan GPU, v1.9.1)",
+      bytes: 23_632_146,
+      installed: false,
+    },
   ],
   // whisper-cli readiness (drives the Transcription-engine row + the
   // engine-missing notice). Flip via localStorage for dev-mock QA:
@@ -435,8 +450,22 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "get_meeting_for_note":
       return meeting(String(args.noteId));
     case "get_transcript":
+      // fotwMockNoTranscript = "1" → pre-transcription state (the
+      // "Transcribe recording" box, where the pipeline notices render).
+      if (
+        typeof localStorage !== "undefined" &&
+        localStorage.getItem("fotwMockNoTranscript") === "1"
+      ) {
+        return null;
+      }
       return transcript;
     case "get_cleaned_transcript":
+      if (
+        typeof localStorage !== "undefined" &&
+        localStorage.getItem("fotwMockNoTranscript") === "1"
+      ) {
+        return null;
+      }
       // Polished variant: same ids/speakers/timestamps, tidied text.
       return {
         ...transcript,
@@ -576,6 +605,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
 
 function installDevMock() {
   const callbacks: Record<number, (payload: unknown) => void> = {};
+  const listeners: Record<string, number[]> = {};
   let cbId = 1;
   const w = window as unknown as Record<string, unknown>;
   w.__TAURI_INTERNALS__ = {
@@ -591,11 +621,25 @@ function installDevMock() {
       return filePath;
     },
     async invoke(cmd: string, args: Record<string, unknown>) {
-      // event plugin: register/cleanup listeners without erroring
-      if (cmd === "plugin:event|listen" || cmd === "plugin:event|registerListener") return cbId++;
+      // event plugin: remember which handler listens to which event so QA can
+      // fire backend events by hand (see fotwMockEmit below)
+      if (cmd === "plugin:event|listen" || cmd === "plugin:event|registerListener") {
+        const ev = String((args as { event?: unknown })?.event ?? "");
+        const handler = Number((args as { handler?: unknown })?.handler ?? 0);
+        if (ev && handler) (listeners[ev] ??= []).push(handler);
+        return cbId++;
+      }
       if (cmd === "plugin:event|unlisten") return null;
       return handle(cmd, args || {});
     },
+  };
+  // QA hook — fire a mock backend event from the devtools console, e.g.:
+  //   fotwMockEmit("pipeline:progress", { meeting_id: "m1", stage: "transcribing",
+  //     detail: "your microphone (42%)", done: false, error: null })
+  //   fotwMockEmit("pipeline:progress", { meeting_id: "m1", stage: null, detail: null,
+  //     done: true, error: "whisper-cli is not installed — install whisper.cpp …" })
+  w.fotwMockEmit = (event: string, payload: unknown) => {
+    for (const id of listeners[event] ?? []) callbacks[id]?.({ event, id: 0, payload });
   };
   // The event plugin reads a separate global for listener bookkeeping.
   w.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
