@@ -318,13 +318,23 @@ pub async fn run_with(
                         wanted = %model_id, using = fallback_id, error = %e,
                         "model unavailable — using installed model instead"
                     );
+                    // Human names, and no em-dash: the frontend already
+                    // joins stage and detail with one.
+                    let name = |id: &str| {
+                        models::artifact(id)
+                            .map(|a| a.display)
+                            .unwrap_or(id)
+                            .to_string()
+                    };
                     emit_stage(
                         state,
                         on_stage,
                         meeting_id,
                         "ensuring-models",
                         Some(format!(
-                            "{model_id} unavailable — using installed {fallback_id}"
+                            "{} unavailable, transcribing with installed {}",
+                            name(&model_id),
+                            name(fallback_id)
                         )),
                     );
                     (fallback_id.to_string(), path)

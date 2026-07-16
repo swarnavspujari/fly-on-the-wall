@@ -325,6 +325,11 @@ fn candidate_urls_with(url: &str, allow_mirror: bool) -> Vec<String> {
     v
 }
 
+/// Error prefix shared by the producer in `download_and_verify` and the
+/// `retry_same_url` predicate, so a message reword can't silently decouple
+/// them.
+const CHECKSUM_MISMATCH_PREFIX: &str = "checksum mismatch";
+
 /// Whether a failed attempt is worth retrying against the SAME url. A
 /// checksum mismatch is deterministic for a given source — the host is
 /// simply serving a file that isn't the pinned one — so retrying it cannot
@@ -332,7 +337,7 @@ fn candidate_urls_with(url: &str, allow_mirror: bool) -> Vec<String> {
 /// next source. Transient failures (network, HTTP 5xx, Xet 403) get one
 /// retry.
 fn retry_same_url(error: &str) -> bool {
-    !error.starts_with("checksum mismatch")
+    !error.starts_with(CHECKSUM_MISMATCH_PREFIX)
 }
 
 /// One download attempt from one URL into `tmp`, streaming progress and
@@ -410,7 +415,7 @@ async fn download_and_verify(
     let digest = hex::encode(hasher.finalize());
     if digest != a.sha256 {
         return cleanup(format!(
-            "checksum mismatch (expected {}, got {digest})",
+            "{CHECKSUM_MISMATCH_PREFIX} (expected {}, got {digest})",
             a.sha256
         ))
         .await;
