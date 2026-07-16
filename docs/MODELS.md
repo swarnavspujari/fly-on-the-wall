@@ -38,10 +38,47 @@ local speaker turns (spec §6.3): "who said what" never depends on the network.
 
 | Artifact | Version | Size | Purpose |
 |---|---|---|---|
-| whisper.cpp CLI (`whisper-cli.exe`) | v1.9.1 (CPU build) | ~8 MB zip | ASR; the same zip ships `parakeet-cli.exe` for a future Parakeet engine |
+| whisper.cpp CLI (`whisper-cli.exe`, Windows) | v1.9.1 (CPU build) | ~8 MB zip | ASR; the same zip ships `parakeet-cli.exe` for a future Parakeet engine |
 | whisper.cpp CLI (Vulkan GPU, Windows) | v1.9.1 (`GGML_VULKAN=1` build) | ~24 MB zip | optional GPU ASR — one cross-vendor build (NVIDIA/AMD/Intel); see below |
+| whisper.cpp CLI (macOS universal2) | v1.9.1 (static, Metal embedded) | ~8 MB tar.bz2 | ASR — one archive for Intel + Apple Silicon; see "Building the macOS/Linux engine" |
+| whisper.cpp CLI (Linux x64) | v1.9.1 (static, portable CPU) | ~8 MB tar.bz2 | ASR |
 | sherpa-onnx diarization CLI | v1.13.3 | ~19 MB | speaker diarization |
 | ffmpeg | n8.1 (BtbN autobuild, dated tag) | ~79 MB zip | screen capture (gdigrab) + media import conversion |
+
+### Building the macOS/Linux engine
+
+Upstream whisper.cpp ships **no** macOS or Linux binary, so those platforms
+historically depended on a `whisper-cli` on `PATH` (e.g. `brew install
+whisper-cpp`) — which most users don't have, producing a dead-end transcribe
+error. To close that, we build the same pinned version ourselves and host it as
+a tools release on the fork, so `ensure_tool` auto-downloads it on first
+transcribe exactly like Windows.
+
+Reproduce with [`scripts/build-whisper-sidecar.sh`](../scripts/build-whisper-sidecar.sh)
+(needs `git` + `cmake`):
+
+```
+scripts/build-whisper-sidecar.sh macos   # -> dist/whisper-bin-macos-universal2-v1.9.1.tar.bz2
+scripts/build-whisper-sidecar.sh linux   # -> dist/whisper-bin-linux-x64-v1.9.1.tar.bz2
+```
+
+It builds a **static** binary (single self-contained file — no dylibs to
+bundle), verifies it links only system libraries, packages it flat (archive
+root holds just `whisper-cli`), and prints the SHA-256, byte size, and a
+ready-to-paste `Artifact { .. }`. Then:
+
+1. Upload each archive to a GitHub release on the fork, tag `tools-whisper-v1.9.1`.
+2. Paste the emitted `Artifact` into the macOS / Linux `TOOLS` array in
+   `src-tauri/src/models.rs` (id `whisper-bin`, `probe_rel` `bin/whisper/whisper-cli`).
+
+Status: the **macOS universal2** engine is built, hosted (`tools-whisper-v1.9.1`),
+and pinned in `models.rs`, so first transcribe auto-downloads it — same as
+Windows. **Linux** is intentionally out of scope here: it keeps resolving a
+`whisper-cli` on `PATH`, and the script already supports building the Linux
+archive whenever someone wants to add that platform (build on Linux, upload,
+paste the emitted `Artifact`). Where no engine is resolvable, the app shows an
+actionable "engine not installed" prompt (Install / Settings) rather than a
+raw error.
 
 ## GPU transcription (post-meeting only)
 
@@ -56,14 +93,14 @@ launch, or mid-run — falls back to CPU visibly and re-pins the machine to CPU
 Per-OS strategy: **Windows** downloads the pinned Vulkan build above (upstream
 whisper.cpp publishes no Vulkan Windows binary — only CPU/BLAS/CUDA-only — so
 this one is built from the upstream v1.9.1 tag with `-DGGML_VULKAN=1` and
-hosted as a tools release on this repo). **macOS** whisper.cpp builds
-(including brew's, found via PATH) default to Metal already; Metal runs as a
-guarded primary with a forced-CPU (`-ng`) fallback, because on GPUs that
-Metal can't serve (e.g. Intel-era Macs) ggml's Metal init aborts — that
-failure falls back to CPU mid-run and pins the machine to CPU like Windows
-does. The live transcript loop always stays on CPU (`-ng` on macOS, the CPU
-build on Windows): it runs during capture, exactly when the GPU is busy
-with the call.
+hosted as a tools release on this repo). **macOS** whisper.cpp builds default
+to Metal already — the managed universal archive above is built with Metal
+embedded, and a brew/PATH build works the same. Metal runs as a guarded
+primary with a forced-CPU (`-ng`) fallback, because on GPUs that Metal can't
+serve (e.g. Intel-era Macs) ggml's Metal init aborts — that failure falls
+back to CPU mid-run and pins the machine to CPU like Windows does. The live
+transcript loop always stays on CPU (`-ng` on macOS, the CPU build on
+Windows): it runs during capture, exactly when the GPU is busy with the call.
 
 ## Model registry
 

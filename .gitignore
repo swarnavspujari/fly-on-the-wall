@@ -36,3 +36,7 @@ recordings/
 Thumbs.db
 .vscode/
 .idea/
+
+# whisper.cpp engine build (scripts/build-whisper-sidecar.sh)
+/.whisper-build/
+/dist/
