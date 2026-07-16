@@ -390,7 +390,9 @@ export default function App() {
       await api.downloadModel(WHISPER_ENGINE_ID);
       refreshEngine();
     } catch (e) {
-      setPipelineError(String(e));
+      // Tag the failure so the notice selector keeps the actionable engine
+      // notice even for non-download errors (e.g. a failed extraction).
+      setPipelineError(`engine install failed: ${String(e)}`);
     } finally {
       setInstallingEngine(false);
       // Only clear the engine's own progress — `model:progress` is a shared

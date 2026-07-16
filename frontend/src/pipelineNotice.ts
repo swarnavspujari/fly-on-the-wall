@@ -34,6 +34,10 @@ export function briefError(error: string, max = 260): string {
 const ENGINE_MISSING_ERROR = /whisper-cli is not installed/i;
 /** Download errors (models.rs `ensure`): offline, CDN outage, checksum. */
 const DOWNLOAD_ERROR = /download (failed|interrupted)/i;
+/** An in-app engine install that failed for ANY reason (App.tsx tags it) —
+ *  extraction/disk errors carry no "download" keyword but must keep the
+ *  actionable engine notice rather than dropping to a bare error box. */
+const ENGINE_INSTALL_ERROR = /^engine install failed/i;
 
 /** Which notice a pipeline failure deserves. Matching on the error CONTENT
  *  (not merely "engine absent + some error") keeps Groq failures and other
@@ -45,6 +49,9 @@ export function selectPipelineNotice({
 }: PipelineNoticeInput): PipelineNotice {
   if (engineInstalling) return { kind: "engine-missing", installError: null };
   if (!pipelineError) return { kind: "none", installError: null };
+  if (ENGINE_INSTALL_ERROR.test(pipelineError) && engineInstalled !== true) {
+    return { kind: "engine-missing", installError: briefError(pipelineError) };
+  }
   const isDownload = DOWNLOAD_ERROR.test(pipelineError);
   // The pipeline itself said the engine can't be resolved. Stale case
   // (engine has appeared since, e.g. brew install + settings refresh) falls

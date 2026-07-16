@@ -63,6 +63,16 @@ describe("selectPipelineNotice", () => {
     expect(n.installError).toContain("download failed");
   });
 
+  it("a tagged install failure keeps the engine notice even without a download keyword", () => {
+    const n = selectPipelineNotice({
+      ...base,
+      pipelineError: "engine install failed: unsupported archive format for whisper-bin-x64.7z",
+      engineInstalled: false,
+    });
+    expect(n.kind).toBe("engine-missing");
+    expect(n.installError).toContain("unsupported archive format");
+  });
+
   it("unknown error → generic", () => {
     expect(
       selectPipelineNotice({ ...base, pipelineError: "boom", engineInstalled: true }).kind,
