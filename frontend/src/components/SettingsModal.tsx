@@ -31,9 +31,10 @@ interface Props {
   updater: Updater;
   recordingActive: boolean;
   appVersion: string | null;
-  /** When "engine", open straight to Technical view scrolled to the
-   *  transcription-engine row (deep-link from the transcribe error). */
-  initialFocus?: "engine" | null;
+  /** Deep-link from the transcribe error: "engine" opens Technical view
+   *  scrolled to the transcription-engine row; "groq" opens Technical view
+   *  scrolled to the Groq card with the enable checkbox visible. */
+  initialFocus?: "engine" | "groq" | null;
   onClose: () => void;
 }
 
@@ -202,16 +203,19 @@ export default function SettingsModal({
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
 
   // Presentational view mode — Technical reveals model installs, GPU + OAuth details.
-  // A deep-link to the engine row forces Technical so the row is visible.
-  const [technical, setTechnical] = useState(initialFocus === "engine");
+  // A deep-link forces Technical so its target (engine row, or the Groq
+  // enable checkbox under the Groq card) is actually rendered.
+  const [technical, setTechnical] = useState(initialFocus !== null);
   const engineRowRef = useRef<HTMLDivElement>(null);
+  const groqCardRef = useRef<HTMLDivElement>(null);
   const didFocusRef = useRef(false);
-  // Deep-link: once settings have loaded (row is rendered), scroll it into
+  // Deep-link: once settings have loaded (target is rendered), scroll it into
   // view a single time — not on every later refresh (e.g. post-install).
   useEffect(() => {
-    if (initialFocus === "engine" && settings && !didFocusRef.current) {
+    if (initialFocus && settings && !didFocusRef.current) {
       didFocusRef.current = true;
-      engineRowRef.current?.scrollIntoView({ block: "center" });
+      const target = initialFocus === "groq" ? groqCardRef : engineRowRef;
+      target.current?.scrollIntoView({ block: "center" });
     }
   }, [initialFocus, settings]);
   // Appearance control (System / Light / Dark) — wired to the shared theme hook.
@@ -587,23 +591,23 @@ export default function SettingsModal({
   };
 
   const asrModels = settings?.models.filter((m) => m.id.startsWith("ggml-")) ?? [];
-  // The whisper.cpp engine (and its GPU variant) get a dedicated, friendlier
-  // "Transcription engine" row below instead of a cryptic binary entry here.
+  // The whisper.cpp engine gets a dedicated, friendlier "Transcription
+  // engine" row below instead of a cryptic binary entry here. Exact-id match:
+  // a prefix filter would also hide whisper-bin-vulkan, the Windows GPU
+  // build the benchmark manages, which must stay visible in this list.
   const otherModels =
-    settings?.models.filter(
-      (m) => !m.id.startsWith("ggml-") && !m.id.startsWith("whisper-bin"),
-    ) ?? [];
+    settings?.models.filter((m) => !m.id.startsWith("ggml-") && m.id !== WHISPER_ENGINE_ID) ?? [];
   const engineInstalling = downloading === WHISPER_ENGINE_ID;
   const engineProg =
     engineInstalling && modelProgress?.id === WHISPER_ENGINE_ID && modelProgress.total > 0
       ? modelProgress
       : null;
-  const enginePct = engineProg
-    ? Math.round((engineProg.downloaded / engineProg.total) * 100)
-    : 0;
+  const enginePct = engineProg ? Math.round((engineProg.downloaded / engineProg.total) * 100) : 0;
 
   const groqHasKey = !!settings?.has_groq_key || !!groqKey;
-  const showGroqCard = tier === "cloud" || useGroq;
+  // The Groq deep-link must land somewhere the user can actually enable it,
+  // so it renders the card even before the toggle/tier is on.
+  const showGroqCard = tier === "cloud" || useGroq || initialFocus === "groq";
 
   return (
     <Modal
@@ -730,36 +734,38 @@ export default function SettingsModal({
 
           {/* Cloud tier / Groq fallback → collect the Groq key here */}
           {showGroqCard && (
-            <Card tone="muted" pad="sm" radius="md">
-              <div className="mb-2 flex items-center gap-2">
-                <span className="text-text" style={{ fontSize: "12.5px", fontWeight: 600 }}>
-                  Groq
-                </span>
-                <Badge tone="warning" size="sm">
-                  cloud
-                </Badge>
-                <Badge tone={groqHasKey ? "success" : "warning"} size="sm">
-                  {groqHasKey ? "key ✓" : "needs key"}
-                </Badge>
-              </div>
-              <Input
-                type="password"
-                style={MONO_KEY}
-                placeholder={
-                  settings?.has_groq_key ? "Groq API key saved — enter to replace" : "gsk_…"
-                }
-                value={groqKey}
-                onChange={(e) => setGroqKey(e.target.value)}
-              />
-              <p
-                className="text-text-3"
-                style={{ margin: "8px 0 0", fontSize: 11, lineHeight: 1.5 }}
-              >
-                Cloud transcription uploads meeting audio to Groq — it{" "}
-                <span style={LEAVES_PILL}>LEAVES</span> this machine. Who-said-what (diarization)
-                still runs locally. Applied when you press Save.
-              </p>
-            </Card>
+            <div ref={groqCardRef}>
+              <Card tone="muted" pad="sm" radius="md">
+                <div className="mb-2 flex items-center gap-2">
+                  <span className="text-text" style={{ fontSize: "12.5px", fontWeight: 600 }}>
+                    Groq
+                  </span>
+                  <Badge tone="warning" size="sm">
+                    cloud
+                  </Badge>
+                  <Badge tone={groqHasKey ? "success" : "warning"} size="sm">
+                    {groqHasKey ? "key ✓" : "needs key"}
+                  </Badge>
+                </div>
+                <Input
+                  type="password"
+                  style={MONO_KEY}
+                  placeholder={
+                    settings?.has_groq_key ? "Groq API key saved — enter to replace" : "gsk_…"
+                  }
+                  value={groqKey}
+                  onChange={(e) => setGroqKey(e.target.value)}
+                />
+                <p
+                  className="text-text-3"
+                  style={{ margin: "8px 0 0", fontSize: 11, lineHeight: 1.5 }}
+                >
+                  Cloud transcription uploads meeting audio to Groq — it{" "}
+                  <span style={LEAVES_PILL}>LEAVES</span> this machine. Who-said-what (diarization)
+                  still runs locally. Applied when you press Save.
+                </p>
+              </Card>
+            </div>
           )}
 
           {tier !== "cloud" && (

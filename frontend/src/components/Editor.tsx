@@ -74,7 +74,7 @@ interface Props {
   onStopScreen: () => void;
   onTranscribe: () => void;
   onInstallEngine: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (focus: "engine" | "groq") => void;
   onRelabel: (speakerKey: string, label: string) => void;
   onEditSegment: (segmentId: string, text: string) => void;
 }

@@ -3,6 +3,7 @@ import type { Meeting, ModelProgress, Transcript } from "../types";
 import { ChevronDown, Plus, RefreshCw } from "lucide-react";
 import { fmtElapsed } from "./RecordingBar";
 import { Avatar, Button, ProgressBar, SectionLabel, speakerColor } from "./ui";
+import { briefError, selectPipelineNotice } from "../pipelineNotice";
 
 interface Props {
   meeting: Meeting;
@@ -27,8 +28,9 @@ interface Props {
   onTranscribe: () => void;
   /** Install the whisper.cpp engine in-app (only meaningful when engine.managed). */
   onInstallEngine: () => void;
-  /** Open Settings deep-linked to the transcription-engine row. */
-  onOpenSettings: () => void;
+  /** Open Settings deep-linked to the transcription-engine row or the Groq
+   *  option (in a state where the user can actually enable it). */
+  onOpenSettings: (focus: "engine" | "groq") => void;
   onRelabel: (speakerKey: string, label: string) => void;
   /** "Someone else…" in the speaker dropdown: adds a new attendee AND
    *  assigns them to the speaker in one step. */
@@ -230,14 +232,17 @@ function EngineMissingNotice({
   engine,
   installing,
   installPct,
+  installError,
   onInstall,
   onOpenSettings,
 }: {
   engine: { installed: boolean; managed: boolean };
   installing: boolean;
   installPct: number | null;
+  /** A failed in-app install's (briefed) error — shown instead of vanishing. */
+  installError: string | null;
   onInstall: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (focus: "engine" | "groq") => void;
 }) {
   return (
     <div
@@ -247,10 +252,14 @@ function EngineMissingNotice({
     >
       <div className="font-semibold">Transcription engine not installed</div>
       <div className="mt-1" style={{ lineHeight: 1.5 }}>
-        Your recording and the downloaded model are ready, but the whisper.cpp engine
-        that runs them isn&apos;t installed yet. It runs fully on this machine — nothing
-        is uploaded.
+        Your recording and the downloaded model are ready, but the whisper.cpp engine that runs them
+        isn&apos;t installed yet. It runs fully on this machine — nothing is uploaded.
       </div>
+      {installError && (
+        <div className="mt-1" style={{ lineHeight: 1.5 }}>
+          The install didn&apos;t finish: {installError}
+        </div>
+      )}
       {installing ? (
         <div className="mt-2 flex items-center gap-2">
           {installPct !== null ? (
@@ -269,7 +278,7 @@ function EngineMissingNotice({
               Install engine
             </Button>
           )}
-          <Button variant="outline" size="sm" onClick={onOpenSettings}>
+          <Button variant="outline" size="sm" onClick={() => onOpenSettings("engine")}>
             Set up in Settings
           </Button>
         </div>
@@ -286,18 +295,26 @@ function EngineMissingNotice({
   );
 }
 
-/** Shared footer: the cloud escape hatch, with its privacy trade-off named. */
-function GroqHint({ onOpenSettings }: { onOpenSettings: () => void }) {
+/** Shared footer: the cloud escape hatch, with its privacy trade-off named.
+ *  A real <button> (keyboard-reachable), styled as an inline text link. */
+function GroqHint({ onOpenSettings }: { onOpenSettings: (focus: "engine" | "groq") => void }) {
   return (
     <div className="mt-2" style={{ fontSize: 12, lineHeight: 1.5 }}>
       Or use{" "}
-      <span
-        role="button"
+      <button
+        type="button"
         className="cursor-pointer underline"
-        onClick={onOpenSettings}
+        style={{
+          background: "none",
+          border: "none",
+          padding: 0,
+          font: "inherit",
+          color: "inherit",
+        }}
+        onClick={() => onOpenSettings("groq")}
       >
         Groq cloud transcription
-      </span>{" "}
+      </button>{" "}
       (Settings) — works without local models, but audio leaves this machine.
     </div>
   );
@@ -314,10 +331,8 @@ function DownloadFailedNotice({
 }: {
   error: string;
   onRetry: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (focus: "engine" | "groq") => void;
 }) {
-  const brief = error.replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim();
-  const shown = brief.length > 260 ? `${brief.slice(0, 260)}…` : brief;
   return (
     <div
       className="mt-2 rounded-lg border border-line px-3 py-2.5 text-[13px]"
@@ -326,13 +341,13 @@ function DownloadFailedNotice({
     >
       <div className="font-semibold">Model download failed</div>
       <div className="mt-1" style={{ lineHeight: 1.5 }}>
-        {shown}
+        {briefError(error)}
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <Button variant="primary" size="sm" onClick={onRetry}>
           Try again
         </Button>
-        <Button variant="outline" size="sm" onClick={onOpenSettings}>
+        <Button variant="outline" size="sm" onClick={() => onOpenSettings("engine")}>
           Set up in Settings
         </Button>
       </div>
@@ -376,14 +391,17 @@ export default function TranscriptPanel({
       ? Math.round((modelProgress.downloaded / modelProgress.total) * 100)
       : null;
 
-  // The actionable case: a transcribe failed (or an install is streaming) AND
-  // the whisper-cli engine isn't resolvable — turn the raw error into an
-  // install/setup prompt. `engine` is null only until the first settings load.
-  const engineMissing = (!!pipelineError || engineInstalling) && !!engine && !engine.installed;
-  // A model download that failed (offline, CDN outage) with the engine fine —
-  // same actionable treatment instead of a raw error string.
-  const downloadFailed =
-    !engineMissing && !!pipelineError && /download (failed|interrupted)/i.test(pipelineError);
+  // Which notice a pipeline failure deserves — decided on the error CONTENT
+  // by the pure selector (pipelineNotice.ts) so Groq failures and unrelated
+  // errors never get mislabeled as an engine problem. The engine notice also
+  // needs the engine object itself for the managed/manual split.
+  const notice = selectPipelineNotice({
+    pipelineError,
+    engineInstalling,
+    engineInstalled: engine ? engine.installed : null,
+  });
+  const engineMissing = notice.kind === "engine-missing" && !!engine;
+  const downloadFailed = notice.kind === "download-failed";
   const installPct =
     modelProgress && modelProgress.id === WHISPER_ENGINE_ID && modelProgress.total > 0
       ? Math.round((modelProgress.downloaded / modelProgress.total) * 100)
@@ -449,6 +467,7 @@ export default function TranscriptPanel({
             engine={engine!}
             installing={engineInstalling}
             installPct={installPct}
+            installError={notice.installError}
             onInstall={onInstallEngine}
             onOpenSettings={onOpenSettings}
           />
@@ -499,7 +518,7 @@ export default function TranscriptPanel({
           style={{ background: "var(--error-soft)", color: "var(--error-text)" }}
           role="alert"
         >
-          Re-transcription failed — showing the previous transcript. {pipelineError}
+          Re-transcription failed — showing the previous transcript. {briefError(pipelineError)}
         </div>
       )}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">

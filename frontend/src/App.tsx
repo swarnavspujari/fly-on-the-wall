@@ -86,7 +86,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   // When Settings is opened from the transcribe error, deep-link to the engine
   // row; null for a normal open.
-  const [settingsFocus, setSettingsFocus] = useState<"engine" | null>(null);
+  const [settingsFocus, setSettingsFocus] = useState<"engine" | "groq" | null>(null);
   const [showFirstRun, setShowFirstRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Notepad mode: below this width both sidebars fold into a menu button and
@@ -393,7 +393,9 @@ export default function App() {
       setPipelineError(String(e));
     } finally {
       setInstallingEngine(false);
-      setModelProgress(null);
+      // Only clear the engine's own progress — `model:progress` is a shared
+      // stream, and a concurrent pipeline download must keep its bar.
+      setModelProgress((p) => (p && p.id === WHISPER_ENGINE_ID ? null : p));
     }
   }, [refreshEngine]);
 
@@ -594,8 +596,8 @@ export default function App() {
             onStopScreen={() => void stopScreen()}
             onTranscribe={() => void transcribeNow()}
             onInstallEngine={() => void installEngine()}
-            onOpenSettings={() => {
-              setSettingsFocus("engine");
+            onOpenSettings={(focus) => {
+              setSettingsFocus(focus);
               setShowSettings(true);
             }}
             onRelabel={(k, l) => void relabel(k, l)}

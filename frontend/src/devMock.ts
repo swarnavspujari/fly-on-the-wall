@@ -257,6 +257,20 @@ const asrSettings = {
     { id: "diarize", display: "pyannote-community-1", bytes: 400_000_000, installed: true },
     { id: "embed", display: "bge-small-en", bytes: 100_000_000, installed: true },
   ],
+  // whisper-cli readiness (drives the Transcription-engine row + the
+  // engine-missing notice). Flip via localStorage for dev-mock QA:
+  //   fotwMockEngineMissing = "1"  → not installed
+  //   fotwMockEngineUnmanaged = "1" → no managed artifact (manual install UI)
+  get engine_installed() {
+    return (
+      typeof localStorage === "undefined" || localStorage.getItem("fotwMockEngineMissing") !== "1"
+    );
+  },
+  get engine_managed() {
+    return (
+      typeof localStorage === "undefined" || localStorage.getItem("fotwMockEngineUnmanaged") !== "1"
+    );
+  },
 };
 
 const llmSettings = {

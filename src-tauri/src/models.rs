@@ -233,9 +233,17 @@ pub fn tool_installed(data_dir: &Path, id: &str, path_names: &[&str]) -> bool {
 
 /// Locate an executable on PATH (used where upstream publishes no binary for
 /// this OS — e.g. whisper-cli and ffmpeg on macOS, whisper-cli on Linux).
+/// On macOS the standard Homebrew prefixes are probed as well: apps launched
+/// from Finder don't inherit brew's PATH, and without this the "brew install
+/// whisper-cpp" remedy our own error message suggests would never resolve.
 pub fn find_on_path(names: &[&str]) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
+    let path_dirs = std::env::split_paths(&path_var).collect::<Vec<_>>();
+    #[cfg(target_os = "macos")]
+    let extra_dirs = ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from);
+    #[cfg(not(target_os = "macos"))]
+    let extra_dirs: [PathBuf; 0] = [];
+    for dir in path_dirs.iter().chain(extra_dirs.iter()) {
         for name in names {
             for candidate in [dir.join(name), dir.join(format!("{name}.exe"))] {
                 if candidate.is_file() {
