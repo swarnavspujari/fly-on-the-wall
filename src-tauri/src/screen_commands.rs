@@ -112,8 +112,11 @@ pub async fn start_screen_recording(
     let out_path = state.data_dir.join(&rel_path);
 
     let recorder = fly_capture_screen::ffmpeg::FfmpegScreenRecorder::new(ffmpeg);
-    let session = recorder
-        .start(target, &out_path)
+    // start() deliberately watches the child for ~600 ms (doomed captures
+    // fail fast) — run it off the async runtime like stop() does.
+    let session = tauri::async_runtime::spawn_blocking(move || recorder.start(target, &out_path))
+        .await
+        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
 
     let mut guard = state.screen.lock().unwrap();

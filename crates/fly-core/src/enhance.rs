@@ -175,30 +175,58 @@ fn try_parse_json(output: &str, segment_ids: &[String]) -> Option<Vec<NoteBlock>
     )
 }
 
-/// Largest parseable prefix of a block array cut off mid-flight: close the
-/// array after each complete top-level object, scanning from the end (the
-/// first candidate that parses keeps the most blocks). Candidates that cut
-/// inside a string simply fail to parse and are skipped; attempts are capped
-/// so pathological outputs stay cheap.
+/// Largest parseable prefix of a block array cut off mid-flight: one forward
+/// scan (string- and escape-aware, so `}` inside markdown never fools it)
+/// collects the offsets where a top-level object actually closes, then the
+/// array is re-closed after the latest one that parses. The last offset
+/// parses unless the output is broken beyond truncation, so this is
+/// effectively one extra serde pass.
 fn salvage_truncated_array(json: &str) -> Option<Vec<RawBlock>> {
-    json.char_indices()
-        .rev()
-        .filter(|(_, c)| *c == '}')
-        .take(50)
-        .find_map(|(idx, _)| serde_json::from_str(&format!("{}]", &json[..=idx])).ok())
+    let mut object_ends = Vec::new();
+    let (mut brace_depth, mut in_string, mut escaped) = (0i32, false, false);
+    for (i, c) in json.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else {
+            match c {
+                '"' => in_string = true,
+                '{' => brace_depth += 1,
+                '}' => {
+                    brace_depth -= 1;
+                    if brace_depth == 0 {
+                        object_ends.push(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut buf = String::with_capacity(json.len() + 1);
+    object_ends.iter().rev().find_map(|&end| {
+        buf.clear();
+        buf.push_str(&json[..=end]);
+        buf.push(']');
+        serde_json::from_str(&buf).ok()
+    })
 }
 
 /// Whether an unparseable output was clearly ATTEMPTING the JSON block
-/// contract (fenced or bare array carrying the block fields) — the case
-/// where the prose fallback would paste JSON gibberish into the note.
+/// contract — the case where the prose fallback would paste JSON gibberish
+/// into the note. Deliberately broad: a fence anywhere (prose preambles
+/// happen), a bare array start, or the contract's own field names count.
 fn looks_like_block_json(output: &str) -> bool {
+    if output.contains("```json") || output.contains("\"markdown\"") {
+        return true;
+    }
     let t = output.trim_start();
-    let t = t
-        .strip_prefix("```json")
-        .or_else(|| t.strip_prefix("```"))
-        .unwrap_or(t)
-        .trim_start();
-    t.starts_with('[') && output.contains("\"markdown\"")
+    let t = t.strip_prefix("```").unwrap_or(t).trim_start();
+    t.starts_with('[')
 }
 
 // ---------------------------------------------------------------------------
@@ -694,6 +722,31 @@ mod tests {
     #[test]
     fn unsalvageable_json_output_yields_no_blocks() {
         let out = "```json\n[\n  {\"type\": \"ai\", \"markdown\": \"## Summ";
+        assert!(parse_enhanced_blocks(out, &[]).is_empty());
+    }
+
+    /// Braces inside block markdown (meetings about code happen) must not
+    /// fool the salvage scan — `}` in a JSON string is not an object end.
+    #[test]
+    fn salvage_ignores_braces_inside_markdown_strings() {
+        let out = String::from("[\n")
+            + &format!(
+                "{{\"type\": \"ai\", \"markdown\": \"Code: {} end\", \"sources\": []}},\n",
+                "if (x) { y(); } ".repeat(60)
+            )
+            + "{\"type\": \"ai\", \"markdown\": \"## Next\", \"sources\": []},\n"
+            + "{\"type\": \"ai\", \"markdown\": \"## Cut off he";
+        let blocks = parse_enhanced_blocks(&out, &[]);
+        assert_eq!(blocks.len(), 2, "both complete blocks survive");
+        assert!(blocks[1].markdown.contains("## Next"));
+    }
+
+    /// A prose preamble before a truncated fenced array is still a JSON
+    /// attempt: parse fails, salvage fails, and the output must NOT fall
+    /// back to pasting the fence + partial JSON into the note.
+    #[test]
+    fn prose_preamble_before_truncated_fence_yields_no_blocks() {
+        let out = "Here are the blocks:\n```json\n[\n {\"type\": \"ai\", \"ma";
         assert!(parse_enhanced_blocks(out, &[]).is_empty());
     }
 

@@ -167,6 +167,10 @@ export interface PipelineProgress {
   error: string | null;
 }
 
+/** Managed-artifact id of the whisper.cpp engine — the ONE frontend copy,
+ *  mirroring models::WHISPER_ENGINE_ID in the backend. */
+export const WHISPER_ENGINE_ID = "whisper-bin";
+
 export interface ModelProgress {
   id: string;
   downloaded: number;

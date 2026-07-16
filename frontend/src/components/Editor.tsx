@@ -441,8 +441,12 @@ function ScreenControl({
     } else if (choice === "window") {
       // Swap the menu to a picker of the windows open right now — users
       // can't know a window's EXACT title (VM/RDP clients decorate them),
-      // and gdigrab needs it exact.
-      void api.listCaptureWindows().then(setWindowChoices);
+      // and gdigrab needs it exact. On failure show the empty state rather
+      // than a menu that silently does nothing.
+      void api
+        .listCaptureWindows()
+        .then(setWindowChoices)
+        .catch(() => setWindowChoices([]));
     } else {
       closeMenu();
       const spec = prompt("Region as x,y,width,height:", "0,0,1280,720");

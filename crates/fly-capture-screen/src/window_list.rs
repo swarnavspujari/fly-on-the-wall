@@ -66,6 +66,11 @@ pub fn list_windows() -> Vec<String> {
             LPARAM(&mut titles as *mut Vec<String> as isize),
         );
     }
+    // Duplicate titles (two Notepads) are indistinguishable to gdigrab's
+    // FindWindow anyway — presenting one entry per title is honest, and it
+    // keeps the picker's per-title React keys unique.
+    let mut seen = std::collections::HashSet::new();
+    titles.retain(|t| seen.insert(t.clone()));
     titles
 }
 

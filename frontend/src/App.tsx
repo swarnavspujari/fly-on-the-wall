@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { PanelLeft, X } from "lucide-react";
 import { api } from "./api";
+import { WHISPER_ENGINE_ID } from "./types";
 import type {
   AppInfo,
   CalendarEvent,
@@ -33,10 +34,6 @@ import { useUpdater } from "./updater";
 
 /** Window width (px) under which the sidebars collapse into a menu button. */
 const NARROW_BREAKPOINT = 880;
-
-/** Managed-artifact id for the whisper.cpp engine (mirrors models::WHISPER_ENGINE_ID
- *  in the backend). Installing it is what makes local transcription possible. */
-const WHISPER_ENGINE_ID = "whisper-bin";
 
 const IDLE_STATUS: RecordingStatus = {
   active: false,
@@ -110,6 +107,20 @@ export default function App() {
     setFolders(await api.listFolders());
   }, []);
 
+  // Re-read whisper-cli readiness (managed install or on PATH). Called after an
+  // in-app install and whenever Settings closes, so a manual `brew install`
+  // outside the app is reflected too. ONE fetch-and-set for every AsrSettings
+  // field the app mirrors — a new field added here updates every caller.
+  const refreshAsrState = useCallback(() => {
+    api
+      .getAsrSettings()
+      .then((s) => {
+        setAutoTranscribe(s.auto_transcribe);
+        setEngine({ installed: s.engine_installed, managed: s.engine_managed });
+      })
+      .catch(console.error);
+  }, []);
+
   const firstNotesLogged = useRef(false);
   // A slow fetch for a previous selection must not overwrite a newer one.
   const notesSeq = useRef(0);
@@ -139,19 +150,13 @@ export default function App() {
       .then(setInfo)
       .catch((e) => setError(String(e)));
     refreshFolders().catch((e) => setError(String(e)));
-    api
-      .getAsrSettings()
-      .then((s) => {
-        setAutoTranscribe(s.auto_transcribe);
-        setEngine({ installed: s.engine_installed, managed: s.engine_managed });
-      })
-      .catch(console.error);
+    refreshAsrState();
     api.listTemplates().then(setTemplates).catch(console.error);
     api
       .getAppSetting("consent.recording_notice_accepted")
       .then((v) => setShowFirstRun(v !== "true"))
       .catch(console.error);
-  }, [refreshFolders]);
+  }, [refreshFolders, refreshAsrState]);
 
   // upcoming calendar meetings: on start + every 5 minutes
   useEffect(() => {
@@ -371,16 +376,6 @@ export default function App() {
     }
   };
 
-  // Re-read whisper-cli readiness (managed install or on PATH). Called after an
-  // in-app install and whenever Settings closes, so a manual `brew install`
-  // outside the app is reflected too.
-  const refreshEngine = useCallback(() => {
-    api
-      .getAsrSettings()
-      .then((s) => setEngine({ installed: s.engine_installed, managed: s.engine_managed }))
-      .catch(console.error);
-  }, []);
-
   // One-click engine install from the transcribe error / Settings. Progress
   // arrives on the shared `model:progress` stream (id "whisper-bin").
   const installEngine = useCallback(async () => {
@@ -388,7 +383,7 @@ export default function App() {
     setPipelineError(null);
     try {
       await api.downloadModel(WHISPER_ENGINE_ID);
-      refreshEngine();
+      refreshAsrState();
     } catch (e) {
       // Tag the failure so the notice selector keeps the actionable engine
       // notice even for non-download errors (e.g. a failed extraction).
@@ -399,7 +394,7 @@ export default function App() {
       // stream, and a concurrent pipeline download must keep its bar.
       setModelProgress((p) => (p && p.id === WHISPER_ENGINE_ID ? null : p));
     }
-  }, [refreshEngine]);
+  }, [refreshAsrState]);
 
   const transcribeNow = async () => {
     if (!openMeeting) return;
@@ -684,13 +679,7 @@ export default function App() {
           onClose={() => {
             setShowSettings(false);
             setSettingsFocus(null);
-            api
-              .getAsrSettings()
-              .then((s) => {
-                setAutoTranscribe(s.auto_transcribe);
-                setEngine({ installed: s.engine_installed, managed: s.engine_managed });
-              })
-              .catch(console.error);
+            refreshAsrState();
             api.listTemplates().then(setTemplates).catch(console.error);
             api.upcomingMeetings().then(setUpcoming).catch(console.error);
           }}

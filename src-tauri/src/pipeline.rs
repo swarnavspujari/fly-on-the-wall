@@ -312,7 +312,7 @@ pub async fn run_with(
         // disk — fall back to the best installed one, visibly.
         let (model_id, model_path) = match models::ensure(on_model, &data_dir, &model_id).await {
             Ok(path) => (model_id, path),
-            Err(e) => match models::best_installed_asr_model(&data_dir) {
+            Err(e) => match models::best_installed_asr_model(&data_dir, &model_id) {
                 Some((fallback_id, path)) => {
                     tracing::warn!(
                         wanted = %model_id, using = fallback_id, error = %e,

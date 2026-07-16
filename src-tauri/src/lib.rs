@@ -104,6 +104,20 @@ pub fn run() {
                     .await;
                 });
             }
+            // Reclaim disk from download temp files a crashed run stranded
+            // (per-attempt unique names — nothing else ever opens them).
+            {
+                let data_dir = app.state::<state::AppState>().data_dir.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        models::sweep_stale_downloads(
+                            &data_dir,
+                            std::time::Duration::from_secs(60 * 60),
+                        );
+                    })
+                    .await;
+                });
+            }
             // Recording self-heal: re-attach (or fully resurrect) finished
             // recordings whose database write was lost — the manifests written
             // at stop time make this possible even after the database itself

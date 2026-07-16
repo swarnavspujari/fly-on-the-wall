@@ -153,6 +153,11 @@ impl ScreenRecorder for FfmpegScreenRecorder {
 
         let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
         let mut cmd = Command::new(&self.exe);
+        // stderr is piped but nobody drains it while recording — ffmpeg's
+        // periodic stats lines would eventually fill the OS pipe buffer and
+        // block encoding mid-meeting. Errors still come through (and are all
+        // brief_stderr needs); the banner noise disappears as a bonus.
+        cmd.args(["-hide_banner", "-nostats", "-loglevel", "error"]);
         cmd.args(grab_args(
             host_backend(),
             &target,
@@ -204,7 +209,10 @@ impl ScreenRecorder for FfmpegScreenRecorder {
                         let _ = e.read_to_string(&mut stderr);
                     }
                     tracing::warn!(%status, stderr, "ffmpeg died at capture start");
-                    return Err(ScreenError::Capture(brief_stderr(&stderr)));
+                    return Err(ScreenError::Capture(format!(
+                        "{} (ffmpeg {status})",
+                        brief_stderr(&stderr)
+                    )));
                 }
                 Ok(Some(_)) => break, // exited cleanly?! stop() will sort it out
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
@@ -238,7 +246,9 @@ fn brief_stderr(stderr: &str) -> String {
         .collect();
     tail.reverse();
     if tail.is_empty() {
-        "ffmpeg exited before capture started".into()
+        // No claim about WHEN it died — stop() uses this too, and a capture
+        // can fail hours in (disk full at finalize) with drained stderr.
+        "ffmpeg exited without diagnostics".into()
     } else {
         tail.join(" · ")
     }
@@ -271,7 +281,10 @@ impl ScreenSession for FfmpegSession {
                             let _ = e.read_to_string(&mut stderr);
                         }
                         tracing::warn!(%status, stderr, "screen capture ffmpeg failed");
-                        return Err(ScreenError::Capture(brief_stderr(&stderr)));
+                        return Err(ScreenError::Capture(format!(
+                            "{} (ffmpeg {status})",
+                            brief_stderr(&stderr)
+                        )));
                     }
                     break;
                 }
@@ -319,7 +332,8 @@ mod tests {
     fn brief_stderr_keeps_the_last_real_lines_otherwise() {
         let msg = brief_stderr("ffmpeg version n8.1.2\n\nUnknown encoder 'libx26'\n");
         assert!(msg.contains("Unknown encoder"), "{msg}");
-        assert_eq!(brief_stderr(""), "ffmpeg exited before capture started");
+        // No when-claim: stop() uses this too, hours into a recording.
+        assert_eq!(brief_stderr(""), "ffmpeg exited without diagnostics");
     }
 
     #[test]

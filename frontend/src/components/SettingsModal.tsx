@@ -2,6 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Plus } from "lucide-react";
 import { api } from "../api";
+import { WHISPER_ENGINE_ID } from "../types";
 import type {
   AsrSettings,
   AudioDevice,
@@ -37,10 +38,6 @@ interface Props {
   initialFocus?: "engine" | "groq" | null;
   onClose: () => void;
 }
-
-/** Managed-artifact id for the whisper.cpp engine (mirrors
- *  models::WHISPER_ENGINE_ID in the backend). */
-const WHISPER_ENGINE_ID = "whisper-bin";
 
 const TIERS = [
   { id: "light", label: "Light", desc: "Whisper small (Q5) — ~2 GB RAM, fine on old laptops" },
