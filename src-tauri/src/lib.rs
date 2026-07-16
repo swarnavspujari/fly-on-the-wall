@@ -206,6 +206,7 @@ pub fn run() {
             calendar_commands::set_calendar_enabled,
             calendar_commands::start_meeting_from_event,
             screen_commands::screen_status,
+            screen_commands::list_capture_windows,
             screen_commands::start_screen_recording,
             screen_commands::stop_screen_recording,
             screen_commands::ensure_video_thumbnail,

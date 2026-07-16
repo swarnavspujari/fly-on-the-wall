@@ -596,6 +596,12 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "";
     case "reveal_logs_dir":
       return null;
+    case "list_capture_windows":
+      return [
+        "Weekly sync - Zoom",
+        "IDB VDI IT - VMware Horizon Client",
+        "budget notes.xlsx - Excel",
+      ];
     case "export_note":
       return "C:\\Users\\you\\Desktop\\note.md";
     case "ensure_video_thumbnail":

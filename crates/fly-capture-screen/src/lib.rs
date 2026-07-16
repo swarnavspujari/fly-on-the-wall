@@ -4,6 +4,7 @@
 //! (ScreenCaptureKit) is future work — see docs/PORTING.md.
 
 pub mod ffmpeg;
+pub mod window_list;
 
 use std::path::{Path, PathBuf};
 

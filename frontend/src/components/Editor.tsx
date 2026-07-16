@@ -398,6 +398,13 @@ function ScreenControl({
   onStopScreen: () => void;
 }) {
   const [menu, setMenu] = useState(false);
+  // Non-null while the "Window…" picker is showing (the titles open right
+  // now, fetched from the backend when the user asks for window capture).
+  const [windowChoices, setWindowChoices] = useState<string[] | null>(null);
+  const closeMenu = () => {
+    setMenu(false);
+    setWindowChoices(null);
+  };
 
   if (screenStatus.active) {
     return (
@@ -428,13 +435,16 @@ function ScreenControl({
   }
 
   const pick = (choice: "full" | "window" | "region") => {
-    setMenu(false);
     if (choice === "full") {
+      closeMenu();
       onStartScreen({ kind: "full_screen" });
     } else if (choice === "window") {
-      const t = prompt("Exact window title to capture:");
-      if (t) onStartScreen({ kind: "window", title: t });
+      // Swap the menu to a picker of the windows open right now — users
+      // can't know a window's EXACT title (VM/RDP clients decorate them),
+      // and gdigrab needs it exact.
+      void api.listCaptureWindows().then(setWindowChoices);
     } else {
+      closeMenu();
       const spec = prompt("Region as x,y,width,height:", "0,0,1280,720");
       const parts = spec?.split(",").map((n) => parseInt(n.trim(), 10)) ?? [];
       if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
@@ -447,6 +457,11 @@ function ScreenControl({
         });
       }
     }
+  };
+
+  const pickWindow = (title: string) => {
+    closeMenu();
+    onStartScreen({ kind: "window", title });
   };
 
   return (
@@ -462,34 +477,71 @@ function ScreenControl({
       </Button>
       {menu && (
         <>
-          <span className="fixed inset-0 z-10" onClick={() => setMenu(false)} aria-hidden="true" />
+          <span className="fixed inset-0 z-10" onClick={closeMenu} aria-hidden="true" />
           <span
             className="absolute right-0 z-20 min-w-[154px] p-1"
             style={{
               top: "calc(100% + 6px)",
+              maxWidth: 360,
               background: "var(--surface)",
               border: "1px solid var(--line)",
               borderRadius: "var(--radius-lg)",
               boxShadow: "var(--shadow-pop)",
             }}
           >
-            <SectionLabel className="block px-2.5 pb-1 pt-1.5">Capture</SectionLabel>
-            {(
-              [
-                ["full", "Full screen"],
-                ["window", "Window…"],
-                ["region", "Region…"],
-              ] as const
-            ).map(([v, l]) => (
-              <button
-                key={v}
-                onClick={() => pick(v)}
-                className="block w-full cursor-pointer border-0 bg-transparent px-2.5 py-1.5 text-left text-[13px] text-text hover:bg-surface-3"
-                style={{ borderRadius: "var(--radius-sm)" }}
-              >
-                {l}
-              </button>
-            ))}
+            {windowChoices === null ? (
+              <>
+                <SectionLabel className="block px-2.5 pb-1 pt-1.5">Capture</SectionLabel>
+                {(
+                  [
+                    ["full", "Full screen"],
+                    ["window", "Window…"],
+                    ["region", "Region…"],
+                  ] as const
+                ).map(([v, l]) => (
+                  <button
+                    key={v}
+                    onClick={() => pick(v)}
+                    className="block w-full cursor-pointer border-0 bg-transparent px-2.5 py-1.5 text-left text-[13px] text-text hover:bg-surface-3"
+                    style={{ borderRadius: "var(--radius-sm)" }}
+                  >
+                    {l}
+                  </button>
+                ))}
+              </>
+            ) : (
+              <>
+                <SectionLabel className="block px-2.5 pb-1 pt-1.5">Pick a window</SectionLabel>
+                <span className="block overflow-y-auto" style={{ maxHeight: 280 }}>
+                  {windowChoices.map((title) => (
+                    <button
+                      key={title}
+                      onClick={() => pickWindow(title)}
+                      title={title}
+                      className="block w-full cursor-pointer truncate border-0 bg-transparent px-2.5 py-1.5 text-left text-[13px] text-text hover:bg-surface-3"
+                      style={{ borderRadius: "var(--radius-sm)" }}
+                    >
+                      {title}
+                    </button>
+                  ))}
+                </span>
+                {windowChoices.length === 0 && (
+                  <span
+                    className="block px-2.5 py-1.5 text-text-3"
+                    style={{ fontSize: 12, lineHeight: 1.5 }}
+                  >
+                    No windows found — window capture is Windows-only for now.
+                  </span>
+                )}
+                <button
+                  onClick={() => setWindowChoices(null)}
+                  className="block w-full cursor-pointer border-0 bg-transparent px-2.5 py-1.5 text-left text-[12px] text-text-3 hover:bg-surface-3"
+                  style={{ borderRadius: "var(--radius-sm)" }}
+                >
+                  ‹ Back
+                </button>
+              </>
+            )}
           </span>
         </>
       )}

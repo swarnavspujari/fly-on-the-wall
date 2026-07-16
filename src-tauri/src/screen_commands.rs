@@ -42,6 +42,13 @@ pub async fn screen_status(state: State<'_, AppState>) -> Result<ScreenStatus, S
     })
 }
 
+/// Windows the user can pick for window capture (exact current titles,
+/// front-to-back). Empty on platforms without window capture.
+#[tauri::command]
+pub async fn list_capture_windows() -> CmdResult<Vec<String>> {
+    Ok(fly_capture_screen::window_list::list_windows())
+}
+
 /// Start capturing the screen (full / window / region) for a note. Downloads
 /// the ffmpeg sidecar on first use.
 #[tauri::command]
@@ -54,6 +61,25 @@ pub async fn start_screen_recording(
     if state.screen.lock().unwrap().is_some() {
         return Err("a screen recording is already in progress".into());
     }
+    // Window capture: gdigrab needs the EXACT current title, but titles
+    // drift between picking and recording (VM/RDP clients decorate them —
+    // the "IDB VDI IT" field failure). Re-resolve against the windows open
+    // right now; a vanished window fails HERE with a readable message
+    // instead of dying inside ffmpeg with an I/O error.
+    #[cfg(windows)]
+    let target = match target {
+        CaptureTarget::Window { title } => {
+            let resolved = fly_capture_screen::window_list::resolve_window_title(&title)
+                .ok_or_else(|| {
+                    format!(
+                        "no open window matches \"{title}\" — it may have been closed or \
+                         renamed. Pick the window again."
+                    )
+                })?;
+            CaptureTarget::Window { title: resolved }
+        }
+        t => t,
+    };
     // make sure the note exists before we spin anything up
     state
         .storage
@@ -260,5 +286,92 @@ mod tests {
         let res = generate_thumbnail(&ffmpeg, &dir.path().join("nope.mp4"), &missing_thumb).await;
         assert!(res.is_err());
         assert!(!missing_thumb.exists());
+    }
+
+    /// A doomed window capture must fail at START with a readable message —
+    /// the old behavior reported "recording" and only surfaced ffmpeg's raw
+    /// I/O-error dump at stop time, silently losing the session.
+    #[cfg(windows)]
+    #[test]
+    fn missing_window_fails_at_start_with_readable_error() {
+        let Some(ffmpeg) = local_ffmpeg() else {
+            eprintln!("SKIP missing_window_fails_at_start: no ffmpeg on this machine");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = fly_capture_screen::ffmpeg::FfmpegScreenRecorder::new(ffmpeg);
+        let err = recorder
+            .start(
+                CaptureTarget::Window {
+                    title: "fotw-window-that-cannot-exist-4f9c1b".into(),
+                },
+                &dir.path().join("out.mp4"),
+            )
+            .err()
+            .expect("start must fail when the window does not exist")
+            .to_string();
+        assert!(err.contains("wasn't found"), "unreadable error: {err}");
+        assert!(!err.contains("libavdevice"), "banner leaked: {err}");
+    }
+
+    /// End-to-end proof of the fix path: spawn a real titled window, find it
+    /// via enumeration, resolve a PARTIAL lowercase title (the field-failure
+    /// shape), record it for ~2 s, and verify a playable MP4 landed.
+    /// #[ignore]: needs an interactive desktop + ffmpeg, and briefly flashes
+    /// a console window — run explicitly (cargo test -- --ignored).
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn window_capture_records_a_real_window_e2e() {
+        use fly_capture_screen::window_list::{list_windows, pick_title};
+        let Some(ffmpeg) = local_ffmpeg() else {
+            eprintln!("SKIP window_capture_e2e: no ffmpeg on this machine");
+            return;
+        };
+        let title = "FOTW capture proof 4f9c1b";
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            &format!("$Host.UI.RawUI.WindowTitle = '{title}'; Start-Sleep 30"),
+        ]);
+        {
+            // CREATE_NEW_CONSOLE: without it the child INHERITS the test
+            // runner's (hidden) console and no capturable window exists.
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0000_0010);
+        }
+        let mut helper = cmd.spawn().expect("spawn helper window");
+
+        // The console window takes a beat to appear in enumeration.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let resolved = loop {
+            if let Some(t) = pick_title("fotw capture proof", &list_windows()) {
+                break t;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "helper window never appeared in list_windows()"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        };
+        assert_eq!(resolved, title, "partial lowercase title must resolve");
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("capture.mp4");
+        let recorder = fly_capture_screen::ffmpeg::FfmpegScreenRecorder::new(ffmpeg);
+        let session = recorder
+            .start(CaptureTarget::Window { title: resolved }, &out)
+            .expect("capture must start against a resolved live window");
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        let path = session.stop().expect("capture must finalize");
+        let bytes = std::fs::metadata(&path).unwrap().len();
+        let _ = helper.kill();
+        let _ = helper.wait();
+        assert!(
+            bytes > 5_000,
+            "expected a real MP4, got {bytes} bytes at {}",
+            path.display()
+        );
     }
 }

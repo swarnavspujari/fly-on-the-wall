@@ -185,15 +185,62 @@ impl ScreenRecorder for FfmpegScreenRecorder {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| ScreenError::Capture(format!("failed to launch ffmpeg: {e}")))?;
+
+        // A doomed capture (window vanished, bad input) makes ffmpeg exit
+        // within a few hundred ms — but the old code only noticed at STOP
+        // time, so the app claimed "recording" while nothing was captured
+        // and the user's meeting was silently lost. Give the process a short
+        // beat and fail the START with a readable error instead.
+        let deadline = Instant::now() + std::time::Duration::from_millis(600);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => {
+                    let mut stderr = String::new();
+                    if let Some(mut e) = child.stderr.take() {
+                        use std::io::Read;
+                        let _ = e.read_to_string(&mut stderr);
+                    }
+                    tracing::warn!(%status, stderr, "ffmpeg died at capture start");
+                    return Err(ScreenError::Capture(brief_stderr(&stderr)));
+                }
+                Ok(Some(_)) => break, // exited cleanly?! stop() will sort it out
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
 
         Ok(Box::new(FfmpegSession {
             child,
             out_path: out_path.to_path_buf(),
             started: Instant::now(),
         }))
+    }
+}
+
+/// The human end of an ffmpeg stderr dump: the version/config banner is
+/// noise, the real error is in the last lines. Special-case gdigrab's
+/// window-not-found, the one users actually hit.
+fn brief_stderr(stderr: &str) -> String {
+    if stderr.contains("Can't find window") {
+        return "the selected window wasn't found — it may have been closed or renamed. \
+                Pick the window again."
+            .into();
+    }
+    let mut tail: Vec<&str> = stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(3)
+        .collect();
+    tail.reverse();
+    if tail.is_empty() {
+        "ffmpeg exited before capture started".into()
+    } else {
+        tail.join(" · ")
     }
 }
 
@@ -223,17 +270,8 @@ impl ScreenSession for FfmpegSession {
                             use std::io::Read;
                             let _ = e.read_to_string(&mut stderr);
                         }
-                        return Err(ScreenError::Capture(format!(
-                            "ffmpeg exited with {status}: {}",
-                            stderr
-                                .chars()
-                                .rev()
-                                .take(400)
-                                .collect::<String>()
-                                .chars()
-                                .rev()
-                                .collect::<String>()
-                        )));
+                        tracing::warn!(%status, stderr, "screen capture ffmpeg failed");
+                        return Err(ScreenError::Capture(brief_stderr(&stderr)));
                     }
                     break;
                 }
@@ -263,6 +301,26 @@ impl ScreenSession for FfmpegSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact stderr from the 2026-07-16 field failure must brief to the
+    /// actionable window message, not a 400-char banner dump.
+    #[test]
+    fn brief_stderr_names_the_missing_window_case() {
+        let field = "ffmpeg version n8.1.2 Copyright (c)\n  libavdevice 62. 3.102 / 62. 3.102\n\
+                     [in#0 @ 00000222dd7de940] Can't find window 'IDB VDI IT', aborting.\n\
+                     [in#0 @ 00000222dd7dc7c0] Error opening input: I/O error\n\
+                     Error opening input files: I/O error\n";
+        let msg = brief_stderr(field);
+        assert!(msg.contains("wasn't found"), "{msg}");
+        assert!(!msg.contains("libavdevice"), "banner must not leak: {msg}");
+    }
+
+    #[test]
+    fn brief_stderr_keeps_the_last_real_lines_otherwise() {
+        let msg = brief_stderr("ffmpeg version n8.1.2\n\nUnknown encoder 'libx26'\n");
+        assert!(msg.contains("Unknown encoder"), "{msg}");
+        assert_eq!(brief_stderr(""), "ffmpeg exited before capture started");
+    }
 
     #[test]
     fn gdigrab_args_for_each_target() {
