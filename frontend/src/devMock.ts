@@ -30,6 +30,8 @@ const folders = [
   { id: "f-personal", name: "Personal", parent_id: null, created_at: ago(7000) },
 ];
 
+// happened_at mirrors the backend's COALESCE(meeting started_at, note
+// created_at): it drives list order and is mutable via the date editor.
 const noteMeta = [
   {
     id: "n1",
@@ -37,6 +39,7 @@ const noteMeta = [
     folder_id: "f-clients",
     meeting_id: "m1",
     updated_at: ago(1),
+    happened_at: ago(30),
   },
   {
     id: "n2",
@@ -44,6 +47,7 @@ const noteMeta = [
     folder_id: "f-team",
     meeting_id: "m2",
     updated_at: ago(120),
+    happened_at: ago(180),
   },
   {
     id: "n3",
@@ -51,6 +55,7 @@ const noteMeta = [
     folder_id: "f-team",
     meeting_id: null,
     updated_at: ago(1500),
+    happened_at: ago(1500),
   },
   {
     id: "n4",
@@ -58,6 +63,7 @@ const noteMeta = [
     folder_id: "f-clients",
     meeting_id: "m4",
     updated_at: ago(2900),
+    happened_at: ago(2900),
   },
   {
     id: "n5",
@@ -65,6 +71,7 @@ const noteMeta = [
     folder_id: null,
     meeting_id: "m5",
     updated_at: ago(5800),
+    happened_at: ago(5800),
   },
   {
     id: "n6",
@@ -72,8 +79,12 @@ const noteMeta = [
     folder_id: "f-personal",
     meeting_id: null,
     updated_at: ago(8600),
+    happened_at: ago(8600),
   },
 ];
+
+const byHappenedDesc = (a: { happened_at: string }, b: { happened_at: string }) =>
+  b.happened_at.localeCompare(a.happened_at);
 
 const scratchpad =
   "acme renewal — procurement pushback on price\n" +
@@ -179,8 +190,8 @@ function meeting(noteId: string) {
     note_id: m.id,
     attendees: mockAttendees,
     attendees_confirmed: mockAttendeesConfirmed,
-    started_at: ago(30),
-    ended_at: ago(17),
+    started_at: m.happened_at,
+    ended_at: new Date(new Date(m.happened_at).getTime() + 754_000).toISOString(),
     recording: {
       mic_path: "mic.wav",
       system_path: "sys.wav",
@@ -262,6 +273,7 @@ function importStage() {
       folder_id: null,
       meeting_id: IMPORT_MEETING_ID,
       updated_at: nowIso(),
+      happened_at: nowIso(),
     });
   }
   return mockImport;
@@ -569,11 +581,13 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "delete_note":
       return null;
     case "list_recent_notes":
-      return noteMeta;
+      return [...noteMeta].sort(byHappenedDesc);
     case "list_notes_in_folder":
-      return args.folderId == null
-        ? noteMeta.filter((n) => !n.folder_id)
-        : noteMeta.filter((n) => n.folder_id === args.folderId);
+      return (
+        args.folderId == null
+          ? noteMeta.filter((n) => !n.folder_id)
+          : noteMeta.filter((n) => n.folder_id === args.folderId)
+      ).sort(byHappenedDesc);
     case "get_note":
       return note(String(args.id));
     case "create_note":
@@ -628,6 +642,11 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
           label: String(args.label ?? ""),
         });
       return transcript;
+    }
+    case "update_meeting_started_at": {
+      const m = noteMeta.find((n) => n.meeting_id === args.meetingId);
+      if (m) m.happened_at = String(args.startedAt);
+      return meeting(m?.id ?? "n1");
     }
     case "update_meeting_attendees": {
       mockAttendees = (args.attendees as typeof mockAttendees) ?? [];

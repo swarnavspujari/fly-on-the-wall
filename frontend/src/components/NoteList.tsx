@@ -13,16 +13,18 @@ interface Props {
   onDeleteNote: (id: string) => void;
 }
 
-function relTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  const mins = Math.floor((Date.now() - then) / 60_000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
+/** The meeting's date (started_at, else note created_at) as an absolute
+ * local date + time; the year appears once it isn't the current one. */
+function fmtMeetingDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const date = d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }),
+  });
+  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return `${date} · ${time}`;
 }
 
 /** Render a FTS snippet, highlighting the [[match]] markers. */
@@ -181,7 +183,10 @@ export default function NoteList({
                       <Trash2 size={13} strokeWidth={1.75} />
                     </button>
                   </div>
-                  <div className="mt-0.5 text-[12px] text-text-3">{relTime(n.updated_at)}</div>
+                  {/* happened_at fallback: pre-feature summaries in the localStorage cache */}
+                  <div className="mt-0.5 text-[12px] text-text-3">
+                    {fmtMeetingDate(n.happened_at ?? n.updated_at)}
+                  </div>
                 </div>
               </div>
             );

@@ -182,6 +182,7 @@ pub fn run() {
             recording::resume_recording,
             recording::stop_recording,
             recording::get_meeting_for_note,
+            recording::update_meeting_started_at,
             recording::list_mic_devices,
             asr_commands::transcribe_meeting,
             asr_commands::get_transcript,

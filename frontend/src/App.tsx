@@ -482,6 +482,8 @@ export default function App() {
   // Attendee edits (editor Save / "Someone else…") return the updated meeting.
   const meetingChanged = (m: Meeting) => {
     if (openMeetingIdRef.current === m.id) setOpenMeeting(m);
+    // a date edit reorders the list (sorted by meeting date)
+    void refreshNotes();
   };
 
   // Undo of a re-diarize hands back the restored raw transcript; the cleaned

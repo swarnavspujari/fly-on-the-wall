@@ -244,6 +244,26 @@ pub fn get_meeting_for_note(
         .map_err(|e| e.to_string())
 }
 
+/// Set a meeting's start date/time (the note header's date editor). RFC 3339
+/// input; length is preserved (ended_at shifts), and the meeting folder +
+/// manifest re-mirror the new date (see Storage::set_meeting_started_at).
+#[tauri::command]
+pub fn update_meeting_started_at(
+    state: State<'_, AppState>,
+    meeting_id: String,
+    started_at: String,
+) -> CmdResult<Meeting> {
+    let when = chrono::DateTime::parse_from_rfc3339(&started_at)
+        .map_err(|e| format!("invalid date: {e}"))?
+        .with_timezone(&chrono::Utc);
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .set_meeting_started_at(&meeting_id, when)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn list_mic_devices(state: State<'_, AppState>) -> CmdResult<Vec<fly_audio::AudioDevice>> {
     state.audio.list_mic_devices().map_err(|e| e.to_string())

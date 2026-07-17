@@ -41,6 +41,9 @@ export interface NoteSummary {
   folder_id: string | null;
   meeting_id: string | null;
   updated_at: string;
+  /** When the note's meeting happened (started_at), else the note's
+   * created_at — list order and the date shown in rows. */
+  happened_at: string;
 }
 
 export interface SearchHit {

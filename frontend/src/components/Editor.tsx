@@ -39,6 +39,7 @@ import { api } from "../api";
 import { fmtElapsed } from "./RecordingBar";
 import { Button, Modal, SectionLabel } from "./ui";
 import AttendeeEditor from "./AttendeeEditor";
+import DateTimePicker from "./DateTimePicker";
 import ImportQueue from "./ImportQueue";
 import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
@@ -107,7 +108,11 @@ const CHIP =
 function fmtWhen(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  const date = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const date = d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }),
+  });
   const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
   return `${date} · ${time}`;
 }
@@ -593,6 +598,10 @@ function MetaRow({
   onRemoveAttachment: (attachmentId: string) => void;
 }) {
   const [opening, setOpening] = useState(false);
+  // Meeting date editor (the date chip opens it on meeting notes).
+  const [editingWhen, setEditingWhen] = useState(false);
+  const [whenSaving, setWhenSaving] = useState(false);
+  const [whenError, setWhenError] = useState<string | null>(null);
   const tplName =
     templates.find((t) => t.id === templateId)?.name ?? templates[0]?.name ?? "Template";
   const folderName = note.folder_id
@@ -605,10 +614,41 @@ function MetaRow({
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {when && (
+      {when && meeting ? (
+        <button
+          className={`${CHIP} cursor-pointer hover:bg-surface-3`}
+          title="Edit meeting date & time"
+          onClick={() => {
+            setWhenError(null);
+            setEditingWhen(true);
+          }}
+        >
+          <Calendar size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} /> {when}
+        </button>
+      ) : when ? (
         <span className={CHIP}>
           <Calendar size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} /> {when}
         </span>
+      ) : null}
+      {editingWhen && meeting && (
+        <DateTimePicker
+          value={meeting.started_at}
+          saving={whenSaving}
+          error={whenError}
+          onCancel={() => setEditingWhen(false)}
+          onSave={(iso) => {
+            setWhenSaving(true);
+            setWhenError(null);
+            api
+              .updateMeetingStartedAt(meeting.id, iso)
+              .then((updated) => {
+                onMeetingChanged(updated);
+                setEditingWhen(false);
+              })
+              .catch((e) => setWhenError(String(e)))
+              .finally(() => setWhenSaving(false));
+          }}
+        />
       )}
 
       {/* template chip — a styled native select */}

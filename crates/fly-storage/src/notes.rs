@@ -19,7 +19,17 @@ pub struct NoteSummary {
     pub folder_id: Option<String>,
     pub meeting_id: Option<String>,
     pub updated_at: chrono::DateTime<Utc>,
+    /// When the note's meeting happened (its `started_at`), falling back to
+    /// the note's `created_at` for meeting-less notes. List views sort by and
+    /// display this date.
+    pub happened_at: chrono::DateTime<Utc>,
 }
+
+/// Shared SELECT for summary rows: joins the note's meeting so `happened_at`
+/// (COALESCE(meeting started_at, note created_at)) comes back as column 5.
+const SUMMARY_SELECT: &str = "SELECT n.id, n.title, n.folder_id, n.meeting_id, n.updated_at,
+            COALESCE(m.started_at, n.created_at) AS happened_at
+     FROM notes n LEFT JOIN meetings m ON m.id = n.meeting_id";
 
 impl Storage {
     pub fn create_note(&self, title: &str, folder_id: Option<&str>) -> Result<Note> {
@@ -72,22 +82,23 @@ impl Storage {
             .ok_or_else(|| StorageError::NotFound(format!("note {id}")))
     }
 
-    /// Notes in one folder (`None` = unfiled/root notes), newest first.
+    /// Notes in one folder (`None` = unfiled/root notes), newest meeting
+    /// date first.
     pub fn list_notes_in_folder(&self, folder_id: Option<&str>) -> Result<Vec<NoteSummary>> {
-        let sql = "SELECT id, title, folder_id, meeting_id, updated_at FROM notes
-                   WHERE (?1 IS NULL AND folder_id IS NULL) OR folder_id = ?1
-                   ORDER BY updated_at DESC";
-        let mut stmt = self.conn.prepare(sql)?;
+        let sql = format!(
+            "{SUMMARY_SELECT}
+             WHERE (?1 IS NULL AND n.folder_id IS NULL) OR n.folder_id = ?1
+             ORDER BY happened_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([folder_id], row_to_summary)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Most recently updated notes across all folders.
+    /// Notes across all folders, newest meeting date first.
     pub fn list_recent_notes(&self, limit: usize) -> Result<Vec<NoteSummary>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, folder_id, meeting_id, updated_at FROM notes
-             ORDER BY updated_at DESC LIMIT ?1",
-        )?;
+        let sql = format!("{SUMMARY_SELECT} ORDER BY happened_at DESC LIMIT ?1");
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([limit as i64], row_to_summary)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -104,25 +115,23 @@ impl Storage {
         until: Option<chrono::DateTime<chrono::Utc>>,
         before: Option<(String, String)>,
     ) -> Result<Vec<NoteSummary>> {
-        let mut sql = String::from(
-            "SELECT id, title, folder_id, meeting_id, updated_at FROM notes WHERE 1=1",
-        );
+        let mut sql = format!("{SUMMARY_SELECT} WHERE 1=1");
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(f) = folder_id {
-            sql.push_str(&format!(" AND folder_id = ?{}", params.len() + 1));
+            sql.push_str(&format!(" AND n.folder_id = ?{}", params.len() + 1));
             params.push(Box::new(f.to_string()));
         }
         if let Some(s) = since {
-            sql.push_str(&format!(" AND updated_at >= ?{}", params.len() + 1));
+            sql.push_str(&format!(" AND n.updated_at >= ?{}", params.len() + 1));
             params.push(Box::new(s.to_rfc3339()));
         }
         if let Some(u) = until {
-            sql.push_str(&format!(" AND updated_at <= ?{}", params.len() + 1));
+            sql.push_str(&format!(" AND n.updated_at <= ?{}", params.len() + 1));
             params.push(Box::new(u.to_rfc3339()));
         }
         if let Some((ts, id)) = before {
             sql.push_str(&format!(
-                " AND (updated_at < ?{n} OR (updated_at = ?{n} AND id > ?{m}))",
+                " AND (n.updated_at < ?{n} OR (n.updated_at = ?{n} AND n.id > ?{m}))",
                 n = params.len() + 1,
                 m = params.len() + 2
             ));
@@ -130,7 +139,7 @@ impl Storage {
             params.push(Box::new(id));
         }
         sql.push_str(&format!(
-            " ORDER BY updated_at DESC, id LIMIT {}",
+            " ORDER BY n.updated_at DESC, n.id LIMIT {}",
             limit.max(1)
         ));
         let mut stmt = self.conn.prepare(&sql)?;
@@ -361,6 +370,7 @@ fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteSummary> {
         folder_id: r.get(2)?,
         meeting_id: r.get(3)?,
         updated_at: parse_ts(r.get::<_, String>(4)?),
+        happened_at: parse_ts(r.get::<_, String>(5)?),
     })
 }
 
@@ -439,5 +449,33 @@ mod tests {
         assert_eq!(unfiled[0].title, "unfiled");
 
         assert_eq!(s.list_recent_notes(10).unwrap().len(), 2);
+    }
+
+    /// Lists order by when the meeting happened (started_at, else the note's
+    /// created_at) — a later edit must not resurface an old meeting.
+    #[test]
+    fn lists_order_by_meeting_date_not_edit_time() {
+        let (_dir, s) = test_storage();
+        let plain = s.create_note("plain note", None).unwrap();
+        let old = s.create_note("old meeting", None).unwrap();
+        let m = s.create_meeting("old meeting", &old.id, &[]).unwrap();
+        let past = chrono::Utc::now() - chrono::Duration::days(30);
+        s.set_meeting_started_at(&m.id, past).unwrap();
+        // editing the note bumps updated_at but must not change its place
+        s.update_note_scratchpad(&old.id, "edited today").unwrap();
+
+        let recent = s.list_recent_notes(10).unwrap();
+        assert_eq!(
+            recent.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            vec![plain.id.as_str(), old.id.as_str()]
+        );
+        assert_eq!(recent[0].happened_at, plain.created_at);
+        assert_eq!(recent[1].happened_at.timestamp(), past.timestamp());
+
+        let unfiled = s.list_notes_in_folder(None).unwrap();
+        assert_eq!(
+            unfiled.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            vec![plain.id.as_str(), old.id.as_str()]
+        );
     }
 }

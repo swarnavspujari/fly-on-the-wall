@@ -88,6 +88,10 @@ export const api = {
   resumeRecording: () => invoke<RecordingStatus>("resume_recording"),
   stopRecording: () => invoke<Meeting>("stop_recording"),
   getMeetingForNote: (noteId: string) => invoke<Meeting | null>("get_meeting_for_note", { noteId }),
+  // Set the meeting's start date/time (RFC 3339 UTC). Length is preserved
+  // (ended_at shifts); the meeting folder + manifest re-mirror the date.
+  updateMeetingStartedAt: (meetingId: string, startedAt: string) =>
+    invoke<Meeting>("update_meeting_started_at", { meetingId, startedAt }),
 
   // transcription
   transcribeMeeting: (meetingId: string) => invoke<void>("transcribe_meeting", { meetingId }),
