@@ -74,7 +74,9 @@ fn load_staged(state: &AppState, meeting_id: &str) -> CmdResult<Option<ImportSta
         .get_setting(&manifest_key(meeting_id))
         .map_err(|e| e.to_string())?;
     match raw {
-        Some(json) => serde_json::from_str(&json).map(Some).map_err(|e| e.to_string()),
+        Some(json) => serde_json::from_str(&json)
+            .map(Some)
+            .map_err(|e| e.to_string()),
         None => Ok(None),
     }
 }
@@ -94,7 +96,13 @@ fn save_staged(state: &AppState, staged: &ImportStaged) -> CmdResult<()> {
 fn copy_name(dir: &Path, original: &str) -> String {
     let safe: String = original
         .chars()
-        .map(|c| if c.is_alphanumeric() || " -_.".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || " -_.".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let (stem, ext) = match safe.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
@@ -168,11 +176,18 @@ pub async fn import_stage(
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let kind = if VIDEO_EXTS.contains(&ext.as_str()) { "video" } else { "audio" };
+        let kind = if VIDEO_EXTS.contains(&ext.as_str()) {
+            "video"
+        } else {
+            "audio"
+        };
         let supported = AUDIO_EXTS.contains(&ext.as_str()) || VIDEO_EXTS.contains(&ext.as_str());
 
         let (rel_path, error) = if !supported {
-            (None, Some("Unsupported file type — audio or video only".to_string()))
+            (
+                None,
+                Some("Unsupported file type — audio or video only".to_string()),
+            )
         } else {
             let copy = rec_dir.join(copy_name(&rec_dir, &file_name));
             match std::fs::copy(src, &copy) {
@@ -482,7 +497,10 @@ mod tests {
     #[test]
     fn copy_name_sanitizes_and_uniquifies() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(copy_name(dir.path(), "Team sync: Q3.mp3"), "Team sync_ Q3.mp3");
+        assert_eq!(
+            copy_name(dir.path(), "Team sync: Q3.mp3"),
+            "Team sync_ Q3.mp3"
+        );
         std::fs::write(dir.path().join("a.mp3"), b"x").unwrap();
         assert_eq!(copy_name(dir.path(), "a.mp3"), "a (2).mp3");
     }

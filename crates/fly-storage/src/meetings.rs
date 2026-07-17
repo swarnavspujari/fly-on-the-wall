@@ -99,11 +99,7 @@ impl Storage {
     /// policy as title renames) and the folder's `recording.manifest.json`
     /// is rewritten so self-heal on another machine resurrects the meeting
     /// under the edited date.
-    pub fn set_meeting_started_at(
-        &self,
-        id: &str,
-        started_at: DateTime<Utc>,
-    ) -> Result<Meeting> {
+    pub fn set_meeting_started_at(&self, id: &str, started_at: DateTime<Utc>) -> Result<Meeting> {
         let old = self.get_meeting(id)?;
         let delta = started_at - old.started_at;
         let ended_at = old.ended_at.map(|e| e + delta);
@@ -420,7 +416,10 @@ mod tests {
             &std::fs::read_to_string(new_dir.join(crate::RECORDING_MANIFEST)).unwrap(),
         )
         .unwrap();
-        assert_eq!(manifest.recording.mixed_path.as_deref(), Some(mixed.as_str()));
+        assert_eq!(
+            manifest.recording.mixed_path.as_deref(),
+            Some(mixed.as_str())
+        );
         assert_eq!(manifest.started_at, Some(new_start));
         assert_eq!(manifest.ended_at, updated.ended_at.unwrap());
     }
