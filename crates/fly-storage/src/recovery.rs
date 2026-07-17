@@ -846,7 +846,7 @@ mod tests {
     /// A second sweep rewrites nothing.
     #[test]
     fn startup_backfill_makes_existing_meetings_portable() {
-        let (tmp, s) = test_storage();
+        let (_tmp, s) = test_storage();
         let clients = s.create_folder("Clients", None).unwrap();
         let note = s.create_note("Acme kickoff", Some(&clients.id)).unwrap();
         let meeting = s.create_meeting("Acme kickoff", &note.id, &[]).unwrap();

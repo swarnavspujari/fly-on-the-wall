@@ -262,7 +262,7 @@ fn concat_16k(sources: &[PathBuf], dst: &Path, gap_ms: u64) -> CmdResult<(u64, V
     let mut boundaries = Vec::with_capacity(sources.len());
     for src in sources {
         if !samples.is_empty() {
-            samples.extend(std::iter::repeat(0f32).take((gap_ms * RATE / 1000) as usize));
+            samples.extend(std::iter::repeat_n(0f32, (gap_ms * RATE / 1000) as usize));
         }
         let (chunk, rate) = fly_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
         let chunk = fly_audio::mix::resample_linear(&chunk, rate, RATE as u32);
