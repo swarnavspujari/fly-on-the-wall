@@ -224,7 +224,9 @@ pub fn run() {
             screen_commands::start_screen_recording,
             screen_commands::stop_screen_recording,
             screen_commands::ensure_video_thumbnail,
-            import_commands::import_media,
+            import_commands::import_stage,
+            import_commands::import_state,
+            import_commands::import_transcribe,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fly on the Wall")

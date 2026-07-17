@@ -12,7 +12,7 @@ import type {
   CalendarStatus,
   CalendarToggle,
   CaptureTarget,
-  ImportResult,
+  ImportStaged,
   ScreenStatus,
   AsrSettings,
   AsrSettingsUpdate,
@@ -170,5 +170,11 @@ export const api = {
   startScreenRecording: (noteId: string, target: CaptureTarget) =>
     invoke<ScreenStatus>("start_screen_recording", { noteId, target }),
   stopScreenRecording: () => invoke<Note>("stop_screen_recording"),
-  importMedia: () => invoke<ImportResult | null>("import_media"),
+  // Multi-select picker → ONE staged (untranscribed) note. Null on cancel.
+  importStage: () => invoke<ImportStaged | null>("import_stage"),
+  // The staged queue for a meeting (null once its transcript exists).
+  importState: (meetingId: string) => invoke<ImportStaged | null>("import_state", { meetingId }),
+  // Normalize + join the staged files in `order`, then queue the pipeline.
+  importTranscribe: (meetingId: string, order: string[]) =>
+    invoke<ImportStaged>("import_transcribe", { meetingId, order }),
 };

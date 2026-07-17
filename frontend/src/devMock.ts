@@ -114,9 +114,12 @@ function note(id: string) {
     folder_id: m.folder_id,
     meeting_id: m.meeting_id,
     scratchpad: m.id === "n1" ? scratchpad : "",
-    blocks: m.meeting_id
-      ? blocks
-      : [{ id: "b0", origin: { kind: "user" }, markdown: "Rough notes go here." }],
+    blocks:
+      m.id === IMPORT_NOTE_ID
+        ? []
+        : m.meeting_id
+          ? blocks
+          : [{ id: "b0", origin: { kind: "user" }, markdown: "Rough notes go here." }],
     attachments:
       m.id === "n1"
         ? [
@@ -155,6 +158,21 @@ let mockUndo: { taken_at: string; changed_segments: number } | null = null;
 function meeting(noteId: string) {
   const m = noteMeta.find((n) => n.id === noteId);
   if (!m || !m.meeting_id) return null;
+  if (m.id === IMPORT_NOTE_ID) {
+    // staged import: no recording until the (mock) transcription starts
+    return {
+      id: m.meeting_id,
+      title: m.title,
+      note_id: m.id,
+      attendees: [],
+      attendees_confirmed: false,
+      started_at: ago(1),
+      ended_at: mockImport?.started ? nowIso() : null,
+      recording: mockImport?.started
+        ? { mic_path: null, system_path: null, mixed_path: "mix.wav", duration_ms: 180_000 }
+        : null,
+    };
+  }
   return {
     id: m.meeting_id,
     title: m.title,
@@ -170,6 +188,124 @@ function meeting(noteId: string) {
       duration_ms: 754_000,
     },
   };
+}
+
+/* ---- staged media import (sidebar "Import media as a note") ----
+   Stateful mock of import_stage / import_state / import_transcribe, with a
+   simulated conversion + pipeline event stream so the queue's per-file
+   Waiting → Transcribing % → Done flow is testable in the dev browser. */
+const IMPORT_NOTE_ID = "n-imp";
+const IMPORT_MEETING_ID = "m-imp";
+/** Per-file mock durations (ms) — drive the concat boundaries. */
+const IMPORT_DURATIONS: Record<string, number> = { "if-1": 120_000, "if-2": 60_000 };
+interface MockImportFile {
+  id: string;
+  file_name: string;
+  size: number;
+  kind: "audio" | "video";
+  rel_path: string | null;
+  error: string | null;
+}
+let mockImport: {
+  note_id: string;
+  meeting_id: string;
+  files: MockImportFile[];
+  boundaries_ms: number[];
+  started: boolean;
+} | null = null;
+let mockImportDone = false;
+
+const mockEmit = (event: string, payload: unknown) =>
+  (window as unknown as { fotwMockEmit?: (e: string, p: unknown) => void }).fotwMockEmit?.(
+    event,
+    payload,
+  );
+
+function importStage() {
+  mockImportDone = false;
+  mockImport = {
+    note_id: IMPORT_NOTE_ID,
+    meeting_id: IMPORT_MEETING_ID,
+    files: [
+      {
+        id: "if-1",
+        file_name: "Fuel Bid Meeting 2026-07-09.mp3",
+        size: 18_400_000,
+        kind: "audio",
+        rel_path: "recordings/imp/Fuel Bid Meeting 2026-07-09.mp3",
+        error: null,
+      },
+      {
+        id: "if-2",
+        file_name: "screen-walkthrough.mp4",
+        size: 52_000_000,
+        kind: "video",
+        rel_path: "recordings/imp/screen-walkthrough.mp4",
+        error: null,
+      },
+      {
+        id: "if-3",
+        file_name: "agenda.txt",
+        size: 4_000,
+        kind: "audio",
+        rel_path: null,
+        error: "Unsupported file type — audio or video only",
+      },
+    ],
+    boundaries_ms: [],
+    started: false,
+  };
+  if (!noteMeta.some((n) => n.id === IMPORT_NOTE_ID)) {
+    noteMeta.unshift({
+      id: IMPORT_NOTE_ID,
+      title: "Fuel Bid Meeting 2026-07-09",
+      folder_id: null,
+      meeting_id: IMPORT_MEETING_ID,
+      updated_at: nowIso(),
+    });
+  }
+  return mockImport;
+}
+
+function importTranscribe(order: string[]) {
+  if (!mockImport) throw new Error("no staged import for this meeting");
+  if (mockImport.started) return mockImport;
+  const files = order
+    .map((id) => mockImport?.files.find((f) => f.id === id))
+    .filter((f): f is MockImportFile => f != null && f.error == null);
+  const boundaries: number[] = [];
+  let cum = 0;
+  for (const [i, f] of files.entries()) {
+    if (i > 0) cum += 1000; // the backend's inter-file silence gap
+    cum += IMPORT_DURATIONS[f.id] ?? 60_000;
+    boundaries.push(cum);
+  }
+  mockImport = { ...mockImport, files, boundaries_ms: boundaries, started: true };
+
+  // simulated backend events: per-file conversion, then the real pipeline shape
+  const pipe = (stage: string, detail: string | null = null, done = false, error: string | null = null) =>
+    mockEmit("pipeline:progress", { meeting_id: IMPORT_MEETING_ID, stage, detail, done, error });
+  let t = 200;
+  const at = (ms: number, fn: () => void) => window.setTimeout(fn, ms);
+  for (const f of files) {
+    at(t, () => mockEmit("import:progress", { meeting_id: IMPORT_MEETING_ID, file_id: f.id, stage: "converting" }));
+    t += 700;
+    at(t, () => mockEmit("import:progress", { meeting_id: IMPORT_MEETING_ID, file_id: f.id, stage: "converted" }));
+  }
+  at((t += 300), () => pipe("waiting"));
+  at((t += 500), () => pipe("starting"));
+  for (let pct = 5; pct <= 100; pct += 5) {
+    at((t += 450), () => pipe("transcribing", `${pct}%`));
+  }
+  at((t += 500), () => pipe("diarizing"));
+  at((t += 1200), () => pipe("aligning"));
+  at((t += 600), () => pipe("saving"));
+  at((t += 500), () => pipe("polishing"));
+  at((t += 1200), () => {
+    mockImportDone = true;
+    pipe("done", null, true);
+  });
+  return mockImport;
 }
 
 const seg = (id: string, key: string, start: number, text: string) => ({
@@ -450,6 +586,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "get_meeting_for_note":
       return meeting(String(args.noteId));
     case "get_transcript":
+      // staged import: no transcript until the mock pipeline finishes
+      if (args.meetingId === IMPORT_MEETING_ID && !mockImportDone) return null;
       // fotwMockNoTranscript = "1" → pre-transcription state (the
       // "Transcribe recording" box, where the pipeline notices render).
       if (
@@ -606,6 +744,14 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "C:\\Users\\you\\Desktop\\note.md";
     case "ensure_video_thumbnail":
       return `${String(args.relPath ?? "")}.jpg`;
+    case "import_stage":
+      return importStage();
+    case "import_state":
+      return args.meetingId === IMPORT_MEETING_ID && mockImport && !mockImportDone
+        ? mockImport
+        : null;
+    case "import_transcribe":
+      return importTranscribe((args.order as string[]) ?? []);
     default:
       return null;
   }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Inbox, List, Plus, Settings as SettingsIcon, X } from "lucide-react";
+import { Inbox, List, Plus, Settings as SettingsIcon, Upload, X } from "lucide-react";
 import type { CalendarEvent, Folder } from "../types";
 import { Badge, Button, SectionLabel } from "./ui";
 import logoLight from "../assets/brand/fly-on-the-wall-logo.svg";
@@ -16,6 +16,8 @@ interface Props {
   onRenameFolder: (id: string, name: string) => void;
   onDeleteFolder: (id: string) => void;
   onStartFromEvent: (ev: CalendarEvent) => void;
+  /** Multi-select audio/video picker — everything picked becomes ONE new note. */
+  onImportMedia: () => void;
   onOpenSettings: () => void;
   /** Resolved theme — picks the wordmark variant (dark logo on the ink shell). */
   theme?: "light" | "dark";
@@ -131,6 +133,7 @@ export default function Sidebar({
   onRenameFolder,
   onDeleteFolder,
   onStartFromEvent,
+  onImportMedia,
   onOpenSettings,
   theme = "light",
   onMoveNote,
@@ -420,6 +423,14 @@ export default function Sidebar({
           {tree.map((n) => renderNode(n, 0))}
         </div>
       </nav>
+      <button
+        onClick={onImportMedia}
+        title="Upload audio or video files — everything you pick becomes one new note"
+        className="flex cursor-pointer items-center gap-2.5 border-t border-line px-4 py-2.5 text-left text-[13px] font-medium text-text-2 hover:bg-surface-3 hover:text-text"
+      >
+        <Upload size={15} strokeWidth={1.75} className="flex-none" />
+        Import media as a note
+      </button>
       <button
         onClick={onOpenSettings}
         className="flex cursor-pointer items-center gap-2.5 border-t border-line px-4 py-2.5 text-left text-[13px] font-medium text-text-2 hover:bg-surface-3 hover:text-text"

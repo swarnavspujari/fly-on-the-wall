@@ -7,6 +7,7 @@ import type {
   AppInfo,
   CalendarEvent,
   Folder,
+  ImportStaged,
   Meeting,
   ModelProgress,
   Note,
@@ -61,6 +62,9 @@ export default function App() {
   const [pipeStage, setPipeStage] = useState<string | null>(null);
   const [pipeDetail, setPipeDetail] = useState<string | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
+  // Staged (untranscribed) media import for the open note's meeting — while
+  // set, the editor shows the import queue instead of the note content.
+  const [importStaged, setImportStaged] = useState<ImportStaged | null>(null);
   const [modelProgress, setModelProgress] = useState<ModelProgress | null>(null);
   // Transcription-engine (whisper-cli) readiness — distinct from model
   // weights. `null` until the first settings fetch resolves.
@@ -102,6 +106,16 @@ export default function App() {
   useEffect(() => {
     openMeetingIdRef.current = openMeeting?.id ?? null;
   }, [openMeeting]);
+  // For the pipeline-done handler: which note is open, and whether it was an
+  // import (its meeting must be refetched once the transcript lands).
+  const openNoteIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    openNoteIdRef.current = openNote?.id ?? null;
+  }, [openNote]);
+  const importStagedRef = useRef<ImportStaged | null>(null);
+  useEffect(() => {
+    importStagedRef.current = importStaged;
+  }, [importStaged]);
 
   const refreshFolders = useCallback(async () => {
     setFolders(await api.listFolders());
@@ -223,6 +237,23 @@ export default function App() {
             if (openMeetingIdRef.current !== p.meeting_id) return;
             setTranscript(raw);
             setCleanedTranscript(cleaned);
+            // An imported note just became a normal note: drop the queue and
+            // refetch the meeting (recording set at transcribe time) and the
+            // note (imported videos were attached to it backend-side).
+            if (importStagedRef.current?.meeting_id === p.meeting_id) {
+              setImportStaged(null);
+              const noteId = openNoteIdRef.current;
+              if (noteId) {
+                const [meeting, note] = await Promise.all([
+                  api.getMeetingForNote(noteId),
+                  api.getNote(noteId),
+                ]);
+                if (openMeetingIdRef.current === p.meeting_id) {
+                  if (meeting) setOpenMeeting(meeting);
+                  setOpenNote(note);
+                }
+              }
+            }
           })().catch(console.error);
         }
       } else {
@@ -280,19 +311,22 @@ export default function App() {
     setPipelineError(null);
     setPipeDetail(null);
     if (meeting) {
-      const [raw, cleaned, stage] = await Promise.all([
+      const [raw, cleaned, stage, staged] = await Promise.all([
         api.getTranscript(meeting.id),
         api.getCleanedTranscript(meeting.id).catch(() => null),
         api.pipelineStage(meeting.id),
+        api.importState(meeting.id).catch(() => null),
       ]);
       if (!fresh()) return;
       setTranscript(raw);
       setCleanedTranscript(cleaned);
       setPipeStage(stage);
+      setImportStaged(staged);
     } else {
       setTranscript(null);
       setCleanedTranscript(null);
       setPipeStage(null);
+      setImportStaged(null);
     }
   }, []);
 
@@ -307,6 +341,7 @@ export default function App() {
     setCleanedTranscript(null);
     setPipeStage(null);
     setPipeDetail(null);
+    setImportStaged(null);
   };
 
   const deleteNote = async (id: string) => {
@@ -317,6 +352,7 @@ export default function App() {
       setOpenMeeting(null);
       setTranscript(null);
       setCleanedTranscript(null);
+      setImportStaged(null);
     }
     await refreshNotes();
   };
@@ -338,6 +374,38 @@ export default function App() {
   const onNoteChanged = (note: Note) => {
     setOpenNote(note);
     void refreshNotes();
+  };
+
+  // "Import media as a note": multi-select picker → ONE staged note that
+  // opens on the import queue (transcription starts when the user confirms).
+  const importMedia = async () => {
+    try {
+      const staged = await api.importStage();
+      if (!staged) return; // user cancelled the picker
+      await refreshNotes();
+      await openNoteById(staged.note_id);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  // Transcribe the staged queue in the user's order. On failure (e.g. a file
+  // ffmpeg can't decode) the queue drops back to idle with the error surfaced.
+  const importTranscribe = async (order: string[]) => {
+    const staged = importStagedRef.current;
+    if (!staged) return;
+    setPipelineError(null);
+    try {
+      const updated = await api.importTranscribe(staged.meeting_id, order);
+      setImportStaged(updated);
+      if (openNoteIdRef.current === staged.note_id) {
+        setOpenMeeting(await api.getMeetingForNote(staged.note_id));
+      }
+    } catch (e) {
+      setError(String(e));
+      const fresh = await api.importState(staged.meeting_id).catch(() => null);
+      setImportStaged(fresh);
+    }
   };
 
   const startRecording = async () => {
@@ -509,6 +577,10 @@ export default function App() {
         })
       }
       onStartFromEvent={(ev) => void startFromEvent(ev)}
+      onImportMedia={() => {
+        setDrawerOpen(false);
+        void importMedia();
+      }}
       onOpenSettings={() => {
         setDrawerOpen(false);
         setShowSettings(true);
@@ -581,6 +653,7 @@ export default function App() {
             engineInstalling={installingEngine}
             recStatus={recStatus}
             screenStatus={screenStatus}
+            importStaged={importStaged}
             folders={folders}
             templates={templates}
             dataDir={info?.data_dir ?? null}
@@ -592,6 +665,7 @@ export default function App() {
             onStartScreen={(target) => void startScreen(target)}
             onStopScreen={() => void stopScreen()}
             onTranscribe={() => void transcribeNow()}
+            onImportTranscribe={(order) => void importTranscribe(order)}
             onInstallEngine={() => void installEngine()}
             onOpenSettings={(focus) => {
               setSettingsFocus(focus);

@@ -4,6 +4,7 @@ import type {
   Attachment,
   CaptureTarget,
   Folder,
+  ImportStaged,
   Meeting,
   ModelProgress,
   Note,
@@ -38,6 +39,7 @@ import { api } from "../api";
 import { fmtElapsed } from "./RecordingBar";
 import { Button, Modal, SectionLabel } from "./ui";
 import AttendeeEditor from "./AttendeeEditor";
+import ImportQueue from "./ImportQueue";
 import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
@@ -59,6 +61,10 @@ interface Props {
   engineInstalling: boolean;
   recStatus: RecordingStatus;
   screenStatus: ScreenStatus;
+  /** Staged (untranscribed) media import for this note's meeting, if any —
+   * while set and no transcript exists, the import queue replaces the note
+   * content and the view switcher is hidden. */
+  importStaged: ImportStaged | null;
   folders: Folder[];
   templates: Template[];
   /** Absolute app data dir — lets the audio player stream local recordings. */
@@ -73,6 +79,8 @@ interface Props {
   onStartScreen: (target: CaptureTarget) => void;
   onStopScreen: () => void;
   onTranscribe: () => void;
+  /** Start transcribing the staged import in the queue's order (file ids). */
+  onImportTranscribe: (order: string[]) => void;
   onInstallEngine: () => void;
   onOpenSettings: (focus: "engine" | "groq") => void;
   onRelabel: (speakerKey: string, label: string) => void;
@@ -842,6 +850,7 @@ export default function Editor({
   engineInstalling,
   recStatus,
   screenStatus,
+  importStaged,
   folders,
   templates,
   dataDir,
@@ -853,6 +862,7 @@ export default function Editor({
   onStartScreen,
   onStopScreen,
   onTranscribe,
+  onImportTranscribe,
   onInstallEngine,
   onOpenSettings,
   onRelabel,
@@ -1086,16 +1096,19 @@ export default function Editor({
     else void api.revealDataDir();
   };
 
-  const showTranscript = view === "transcript" && hasMeeting;
-  const showEnhanced = view === "enhanced" && enhanced;
-  const showNotes = !showTranscript && !showEnhanced;
+  // Import-staged note: the queue replaces every view until the transcript
+  // lands, then the note renders (and behaves) like any recorded note.
+  const pendingImport = importStaged != null && transcript == null;
+  const showTranscript = !pendingImport && view === "transcript" && hasMeeting;
+  const showEnhanced = !pendingImport && view === "enhanced" && enhanced;
+  const showNotes = !pendingImport && !showTranscript && !showEnhanced;
 
   return (
     <div className="flex h-full min-w-0 flex-1">
       <div className="relative flex min-w-0 flex-1 flex-col bg-surface">
         {/* controls bar */}
         <div className="print:hidden flex flex-wrap items-center justify-end gap-2 border-b border-line px-6 py-2.5">
-          {!recStatus.active && (
+          {!recStatus.active && !pendingImport && (
             <Button
               variant="record"
               size="sm"
@@ -1106,11 +1119,13 @@ export default function Editor({
               Record
             </Button>
           )}
-          <ScreenControl
-            screenStatus={screenStatus}
-            onStartScreen={onStartScreen}
-            onStopScreen={onStopScreen}
-          />
+          {!pendingImport && (
+            <ScreenControl
+              screenStatus={screenStatus}
+              onStartScreen={onStartScreen}
+              onStopScreen={onStopScreen}
+            />
+          )}
           <Button
             variant={askOpen ? "soft" : "outline"}
             size="sm"
@@ -1240,6 +1255,18 @@ export default function Editor({
               </div>
             )}
 
+            {/* Import queue — replaces the note content until transcription completes */}
+            {pendingImport && importStaged && (
+              <ImportQueue
+                staged={importStaged}
+                pipeStage={pipeStage}
+                pipeDetail={pipeDetail}
+                pipelineError={pipelineError}
+                onTranscribe={onImportTranscribe}
+                onRetry={onTranscribe}
+              />
+            )}
+
             {/* Transcript view — live pane stays mounted while recording so it keeps
                 listening; it's only shown when the Transcript view is active. */}
             {isRecordingThisNote && recStatus.meeting_id && (
@@ -1298,16 +1325,18 @@ export default function Editor({
           </div>
         </div>
 
-        {/* floating view switcher (Granola-style) */}
-        <ViewSwitcher
-          view={view}
-          setView={setView}
-          hasMeeting={hasMeeting}
-          enhanced={enhanced}
-          transcriptBusy={!!pipeStage || isRecordingThisNote}
-          onEnhance={() => void enhance()}
-          enhancing={enhancing}
-        />
+        {/* floating view switcher (Granola-style) — hidden while an import is staged */}
+        {!pendingImport && (
+          <ViewSwitcher
+            view={view}
+            setView={setView}
+            hasMeeting={hasMeeting}
+            enhanced={enhanced}
+            transcriptBusy={!!pipeStage || isRecordingThisNote}
+            onEnhance={() => void enhance()}
+            enhancing={enhancing}
+          />
+        )}
       </div>
 
       {askOpen && (
