@@ -75,14 +75,16 @@ flat (archive root holds just `whisper-cli`), and prints the same pin.
 (Rebuilds are not bit-identical — timestamps land in the tar header —
 integrity rests on the SHA-256 pin of the one hosted artifact.)
 
-Status: **pending** — the `models.rs` entry ships with a deliberately invalid
-placeholder SHA until the maintainer runs the workflow and pastes the real
-pin, so nothing downloads (fails closed) before the artifact exists. See
-`docs/pr-triage/pr-26-rehost-checklist.md` for the release + smoke-test
-steps. **Linux** stays PATH-resolved (`whisper-cli` on PATH); the script's
-`linux` target exists for whoever adds that platform later. Where no engine
-is resolvable, the app shows an actionable "engine not installed" prompt
-(Install / Settings) rather than a raw error.
+Status: **hosted and pinned** (2026-07-16) — built by workflow run
+29546886480, attached to `tools-whisper-v1.9.1`, and pinned in `models.rs`
+after independently re-hashing the hosted asset and verifying both fat-binary
+slices (x86_64 + arm64). Awaiting the Apple Silicon and Intel-Mac smoke tests
+in `docs/pr-triage/pr-26-rehost-checklist.md` before this branch merges — the
+arm64 slice has never been executed on real hardware. **Linux** stays
+PATH-resolved (`whisper-cli` on PATH); the script's `linux` target exists for
+whoever adds that platform later. Where no engine is resolvable, the app
+shows an actionable "engine not installed" prompt (Install / Settings)
+rather than a raw error.
 
 ## GPU transcription (post-meeting only)
 

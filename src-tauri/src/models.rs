@@ -136,18 +136,14 @@ const TOOLS: &[Artifact] = &[
     // Windows, instead of requiring a `whisper-cli` on PATH (e.g. `brew
     // install whisper-cpp`). While no managed copy is installed yet, a
     // brew/PATH build still wins (resolution: installed → PATH → download).
-    //
-    // MAINTAINER, BEFORE MERGE: run the build-whisper-sidecar workflow
-    // (workflow_dispatch, create_release=true), then replace sha256/bytes
-    // below with the pin it prints. The placeholder is deliberately invalid —
-    // it is not 64 hex chars, so every download fails closed until the real
-    // artifact exists.
+    // Pin verified 2026-07-16 by hashing the hosted asset independently of
+    // the workflow's summary; fat header confirmed x86_64 + arm64 slices.
     Artifact {
         id: "whisper-bin",
         display: "whisper.cpp CLI (macOS universal, v1.9.1)",
         url: "https://github.com/swarnavspujari/fly-on-the-wall/releases/download/tools-whisper-v1.9.1/whisper-bin-macos-universal2-v1.9.1.tar.bz2",
-        sha256: "REPLACE-WITH-WORKFLOW-EMITTED-SHA256-BEFORE-MERGE",
-        bytes: 0,
+        sha256: "f9a4bcae555dd3d14f0a8795aad63b8a7a006d59f705bca94e83ef2215805070",
+        bytes: 2_388_157,
         kind: ArtifactKind::Archive,
         dest_rel: "bin/whisper",
         probe_rel: "bin/whisper/whisper-cli",

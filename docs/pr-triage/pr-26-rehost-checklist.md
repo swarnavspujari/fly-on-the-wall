@@ -9,26 +9,24 @@ merge before completing steps 1–2, and do not ship without the smoke tests
 (the **arm64 slice has never been executed by anyone**; only the PR author's
 Intel build of his own artifact has ever run).
 
-## 1. Build + host the artifact (maintainer, ~10 min)
+## 1. Build + host the artifact — DONE 2026-07-16
 
-- [ ] Push the branch, open Actions → **Build whisper sidecar (macOS)** →
-      Run workflow on this branch with `create_release = true`.
-- [ ] Confirm the run is green, including the hard `lipo -archs` assert
-      (`x86_64 arm64`) and the pinned-commit check
+- [x] Workflow run 29546886480 (dispatched from main with
+      `create_release = true`) — green, including the hard `lipo -archs`
+      assert and the pinned-commit check
       (`f049fff95a089aa9969deb009cdd4892b3e74916`).
-- [ ] Confirm the release `tools-whisper-v1.9.1` now carries
-      `whisper-bin-macos-universal2-v1.9.1.tar.bz2`.
-- [ ] Copy the pin (sha256 / bytes) from the job summary.
+- [x] Release `tools-whisper-v1.9.1` carries
+      `whisper-bin-macos-universal2-v1.9.1.tar.bz2` (2,388,157 bytes).
+- [x] Pin taken by independently downloading + sha256-hashing the hosted
+      asset (`f9a4bcae555dd3d14f0a8795aad63b8a7a006d59f705bca94e83ef2215805070`)
+      and verifying the fat header carries both x86_64 and arm64 slices.
 
-## 2. Pin it (maintainer, ~2 min)
+## 2. Pin it — DONE 2026-07-16
 
-- [ ] In `src-tauri/src/models.rs` (macOS `TOOLS`), replace
-      `sha256: "REPLACE-WITH-WORKFLOW-EMITTED-SHA256-BEFORE-MERGE"` and
-      `bytes: 0` with the workflow's values; drop the "MAINTAINER, BEFORE
-      MERGE" comment block.
-- [ ] Update `docs/MODELS.md` "Status: **pending**" paragraph to "hosted and
-      pinned".
-- [ ] `cargo check` still green; commit.
+- [x] `models.rs` placeholder replaced with the verified sha256/bytes;
+      maintainer comment block dropped.
+- [x] `docs/MODELS.md` status updated to "hosted and pinned".
+- [x] `cargo check` green; committed on this branch.
 
 ## 3. Smoke test — Apple Silicon (maintainer's partner's machine, arm64 slice)
 
