@@ -8,7 +8,7 @@
 <meta property="og:title" content="Fly on the Wall">
 <meta property="og:description" content="The meeting notes app that never phones home. Free, open source, on-device.">
 <meta property="og:url" content="https://swarnavspujari.github.io/fly-on-the-wall/">
-<meta property="og:image" content="https://swarnavspujari.github.io/fly-on-the-wall/assets/brand/logo.png">
+<meta property="og:image" content="https://swarnavspujari.github.io/fly-on-the-wall/assets/screenshots/og.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" type="image/png" href="assets/brand/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -124,9 +124,6 @@
   .btn-ghost { background: transparent; color: var(--text-2); border: none; min-width: 44px; padding: 10px; }
   .btn-ghost:hover { background: var(--surface-3); color: var(--text); }
 
-  .theme-light-only, .theme-dark-only { display: none; }
-  [data-theme="light"] .theme-light-only { display: block; }
-  [data-theme="dark"] .theme-dark-only { display: block; }
   [data-theme="light"] .icon-moon { display: block; }
   [data-theme="light"] .icon-sun { display: none; }
   [data-theme="dark"] .icon-moon { display: none; }
@@ -147,6 +144,12 @@
   .hero .sub { font-size: clamp(17px, 2.2vw, 20px); color: var(--text-2); max-width: 56ch; margin: 0 auto 36px; }
   .hero .downloads { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 14px; }
   .hero .fineprint { color: var(--text-3); font-size: 14px; }
+  .shot {
+    display: block; max-width: 100%; height: auto;
+    border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow-lg);
+  }
+  .hero-shot { margin: 48px auto 0; width: min(980px, 100%); }
+  .how-shot { margin: 40px auto 0; width: min(920px, 100%); }
 
   section { padding: 72px 0; }
   section.alt { background: var(--surface-2); border-top: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); }
@@ -261,6 +264,11 @@
     .mcp { grid-template-columns: 1fr; }
     section { padding: 56px 0; }
   }
+
+  /* Theme-conditional visibility — keep LAST so it wins over display rules above. */
+  .theme-light-only, .theme-dark-only { display: none; }
+  [data-theme="light"] .theme-light-only { display: block; }
+  [data-theme="dark"] .theme-dark-only { display: block; }
 </style>
 </head>
 <body>
@@ -309,6 +317,9 @@
       <a class="btn btn-outline" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Linux</a>
     </div>
     <p class="fineprint">Works with Zoom, Meet, Teams — anything that makes sound on your computer.</p>
+    <img class="shot hero-shot" src="assets/screenshots/app-transcript-light.webp"
+         alt="The Fly on the Wall main window: a meeting transcript with three color-coded speakers, a playable waveform, screen recordings, folders, and upcoming calendar meetings"
+         width="1600" height="1103" fetchpriority="high">
   </section>
 
   <!-- ============ HOW IT WORKS ============ -->
@@ -343,6 +354,10 @@
           <p>"What did I commit to?" "Draft the follow-up email." Chat with the meeting and drop any answer into your note with one click.</p>
         </div>
       </div>
+      <img class="shot how-shot theme-light-only" src="assets/screenshots/app-notes-light.webp"
+           alt="A meeting note in the editor: rough notes with a highlighted line, checked-off action items, an attached PDF, and the Enhance button" width="1600" height="1103" loading="lazy">
+      <img class="shot how-shot theme-dark-only" src="assets/screenshots/app-notes-dark.webp"
+           alt="The same meeting note in dark theme" width="1600" height="1103" loading="lazy">
     </div>
   </section>
 
