@@ -114,12 +114,12 @@ work, as of July 2026 (details change — check each vendor):
 |  | **Fly on the Wall** | Otter.ai | Fireflies.ai | Fathom | Granola |
 |---|---|---|---|---|---|
 | Where audio is processed | **Your computer** | Their cloud | Their cloud | Their cloud | Cloud AI for notes |
-| A bot joins your call | **Never** | Yes (OtterPilot) | Yes (bot attendee) | Yes (joins as participant) | No |
-| Works with any meeting app | **Yes — captures system audio** | Supported platforms | Supported platforms | Supported platforms | Yes |
+| A bot joins your call | **Never** | Optional — bot or desktop app | Yes, by default | Optional — bot-free in beta | No |
+| Works with any meeting app | **Yes — captures system audio** | Yes, via desktop app | Supported platforms | Supported platforms | Yes |
 | Works fully offline | **Yes** | No | No | No | No |
 | Where transcripts live | **Your disk, plain files** | Their servers | Their servers | Their servers | Their cloud sync |
 | Open source | **Yes, MIT** | No | No | No | No |
-| Price | **Free** | Free tier + paid plans | Free tier + paid plans | Free tier + paid plans | Paid subscription |
+| Price | **Free** | Free tier + paid plans | Free tier + paid plans | Free tier + paid plans | Free tier + paid plans |
 | AI provider | **Local by default; bring your own key** | Theirs | Theirs | Theirs | Theirs |
 
 If your meetings involve anything you wouldn't paste into a public form — legal, medical,

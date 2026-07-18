@@ -7,6 +7,9 @@
 <meta name="description" content="A free, open-source desktop app that records, transcribes, and organizes your meetings entirely on your own machine. No bot joins your call. No audio leaves your computer. No subscription.">
 <meta property="og:title" content="Fly on the Wall">
 <meta property="og:description" content="The meeting notes app that never phones home. Free, open source, on-device.">
+<meta property="og:url" content="https://swarnavspujari.github.io/fly-on-the-wall/">
+<meta property="og:image" content="https://swarnavspujari.github.io/fly-on-the-wall/assets/brand/logo.png">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="icon" type="image/png" href="assets/brand/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -92,7 +95,13 @@
     border-bottom: 1px solid var(--line-2);
   }
   .nav { display: flex; align-items: center; gap: 20px; min-height: 64px; }
-  .nav .logo img { height: 26px; display: block; }
+  .nav .logo { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .nav .logo img { width: 28px; height: 28px; border-radius: 7px; display: block; }
+  .nav .logo .wordmark {
+    font-family: "Bricolage Grotesque", "Spline Sans", sans-serif;
+    font-weight: 700; font-size: 17px; letter-spacing: -0.01em;
+    color: var(--text); white-space: nowrap;
+  }
   .nav-links { display: flex; gap: 4px; margin-left: auto; }
   .nav-links a {
     color: var(--text-2); text-decoration: none; font-weight: 500; font-size: 15px;
@@ -124,7 +133,8 @@
   [data-theme="dark"] .icon-sun { display: block; }
 
   /* ---- hero ---- */
-  .hero { padding: 88px 0 64px; text-align: center; position: relative; overflow: hidden; }
+  .hero { padding: 72px 0 64px; text-align: center; position: relative; overflow: hidden; }
+  .hero .hero-logo { width: min(340px, 74vw); height: auto; margin: 0 auto 30px; }
   .hero .eyebrow {
     display: inline-flex; align-items: center; gap: 8px;
     background: var(--primary-soft); color: var(--primary-soft-text);
@@ -137,7 +147,6 @@
   .hero .sub { font-size: clamp(17px, 2.2vw, 20px); color: var(--text-2); max-width: 56ch; margin: 0 auto 36px; }
   .hero .downloads { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 14px; }
   .hero .fineprint { color: var(--text-3); font-size: 14px; }
-  .hero .mascot { width: min(200px, 40vw); margin: 44px auto 0; display: block; }
 
   section { padding: 72px 0; }
   section.alt { background: var(--surface-2); border-top: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); }
@@ -260,8 +269,8 @@
 <header class="site">
   <div class="wrap nav">
     <a class="logo" href="#" aria-label="Fly on the Wall — home">
-      <img class="theme-light-only" src="assets/brand/logo.png" alt="Fly on the Wall" width="720" height="405">
-      <img class="theme-dark-only" src="assets/brand/logo-dark.png" alt="Fly on the Wall" width="720" height="405">
+      <img src="assets/brand/favicon.png" alt="" width="64" height="64">
+      <span class="wordmark">Fly on the Wall</span>
     </a>
     <nav class="nav-links" aria-label="Main">
       <a href="#how">How it works</a>
@@ -285,6 +294,8 @@
 
   <!-- ============ HERO ============ -->
   <section class="hero wrap">
+    <img class="hero-logo theme-light-only" src="assets/brand/logo.png" alt="Fly on the Wall" width="720" height="405">
+    <img class="hero-logo theme-dark-only" src="assets/brand/logo-dark.png" alt="Fly on the Wall" width="720" height="405">
     <p class="eyebrow">Free &amp; open source · MIT</p>
     <h1>The meeting notes app that never phones home.</h1>
     <p class="sub">
@@ -298,7 +309,6 @@
       <a class="btn btn-outline" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Linux</a>
     </div>
     <p class="fineprint">Works with Zoom, Meet, Teams — anything that makes sound on your computer.</p>
-    <img class="mascot" src="assets/brand/mascot.png" alt="" width="200" height="200">
   </section>
 
   <!-- ============ HOW IT WORKS ============ -->
@@ -455,12 +465,12 @@
           </thead>
           <tbody>
             <tr><th scope="row">Where audio is processed</th><td class="us">Your computer</td><td>Their cloud</td><td>Their cloud</td><td>Their cloud</td><td>Cloud AI for notes</td></tr>
-            <tr><th scope="row">A bot joins your call</th><td class="us">Never</td><td>Yes</td><td>Yes</td><td>Yes</td><td>No</td></tr>
-            <tr><th scope="row">Works with any meeting app</th><td class="us">Yes — system audio</td><td>Supported platforms</td><td>Supported platforms</td><td>Supported platforms</td><td>Yes</td></tr>
+            <tr><th scope="row">A bot joins your call</th><td class="us">Never</td><td>Optional — bot or desktop app</td><td>Yes, by default</td><td>Optional — bot-free in beta</td><td>No</td></tr>
+            <tr><th scope="row">Works with any meeting app</th><td class="us">Yes — system audio</td><td>Yes, via desktop app</td><td>Supported platforms</td><td>Supported platforms</td><td>Yes</td></tr>
             <tr><th scope="row">Works fully offline</th><td class="us">Yes</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
             <tr><th scope="row">Where transcripts live</th><td class="us">Your disk, plain files</td><td>Their servers</td><td>Their servers</td><td>Their servers</td><td>Their cloud sync</td></tr>
             <tr><th scope="row">Open source</th><td class="us">Yes, MIT</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
-            <tr><th scope="row">Price</th><td class="us">Free</td><td>Free tier + paid</td><td>Free tier + paid</td><td>Free tier + paid</td><td>Subscription</td></tr>
+            <tr><th scope="row">Price</th><td class="us">Free</td><td>Free tier + paid</td><td>Free tier + paid</td><td>Free tier + paid</td><td>Free tier + paid</td></tr>
             <tr><th scope="row">AI provider</th><td class="us">Local by default; bring your own key</td><td>Theirs</td><td>Theirs</td><td>Theirs</td><td>Theirs</td></tr>
           </tbody>
         </table>
