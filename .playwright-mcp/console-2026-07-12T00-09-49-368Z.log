@@ -1,3 +1,0 @@
-[  633026ms] [INFO] [devMock] Tauri IPC stubbed (dev browser only — no native runtime). @ http://localhost:1420/src/devMock.ts:469
-[  633031ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:1420/node_modules/.vite/deps/react-dom_client.js?v=e6dc1174:14335
-[  633180ms] [INFO] [startup] fresh notes list at 515 ms @ http://localhost:1420/src/App.tsx:80

@@ -31,6 +31,9 @@ recordings/
 !crates/**/fixtures/**/*.wav
 !src-tauri/fixtures/*.wav
 
+# tool/debug artifacts
+.playwright-mcp/
+
 # os / editor
 .DS_Store
 Thumbs.db
