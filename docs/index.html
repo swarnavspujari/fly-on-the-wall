@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fly on the Wall — private meeting notes that never leave your computer</title>
+<meta name="description" content="A free, open-source desktop app that records, transcribes, and organizes your meetings entirely on your own machine. No bot joins your call. No audio leaves your computer. No subscription.">
+<meta property="og:title" content="Fly on the Wall">
+<meta property="og:description" content="The meeting notes app that never phones home. Free, open source, on-device.">
+<link rel="icon" type="image/png" href="assets/brand/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700;800&family=Spline+Sans:wght@400;500;600&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>
+  // Pre-paint theme (no flash). Default follows the OS; toggle persists.
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem("fotw-site-theme"); } catch (e) {}
+    var theme = saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+  /* ====== Fly on the Wall design tokens (ported from frontend/src/index.css) ====== */
+  :root {
+    --bg: #f2f2e8; --surface: #ffffff; --surface-2: #fbfaf4; --surface-3: #f4f2e9;
+    --shell: #eae9dc;
+    --text: #16151c; --text-2: #4c4b57; --text-3: #66646f; --text-on-fill: #ffffff;
+    --primary: #6a4ae0; --primary-hover: #5b3fd9; --primary-press: #4a31b8;
+    --on-primary: #ffffff; --primary-text: #5b3fd9;
+    --primary-soft: #eeebfe; --primary-soft-text: #5133c2;
+    --accent: #ffd94a; --on-accent: #1a1710;
+    --highlight: #ffe9a6; --on-highlight: #16151c;
+    --line: rgba(20,18,28,.12); --line-2: rgba(20,18,28,.06); --line-strong: rgba(20,18,28,.26);
+    --rec: #d6342e; --on-rec: #ffffff;
+    --success-text: #176b42; --success-soft: #e2f3e9;
+    --brand-ink: #0d0d12; --brand-cream: #f2f2e8; --brand-yellow: #ffd94a;
+    --shadow-sm: 0 1px 2px rgba(13,13,18,.06), 0 2px 8px rgba(13,13,18,.05);
+    --shadow-lg: 0 8px 32px rgba(13,13,18,.14);
+    color-scheme: light;
+  }
+  [data-theme="dark"] {
+    --bg: #0d0d12; --surface: #17161f; --surface-2: #201f2a; --surface-3: #2b2b3c;
+    --shell: #121118;
+    --text: #f2f2e8; --text-2: #c3c1ce; --text-3: #a29fae;
+    --primary: #a896ff; --primary-hover: #b7a8ff; --primary-press: #8e77ff;
+    --on-primary: #16151c; --primary-text: #b7a8ff;
+    --primary-soft: #201b33; --primary-soft-text: #c3b4ff;
+    --highlight: rgba(255,217,74,.28); --on-highlight: #f2f2e8;
+    --line: rgba(242,242,232,.14); --line-2: rgba(242,242,232,.07); --line-strong: rgba(242,242,232,.30);
+    --success-text: #7fd8a6; --success-soft: rgba(31,122,77,.22);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.4), 0 2px 8px rgba(0,0,0,.3);
+    --shadow-lg: 0 8px 32px rgba(0,0,0,.5);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Spline Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 16.5px; line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { font-family: "Bricolage Grotesque", "Spline Sans", sans-serif; line-height: 1.08; letter-spacing: -0.02em; margin: 0; }
+  p { margin: 0; }
+  a { color: var(--primary-text); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  img { max-width: 100%; height: auto; }
+  code, pre { font-family: "Spline Sans Mono", ui-monospace, monospace; font-size: .86em; }
+  :focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; border-radius: 6px; }
+  mark { background: var(--highlight); color: var(--on-highlight); padding: 0 .18em; border-radius: 4px; }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .skip-link {
+    position: absolute; left: 16px; top: -60px; z-index: 100;
+    background: var(--primary); color: var(--on-primary);
+    padding: 10px 16px; border-radius: 10px; font-weight: 600; text-decoration: none;
+    transition: top .15s ease;
+  }
+  .skip-link:focus { top: 12px; }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---- header ---- */
+  header.site {
+    position: sticky; top: 0; z-index: 50;
+    background: color-mix(in srgb, var(--shell) 88%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line-2);
+  }
+  .nav { display: flex; align-items: center; gap: 20px; min-height: 64px; }
+  .nav .logo img { height: 26px; display: block; }
+  .nav-links { display: flex; gap: 4px; margin-left: auto; }
+  .nav-links a {
+    color: var(--text-2); text-decoration: none; font-weight: 500; font-size: 15px;
+    padding: 8px 12px; border-radius: 10px;
+  }
+  .nav-links a:hover { background: var(--surface-3); color: var(--text); }
+  .nav-cta { display: flex; align-items: center; gap: 10px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    font: inherit; font-weight: 600; font-size: 15px; text-decoration: none; cursor: pointer;
+    border-radius: 12px; padding: 10px 18px; min-height: 44px; border: 1px solid transparent;
+    transition: background .15s ease, border-color .15s ease, transform .1s ease;
+  }
+  .btn-primary { background: var(--primary); color: var(--on-primary); }
+  .btn-primary:hover { background: var(--primary-hover); }
+  .btn-primary:active { background: var(--primary-press); transform: translateY(1px); }
+  .btn-outline { background: transparent; color: var(--text); border-color: var(--line-strong); }
+  .btn-outline:hover { background: var(--surface-3); }
+  .btn-ghost { background: transparent; color: var(--text-2); border: none; min-width: 44px; padding: 10px; }
+  .btn-ghost:hover { background: var(--surface-3); color: var(--text); }
+
+  .theme-light-only, .theme-dark-only { display: none; }
+  [data-theme="light"] .theme-light-only { display: block; }
+  [data-theme="dark"] .theme-dark-only { display: block; }
+  [data-theme="light"] .icon-moon { display: block; }
+  [data-theme="light"] .icon-sun { display: none; }
+  [data-theme="dark"] .icon-moon { display: none; }
+  [data-theme="dark"] .icon-sun { display: block; }
+
+  /* ---- hero ---- */
+  .hero { padding: 88px 0 64px; text-align: center; position: relative; overflow: hidden; }
+  .hero .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--primary-soft); color: var(--primary-soft-text);
+    font-size: 13.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 14px; border-radius: 999px; margin-bottom: 28px;
+  }
+  .hero h1 {
+    font-size: clamp(38px, 6.4vw, 64px); font-weight: 800; max-width: 17ch; margin: 0 auto 22px;
+  }
+  .hero .sub { font-size: clamp(17px, 2.2vw, 20px); color: var(--text-2); max-width: 56ch; margin: 0 auto 36px; }
+  .hero .downloads { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 14px; }
+  .hero .fineprint { color: var(--text-3); font-size: 14px; }
+  .hero .mascot { width: min(200px, 40vw); margin: 44px auto 0; display: block; }
+
+  section { padding: 72px 0; }
+  section.alt { background: var(--surface-2); border-top: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); }
+  .kicker {
+    color: var(--primary-text); font-weight: 600; font-size: 13.5px;
+    letter-spacing: .08em; text-transform: uppercase; margin-bottom: 12px;
+  }
+  h2 { font-size: clamp(28px, 4vw, 40px); font-weight: 700; margin-bottom: 14px; }
+  .lede { color: var(--text-2); font-size: 17.5px; max-width: 62ch; margin-bottom: 40px; }
+
+  /* ---- steps ---- */
+  .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+  .step {
+    background: var(--surface); border: 1px solid var(--line-2); border-radius: 18px;
+    padding: 26px 24px; box-shadow: var(--shadow-sm);
+  }
+  .step .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px; margin-bottom: 14px;
+    background: var(--accent); color: var(--on-accent);
+    font-family: "Bricolage Grotesque", sans-serif; font-weight: 700; font-size: 16px;
+  }
+  .step h3 { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+  .step p { color: var(--text-2); font-size: 15.5px; }
+
+  /* ---- feature grid ---- */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line-2); border-radius: 18px;
+    padding: 24px; box-shadow: var(--shadow-sm);
+  }
+  .card .ic {
+    width: 42px; height: 42px; border-radius: 12px; margin-bottom: 14px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--primary-soft); color: var(--primary-soft-text);
+  }
+  .card h3 { font-size: 18.5px; font-weight: 700; margin-bottom: 8px; }
+  .card p { color: var(--text-2); font-size: 15.5px; }
+
+  /* ---- privacy split ---- */
+  .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .panel { border-radius: 18px; padding: 28px; border: 1px solid var(--line-2); }
+  .panel.local { background: var(--surface); box-shadow: var(--shadow-sm); }
+  .panel.cloud { background: transparent; border-style: dashed; border-color: var(--line-strong); }
+  .panel h3 { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+  .panel .tag { font-size: 13px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; margin-bottom: 14px; }
+  .panel.local .tag { color: var(--success-text); }
+  .panel.cloud .tag { color: var(--text-3); }
+  .panel ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+  .panel li { display: flex; gap: 10px; color: var(--text-2); font-size: 15.5px; align-items: baseline; }
+  .panel li::before { content: "•"; color: var(--primary-text); font-weight: 700; }
+
+  /* ---- comparison table ---- */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line-2); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-sm); }
+  table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 15px; }
+  caption { text-align: left; color: var(--text-3); font-size: 13.5px; padding: 14px 18px 0; caption-side: top; }
+  th, td { text-align: left; padding: 13px 18px; border-top: 1px solid var(--line-2); vertical-align: top; }
+  thead th { border-top: none; font-family: "Bricolage Grotesque", sans-serif; font-size: 15px; }
+  tbody th { font-weight: 500; color: var(--text-2); white-space: nowrap; }
+  td.us { background: var(--primary-soft); color: var(--primary-soft-text); font-weight: 600; }
+  thead th.us { background: var(--primary); color: var(--on-primary); border-radius: 0; }
+  td, th { color: var(--text); }
+  tbody td { color: var(--text-2); }
+
+  /* ---- mcp ---- */
+  .mcp { display: grid; grid-template-columns: 1.1fr .9fr; gap: 36px; align-items: center; }
+  pre.snippet {
+    margin: 0; background: var(--brand-ink); color: var(--brand-cream);
+    border-radius: 16px; padding: 22px; overflow-x: auto; line-height: 1.6;
+    border: 1px solid var(--line-2); font-size: 13.5px;
+  }
+  pre.snippet .v { color: #ffd94a; }
+  pre.snippet .k { color: #a896ff; }
+
+  /* ---- faq ---- */
+  .faq { display: grid; gap: 10px; max-width: 780px; }
+  details {
+    background: var(--surface); border: 1px solid var(--line-2); border-radius: 14px;
+    padding: 0 20px;
+  }
+  summary {
+    cursor: pointer; font-weight: 600; font-size: 16px; padding: 16px 0;
+    list-style: none; display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "+"; font-family: "Bricolage Grotesque", sans-serif; font-size: 20px; color: var(--primary-text); flex-shrink: 0; }
+  details[open] summary::after { content: "–"; }
+  details p { color: var(--text-2); padding-bottom: 18px; font-size: 15.5px; }
+  details a { font-weight: 500; }
+
+  /* ---- final cta + footer ---- */
+  .cta-final { text-align: center; }
+  .cta-final h2 { margin-bottom: 10px; }
+  footer.site {
+    background: var(--shell); border-top: 1px solid var(--line-2);
+    padding: 36px 0; color: var(--text-3); font-size: 14.5px;
+  }
+  footer .row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; justify-content: space-between; }
+  footer a { color: var(--text-2); }
+
+  /* ---- reveal animation (guarded) ---- */
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal { opacity: 0; transform: translateY(14px); transition: opacity .5s ease, transform .5s ease; }
+    .reveal.in { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+  }
+
+  @media (max-width: 860px) {
+    .nav-links { display: none; }
+    .mcp { grid-template-columns: 1fr; }
+    section { padding: 56px 0; }
+  }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site">
+  <div class="wrap nav">
+    <a class="logo" href="#" aria-label="Fly on the Wall — home">
+      <img class="theme-light-only" src="assets/brand/logo.png" alt="Fly on the Wall" width="720" height="405">
+      <img class="theme-dark-only" src="assets/brand/logo-dark.png" alt="Fly on the Wall" width="720" height="405">
+    </a>
+    <nav class="nav-links" aria-label="Main">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#compare">Compare</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <div class="nav-cta">
+      <button id="theme-toggle" class="btn btn-ghost" type="button" aria-label="Switch theme">
+        <svg class="icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="icon-sun" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <a class="btn btn-outline" href="https://github.com/swarnavspujari/fly-on-the-wall">GitHub</a>
+      <a class="btn btn-primary" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Download</a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ============ HERO ============ -->
+  <section class="hero wrap">
+    <p class="eyebrow">Free &amp; open source · MIT</p>
+    <h1>The meeting notes app that never phones home.</h1>
+    <p class="sub">
+      Fly on the Wall records, transcribes, and organizes your meetings
+      <mark>entirely on your own computer</mark>. No bot joins your call. No audio
+      leaves your machine. No subscription.
+    </p>
+    <div class="downloads">
+      <a class="btn btn-primary" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Download for Windows</a>
+      <a class="btn btn-outline" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">macOS</a>
+      <a class="btn btn-outline" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Linux</a>
+    </div>
+    <p class="fineprint">Works with Zoom, Meet, Teams — anything that makes sound on your computer.</p>
+    <img class="mascot" src="assets/brand/mascot.png" alt="" width="200" height="200">
+  </section>
+
+  <!-- ============ HOW IT WORKS ============ -->
+  <section id="how" class="alt">
+    <div class="wrap">
+      <p class="kicker">How it works</p>
+      <h2>From live call to clean notes, in four steps.</h2>
+      <p class="lede">
+        Fly on the Wall listens from your side of the call — your microphone and the sound
+        coming out of your computer — so nothing joins the meeting and there's nothing for
+        other participants to see.
+      </p>
+      <div class="steps">
+        <div class="step reveal">
+          <span class="num" aria-hidden="true">1</span>
+          <h3>Record</h3>
+          <p>One click — or start straight from a meeting on your connected calendar. Jot rough notes in the scratchpad while you talk.</p>
+        </div>
+        <div class="step reveal">
+          <span class="num" aria-hidden="true">2</span>
+          <h3>Transcribe</h3>
+          <p>Stop, and the transcript is built on your machine: timestamped, with speakers separated and labeled. Click any name to rename it.</p>
+        </div>
+        <div class="step reveal">
+          <span class="num" aria-hidden="true">3</span>
+          <h3>Enhance</h3>
+          <p>Pick a template — 1:1, sales, standup, interview — and your rough notes become clean, structured ones. Every AI-written line cites the transcript moment it came from.</p>
+        </div>
+        <div class="step reveal">
+          <span class="num" aria-hidden="true">4</span>
+          <h3>Ask</h3>
+          <p>"What did I commit to?" "Draft the follow-up email." Chat with the meeting and drop any answer into your note with one click.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FEATURES ============ -->
+  <section id="features">
+    <div class="wrap">
+      <p class="kicker">Features</p>
+      <h2>Built for people whose meetings are nobody else's business.</h2>
+      <p class="lede">
+        Founders, sales, consultants, recruiters — anyone who talks for a living and signs
+        NDAs about it.
+      </p>
+      <div class="grid">
+        <div class="card reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 3.3a10 10 0 1 0 7 7"/><path d="m14 10 7-7"/><path d="M21 7V3h-4"/></svg></div>
+          <h3>No bot in the room</h3>
+          <p>Nothing joins your call or announces itself. It captures your mic and your system audio — so it works with any meeting app, or a phone on speaker.</p>
+        </div>
+        <div class="card reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+          <h3>On-device everything</h3>
+          <p>Transcription and speaker labeling run locally. After a one-time model download, it works with no internet connection at all.</p>
+        </div>
+        <div class="card reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg></div>
+          <h3>Notes with receipts</h3>
+          <p>Your words stay in your color; AI additions are tinted and carry citation chips that jump to the exact transcript moment. No mystery summaries.</p>
+        </div>
+        <div class="card reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
+          <h3>Search that finds meaning</h3>
+          <p>Hybrid keyword + semantic search across notes and transcripts — "the call where we discussed pricing" works even if nobody said "pricing".</p>
+        </div>
+        <div class="card reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></div>
+          <h3>Your files, not a silo</h3>
+          <p>Every note is a plain file on your disk. Folders, drag-and-drop, Markdown and PDF export. Back up however you already back up files.</p>
+        </div>
+        <div class="card reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></div>
+          <h3>Calendar aware</h3>
+          <p>Connect Google Calendar or Outlook (read-only) to see what's next and start a note straight from the meeting. Sign-ins live in your system keychain.</p>
+        </div>
+        <div class="card reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
+          <h3>Import old recordings</h3>
+          <p>Drop in existing audio or video files — several at once — and get the same transcripts, speakers, and enhanced notes for meetings from before.</p>
+        </div>
+        <div class="card reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg></div>
+          <h3>Talks to your AI tools</h3>
+          <p>A bundled MCP server lets Claude Desktop read your meetings locally — "what's changed with the Acme account?" answered with citations, nothing uploaded.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PRIVACY ============ -->
+  <section id="privacy" class="alt">
+    <div class="wrap">
+      <p class="kicker">Privacy</p>
+      <h2>Private by default. Cloud by choice.</h2>
+      <p class="lede">
+        There is no server to breach, no retention policy to read, and no vendor in the
+        loop. Exactly two features can touch the internet — both off until you turn them
+        on, both clearly labeled when active, both using your own keys.
+      </p>
+      <div class="split">
+        <div class="panel local reveal">
+          <p class="tag">Always on your machine</p>
+          <h3>The whole pipeline, local</h3>
+          <ul>
+            <li>Recording — your mic and system audio, captured separately</li>
+            <li>Transcription — on-device speech-to-text</li>
+            <li>Speaker labeling — who said what, figured out locally</li>
+            <li>Enhance &amp; Ask — a local assistant, by default</li>
+            <li>Search — keyword + semantic, indexed on your disk</li>
+            <li>Storage — plain files you can open in any editor</li>
+          </ul>
+        </div>
+        <div class="panel cloud reveal">
+          <p class="tag">Optional · your keys · off by default</p>
+          <h3>Two opt-in cloud features</h3>
+          <ul>
+            <li><strong>Groq transcription</strong> — faster transcripts on slower computers; audio goes to Groq, speaker labeling stays local</li>
+            <li><strong>Claude for Enhance &amp; Ask</strong> — bring your own Anthropic key when you want a frontier model on your notes</li>
+          </ul>
+          <p style="margin-top:14px; color:var(--text-3); font-size:14.5px;">
+            Keys are stored in your system keychain, never in a plain file — and the app
+            tells you on screen whenever a cloud feature is active.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ COMPARE ============ -->
+  <section id="compare">
+    <div class="wrap">
+      <p class="kicker">Compare</p>
+      <h2>The honest comparison.</h2>
+      <p class="lede">
+        Cloud note-takers are polished products with real strengths — mobile apps, team
+        workspaces, CRM integrations. If those matter more to you than privacy, cost, or
+        control, they're reasonable choices. Here's the objective difference in how they
+        work.
+      </p>
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Comparison of meeting note-takers">
+        <table>
+          <caption>As of July 2026 — vendor details change; check each product's site.</caption>
+          <thead>
+            <tr>
+              <th scope="col"><span class="sr-only">Capability</span></th>
+              <th scope="col" class="us">Fly on the Wall</th>
+              <th scope="col">Otter.ai</th>
+              <th scope="col">Fireflies.ai</th>
+              <th scope="col">Fathom</th>
+              <th scope="col">Granola</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Where audio is processed</th><td class="us">Your computer</td><td>Their cloud</td><td>Their cloud</td><td>Their cloud</td><td>Cloud AI for notes</td></tr>
+            <tr><th scope="row">A bot joins your call</th><td class="us">Never</td><td>Yes</td><td>Yes</td><td>Yes</td><td>No</td></tr>
+            <tr><th scope="row">Works with any meeting app</th><td class="us">Yes — system audio</td><td>Supported platforms</td><td>Supported platforms</td><td>Supported platforms</td><td>Yes</td></tr>
+            <tr><th scope="row">Works fully offline</th><td class="us">Yes</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
+            <tr><th scope="row">Where transcripts live</th><td class="us">Your disk, plain files</td><td>Their servers</td><td>Their servers</td><td>Their servers</td><td>Their cloud sync</td></tr>
+            <tr><th scope="row">Open source</th><td class="us">Yes, MIT</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
+            <tr><th scope="row">Price</th><td class="us">Free</td><td>Free tier + paid</td><td>Free tier + paid</td><td>Free tier + paid</td><td>Subscription</td></tr>
+            <tr><th scope="row">AI provider</th><td class="us">Local by default; bring your own key</td><td>Theirs</td><td>Theirs</td><td>Theirs</td><td>Theirs</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:22px; color:var(--text-2); max-width:66ch;">
+        If your meetings involve anything you wouldn't paste into a public form — legal,
+        medical, HR, unreleased product, other people's confidential information — the
+        architecture is the feature.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ MCP ============ -->
+  <section class="alt">
+    <div class="wrap mcp">
+      <div>
+        <p class="kicker">For AI power users</p>
+        <h2>Your meetings, on tap for Claude.</h2>
+        <p class="lede" style="margin-bottom:18px;">
+          Fly on the Wall ships a local MCP server over your notes, meetings, and
+          transcripts. Connect it to Claude Desktop and ask for a briefing on any project,
+          customer, or recurring meeting — every claim cites its meeting and transcript
+          segments, and nothing leaves your machine.
+        </p>
+        <p style="color:var(--text-2);">
+          The app generates the exact config snippet for your install under
+          <strong>Settings → "Chat with your notes (MCP)"</strong>.
+        </p>
+      </div>
+      <pre class="snippet" aria-label="Claude Desktop configuration example"><code>{
+  <span class="k">"mcpServers"</span>: {
+    <span class="k">"flyonthewall"</span>: {
+      <span class="k">"command"</span>: <span class="v">"C:\\...\\flyonthewall-mcp.exe"</span>
+    }
+  }
+}</code></pre>
+    </div>
+  </section>
+
+  <!-- ============ FAQ ============ -->
+  <section id="faq">
+    <div class="wrap">
+      <p class="kicker">FAQ</p>
+      <h2>Questions people actually ask.</h2>
+      <div class="faq" style="margin-top:34px;">
+        <details>
+          <summary>Is it really free?</summary>
+          <p>Yes. Fly on the Wall is open source under the MIT license — no accounts, no tiers, no trial timers. The optional cloud features (Groq, Claude) use your own API keys, so any cost there is between you and those providers; Groq has a free tier.</p>
+        </details>
+        <details>
+          <summary>Which meeting apps does it work with?</summary>
+          <p>All of them. It doesn't integrate with meeting platforms — it records your microphone and the sound coming out of your computer. Zoom, Google Meet, Teams, Slack huddles, a webinar, or a phone on speaker next to your laptop all work the same way.</p>
+        </details>
+        <details>
+          <summary>Do other participants see anything?</summary>
+          <p>No. Nothing joins the call, so there's no bot in the attendee list and no "recording" banner from Fly on the Wall. Note that laws on recording conversations vary by place — getting consent is on you.</p>
+        </details>
+        <details>
+          <summary>What are the platform caveats?</summary>
+          <p>Windows and Linux capture both channels today. On a Mac, system-audio capture isn't available yet, so it records your microphone only and tells you so — everything else works. Installers are currently unsigned, so each OS shows a one-time warning on first launch; the <a href="https://github.com/swarnavspujari/fly-on-the-wall#install">README walks you past it</a>.</p>
+        </details>
+        <details>
+          <summary>Does the AI need the internet?</summary>
+          <p>Not by default. Enhance and Ask run on a local assistant on your computer. If you want a frontier model instead, you can plug in your own Anthropic key — and the app labels it clearly whenever a cloud feature is active.</p>
+        </details>
+        <details>
+          <summary>How do I set up calendars and API keys?</summary>
+          <p>Step-by-step guides — one-click Google and Outlook connections for invited testers, bring-your-own OAuth app instructions, and Groq / Anthropic key walkthroughs — live in the <a href="https://github.com/swarnavspujari/fly-on-the-wall#connect-your-calendars">README's setup section</a>.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FINAL CTA ============ -->
+  <section class="alt cta-final">
+    <div class="wrap">
+      <h2>Be the fly on the wall.</h2>
+      <p class="lede" style="margin: 0 auto 30px;">Free, open source, and yours in about a minute.</p>
+      <div class="downloads" style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+        <a class="btn btn-primary" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Download the latest release</a>
+        <a class="btn btn-outline" href="https://github.com/swarnavspujari/fly-on-the-wall">Star it on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site">
+  <div class="wrap row">
+    <p>Fly on the Wall · MIT licensed · your meetings stay yours.</p>
+    <p>
+      <a href="https://github.com/swarnavspujari/fly-on-the-wall">GitHub</a> ·
+      <a href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Releases</a> ·
+      <a href="https://github.com/swarnavspujari/fly-on-the-wall#readme">Docs</a>
+    </p>
+  </div>
+</footer>
+
+<script>
+  // Theme toggle (two-state; initial state set pre-paint above).
+  var toggle = document.getElementById("theme-toggle");
+  function syncToggleLabel() {
+    var dark = document.documentElement.getAttribute("data-theme") === "dark";
+    toggle.setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
+  }
+  toggle.addEventListener("click", function () {
+    var next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("fotw-site-theme", next); } catch (e) {}
+    syncToggleLabel();
+  });
+  syncToggleLabel();
+
+  // Scroll reveal, skipped for reduced motion.
+  if (matchMedia("(prefers-reduced-motion: no-preference)").matches && "IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.15 });
+    document.querySelectorAll(".reveal").forEach(function (el) { io.observe(el); });
+  } else {
+    document.querySelectorAll(".reveal").forEach(function (el) { el.classList.add("in"); });
+  }
+</script>
+</body>
+</html>
