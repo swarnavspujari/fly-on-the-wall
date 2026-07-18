@@ -36,7 +36,7 @@ machine. Your meetings stay on your disk, as plain files you can open in any edi
 
 It's free, open source (MIT), and it works offline.
 
-<!-- screenshot: main window with a finished note, light theme -->
+<img src="docs/assets/screenshots/app-transcript-light.webp" alt="The Fly on the Wall main window: a meeting transcript with three color-coded speakers, a playable waveform, screen recordings, folders, and upcoming calendar meetings" width="100%">
 
 ## How it works
 
@@ -102,7 +102,10 @@ A couple of tips for the clearest recordings:
 - **Use a headset if you can.** On open speakers, your microphone also picks up the other
   people, which can leave echoes in the transcript. A headset keeps the two sides clean.
 
-<!-- screenshot: enhanced note with citation chips and speaker colors -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/app-notes-dark.webp">
+  <img src="docs/assets/screenshots/app-notes-light.webp" alt="A meeting note in the editor with rough notes, a highlighted line, checked-off action items, an attached PDF, and the Enhance button — shown in your theme" width="100%">
+</picture>
 
 ## How it compares
 
@@ -205,6 +208,8 @@ Claude, see [Add your API keys](#add-your-api-keys) below.
 
 Connecting a calendar is optional. It lets you start a note and recording straight from a
 meeting, and shows what's coming up next.
+
+<img src="docs/assets/screenshots/upnext.webp" alt="The Up next sidebar widget: a live meeting from Google Calendar and an upcoming one from Outlook, each with a Start button" width="360">
 
 ### Connect your Google Calendar
 
