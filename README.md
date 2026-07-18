@@ -11,6 +11,7 @@ No bot joins your call. No audio leaves your computer. No subscription.
 
 [**Download**](https://github.com/swarnavspujari/fly-on-the-wall/releases/latest) · [**Website**](https://swarnavspujari.github.io/fly-on-the-wall/) · [How it works](#how-it-works) · [Compare](#how-it-compares) · [Setup guides](#connect-your-calendars)
 
+[![CI](https://github.com/swarnavspujari/fly-on-the-wall/actions/workflows/ci.yml/badge.svg)](https://github.com/swarnavspujari/fly-on-the-wall/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/swarnavspujari/fly-on-the-wall?label=release&color=6A4AE0)](https://github.com/swarnavspujari/fly-on-the-wall/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2B2B3C.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-Windows%20·%20macOS%20·%20Linux-2B2B3C)
@@ -454,6 +455,7 @@ instructions / a Gem alongside the MCP connection.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — module boundaries and the porting story
 - [DECISIONS.md](DECISIONS.md) — running log of technical decisions
 - [docs/MODELS.md](docs/MODELS.md) — ASR/diarization model tiers, sizes, licenses
+- [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — local-LLM benchmark behind the default model choice
 - [docs/PORTING.md](docs/PORTING.md) — macOS / iOS / Android guidance
 - [docs/TESTING.md](docs/TESTING.md) — test strategy + manual checklist
 
