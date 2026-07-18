@@ -19,7 +19,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Collect release + traffic stats
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # STATS_TOKEN (fine-grained PAT, Administration: read) unlocks the
+          # traffic API; without it the run still works, minus traffic numbers.
+          GITHUB_TOKEN: ${{ secrets.STATS_TOKEN || secrets.GITHUB_TOKEN }}
         run: node scripts/collect-stats.mjs
       - name: Commit snapshot
         run: |
