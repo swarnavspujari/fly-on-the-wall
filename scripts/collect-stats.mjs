@@ -21,11 +21,12 @@
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 
 const REPO = process.env.GITHUB_REPOSITORY ?? "swarnavspujari/fly-on-the-wall";
-const TOKEN = process.env.GITHUB_TOKEN;
+const TOKEN = process.env.STATS_TOKEN || process.env.GITHUB_TOKEN;
 if (!TOKEN) {
-  console.error("GITHUB_TOKEN is required");
+  console.error("STATS_TOKEN or GITHUB_TOKEN is required");
   process.exit(1);
 }
+console.log(`auth: using ${process.env.STATS_TOKEN ? "STATS_TOKEN" : "GITHUB_TOKEN"}`);
 
 async function api(path) {
   const res = await fetch(`https://api.github.com${path}`, {
