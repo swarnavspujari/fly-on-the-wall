@@ -35,7 +35,10 @@ async function api(path) {
       "x-github-api-version": "2022-11-28",
     },
   });
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  if (!res.ok) {
+    const wants = res.headers.get("x-accepted-github-permissions");
+    throw new Error(`${path} -> ${res.status}${wants ? ` (accepted permissions: ${wants})` : ""}`);
+  }
   return res.json();
 }
 
