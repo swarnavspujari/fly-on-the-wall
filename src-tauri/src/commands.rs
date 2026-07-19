@@ -218,14 +218,56 @@ pub fn move_note(
         .map_err(err_str)
 }
 
+/// Delete a note and everything that belongs to it. Meetings must not
+/// survive as orphans: queued transcriptions are cancelled here, a RUNNING
+/// pipeline gets a cooperative cancel request (the scheduler purges the
+/// meeting and its recordings folder once the run unwinds — deleting files
+/// out from under a live decoder is how folders get stranded), and idle
+/// meetings are purged on the spot.
 #[tauri::command]
-pub fn delete_note(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let meetings = state
+        .storage
+        .lock()
+        .unwrap()
+        .meetings_for_note(&id)
+        .map_err(err_str)?;
+    let on_stage = crate::scheduler::stage_emitter(&app);
+    for m in &meetings {
+        crate::scheduler::cancel(&state, &on_stage, &m.id).map_err(err_str)?;
+    }
     state
         .storage
         .lock()
         .unwrap()
         .delete_note(&id)
-        .map_err(err_str)
+        .map_err(err_str)?;
+    for m in &meetings {
+        let running = {
+            let stages = state.pipeline_stage.lock().unwrap();
+            stages.contains_key(&m.id)
+        };
+        if !running {
+            crate::import_commands::purge_staged_import(&state, &m.id);
+            if let Err(e) = state.storage.lock().unwrap().purge_meeting(&m.id) {
+                tracing::warn!(meeting_id = %m.id, error = %e, "purging deleted note's meeting failed");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Stop a queued or running transcription (the import queue's Cancel).
+/// Completed batches stay checkpointed, so a later Transcribe resumes
+/// instead of redoing them; the staged import queue drops back to idle.
+#[tauri::command]
+pub fn cancel_transcription(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> CmdResult<()> {
+    crate::import_commands::reset_staged_started(&state, &meeting_id);
+    crate::scheduler::cancel(&state, &crate::scheduler::stage_emitter(&app), &meeting_id)
 }
 
 // ---------------------------------------------------------------------------

@@ -22,6 +22,12 @@ pub struct BatchResult {
     /// Language the engine detected while decoding this batch, if any.
     pub language: Option<String>,
     pub words: Vec<Word>,
+    /// Which engine actually decoded this batch. A quota-paced cloud run may
+    /// spill individual batches to a local engine, so this can differ from
+    /// the plan's engine; `None` on checkpoints written before the field
+    /// existed (serde default keeps them resumable).
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -176,10 +182,12 @@ mod tests {
         c.push(BatchResult {
             language: Some("en".into()),
             words: vec![word("hello", 100)],
+            engine: Some("groq".into()),
         });
         c.push(BatchResult {
             language: None,
             words: vec![word("again", 20_100)],
+            engine: Some("whisper.cpp".into()),
         });
 
         let reopened = CheckpointFile::open(path, key);
@@ -187,7 +195,27 @@ mod tests {
         assert_eq!(resumed.len(), 2);
         assert_eq!(resumed[0].words[0].text, "hello");
         assert_eq!(resumed[0].language.as_deref(), Some("en"));
+        assert_eq!(resumed[0].engine.as_deref(), Some("groq"));
         assert_eq!(resumed[1].words[0].start_ms, 20_100);
+        assert_eq!(resumed[1].engine.as_deref(), Some("whisper.cpp"));
+    }
+
+    /// v1.5.0 wrote checkpoints without the per-batch `engine` field; a
+    /// version upgrade mid-import must not discard those finished batches.
+    #[test]
+    fn pre_engine_field_checkpoints_still_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("track.16k.asrpart.json");
+        std::fs::write(
+            &path,
+            r#"{"key":"k","batches":[{"language":"en","words":[{"text":"old","start_ms":0,"end_ms":100}]}]}"#,
+        )
+        .unwrap();
+        let c = CheckpointFile::open(path, "k".into());
+        let resumed = c.resumed();
+        assert_eq!(resumed.len(), 1, "old-format batches must survive");
+        assert_eq!(resumed[0].words[0].text, "old");
+        assert_eq!(resumed[0].engine, None);
     }
 
     #[test]
@@ -198,6 +226,7 @@ mod tests {
         c.push(BatchResult {
             language: None,
             words: vec![word("stale", 0)],
+            engine: None,
         });
 
         let c = CheckpointFile::open(path.clone(), "new-key".into());

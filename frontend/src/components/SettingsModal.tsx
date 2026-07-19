@@ -759,7 +759,11 @@ export default function SettingsModal({
                 >
                   Cloud transcription uploads meeting audio to Groq — it{" "}
                   <span style={LEAVES_PILL}>LEAVES</span> this machine. Who-said-what (diarization)
-                  still runs locally. Applied when you press Save.
+                  still runs locally. Audio goes to Groq first, paced to stay inside the free
+                  tier&apos;s hourly limit; whenever the quota is busy, this machine&apos;s GPU or
+                  CPU transcribes in the meantime. Finished parts are saved as they complete, so a
+                  quit or restart picks up where it left off — nothing is transcribed twice.
+                  Applied when you press Save.
                 </p>
               </Card>
             </div>
@@ -799,8 +803,8 @@ export default function SettingsModal({
             <Checkbox
               checked={useGroq}
               onChange={(e) => setUseGroq(e.target.checked)}
-              label="Use Groq for transcription (cloud fallback)"
-              description="Uploads meeting audio to Groq for transcription; diarization stays local. Bring your own key — free tier available."
+              label="Use Groq for transcription (cloud first, local fills in)"
+              description="Uploads meeting audio to Groq while the free tier's hourly quota lasts; when it's busy, your GPU or CPU transcribes instead of waiting. Finished parts are checkpointed — a restart never re-transcribes them. Diarization stays local. Bring your own key."
             />
           )}
         </section>

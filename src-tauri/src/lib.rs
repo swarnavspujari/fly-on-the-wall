@@ -169,6 +169,7 @@ pub fn run() {
             commands::update_note_scratchpad,
             commands::move_note,
             commands::delete_note,
+            commands::cancel_transcription,
             commands::attach_file,
             commands::export_note,
             commands::copy_note_markdown,

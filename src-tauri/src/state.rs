@@ -25,6 +25,10 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretStore>,
     /// meeting_id → current pipeline stage, for running transcriptions.
     pub pipeline_stage: Mutex<HashMap<String, String>>,
+    /// Meeting ids whose running pipeline was asked to stop (note deleted,
+    /// import cancelled). Engines poll this between batches; the pipeline
+    /// clears a meeting's entry when a fresh run starts.
+    pub cancel_requests: Mutex<std::collections::HashSet<String>>,
     /// At most one screen capture at a time.
     pub screen: Mutex<Option<ActiveScreenRecording>>,
     /// Nudges the transcription queue worker (job enqueued, recording
@@ -69,6 +73,7 @@ impl AppState {
             recording: Mutex::new(None),
             secrets,
             pipeline_stage: Mutex::new(HashMap::new()),
+            cancel_requests: Mutex::new(std::collections::HashSet::new()),
             screen: Mutex::new(None),
             jobs_notify: tokio::sync::Notify::new(),
             ollama: Mutex::new(None),

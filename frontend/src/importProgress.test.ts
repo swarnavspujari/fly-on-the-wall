@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fmtSize, mapProgress } from "./importProgress";
+import { fmtSize, mapProgress, parseTranscribingDetail, rollingStatus } from "./importProgress";
 import type { ImportFile } from "./types";
 
 const file = (id: string): ImportFile => ({
@@ -52,6 +52,65 @@ describe("mapProgress", () => {
     const one = mapProgress([file("a")], [5000], 42);
     expect(one.statuses).toEqual({ a: "transcribing" });
     expect(one.activePct).toBe(42);
+  });
+});
+
+describe("parseTranscribingDetail", () => {
+  it("parses the engine-labeled percent details the pipeline emits", () => {
+    expect(parseTranscribingDetail("cloud 42%")).toEqual({
+      pct: 42,
+      engine: "cloud",
+      quotaWaitMin: null,
+    });
+    expect(parseTranscribingDetail("GPU 7%")).toEqual({ pct: 7, engine: "GPU", quotaWaitMin: null });
+    expect(parseTranscribingDetail("CPU 99%")).toEqual({
+      pct: 99,
+      engine: "CPU",
+      quotaWaitMin: null,
+    });
+  });
+
+  it("parses quota-wait details with the ETA", () => {
+    expect(parseTranscribingDetail("cloud 40%, waiting for cloud quota (~3m)")).toEqual({
+      pct: 40,
+      engine: "cloud",
+      quotaWaitMin: 3,
+    });
+  });
+
+  it("handles channel-wrapped, engine-less, and missing details", () => {
+    expect(parseTranscribingDetail("your microphone (cloud 42%)")).toEqual({
+      pct: 42,
+      engine: "cloud",
+      quotaWaitMin: null,
+    });
+    expect(parseTranscribingDetail("42%")).toEqual({ pct: 42, engine: null, quotaWaitMin: null });
+    expect(parseTranscribingDetail(null)).toEqual({ pct: null, engine: null, quotaWaitMin: null });
+    expect(parseTranscribingDetail("your microphone")).toEqual({
+      pct: null,
+      engine: null,
+      quotaWaitMin: null,
+    });
+  });
+});
+
+describe("rollingStatus", () => {
+  it("shows current file, engine, and file-local percent", () => {
+    // global 30% → file b (25–50% window), 20% through it
+    expect(rollingStatus(FILES, BOUNDS, "cloud 30%")).toBe("2 of 3 · Cloud · 20%");
+    expect(rollingStatus(FILES, BOUNDS, "GPU 30%")).toBe("2 of 3 · GPU · 20%");
+    expect(rollingStatus(FILES, BOUNDS, "30%")).toBe("2 of 3 · 20%");
+  });
+
+  it("says so while the cloud pacer waits, instead of a fake spinner", () => {
+    expect(rollingStatus(FILES, BOUNDS, "cloud 30%, waiting for cloud quota (~3m)")).toBe(
+      "2 of 3 · Waiting for cloud quota (~3m)",
+    );
+  });
+
+  it("returns null without a percent (caller falls back to the stage label)", () => {
+    expect(rollingStatus(FILES, BOUNDS, null)).toBeNull();
+    expect(rollingStatus(FILES, BOUNDS, "your microphone")).toBeNull();
   });
 });
 

@@ -2,7 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { GripVertical, Mic, Monitor, X } from "lucide-react";
 import type { ImportFile, ImportProgress, ImportStaged } from "../types";
-import { fmtSize, mapProgress, type ImportFileStatus } from "../importProgress";
+import {
+  fmtSize,
+  mapProgress,
+  parseTranscribingDetail,
+  rollingStatus,
+  type ImportFileStatus,
+} from "../importProgress";
 import { briefError } from "../pipelineNotice";
 import { Button } from "./ui";
 
@@ -22,6 +28,8 @@ interface Props {
   onTranscribe: (order: string[]) => void;
   /** Re-enqueue after a pipeline failure (the files are already staged). */
   onRetry: () => void;
+  /** Stop the running transcription (finished batches stay checkpointed). */
+  onCancel: () => void;
 }
 
 /** Header copy per running stage (import-flow wording, not the transcript
@@ -46,6 +54,7 @@ export default function ImportQueue({
   pipelineError,
   onTranscribe,
   onRetry,
+  onCancel,
 }: Props) {
   const [files, setFiles] = useState<ImportFile[]>(staged.files);
   const [clicked, setClicked] = useState(false);
@@ -95,8 +104,6 @@ export default function ImportQueue({
   };
 
   // ---- derive per-file statuses from the real pipeline state ----
-  const pct =
-    pipeStage === "transcribing" && pipeDetail ? /(\d+)%/.exec(pipeDetail)?.[1] : undefined;
   const afterAsr =
     pipeStage != null && ["diarizing", "aligning", "saving", "polishing"].includes(pipeStage);
   let statuses: Record<string, ImportFileStatus> = {};
@@ -104,10 +111,12 @@ export default function ImportQueue({
   if (running) {
     if (afterAsr) {
       for (const f of supported) statuses[f.id] = "done";
-    } else if (pipeStage === "transcribing" && pct != null) {
-      ({ statuses, activePct } = mapProgress(supported, staged.boundaries_ms, Number(pct)));
     } else if (pipeStage === "transcribing") {
-      for (const f of supported) statuses[f.id] = "transcribing";
+      // Cloud runs now report % too; a detail without one (first instants)
+      // maps as 0% — first file active, the rest waiting — never the
+      // everything-is-spinning fallback that read as parallel work.
+      const pct = parseTranscribingDetail(pipeDetail).pct ?? 0;
+      ({ statuses, activePct } = mapProgress(supported, staged.boundaries_ms, pct));
     } else {
       for (const f of supported) statuses[f.id] = converting === f.id ? "preparing" : "waiting";
     }
@@ -117,8 +126,11 @@ export default function ImportQueue({
     ? briefError(pipelineError)
     : idle
       ? "Files are transcribed in this order — drag to reorder, then hit Transcribe."
-      : ((pipeStage && RUNNING_LABELS[pipeStage]) ??
-        (converting != null ? "Preparing audio…" : "Starting…"));
+      : pipeStage === "transcribing"
+        ? (rollingStatus(supported, staged.boundaries_ms, pipeDetail) ??
+          RUNNING_LABELS.transcribing)
+        : ((pipeStage && RUNNING_LABELS[pipeStage]) ??
+          (converting != null ? "Preparing audio…" : "Starting…"));
 
   // 1-based position among the transcribable rows (error rows show "!")
   const rowNumber = (i: number) => files.slice(0, i + 1).filter((f) => !f.error).length;
@@ -152,6 +164,16 @@ export default function ImportQueue({
         {pipelineError && (
           <Button variant="primary" size="sm" onClick={onRetry} title="Try transcribing again">
             Retry
+          </Button>
+        )}
+        {running && !pipelineError && !afterAsr && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onCancel}
+            title="Stop transcribing — finished parts are kept and resume next time"
+          >
+            Cancel
           </Button>
         )}
       </div>

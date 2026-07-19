@@ -184,4 +184,7 @@ export const api = {
   // Normalize + join the staged files in `order`, then queue the pipeline.
   importTranscribe: (meetingId: string, order: string[]) =>
     invoke<ImportStaged>("import_transcribe", { meetingId, order }),
+  // Stop a queued/running transcription; finished batches stay checkpointed.
+  cancelTranscription: (meetingId: string) =>
+    invoke<void>("cancel_transcription", { meetingId }),
 };

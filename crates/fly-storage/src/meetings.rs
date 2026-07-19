@@ -76,6 +76,40 @@ impl Storage {
         self.get_meeting(id)
     }
 
+    /// Remove a meeting and everything derived from it: the transcript row
+    /// (raw + cleaned, FTS, embedding chunks), extracted items, its
+    /// transcription job, the meeting row, and the recordings folder on
+    /// disk (which also holds the transcript mirrors). Used when the owning
+    /// note is deleted — a meeting must not survive as an orphan.
+    pub fn purge_meeting(&self, id: &str) -> Result<()> {
+        // resolve the on-disk folder before the row disappears
+        let rec_dir = self
+            .get_meeting(id)
+            .ok()
+            .and_then(|m| m.recording)
+            .and_then(|r| recording_dir_rel(&r));
+        self.conn
+            .execute("DELETE FROM transcripts WHERE meeting_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM transcripts_fts WHERE meeting_id = ?1", [id])?;
+        self.delete_chunks("transcript", id)?;
+        self.conn
+            .execute("DELETE FROM meeting_items WHERE meeting_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM transcription_jobs WHERE meeting_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM meetings WHERE id = ?1", [id])?;
+        if let Some(rel) = rec_dir {
+            // best-effort: a locked file only strands the folder, never the delete
+            if let Err(e) = std::fs::remove_dir_all(self.data_dir.join(&rel)) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(dir = %rel, error = %e, "could not remove recordings folder");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Mark a meeting finished and store its recording.
     pub fn end_meeting(&self, id: &str, recording: &RecordingRef) -> Result<Meeting> {
         let n = self.conn.execute(
@@ -296,6 +330,51 @@ pub(crate) fn row_to_meeting(r: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting>
 mod tests {
     use crate::test_storage;
     use fly_core::{Attendee, RecordingRef};
+
+    /// Purging removes the meeting row, its transcript, its job, and the
+    /// recordings folder on disk — nothing of the meeting survives the
+    /// owning note's deletion.
+    #[test]
+    fn purge_meeting_removes_rows_and_the_recordings_folder() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("Doomed", None).unwrap();
+        let meeting = s.create_meeting("Doomed", &note.id, &[]).unwrap();
+        let rec_dir = dir.path().join("recordings/doomed");
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        std::fs::write(rec_dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        s.end_meeting(
+            &meeting.id,
+            &RecordingRef {
+                mic_path: None,
+                system_path: None,
+                mixed_path: Some("recordings/doomed/recording.mixed.wav".into()),
+                playback_path: None,
+                duration_ms: 1000,
+            },
+        )
+        .unwrap();
+        s.save_transcript(&fly_core::Transcript {
+            meeting_id: meeting.id.clone(),
+            language: Some("en".into()),
+            engine: "whisper.cpp".into(),
+            segments: vec![],
+            speakers: vec![],
+        })
+        .unwrap();
+        s.enqueue_transcription(&meeting.id).unwrap();
+
+        s.purge_meeting(&meeting.id).unwrap();
+
+        assert!(s.get_meeting(&meeting.id).is_err(), "meeting row must go");
+        assert!(s.get_transcript(&meeting.id).unwrap().is_none());
+        assert!(s.transcription_job(&meeting.id).unwrap().is_none());
+        assert!(!rec_dir.exists(), "recordings folder must go");
+        // purging a meeting that never recorded (no folder) is fine too
+        let note2 = s.create_note("Doomed 2", None).unwrap();
+        let m2 = s.create_meeting("Doomed 2", &note2.id, &[]).unwrap();
+        s.purge_meeting(&m2.id).unwrap();
+        assert!(s.get_meeting(&m2.id).is_err());
+    }
 
     #[test]
     fn meeting_lifecycle() {

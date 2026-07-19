@@ -91,6 +91,36 @@ fn save_staged(state: &AppState, staged: &ImportStaged) -> CmdResult<()> {
         .map_err(|e| e.to_string())
 }
 
+/// Un-stick a staged queue after a cancelled run so the user can reorder
+/// and hit Transcribe again (identical re-runs resume from the ASR
+/// checkpoints; a reorder changes the plan key and starts clean).
+pub(crate) fn reset_staged_started(state: &AppState, meeting_id: &str) {
+    if let Ok(Some(mut staged)) = load_staged(state, meeting_id) {
+        if staged.started {
+            staged.started = false;
+            let _ = save_staged(state, &staged);
+        }
+    }
+}
+
+/// Delete a meeting's staged-import residue: the manifest row and — for an
+/// import that never transcribed (no recording_json yet) — the folder of
+/// staged copies. Safe no-op for meetings that were never imports.
+pub(crate) fn purge_staged_import(state: &AppState, meeting_id: &str) {
+    if let Ok(Some(staged)) = load_staged(state, meeting_id) {
+        if let Some(rel) = staged.files.iter().find_map(|f| f.rel_path.clone()) {
+            if let Some(dir) = state.data_dir.join(rel).parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+    let _ = state
+        .storage
+        .lock()
+        .unwrap()
+        .delete_setting(&manifest_key(meeting_id));
+}
+
 /// Keep the original file name readable on disk but safe cross-platform,
 /// and unique within the meeting folder.
 fn copy_name(dir: &Path, original: &str) -> String {

@@ -141,6 +141,9 @@ pub async fn run_with(
         }
     }
     emit_stage(state, on_stage, meeting_id, "starting", None);
+    // A cancel request left over from an earlier run of this meeting must
+    // not kill this fresh one; requests arriving from here on stick.
+    state.cancel_requests.lock().unwrap().remove(meeting_id);
 
     let (recording, hint, data_dir) = {
         let storage = state.storage.lock().unwrap();
@@ -261,15 +264,6 @@ pub async fn run_with(
         .expect("checked above: at least one recording file exists");
 
     let asr: GuardedAsr = if let Some(key) = groq_key {
-        let groq = AsrTier {
-            engine: Box::new(fly_asr::groq::GroqEngine {
-                // finished (paced) cloud chunks survive a crash or restart
-                resume: true,
-                ..fly_asr::groq::GroqEngine::new(key)
-            }) as Box<dyn TranscriptionEngine>,
-            label: Some("groq"),
-            gpu_model_id: None,
-        };
         // A Groq failure that survives the engine's own per-chunk retries
         // (outage, exhausted quota budget, rejected payload) must not sink
         // the meeting — the SAME local chain the no-cloud path uses (GPU
@@ -293,28 +287,46 @@ pub async fn run_with(
         .await;
         match local {
             Ok((cpu_exe, model_path)) => {
-                let mut tiers = vec![groq];
-                tiers.extend(
-                    local_tiers(
-                        state,
-                        on_stage,
-                        on_model,
-                        meeting_id,
-                        cpu_exe,
-                        model_path,
-                        &model_id,
-                        threads,
-                        &opts,
-                        &sample_src,
-                        use_gpu,
-                    )
-                    .await,
-                );
+                let (locals, spillover) = local_tiers(
+                    state,
+                    on_stage,
+                    on_model,
+                    meeting_id,
+                    cpu_exe,
+                    model_path,
+                    &model_id,
+                    threads,
+                    &opts,
+                    &sample_src,
+                    use_gpu,
+                )
+                .await;
+                let mut tiers = vec![AsrTier {
+                    engine: Box::new(fly_asr::groq::GroqEngine {
+                        // finished (paced) cloud chunks survive a restart
+                        resume: true,
+                        // a full quota window must never idle the validated
+                        // local engine below — long pacer waits decode that
+                        // chunk locally, then return to the cloud
+                        local_spillover: spillover,
+                        ..fly_asr::groq::GroqEngine::new(key)
+                    }) as Box<dyn TranscriptionEngine>,
+                    label: Some("groq"),
+                    gpu_model_id: None,
+                }];
+                tiers.extend(locals);
                 GuardedAsr::chain(tiers)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "no local fallback for Groq available — cloud only");
-                GuardedAsr::chain(vec![groq])
+                GuardedAsr::chain(vec![AsrTier {
+                    engine: Box::new(fly_asr::groq::GroqEngine {
+                        resume: true,
+                        ..fly_asr::groq::GroqEngine::new(key)
+                    }) as Box<dyn TranscriptionEngine>,
+                    label: Some("groq"),
+                    gpu_model_id: None,
+                }])
             }
         }
     } else {
@@ -380,7 +392,8 @@ pub async fn run_with(
                 &sample_src,
                 use_gpu,
             )
-            .await,
+            .await
+            .0,
         )
     };
     let diarizer = fly_diarize::sherpa::SherpaDiarizeEngine {
@@ -421,23 +434,23 @@ pub async fn run_with(
     let on_fallback =
         |detail: String| emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
 
-    // Batch progress from the engine → a live "label (42%)" stage detail.
-    // Percentages are speech-time fractions (silence is never decoded), the
-    // honest measure of remaining work on long recordings. Parentheses, not
-    // an em-dash: the frontend already joins stage and detail with one.
+    // Batch progress from the engine → a live "channel (engine 42%)" stage
+    // detail naming the tier that is actually decoding. Percentages are
+    // speech-time fractions (silence is never decoded), the honest measure
+    // of remaining work on long recordings. Parentheses, not an em-dash:
+    // the frontend already joins stage and detail with one.
     let progress_detail = |label: Option<&'static str>| {
-        move |p: fly_asr::TranscribeProgress| {
-            if p.total_ms == 0 {
-                return;
+        move |kind: TierKind, p: fly_asr::TranscribeProgress| {
+            if let Some(detail) = transcribe_detail(kind, label, p) {
+                emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
             }
-            let pct = (p.done_ms * 100 / p.total_ms).min(100);
-            let detail = match label {
-                Some(l) => format!("{l} ({pct}%)"),
-                None => format!("{pct}%"),
-            };
-            emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
         }
     };
+
+    // Cooperative cancellation: the delete/cancel commands drop this meeting
+    // id into `cancel_requests` (cleared at the start of this run); engines
+    // poll it between batches — checkpoints make the abort cheap.
+    let cancelled = || state.cancel_requests.lock().unwrap().contains(meeting_id);
 
     if per_channel {
         let mic_16k = prep(mic_wav.as_ref().unwrap(), "mic.16k.wav")?;
@@ -457,6 +470,7 @@ pub async fn run_with(
                 &opts,
                 &on_fallback,
                 &progress_detail(Some("your microphone")),
+                &cancelled,
             )
             .await?,
             "mic",
@@ -476,12 +490,18 @@ pub async fn run_with(
                 &opts,
                 &on_fallback,
                 &progress_detail(Some("other participants")),
+                &cancelled,
             )
             .await?,
             "system",
         );
         language = language.or(sys_raw.language.clone());
 
+        // ASR checks between batches; catch a cancel that landed after the
+        // last batch before spending minutes on diarization.
+        if cancelled() {
+            return Err(fly_asr::AsrError::Cancelled.to_string());
+        }
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
         // "Just you": no far-end speakers exist, so the engine run is skipped
         // entirely and any surviving far-end speech is attributed to You.
@@ -543,12 +563,23 @@ pub async fn run_with(
 
         emit_stage(state, on_stage, meeting_id, "transcribing", None);
         let raw = guard_loops(
-            asr.transcribe(&track_16k, &opts, &on_fallback, &progress_detail(None))
-                .await?,
+            asr.transcribe(
+                &track_16k,
+                &opts,
+                &on_fallback,
+                &progress_detail(None),
+                &cancelled,
+            )
+            .await?,
             "mixed",
         );
         language = raw.language.clone();
 
+        // ASR checks between batches; catch a cancel that landed after the
+        // last batch before spending minutes on diarization.
+        if cancelled() {
+            return Err(fly_asr::AsrError::Cancelled.to_string());
+        }
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
         if hint.just_you() {
             // single track, just the user: everything is You, no engine run
@@ -589,6 +620,11 @@ pub async fn run_with(
         speakers,
     };
 
+    // Last cancel gate: a deleted note must not get a transcript saved over
+    // its (about to be purged) meeting row.
+    if cancelled() {
+        return Err(fly_asr::AsrError::Cancelled.to_string());
+    }
     emit_stage(state, on_stage, meeting_id, "saving", None);
     {
         let storage = state.storage.lock().unwrap();
@@ -800,6 +836,63 @@ async fn re_diarize_inner(
     })
 }
 
+/// User-facing family of an ASR tier, threaded through progress details so
+/// the transcribing stage always says which engine is decoding ("cloud 42%",
+/// "GPU 42%", "CPU 42%") — the incident UI showed nothing, and the user
+/// assumed a stuck run was parallel cloud work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TierKind {
+    Cloud,
+    Gpu,
+    Cpu,
+}
+
+/// Classify a tier for progress labels: cloud engines by the trait, local
+/// ones by the chain label (only GPU tiers carry one — "whisper.cpp-vulkan"
+/// / "whisper.cpp-metal"; the trait id can't tell the builds apart).
+fn tier_kind(tier: &AsrTier) -> TierKind {
+    if !tier.engine.is_local() {
+        TierKind::Cloud
+    } else if tier
+        .label
+        .is_some_and(|l| l.contains("vulkan") || l.contains("metal"))
+    {
+        TierKind::Gpu
+    } else {
+        TierKind::Cpu
+    }
+}
+
+/// The "transcribing" stage detail for one progress event: engine family +
+/// percent, the channel label around it when one exists, and an explicit
+/// quota-wait notice instead of a fake spinner while the cloud pacer sleeps.
+/// `None` when there is no work to report a fraction of.
+fn transcribe_detail(
+    kind: TierKind,
+    channel: Option<&str>,
+    p: fly_asr::TranscribeProgress,
+) -> Option<String> {
+    if p.total_ms == 0 {
+        return None;
+    }
+    let pct = (p.done_ms * 100 / p.total_ms).min(100);
+    let engine = match kind {
+        TierKind::Cloud => "cloud",
+        TierKind::Gpu => "GPU",
+        TierKind::Cpu => "CPU",
+    };
+    // partial minutes round up — never promise less waiting than reality
+    let wait_m = p.quota_wait_ms.map(|w| w.div_ceil(60_000).max(1));
+    Some(match (channel, wait_m) {
+        (None, None) => format!("{engine} {pct}%"),
+        (None, Some(m)) => format!("{engine} {pct}%, waiting for cloud quota (~{m}m)"),
+        (Some(c), None) => format!("{c} ({engine} {pct}%)"),
+        (Some(c), Some(m)) => {
+            format!("{c} ({engine} {pct}%, waiting for cloud quota ~{m}m)")
+        }
+    })
+}
+
 /// One engine in the pipeline's fallback chain.
 struct AsrTier {
     engine: Box<dyn TranscriptionEngine>,
@@ -887,29 +980,36 @@ impl GuardedAsr {
         wav: &Path,
         opts: &TranscribeOptions,
         notify: &(dyn Fn(String) + Send + Sync),
-        on_progress: fly_asr::TranscribeProgressFn<'_>,
+        on_progress: &(dyn Fn(TierKind, fly_asr::TranscribeProgress) + Send + Sync),
+        cancel: fly_asr::CancelFn<'_>,
     ) -> Result<RawTranscript, String> {
         let mut fell_over_this_call = false;
         loop {
             let idx = *self.active.lock().unwrap();
             let tier = &self.tiers[idx];
+            let kind = tier_kind(tier);
             // After a mid-call failover the next engine emits an immediate
             // 0% event; letting it through would clobber the failover notice
             // just shown. Progress resumes with the first batch.
             let after_first_batch = move |p: fly_asr::TranscribeProgress| {
                 if !fell_over_this_call || p.done_ms > 0 {
-                    on_progress(p);
+                    on_progress(kind, p);
                 }
             };
             let err = match tier
                 .engine
-                .transcribe_with_progress(wav, opts, &after_first_batch)
+                .transcribe_with_progress(wav, opts, &after_first_batch, cancel)
                 .await
             {
                 Ok(raw) => return Ok(raw),
                 Err(e) => e,
             };
             let msg = err.to_string();
+            // An abort the user asked for is not a tier failure — falling
+            // over would restart the work the cancel was meant to stop.
+            if matches!(err, fly_asr::AsrError::Cancelled) {
+                return Err(msg);
+            }
             if let Some(model_id) = &tier.gpu_model_id {
                 *self.gpu_failure.lock().unwrap() = Some((model_id.clone(), msg.clone()));
             }
@@ -1049,7 +1149,10 @@ fn local_tier_specs(
 /// benchmark-gated Vulkan build leads when approved (running the one-time
 /// speed test if there is no verdict yet), macOS runs guarded Metal, and the
 /// CPU build always anchors the chain. Shared by the local path and the Groq
-/// fallback so both see the same hardware.
+/// fallback so both see the same hardware. Also returns a second instance of
+/// the chain's best engine for the cloud tier's quota spillover (resume off:
+/// those one-off chunk decodes are recorded in the cloud checkpoint, a
+/// nested whisper checkpoint beside a temp wav would be junk).
 #[allow(clippy::too_many_arguments)]
 async fn local_tiers(
     state: &AppState,
@@ -1063,7 +1166,7 @@ async fn local_tiers(
     opts: &TranscribeOptions,
     sample_src: &Path,
     use_gpu: bool,
-) -> Vec<AsrTier> {
+) -> (Vec<AsrTier>, Option<Box<dyn TranscriptionEngine>>) {
     let pinned_cpu = {
         let storage = state.storage.lock().unwrap();
         cpu_pinned_for_model(&storage, model_id)
@@ -1097,29 +1200,40 @@ async fn local_tiers(
         None
     };
 
-    local_tier_specs(
+    let specs = local_tier_specs(
         current_os(),
         gpu_exe,
         &cpu_exe,
         model_id,
         use_gpu,
         pinned_cpu,
-    )
-    .into_iter()
-    .map(|spec| AsrTier {
-        engine: Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
-            exe: spec.exe,
+    );
+    let spillover = specs.first().map(|spec| {
+        Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
+            exe: spec.exe.clone(),
             model: model_path.clone(),
             threads,
             force_cpu: spec.force_cpu,
-            // completed batches survive crashes, restarts, and failovers —
-            // the CPU tier resumes exactly where a failed GPU tier stopped
-            resume: true,
-        }) as Box<dyn TranscriptionEngine>,
-        label: spec.label,
-        gpu_model_id: spec.gpu_pin,
-    })
-    .collect()
+            resume: false,
+        }) as Box<dyn TranscriptionEngine>
+    });
+    let tiers = specs
+        .into_iter()
+        .map(|spec| AsrTier {
+            engine: Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
+                exe: spec.exe,
+                model: model_path.clone(),
+                threads,
+                force_cpu: spec.force_cpu,
+                // completed batches survive crashes, restarts, and failovers —
+                // the CPU tier resumes exactly where a failed GPU tier stopped
+                resume: true,
+            }) as Box<dyn TranscriptionEngine>,
+            label: spec.label,
+            gpu_model_id: spec.gpu_pin,
+        })
+        .collect();
+    (tiers, spillover)
 }
 
 /// Whether a stored GPU verdict pins this machine (and model) to CPU — a
@@ -1335,7 +1449,8 @@ mod tests {
                 Path::new("unused.wav"),
                 &TranscribeOptions::default(),
                 &notify,
-                &|_| {},
+                &|_, _| {},
+                &|| false,
             )
             .await
             .expect("fallback must rescue the meeting");
@@ -1405,7 +1520,8 @@ mod tests {
                 Path::new("unused.wav"),
                 &TranscribeOptions::default(),
                 &notify,
-                &|_| {},
+                &|_, _| {},
+                &|| false,
             )
             .await
             .expect("the GPU tier must rescue the meeting");
@@ -1441,7 +1557,8 @@ mod tests {
                 Path::new("unused.wav"),
                 &TranscribeOptions::default(),
                 &notify,
-                &|_| {},
+                &|_, _| {},
+                &|| false,
             )
             .await
             .expect("the CPU tier must rescue the meeting");
@@ -1554,6 +1671,206 @@ mod tests {
         assert!(specs[0].force_cpu);
     }
 
+    #[test]
+    fn tier_kinds_classify_cloud_gpu_cpu() {
+        assert_eq!(
+            tier_kind(&tier(Box::new(RejectingCloud), Some("groq"), None)),
+            TierKind::Cloud
+        );
+        assert_eq!(
+            tier_kind(&tier(
+                Box::new(FixedLocal),
+                Some("whisper.cpp-vulkan"),
+                Some("large-v3")
+            )),
+            TierKind::Gpu
+        );
+        assert_eq!(
+            tier_kind(&tier(
+                Box::new(FixedLocal),
+                Some("whisper.cpp-metal"),
+                Some("small-q5")
+            )),
+            TierKind::Gpu
+        );
+        assert_eq!(
+            tier_kind(&tier(Box::new(FixedLocal), None, None)),
+            TierKind::Cpu
+        );
+    }
+
+    /// The "transcribing" details the frontend parses: engine family +
+    /// percent, wrapped in the channel label when one exists.
+    #[test]
+    fn transcribe_details_name_the_engine_and_percent() {
+        let p = |done, total| fly_asr::TranscribeProgress {
+            done_ms: done,
+            total_ms: total,
+            quota_wait_ms: None,
+        };
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, p(42, 100)),
+            Some("cloud 42%".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Gpu, None, p(1, 3)),
+            Some("GPU 33%".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Cpu, Some("your microphone"), p(50, 100)),
+            Some("your microphone (CPU 50%)".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, p(0, 0)),
+            None,
+            "no speech, no fraction to report"
+        );
+    }
+
+    /// While the cloud pacer waits, the detail says so with an ETA — the UI
+    /// must never show a fake spinner over a deliberate quota sleep.
+    #[test]
+    fn quota_wait_details_replace_the_spinner() {
+        let w = |wait_ms| fly_asr::TranscribeProgress {
+            done_ms: 40,
+            total_ms: 100,
+            quota_wait_ms: Some(wait_ms),
+        };
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, w(180_000)),
+            Some("cloud 40%, waiting for cloud quota (~3m)".into())
+        );
+        // partial minutes round up — never promise less waiting than reality
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, w(61_000)),
+            Some("cloud 40%, waiting for cloud quota (~2m)".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, w(5_000)),
+            Some("cloud 40%, waiting for cloud quota (~1m)".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, Some("other participants"), w(120_000)),
+            Some("other participants (cloud 40%, waiting for cloud quota ~2m)".into())
+        );
+    }
+
+    /// Progress events carry the tier that is ACTUALLY decoding: after a
+    /// cloud failover the same run's events switch to the GPU tier's kind.
+    #[tokio::test]
+    async fn progress_events_carry_the_active_tier_kind() {
+        struct ProgressLocal;
+        #[async_trait::async_trait]
+        impl TranscriptionEngine for ProgressLocal {
+            fn id(&self) -> &'static str {
+                "whisper.cpp"
+            }
+            fn is_local(&self) -> bool {
+                true
+            }
+            async fn transcribe(
+                &self,
+                _wav: &Path,
+                _opts: &TranscribeOptions,
+            ) -> fly_asr::Result<RawTranscript> {
+                unreachable!("transcribe_with_progress is overridden")
+            }
+            async fn transcribe_with_progress(
+                &self,
+                _wav: &Path,
+                _opts: &TranscribeOptions,
+                on_progress: fly_asr::TranscribeProgressFn<'_>,
+                _cancel: fly_asr::CancelFn<'_>,
+            ) -> fly_asr::Result<RawTranscript> {
+                on_progress(fly_asr::TranscribeProgress {
+                    done_ms: 50,
+                    total_ms: 100,
+                    quota_wait_ms: None,
+                });
+                Ok(RawTranscript {
+                    language: None,
+                    words: vec![],
+                    segments: vec![],
+                })
+            }
+        }
+
+        let asr = GuardedAsr::chain(vec![
+            tier(Box::new(RejectingCloud), Some("groq"), None),
+            tier(
+                Box::new(ProgressLocal),
+                Some("whisper.cpp-vulkan"),
+                Some("large-v3"),
+            ),
+        ]);
+        let events = std::sync::Mutex::new(Vec::new());
+        asr.transcribe(
+            Path::new("unused.wav"),
+            &TranscribeOptions::default(),
+            &|_| {},
+            &|kind, p| events.lock().unwrap().push((kind, p.done_ms)),
+            &|| false,
+        )
+        .await
+        .expect("the GPU tier must rescue the meeting");
+        assert_eq!(
+            events.into_inner().unwrap(),
+            vec![(TierKind::Gpu, 50)],
+            "events after the failover must be labeled with the ACTIVE (GPU) tier"
+        );
+    }
+
+    /// A user-requested abort must not fail over to the next tier — that
+    /// would restart the very work the cancel was meant to stop.
+    #[tokio::test]
+    async fn cancelled_run_does_not_fail_over() {
+        struct CancelledCloud;
+        #[async_trait::async_trait]
+        impl TranscriptionEngine for CancelledCloud {
+            fn id(&self) -> &'static str {
+                "groq"
+            }
+            fn is_local(&self) -> bool {
+                false
+            }
+            async fn transcribe(
+                &self,
+                _wav: &Path,
+                _opts: &TranscribeOptions,
+            ) -> fly_asr::Result<RawTranscript> {
+                Err(fly_asr::AsrError::Cancelled)
+            }
+        }
+
+        let asr = GuardedAsr::with_cpu_fallback(
+            Box::new(CancelledCloud),
+            "groq",
+            Box::new(FixedLocal),
+            None,
+        );
+        let notes = std::sync::Mutex::new(Vec::new());
+        let notify = |d: String| notes.lock().unwrap().push(d);
+        let err = asr
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &notify,
+                &|_, _| {},
+                &|| true,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains(fly_asr::CANCELLED_MARKER),
+            "scheduler must see the cancel marker, got: {err}"
+        );
+        assert!(!asr.failed_over(), "a cancel is not a tier failure");
+        assert!(
+            notes.lock().unwrap().is_empty(),
+            "no failover notice for a cancel"
+        );
+    }
+
     #[tokio::test]
     async fn rejected_cloud_without_fallback_surfaces_marker_for_scheduler() {
         let asr = GuardedAsr::single(Box::new(RejectingCloud));
@@ -1562,7 +1879,8 @@ mod tests {
                 Path::new("unused.wav"),
                 &TranscribeOptions::default(),
                 &|_| {},
-                &|_| {},
+                &|_, _| {},
+                &|| false,
             )
             .await
             .unwrap_err();

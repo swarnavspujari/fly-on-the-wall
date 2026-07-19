@@ -82,6 +82,8 @@ interface Props {
   onTranscribe: () => void;
   /** Start transcribing the staged import in the queue's order (file ids). */
   onImportTranscribe: (order: string[]) => void;
+  /** Stop the staged import's running transcription (queue back to idle). */
+  onImportCancel: () => void;
   onInstallEngine: () => void;
   onOpenSettings: (focus: "engine" | "groq") => void;
   onRelabel: (speakerKey: string, label: string) => void;
@@ -903,6 +905,7 @@ export default function Editor({
   onStopScreen,
   onTranscribe,
   onImportTranscribe,
+  onImportCancel,
   onInstallEngine,
   onOpenSettings,
   onRelabel,
@@ -1304,6 +1307,7 @@ export default function Editor({
                 pipelineError={pipelineError}
                 onTranscribe={onImportTranscribe}
                 onRetry={onTranscribe}
+                onCancel={onImportCancel}
               />
             )}
 

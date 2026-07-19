@@ -33,6 +33,18 @@ const RATE_LIMIT_HINT_PAD: Duration = Duration::from_secs(1);
 /// and lets the caller's local fallback rescue the job.
 pub const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(20 * 60);
 
+/// Pacer waits longer than this spill the chunk to the local engine instead
+/// of sleeping: the validated GPU tier decodes a whole batch in well under
+/// half a minute, so any longer idle wait is pure lost time; anything shorter
+/// and the cloud upload wins on both speed and CPU.
+pub const SPILL_TO_LOCAL_THRESHOLD_MS: u64 = 30_000;
+
+/// Whether a quota-paced chunk should be decoded by the injected local
+/// engine instead of waiting `wait_ms` for the cloud window to reopen.
+pub fn spill_to_local(wait_ms: u64, has_local: bool) -> bool {
+    has_local && wait_ms > SPILL_TO_LOCAL_THRESHOLD_MS
+}
+
 /// Map one failed HTTP chunk upload to the error the retry policy consumes.
 /// 429 is transient — the quota window reopens — so it must NOT map to
 /// [`AsrError::Rejected`], which the app's scheduler treats as permanent.
@@ -307,6 +319,23 @@ mod tests {
         assert_eq!(
             retry_delay(&AsrError::Engine("500".into()), 0, Duration::ZERO),
             None
+        );
+    }
+
+    /// The hybrid routing policy: short pacer waits still sleep (the upload
+    /// is cheaper), long waits hand the chunk to the local engine — but only
+    /// when a local engine actually exists below the cloud tier.
+    #[test]
+    fn short_waits_sleep_and_long_waits_spill_to_local() {
+        assert!(!spill_to_local(0, true), "no wait — upload now");
+        assert!(
+            !spill_to_local(SPILL_TO_LOCAL_THRESHOLD_MS, true),
+            "at the threshold waiting still wins"
+        );
+        assert!(spill_to_local(SPILL_TO_LOCAL_THRESHOLD_MS + 1, true));
+        assert!(
+            !spill_to_local(u64::MAX, false),
+            "nothing local to spill to — wait no matter how long"
         );
     }
 

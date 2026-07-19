@@ -37,6 +37,9 @@ pub enum Tick {
     /// Jobs may be queued but a capture is active — recording wins.
     RecordingActive,
     Completed(String),
+    /// The run stopped because the user asked it to (note deleted, import
+    /// cancelled): job row already removed, nothing to retry or surface.
+    Cancelled(String),
     Retrying {
         meeting_id: String,
         attempts: u32,
@@ -72,6 +75,13 @@ fn permanent_failure(error: &str) -> bool {
     error.contains(pipeline::ERR_NO_RECORDING_FILES) || error.contains(fly_asr::REJECTED_MARKER)
 }
 
+/// True when the pipeline stopped because the user asked it to (note
+/// deleted, import cancelled) — not a failure at all: no retry, no error
+/// surfaced, the job row is simply removed.
+fn cancelled_failure(error: &str) -> bool {
+    error.contains(fly_asr::CANCELLED_MARKER)
+}
+
 /// Run at most one queued job to completion. Never starts a pipeline while
 /// audio or screen capture is active.
 pub async fn tick(
@@ -102,6 +112,13 @@ pub async fn tick(
         Ok(_) => {
             set_job_state(state, |s| s.mark_transcription_done(&meeting_id));
             Tick::Completed(meeting_id)
+        }
+        Err(error) if cancelled_failure(&error) => {
+            tracing::info!(meeting_id, "transcription cancelled");
+            state.pipeline_stage.lock().unwrap().remove(&meeting_id);
+            state.cancel_requests.lock().unwrap().remove(&meeting_id);
+            set_job_state(state, |s| s.delete_transcription_job(&meeting_id));
+            Tick::Cancelled(meeting_id)
         }
         Err(error) => {
             tracing::error!(meeting_id, error = %error, "transcription pipeline failed");
@@ -170,6 +187,9 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                     );
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
+                Tick::Cancelled(meeting_id) => {
+                    finish_cancelled(&state, &on_stage, &meeting_id);
+                }
                 Tick::GaveUp { meeting_id, error } => {
                     emit_final(&on_stage, &meeting_id, Some(error))
                 }
@@ -178,6 +198,84 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 }
             }
         }
+    });
+}
+
+/// Stop transcription work for a meeting. A pipeline that is actually
+/// running gets a cooperative cancel request and unwinds at its next batch
+/// boundary (cheap — completed batches are checkpointed); the worker then
+/// finishes up via [`Tick::Cancelled`]. A merely queued/waiting job is
+/// removed on the spot and the terminal "cancelled" event emitted here.
+pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Result<(), String> {
+    let running = {
+        let stages = state.pipeline_stage.lock().unwrap();
+        matches!(stages.get(meeting_id).map(String::as_str), Some(s) if s != WAITING_STAGE)
+    };
+    if running {
+        state
+            .cancel_requests
+            .lock()
+            .unwrap()
+            .insert(meeting_id.to_string());
+        return Ok(());
+    }
+    let had_job = {
+        let storage = state.storage.lock().unwrap();
+        let job = storage
+            .transcription_job(meeting_id)
+            .map_err(|e| e.to_string())?;
+        let pending = job.is_some_and(|j| j.status == "queued" || j.status == "running");
+        if pending {
+            storage
+                .delete_transcription_job(meeting_id)
+                .map_err(|e| e.to_string())?;
+        }
+        pending
+    };
+    if had_job {
+        // guard the pickup race: if the worker grabbed the job between the
+        // check above and the delete, the request makes the run unwind too
+        state
+            .cancel_requests
+            .lock()
+            .unwrap()
+            .insert(meeting_id.to_string());
+        state.pipeline_stage.lock().unwrap().remove(meeting_id);
+        emit_cancelled(on_stage, meeting_id);
+    }
+    Ok(())
+}
+
+/// After a cancelled run winds down: if the owning note is gone (the cancel
+/// came from a note deletion) purge the orphaned meeting — row, transcript,
+/// job, staged-import residue, and the recordings folder — then tell the UI.
+pub fn finish_cancelled(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) {
+    let orphaned = {
+        let storage = state.storage.lock().unwrap();
+        match storage.get_meeting(meeting_id) {
+            Ok(m) => storage.get_note(&m.note_id).is_err(),
+            Err(_) => false,
+        }
+    };
+    if orphaned {
+        crate::import_commands::purge_staged_import(state, meeting_id);
+        let storage = state.storage.lock().unwrap();
+        if let Err(e) = storage.purge_meeting(meeting_id) {
+            tracing::warn!(meeting_id, error = %e, "purging cancelled meeting failed");
+        }
+    }
+    emit_cancelled(on_stage, meeting_id);
+}
+
+/// Terminal event for a cancelled run: done, but neither success nor error —
+/// the frontend drops back to the pre-transcribe state.
+fn emit_cancelled(on_stage: StageSink<'_>, meeting_id: &str) {
+    on_stage(PipelineProgress {
+        meeting_id: meeting_id.to_string(),
+        stage: "cancelled".into(),
+        detail: None,
+        done: true,
+        error: None,
     });
 }
 
@@ -335,6 +433,17 @@ mod tests {
         let e = fly_asr::AsrError::Engine("groq returned 500 Internal Server Error".into());
         assert!(!permanent_failure(&e.to_string()));
         assert!(permanent_failure(pipeline::ERR_NO_RECORDING_FILES));
+    }
+
+    /// A cancel is neither retried (the user asked for the stop) nor a
+    /// permanent failure (nothing is wrong) — it gets its own branch.
+    #[test]
+    fn cancelled_errors_are_neither_retried_nor_failures() {
+        let e = fly_asr::AsrError::Cancelled.to_string();
+        assert!(cancelled_failure(&e));
+        assert!(!permanent_failure(&e));
+        assert!(!cancelled_failure("network reset by peer"));
+        assert!(!cancelled_failure(pipeline::ERR_NO_RECORDING_FILES));
     }
 
     /// A quota 429 is transient by definition (the window reopens) — it must

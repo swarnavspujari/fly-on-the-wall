@@ -51,7 +51,8 @@ impl TranscriptionEngine for WhisperCppEngine {
     }
 
     async fn transcribe(&self, wav_path: &Path, opts: &TranscribeOptions) -> Result<RawTranscript> {
-        self.transcribe_with_progress(wav_path, opts, &|_| {}).await
+        self.transcribe_with_progress(wav_path, opts, &|_| {}, &|| false)
+            .await
     }
 
     async fn transcribe_with_progress(
@@ -59,6 +60,7 @@ impl TranscriptionEngine for WhisperCppEngine {
         wav_path: &Path,
         opts: &TranscribeOptions,
         on_progress: crate::TranscribeProgressFn<'_>,
+        cancel: crate::CancelFn<'_>,
     ) -> Result<RawTranscript> {
         if !self.model.exists() {
             return Err(AsrError::ModelMissing(self.model.display().to_string()));
@@ -113,6 +115,7 @@ impl TranscriptionEngine for WhisperCppEngine {
             on_progress(crate::TranscribeProgress {
                 done_ms: 0,
                 total_ms: total_speech_ms,
+                quota_wait_ms: None,
             });
         }
         for (i, (batch, progress)) in batches
@@ -125,6 +128,11 @@ impl TranscriptionEngine for WhisperCppEngine {
                 words.extend(done.words.iter().cloned());
                 on_progress(progress);
                 continue;
+            }
+            // between batches is the cheap place to abort: everything decoded
+            // so far is already checkpointed
+            if cancel() {
+                return Err(AsrError::Cancelled);
             }
             let (mut chunk, map) = stitch_spans(&samples, rate, batch)
                 .map_err(|e| AsrError::BadAudio(e.to_string()))?;
@@ -144,6 +152,7 @@ impl TranscriptionEngine for WhisperCppEngine {
                 c.push(crate::checkpoint::BatchResult {
                     language: batch_language.clone(),
                     words: mapped.clone(),
+                    engine: Some(self.id().to_string()),
                 });
             }
             language = language.or(batch_language);
@@ -330,7 +339,11 @@ pub(crate) fn cumulative_progress(batches: &[Vec<SpeechSpan>]) -> Vec<crate::Tra
         .iter()
         .map(|batch| {
             done_ms += batch.iter().map(|s| s.end_ms - s.start_ms).sum::<u64>();
-            crate::TranscribeProgress { done_ms, total_ms }
+            crate::TranscribeProgress {
+                done_ms,
+                total_ms,
+                quota_wait_ms: None,
+            }
         })
         .collect()
 }
@@ -443,6 +456,7 @@ mod tests {
                     start_ms: 100,
                     end_ms: 300,
                 }],
+                engine: Some("whisper.cpp".into()),
             });
         }
 
@@ -468,6 +482,36 @@ mod tests {
             ..engine
         };
         assert!(engine.transcribe(&wav, &opts).await.is_err());
+    }
+
+    /// Cancellation is checked before each batch decode: with cancel already
+    /// requested the engine returns Cancelled without launching whisper-cli
+    /// at all (the exe here doesn't exist — a decode attempt would surface a
+    /// different error).
+    #[tokio::test]
+    async fn cancel_between_batches_aborts_without_decoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let rate = 16_000u32;
+        let samples: Vec<f32> = (0..(2 * rate) as usize)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.4)
+            .collect();
+        let wav = dir.path().join("track.16k.wav");
+        fly_audio::mix::write_wav_mono_16(&wav, &samples, rate).unwrap();
+        let model = dir.path().join("model.bin");
+        std::fs::write(&model, b"fake model").unwrap();
+
+        let engine = WhisperCppEngine {
+            exe: dir.path().join("does-not-exist.exe"),
+            model,
+            threads: 1,
+            force_cpu: true,
+            resume: false,
+        };
+        let err = engine
+            .transcribe_with_progress(&wav, &TranscribeOptions::default(), &|_| {}, &|| true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AsrError::Cancelled), "{err:?}");
     }
 
     #[test]

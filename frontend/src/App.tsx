@@ -223,6 +223,23 @@ export default function App() {
     const unPipeline = listen<PipelineProgress>("pipeline:progress", (e) => {
       const p = e.payload;
       if (p.meeting_id !== openMeetingIdRef.current) return;
+      // Cancelled is terminal but neither success nor failure: clear the
+      // progress UI and drop a staged import queue back to idle (the backend
+      // reset its `started` flag).
+      if (p.stage === "cancelled") {
+        setPipeStage(null);
+        setPipeDetail(null);
+        setPipelineError(null);
+        if (importStagedRef.current?.meeting_id === p.meeting_id) {
+          api
+            .importState(p.meeting_id)
+            .then((fresh) => {
+              if (openMeetingIdRef.current === p.meeting_id) setImportStaged(fresh);
+            })
+            .catch(console.error);
+        }
+        return;
+      }
       if (p.done) {
         setPipeStage(null);
         setPipeDetail(null);
@@ -432,6 +449,19 @@ export default function App() {
       setError(String(e));
       const fresh = await api.importState(staged.meeting_id).catch(() => null);
       setImportStaged(fresh);
+    }
+  };
+
+  // Stop the staged import's running transcription. The backend unwinds at
+  // the next batch boundary and emits a terminal "cancelled" event; finished
+  // batches stay checkpointed, so a later Transcribe resumes them.
+  const cancelImportTranscribe = async () => {
+    const staged = importStagedRef.current;
+    if (!staged) return;
+    try {
+      await api.cancelTranscription(staged.meeting_id);
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -695,6 +725,7 @@ export default function App() {
             onStopScreen={() => void stopScreen()}
             onTranscribe={() => void transcribeNow()}
             onImportTranscribe={(order) => void importTranscribe(order)}
+            onImportCancel={() => void cancelImportTranscribe()}
             onInstallEngine={() => void installEngine()}
             onOpenSettings={(focus) => {
               setSettingsFocus(focus);

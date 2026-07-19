@@ -322,8 +322,16 @@ function importTranscribe(order: string[]) {
   }
   at((t += 300), () => pipe("waiting"));
   at((t += 500), () => pipe("starting"));
+  // engine-labeled details like pipeline.rs transcribe_detail emits: a cloud
+  // stretch with one quota-wait notice, then the GPU spillover finishing up
   for (let pct = 5; pct <= 100; pct += 5) {
-    at((t += 450), () => pipe("transcribing", `${pct}%`));
+    const detail =
+      pct === 40
+        ? "cloud 40%, waiting for cloud quota (~3m)"
+        : pct < 60
+          ? `cloud ${pct}%`
+          : `GPU ${pct}%`;
+    at((t += 450), () => pipe("transcribing", detail));
   }
   at((t += 500), () => pipe("diarizing"));
   at((t += 1200), () => pipe("aligning"));
@@ -595,6 +603,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "delete_folder":
     case "move_note":
     case "delete_note":
+    case "cancel_transcription":
       return null;
     case "list_recent_notes":
       return [...noteMeta].sort(byHappenedDesc);
