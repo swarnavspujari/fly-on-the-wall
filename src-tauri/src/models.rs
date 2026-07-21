@@ -240,6 +240,17 @@ pub fn artifact(id: &str) -> Option<&'static Artifact> {
 pub const WHISPER_ENGINE_ID: &str = "whisper-bin";
 pub const WHISPER_CLI_NAMES: &[&str] = &["whisper-cli"];
 
+/// Markers for failures only a person can fix, mirroring
+/// `fly_asr::REJECTED_MARKER`: the pipeline reduces errors to strings before
+/// they reach the scheduler, which matches on these substrings to fail the
+/// job once (with its actionable notice) instead of burning every retry on
+/// an identical outcome. Sharing the constant between the producers below
+/// and `scheduler::permanent_failure` keeps a message reword from silently
+/// decoupling them. The frontend's notice selector (pipelineNotice.ts)
+/// matches the same phrases — change them in both places or not at all.
+pub const ENGINE_MISSING_MARKER: &str = "is not installed";
+pub const DOWNLOAD_FAILED_MARKER: &str = "download failed for";
+
 /// True when a tool binary is already usable without downloading anything — a
 /// managed install (this OS ships an artifact for it) or the same tool on
 /// PATH. This is the non-downloading half of `ensure_tool`, used to report
@@ -320,7 +331,10 @@ pub async fn ensure_tool_with(
     if artifact(id).is_some() {
         return ensure_with(progress, data_dir, id, effort).await;
     }
-    Err(format!("{} is not installed — {}", path_names[0], guidance))
+    Err(format!(
+        "{} {ENGINE_MISSING_MARKER} — {}",
+        path_names[0], guidance
+    ))
 }
 
 pub fn installed_path(data_dir: &Path, a: &Artifact) -> Option<PathBuf> {
@@ -404,7 +418,16 @@ async fn download_and_verify(
         let _ = tokio::fs::remove_file(tmp).await;
         Err::<u64, String>(e)
     };
-    let client = reqwest::Client::new();
+    // Bounded connect + per-chunk read: with no timeouts an offline machine
+    // sits in TCP connect limbo for the OS default (observed 60+ s on macOS)
+    // before any caller — the live loop's prompt "unavailable" verdict most
+    // of all — hears about it. No overall request timeout: model downloads
+    // legitimately run for minutes.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let resp = match async {
         client
             .get(url)
@@ -559,7 +582,7 @@ pub async fn ensure_with(
             ""
         };
         let msg = format!(
-            "download failed for {} after trying {} source(s) (last error: {last}).{hf_hint}",
+            "{DOWNLOAD_FAILED_MARKER} {} after trying {} source(s) (last error: {last}).{hf_hint}",
             a.display,
             candidates.len(),
         );
