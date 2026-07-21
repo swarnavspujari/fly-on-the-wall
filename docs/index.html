@@ -3,23 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fly on the Wall — private meeting notes that never leave your computer</title>
-<meta name="description" content="A free, open-source desktop app that records, transcribes, and organizes your meetings entirely on your own machine. No bot joins your call. No audio leaves your computer. No subscription.">
-<meta property="og:title" content="Fly on the Wall">
-<meta property="og:description" content="The meeting notes app that never phones home. Free, open source, on-device.">
+<title>Fly on the Wall — free, private AI meeting note taker</title>
+<meta name="description" content="A free, open-source AI meeting note taker with fully on-device transcription. Records and organizes your meetings on your own machine — no bot joins your call, no audio leaves your computer, no subscription.">
+<link rel="canonical" href="https://swarnavspujari.github.io/fly-on-the-wall/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Fly on the Wall">
+<meta property="og:title" content="Fly on the Wall — free, private AI meeting note taker">
+<meta property="og:description" content="Records, transcribes, and organizes your meetings entirely on your own computer. No bot joins your call. Free, open source, on-device.">
 <meta property="og:url" content="https://swarnavspujari.github.io/fly-on-the-wall/">
 <meta property="og:image" content="https://swarnavspujari.github.io/fly-on-the-wall/assets/screenshots/og.png">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#f2f2e8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d12" media="(prefers-color-scheme: dark)">
 <link rel="icon" type="image/png" href="assets/brand/favicon.png">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700;800&family=Spline+Sans:wght@400;500;600&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script>
-  // Pre-paint theme (no flash). Default follows the OS; toggle persists.
+  // Pre-paint theme (no flash). Defaults to light; a saved toggle choice wins.
   (function () {
     var saved = null;
     try { saved = localStorage.getItem("fotw-site-theme"); } catch (e) {}
-    var theme = saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    var theme = saved || "light";
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
@@ -144,6 +150,8 @@
   .hero .sub { font-size: clamp(17px, 2.2vw, 20px); color: var(--text-2); max-width: 56ch; margin: 0 auto 36px; }
   .hero .downloads { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 14px; }
   .hero .fineprint { color: var(--text-3); font-size: 14px; }
+  .hero .hero-stats { display: flex; gap: 4px 14px; flex-wrap: wrap; justify-content: center; }
+  .hero .hero-stats strong { color: var(--text-2); }
   .shot {
     display: block; max-width: 100%; height: auto;
     border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow-lg);
@@ -174,6 +182,25 @@
   }
   .step h3 { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
   .step p { color: var(--text-2); font-size: 15.5px; }
+
+  /* ---- feature rows (screenshot + copy, alternating) ---- */
+  .feat-rows { display: grid; gap: 64px; margin-bottom: 64px; }
+  .feat-row { display: grid; grid-template-columns: 5fr 4fr; gap: 40px; align-items: center; }
+  .feat-row.flip { grid-template-columns: 4fr 5fr; }
+  .feat-row.flip .feat-copy { order: -1; }
+  .feat-row h3 { font-size: clamp(21px, 2.6vw, 26px); font-weight: 700; margin-bottom: 10px; }
+  .feat-row p { color: var(--text-2); font-size: 16px; }
+  .feat-row .shot { width: 100%; }
+  @media (max-width: 860px) {
+    .feat-row, .feat-row.flip { grid-template-columns: 1fr; gap: 18px; }
+    .feat-row.flip .feat-copy { order: 0; }
+  }
+  .shots-note { color: var(--text-3); font-size: 12.5px; margin-top: 18px; }
+
+  /* ---- founder note ---- */
+  .founder { max-width: 720px; margin: 0 auto; }
+  .founder p { color: var(--text-2); font-size: 17px; line-height: 1.75; margin-bottom: 18px; }
+  .founder .sig { color: var(--text-3); font-size: 15px; font-style: italic; }
 
   /* ---- feature grid ---- */
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 16px; }
@@ -270,6 +297,33 @@
   [data-theme="light"] .theme-light-only { display: block; }
   [data-theme="dark"] .theme-dark-only { display: block; }
 </style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Fly on the Wall",
+  "applicationCategory": "BusinessApplication",
+  "operatingSystem": "Windows, macOS, Linux",
+  "description": "A free, open-source AI meeting note taker that records, transcribes, and organizes your meetings entirely on your own computer. No bot joins your call and no audio leaves your machine.",
+  "url": "https://swarnavspujari.github.io/fly-on-the-wall/",
+  "downloadUrl": "https://github.com/swarnavspujari/fly-on-the-wall/releases/latest",
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "Fly on the Wall",
+  "url": "https://swarnavspujari.github.io/fly-on-the-wall/"
+}
+</script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
@@ -307,20 +361,24 @@
     <p class="eyebrow">Free &amp; open source · MIT</p>
     <h1>The meeting notes app that never phones home.</h1>
     <p class="sub">
-      Fly on the Wall records, transcribes, and organizes your meetings
+      Records, transcribes, and organizes your meetings
       <mark>entirely on your own computer</mark>. No bot joins your call. No audio
       leaves your machine. No subscription.
     </p>
     <div class="downloads">
-      <a class="btn btn-primary" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Download for Windows</a>
+      <a class="btn btn-primary" id="dl-primary" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Download for Windows</a>
       <a class="btn btn-outline" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">macOS</a>
       <a class="btn btn-outline" href="https://github.com/swarnavspujari/fly-on-the-wall/releases/latest">Linux</a>
     </div>
+    <p class="fineprint">Free · no account · ~1 min setup.</p>
     <p class="fineprint">Works with Zoom, Meet, Teams — anything that makes sound on your computer.</p>
-    <p class="fineprint" id="stats-line" hidden><strong id="dl-count"></strong> downloads and counting.</p>
-    <img class="shot hero-shot" src="assets/screenshots/app-transcript-light.webp"
-         alt="The Fly on the Wall main window: a meeting transcript with three color-coded speakers, a playable waveform, screen recordings, folders, and upcoming calendar meetings"
-         width="1600" height="1103" fetchpriority="high">
+    <p class="fineprint hero-stats">
+      <span id="stats-line" hidden><strong id="dl-count"></strong> downloads and counting.</span>
+      <span id="stars-line" hidden><strong id="star-count"></strong> stars on GitHub.</span>
+    </p>
+    <img class="shot hero-shot" src="assets/screenshots/features/hero.webp"
+         alt="The Fly on the Wall main window: a meeting note with rich-text notes, action-item checkboxes, folders with upcoming calendar meetings, and a floating Transcript / Notes / Enhance switcher"
+         width="1280" height="802" fetchpriority="high">
   </section>
 
   <!-- ============ HOW IT WORKS ============ -->
@@ -362,6 +420,34 @@
     </div>
   </section>
 
+  <!-- ============ WHY ============ -->
+  <section id="why">
+    <div class="wrap founder">
+      <p class="kicker">Why this exists</p>
+      <h2>I was paying twice for tools that still didn't work.</h2>
+      <p>
+        $15 a month for a meeting note-taker — and everyone's bot crowding the attendee
+        list. If I didn't schedule the meeting myself, the recording saved to someone
+        else's account, and I was the one emailing around begging for access to my own
+        conversation.
+      </p>
+      <p>
+        Then a <em>separate</em> subscription for a transcription tool, to cover the
+        webinars and courses that never hand you a transcript — running the same open
+        Whisper model my computer could run for free. Two bills for one job, and both
+        tools kept my data walled off from the AI assistants I actually work with.
+      </p>
+      <p>
+        PCs are more than powerful enough for this now. So I built the tool I wanted:
+        one app that records and transcribes locally, replaces both subscriptions, keeps
+        every word on my own disk — and hands the whole archive to Claude over MCP, so my
+        meeting history becomes something I can actually ask questions of. Then I open-sourced
+        it, so the full stack is yours too.
+      </p>
+      <p class="sig">— Swarnav, builder of Fly on the Wall</p>
+    </div>
+  </section>
+
   <!-- ============ FEATURES ============ -->
   <section id="features">
     <div class="wrap">
@@ -371,27 +457,57 @@
         Founders, sales, consultants, recruiters — anyone who talks for a living and signs
         NDAs about it.
       </p>
+      <div class="feat-rows">
+        <div class="feat-row reveal">
+          <img class="shot" src="assets/screenshots/features/recording.webp" loading="lazy" width="1280" height="802"
+               alt="Recording in progress: a pinned recording bar with pause and stop, live rough transcript filling in, and a warning that system output looks muted">
+          <div class="feat-copy">
+            <h3>No bot in the room</h3>
+            <p>Nothing joins your call or announces itself. It captures your mic and your system audio as separate channels — so it works with Zoom, Meet, Teams, a webinar, or a phone on speaker. A pinned bar keeps recording unmistakable, and warns you the moment your output looks muted.</p>
+          </div>
+        </div>
+        <div class="feat-row flip reveal">
+          <img class="shot" src="assets/screenshots/features/transcript.webp" loading="lazy" width="1280" height="802"
+               alt="A diarized transcript with three color-coded speakers, timestamps, a scrubbable waveform, playable screen-recording tiles, and an inline speaker-rename field">
+          <div class="feat-copy">
+            <h3>On-device transcripts, speaker by speaker</h3>
+            <p>Timestamped, diarized, and built entirely on your machine. Two-channel capture means speaker labels start from ground truth — click any name to rename it everywhere. After a one-time model download it works with no internet at all.</p>
+          </div>
+        </div>
+        <div class="feat-row reveal">
+          <img class="shot" src="assets/screenshots/features/enhanced.webp" loading="lazy" width="1280" height="802"
+               alt="Enhanced notes: the user's own lines in plain text, AI summary and action-item blocks tinted violet with citation chips showing their transcript sources">
+          <div class="feat-copy">
+            <h3>Notes with receipts</h3>
+            <p>Enhance merges your rough notes with the transcript into clean, structured notes. Your words stay yours; every AI line is tinted and carries a citation chip that jumps to the exact transcript moment. No mystery summaries.</p>
+          </div>
+        </div>
+        <div class="feat-row flip reveal">
+          <img class="shot" src="assets/screenshots/features/ask.webp" loading="lazy" width="1280" height="802"
+               alt="The Ask panel beside a note: a question about action items, a grounded answer, and an Insert into note button">
+          <div class="feat-copy">
+            <h3>Ask the meeting anything</h3>
+            <p>"What did I commit to?" "Draft the follow-up email." Chat with any meeting, grounded in its transcript — and drop any answer into your note with one click.</p>
+          </div>
+        </div>
+        <div class="feat-row reveal">
+          <img class="shot" src="assets/screenshots/features/search.webp" loading="lazy" width="1280" height="802"
+               alt="Semantic search results for 'the call where we discussed pricing' with matched snippets and relevance meters across notes and transcripts">
+          <div class="feat-copy">
+            <h3>Search that finds meaning</h3>
+            <p>Hybrid keyword + semantic search across notes and transcripts — "the call where we discussed pricing" surfaces the right meeting even if nobody said "pricing".</p>
+          </div>
+        </div>
+        <div class="feat-row flip reveal">
+          <img class="shot" src="assets/screenshots/features/import.webp" loading="lazy" width="1280" height="802"
+               alt="The import queue: four audio and video files staged for transcription, one done, one transcribing, two waiting, with drag handles to reorder">
+          <div class="feat-copy">
+            <h3>Import old recordings</h3>
+            <p>Drop in existing audio or video files — several at once. They queue, transcribe on your machine, and become notes with the same transcripts, speakers, and enhanced notes. Webinars, courses, meetings from before you installed the app.</p>
+          </div>
+        </div>
+      </div>
       <div class="grid">
-        <div class="card reveal">
-          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 3.3a10 10 0 1 0 7 7"/><path d="m14 10 7-7"/><path d="M21 7V3h-4"/></svg></div>
-          <h3>No bot in the room</h3>
-          <p>Nothing joins your call or announces itself. It captures your mic and your system audio — so it works with any meeting app, or a phone on speaker.</p>
-        </div>
-        <div class="card reveal">
-          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
-          <h3>On-device everything</h3>
-          <p>Transcription and speaker labeling run locally. After a one-time model download, it works with no internet connection at all.</p>
-        </div>
-        <div class="card reveal">
-          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg></div>
-          <h3>Notes with receipts</h3>
-          <p>Your words stay in your color; AI additions are tinted and carry citation chips that jump to the exact transcript moment. No mystery summaries.</p>
-        </div>
-        <div class="card reveal">
-          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
-          <h3>Search that finds meaning</h3>
-          <p>Hybrid keyword + semantic search across notes and transcripts — "the call where we discussed pricing" works even if nobody said "pricing".</p>
-        </div>
         <div class="card reveal">
           <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></div>
           <h3>Your files, not a silo</h3>
@@ -403,16 +519,17 @@
           <p>Connect Google Calendar or Outlook (read-only) to see what's next and start a note straight from the meeting. Sign-ins live in your system keychain.</p>
         </div>
         <div class="card reveal">
-          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
-          <h3>Import old recordings</h3>
-          <p>Drop in existing audio or video files — several at once — and get the same transcripts, speakers, and enhanced notes for meetings from before.</p>
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1h-7.5l-2-2H4a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1z"/></svg></div>
+          <h3>Folders, colors, emoji</h3>
+          <p>Organize with folders you can color or tag with an emoji, and file notes by drag-and-drop. Your structure is just folders on disk.</p>
         </div>
         <div class="card reveal">
-          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg></div>
-          <h3>Talks to your AI tools</h3>
-          <p>A bundled MCP server lets Claude Desktop read your meetings locally — "what's changed with the Acme account?" answered with citations, nothing uploaded.</p>
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h18a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M8 21h8M12 17v4"/></svg></div>
+          <h3>Screen capture, synced</h3>
+          <p>Record the full screen, a window, or a region alongside the audio — shown in the transcript as playable tiles.</p>
         </div>
       </div>
+      <p class="shots-note">App screens above are rendered from the product's design system, faithful to the current release.</p>
     </div>
   </section>
 
@@ -461,10 +578,11 @@
       <p class="kicker">Compare</p>
       <h2>The honest comparison.</h2>
       <p class="lede">
-        Cloud note-takers are polished products with real strengths — mobile apps, team
-        workspaces, CRM integrations. If those matter more to you than privacy, cost, or
-        control, they're reasonable choices. Here's the objective difference in how they
-        work.
+        Looking for a free, open-source alternative to Otter, Fireflies, Fathom, or
+        Granola? Fair — but cloud note-takers are polished products with real strengths:
+        mobile apps, team workspaces, CRM integrations. If those matter more to you than
+        privacy, cost, or control, they're reasonable choices. Here's the objective
+        difference in how they work.
       </p>
       <div class="table-scroll" tabindex="0" role="region" aria-label="Comparison of meeting note-takers">
         <table>
@@ -516,13 +634,8 @@
           <strong>Settings → "Chat with your notes (MCP)"</strong>.
         </p>
       </div>
-      <pre class="snippet" aria-label="Claude Desktop configuration example"><code>{
-  <span class="k">"mcpServers"</span>: {
-    <span class="k">"flyonthewall"</span>: {
-      <span class="k">"command"</span>: <span class="v">"C:\\...\\flyonthewall-mcp.exe"</span>
-    }
-  }
-}</code></pre>
+      <img class="shot" src="assets/screenshots/features/set-mcp.webp" loading="lazy" width="1280" height="802"
+           alt="MCP settings: a copyable Claude Desktop config snippet and the server's tools — get_context, search_notes, whats_changed, open_items, get_transcript">
     </div>
   </section>
 
@@ -535,6 +648,10 @@
         <details>
           <summary>Is it really free?</summary>
           <p>Yes. Fly on the Wall is open source under the MIT license — no accounts, no tiers, no trial timers. The optional cloud features (Groq, Claude) use your own API keys, so any cost there is between you and those providers; Groq has a free tier.</p>
+        </details>
+        <details>
+          <summary>Is this an open-source alternative to Otter, Fireflies, or Granola?</summary>
+          <p>That's the idea — same job (record, transcribe, and summarize your meetings), different architecture. Those tools process your audio in their cloud; Fly on the Wall does everything on your own computer, is MIT-licensed, and replaces a separate transcription subscription too, since imported recordings get the same treatment. The <a href="#compare">comparison table</a> lays out the differences honestly.</p>
         </details>
         <details>
           <summary>Which meeting apps does it work with?</summary>
@@ -600,13 +717,37 @@
   });
   syncToggleLabel();
 
+  // OS-aware primary download label. Falls back to the default "Windows" label.
+  (function () {
+    var btn = document.getElementById("dl-primary");
+    if (!btn) return;
+    var plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
+    var ua = navigator.userAgent || "";
+    var os = null;
+    if (/Android/i.test(ua)) os = null;                 // mobile: keep default
+    else if (/Mac/i.test(plat) || /Mac OS X/i.test(ua)) os = "macOS";
+    else if (/Linux/i.test(plat) || /Linux/i.test(ua)) os = "Linux";
+    else if (/Win/i.test(plat) || /Windows/i.test(ua)) os = "Windows";
+    if (os) btn.textContent = "Download for " + os;
+  })();
+
   // Download counter (docs/data/stats.json, refreshed daily by the stats workflow).
   fetch("data/stats.json")
     .then(function (r) { return r.ok ? r.json() : null; })
     .then(function (s) {
       if (!s || !s.totalDownloads) return;
-      document.getElementById("dl-count").textContent = s.totalDownloads;
+      document.getElementById("dl-count").textContent = Number(s.totalDownloads).toLocaleString();
       document.getElementById("stats-line").hidden = false;
+    })
+    .catch(function () {});
+
+  // Live GitHub star count (public API, no auth). Hidden unless the fetch succeeds.
+  fetch("https://api.github.com/repos/swarnavspujari/fly-on-the-wall")
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      if (!d || typeof d.stargazers_count !== "number" || d.stargazers_count < 1) return;
+      document.getElementById("star-count").textContent = d.stargazers_count.toLocaleString();
+      document.getElementById("stars-line").hidden = false;
     })
     .catch(function () {});
 
