@@ -5,12 +5,14 @@ mod asr_commands;
 mod calendar_commands;
 mod calendar_defaults;
 mod commands;
+pub mod embeddings;
 pub mod extraction;
 pub mod gpu;
 pub mod hw;
 mod import_commands;
 mod live;
 pub mod llm_commands;
+pub mod logging;
 pub mod models;
 pub mod ollama;
 pub mod pipeline;
@@ -22,11 +24,13 @@ pub mod state;
 use tauri::Manager;
 
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // Resolve (and legacy-migrate) the data dir BEFORE file logging exists:
+    // logging::init creating `FlyOnTheWall/logs` first would make the
+    // migration think it already ran. A migration failure falls back to
+    // stdout-only logging here and surfaces via the startup dialog below
+    // (AppState::init repeats the same idempotent preparation).
+    let data_dir = state::prepared_data_dir();
+    logging::init(data_dir.as_deref().ok());
 
     let mut builder = tauri::Builder::default();
 
@@ -101,6 +105,20 @@ pub fn run() {
                     .await;
                 });
             }
+            // Reclaim disk from download temp files a crashed run stranded
+            // (per-attempt unique names — nothing else ever opens them).
+            {
+                let data_dir = app.state::<state::AppState>().data_dir.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        models::sweep_stale_downloads(
+                            &data_dir,
+                            std::time::Duration::from_secs(60 * 60),
+                        );
+                    })
+                    .await;
+                });
+            }
             // Recording self-heal: re-attach (or fully resurrect) finished
             // recordings whose database write was lost — the manifests written
             // at stop time make this possible even after the database itself
@@ -129,6 +147,10 @@ pub fn run() {
             // Drain queued transcriptions (incl. jobs surviving a restart)
             // whenever no recording is active.
             scheduler::spawn(app.handle().clone());
+            // Semantic-search indexer: chunk-backfills existing content, then
+            // embeds pending chunks through Ollama in the background. Fully
+            // best-effort — without Ollama, search stays FTS-only.
+            embeddings::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -147,6 +169,7 @@ pub fn run() {
             commands::update_note_scratchpad,
             commands::move_note,
             commands::delete_note,
+            commands::cancel_transcription,
             commands::attach_file,
             commands::export_note,
             commands::copy_note_markdown,
@@ -154,10 +177,12 @@ pub fn run() {
             commands::open_attachment,
             commands::reveal_attachment,
             commands::reveal_data_dir,
+            commands::reveal_logs_dir,
             commands::mcp_config,
             commands::get_app_setting,
             commands::set_app_setting,
             commands::search,
+            commands::search_semantic,
             recording::recording_status,
             recording::start_recording,
             recording::pause_recording,
@@ -165,6 +190,7 @@ pub fn run() {
             recording::stop_recording,
             recording::get_meeting_for_note,
             recording::get_meetings_for_note,
+            recording::update_meeting_started_at,
             recording::list_mic_devices,
             live::live_status,
             asr_commands::transcribe_meeting,
@@ -204,10 +230,13 @@ pub fn run() {
             calendar_commands::set_calendar_enabled,
             calendar_commands::start_meeting_from_event,
             screen_commands::screen_status,
+            screen_commands::list_capture_windows,
             screen_commands::start_screen_recording,
             screen_commands::stop_screen_recording,
             screen_commands::ensure_video_thumbnail,
-            import_commands::import_media,
+            import_commands::import_stage,
+            import_commands::import_state,
+            import_commands::import_transcribe,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fly on the Wall")

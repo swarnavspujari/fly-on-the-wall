@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://swarnavspujari.github.io/fly-on-the-wall/sitemap.xml

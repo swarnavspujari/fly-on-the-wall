@@ -278,6 +278,7 @@ impl Storage {
             "INSERT INTO transcripts_fts (meeting_id, body) VALUES (?1, ?2)",
             (&t.meeting_id, &body),
         )?;
+        self.sync_transcript_chunks(t)?;
 
         let (md, json) = self.transcript_mirror_paths(&t.meeting_id, "");
         std::fs::write(md, t.to_markdown())?;

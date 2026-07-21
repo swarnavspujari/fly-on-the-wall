@@ -296,7 +296,9 @@ pub fn tool_installed(data_dir: &Path, id: &str, path_names: &[&str]) -> bool {
 /// from Finder don't inherit brew's PATH, and without this the "brew install
 /// whisper-cpp" remedy our own error message suggests would never resolve.
 pub fn find_on_path(names: &[&str]) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
+    // An unset PATH (some Finder/launchd spawns) must not skip the brew
+    // probes below — they exist for exactly those launches.
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
     let path_dirs = std::env::split_paths(&path_var).collect::<Vec<_>>();
     #[cfg(target_os = "macos")]
     let extra_dirs = ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from);
@@ -376,15 +378,66 @@ pub struct ModelProgress {
     pub error: Option<String>,
 }
 
-/// Best already-installed whisper model, if any — the registry lists ASR
-/// models smallest→largest, so the last installed one wins. Lets a meeting
-/// still transcribe when the wanted model can't be downloaded (offline, CDN
-/// outage) but another model is sitting on disk.
-pub fn best_installed_asr_model(data_dir: &Path) -> Option<(&'static str, PathBuf)> {
-    registry()
-        .filter(|a| a.id.starts_with("ggml-"))
-        .filter_map(|a| installed_path(data_dir, a).map(|p| (a.id, p)))
-        .last()
+/// Best already-installed whisper model to stand in for `wanted_id` — the
+/// registry lists ASR models smallest→largest, so among installed models we
+/// prefer the largest that is NOT bigger than the wanted one (a Light-tier
+/// machine whose small model is missing must not get pushed onto a leftover
+/// large-v3 the tier system steered away from). Only when nothing at-or-below
+/// the wanted size is installed does a larger model win — a slow rescue still
+/// beats losing the meeting. Lets transcription proceed when the wanted model
+/// can't be downloaded (offline, CDN outage) but another model is on disk.
+pub fn best_installed_asr_model(
+    data_dir: &Path,
+    wanted_id: &str,
+) -> Option<(&'static str, PathBuf)> {
+    let asr: Vec<&'static Artifact> = registry().filter(|a| a.id.starts_with("ggml-")).collect();
+    let wanted_idx = asr.iter().position(|a| a.id == wanted_id);
+    let installed: Vec<(usize, &'static Artifact, PathBuf)> = asr
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| installed_path(data_dir, a).map(|p| (i, *a, p)))
+        .collect();
+    let at_or_below = installed
+        .iter()
+        .rfind(|(i, _, _)| wanted_idx.is_none_or(|w| *i <= w));
+    at_or_below
+        .or_else(|| installed.first())
+        .map(|(_, a, p)| (a.id, p.clone()))
+}
+
+/// Remove stale download temp files (`{id}.download.{pid}.{n}`) left by a
+/// crashed or killed run — per-attempt unique names mean nothing else ever
+/// opens them, and a multi-GB model orphan must not sit on disk forever.
+/// Age-gated: a LIVE download writes continuously, so its mtime stays fresh;
+/// anything untouched for `max_age` is safely dead. Called off the startup
+/// path (lib.rs).
+pub fn sweep_stale_downloads(data_dir: &Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let is_temp = name.to_string_lossy().contains(".download.");
+        if !is_temp || !entry.path().is_file() {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if stale {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => {
+                    tracing::info!(file = %entry.path().display(), "removed stale download temp")
+                }
+                Err(e) => {
+                    tracing::warn!(file = %entry.path().display(), error = %e, "could not remove stale download temp")
+                }
+            }
+        }
+    }
 }
 
 /// Opt-out for the hf-mirror.com fallback (docs/MODELS.md): set
@@ -435,6 +488,7 @@ fn retry_same_url(error: &str) -> bool {
 /// temp file is removed so the next attempt starts clean.
 async fn download_and_verify(
     progress: ProgressSink<'_>,
+    client: &reqwest::Client,
     a: &Artifact,
     tmp: &Path,
     url: &str,
@@ -443,16 +497,6 @@ async fn download_and_verify(
         let _ = tokio::fs::remove_file(tmp).await;
         Err::<u64, String>(e)
     };
-    // Bounded connect + per-chunk read: with no timeouts an offline machine
-    // sits in TCP connect limbo for the OS default (observed 60+ s on macOS)
-    // before any caller — the live loop's prompt "unavailable" verdict most
-    // of all — hears about it. No overall request timeout: model downloads
-    // legitimately run for minutes.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .read_timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
     let resp = match async {
         client
             .get(url)
@@ -544,6 +588,22 @@ pub async fn ensure(
     ensure_with(progress, data_dir, id, DownloadEffort::Full).await
 }
 
+/// A temp path no other download can be writing to. Concurrent `ensure`
+/// calls for the SAME artifact (e.g. the live-caption loop and a pipeline
+/// both resolving whisper-bin) used to share one `{id}.download` file: both
+/// writers interleaved into it, and since the SHA-256 is computed over each
+/// download's network stream — not the file on disk — the first to finish
+/// could verify its own clean stream yet rename/extract the interleaved
+/// bytes. Process id + an in-process counter make every attempt's file its
+/// own; a crashed run leaves at most a small stale `{id}.download.{pid}.{n}`
+/// file, which no later run ever opens.
+fn download_tmp_path(data_dir: &Path, id: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    data_dir.join(format!("{id}.download.{}.{n}", std::process::id()))
+}
+
 /// [`ensure`] with an explicit download effort.
 pub async fn ensure_with(
     progress: ProgressSink<'_>,
@@ -556,7 +616,7 @@ pub async fn ensure_with(
         return Ok(path);
     }
 
-    let tmp = data_dir.join(format!("{}.download", a.id));
+    let tmp = download_tmp_path(data_dir, a.id);
     if let Some(parent) = tmp.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -573,15 +633,31 @@ pub async fn ensure_with(
         DownloadEffort::Full => (candidate_urls(a.url), 2u8),
         DownloadEffort::SingleAttempt => (vec![a.url.to_string()], 1u8),
     };
+    // One shared client: retries and mirror hops reuse the connection pool
+    // instead of paying a fresh TLS handshake per attempt. Bounded connect +
+    // per-chunk read: with no timeouts an offline machine sits in TCP connect
+    // limbo for the OS default (observed 60+ s on macOS) before any caller —
+    // the live loop's prompt "unavailable" verdict most of all — hears about
+    // it. No overall request timeout: model downloads legitimately run for
+    // minutes.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let mut errors: Vec<String> = Vec::new();
     let mut downloaded: u64 = 0;
     let mut fetched = false;
     'sources: for url in &candidates {
         for attempt in 0..attempts_per_url {
-            if attempt > 0 || !errors.is_empty() {
+            // Back off only before re-hitting the SAME url (protecting a
+            // struggling host); switching to a different source proceeds
+            // immediately — an offline machine shouldn't stack 4 s sleeps
+            // between hosts that all refuse instantly.
+            if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             }
-            match download_and_verify(progress, a, &tmp, url).await {
+            match download_and_verify(progress, &client, a, &tmp, url).await {
                 Ok(bytes) => {
                     downloaded = bytes;
                     fetched = true;
@@ -673,7 +749,7 @@ pub async fn ensure_with(
 /// bundled bsdtar delegates bzip2 to an external binary most machines lack,
 /// so shelling out breaks .tar.bz2 artifacts on clean installs. The format
 /// comes from `src_name` (the artifact URL) because the downloaded temp file
-/// is named `{id}.download`.
+/// carries a `{id}.download.{pid}.{n}` name, not the archive's extension.
 async fn extract_archive(archive: &Path, dest: &Path, src_name: &str) -> Result<(), String> {
     let archive = archive.to_path_buf();
     let dest = dest.to_path_buf();
@@ -803,6 +879,26 @@ mod tests {
         assert!(err.contains("unsupported archive format"), "{err}");
     }
 
+    /// Concurrent downloads of the same artifact must never share a temp
+    /// file — interleaved writers plus stream-side hashing could install
+    /// corrupt bytes. Every attempt gets its own path, under the data dir,
+    /// still recognizably named after the artifact.
+    #[test]
+    fn download_tmp_paths_are_unique_per_attempt() {
+        let dir = Path::new("data");
+        let a = download_tmp_path(dir, "whisper-bin");
+        let b = download_tmp_path(dir, "whisper-bin");
+        assert_ne!(a, b, "two attempts must not share a temp file");
+        for p in [&a, &b] {
+            assert_eq!(p.parent(), Some(dir));
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                name.starts_with("whisper-bin.download."),
+                "temp name should stay attributable to its artifact: {name}"
+            );
+        }
+    }
+
     /// The opt-out drops the mirror and leaves only the pinned primary.
     #[test]
     fn candidate_urls_opt_out_disables_mirror() {
@@ -843,20 +939,62 @@ mod tests {
         assert_eq!(gh.len(), 1);
     }
 
-    /// The registry lists ASR models smallest→largest, so the best installed
-    /// model wins; a dir with no ggml weights yields None.
+    /// The stand-in for a missing model prefers the largest installed model
+    /// AT OR BELOW the wanted one — a Light-tier machine must not get pushed
+    /// onto a leftover large-v3. Only when everything installed is bigger
+    /// does the smallest larger model win (slow rescue beats no rescue).
     #[test]
-    fn best_installed_prefers_largest() {
+    fn best_installed_stays_at_or_below_the_wanted_model() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(best_installed_asr_model(tmp.path()).is_none());
+        assert!(best_installed_asr_model(tmp.path(), "ggml-small-q5_1").is_none());
         for id in ["ggml-small-q5_1", "ggml-large-v3-q5_0"] {
             let a = artifact(id).unwrap();
             let p = tmp.path().join(a.probe_rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, b"x").unwrap();
         }
-        let (id, _) = best_installed_asr_model(tmp.path()).unwrap();
+        // Wanted large → the largest installed wins.
+        let (id, _) = best_installed_asr_model(tmp.path(), "ggml-large-v3-q5_0").unwrap();
         assert_eq!(id, "ggml-large-v3-q5_0");
+        // Wanted small (Light tier) → the leftover large model must NOT win.
+        let (id, _) = best_installed_asr_model(tmp.path(), "ggml-small-q5_1").unwrap();
+        assert_eq!(id, "ggml-small-q5_1");
+        // Wanted medium, only small + large installed → small (at-or-below).
+        let (id, _) = best_installed_asr_model(tmp.path(), "ggml-medium-q5_0").unwrap();
+        assert_eq!(id, "ggml-small-q5_1");
+    }
+
+    /// Only larger models installed → the smallest of them stands in.
+    #[test]
+    fn best_installed_falls_up_only_when_nothing_smaller_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = artifact("ggml-large-v3-q5_0").unwrap();
+        let p = tmp.path().join(a.probe_rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"x").unwrap();
+        let (id, _) = best_installed_asr_model(tmp.path(), "ggml-small-q5_1").unwrap();
+        assert_eq!(id, "ggml-large-v3-q5_0");
+    }
+
+    /// Stale download temps (dead pids) are reclaimed; fresh ones survive.
+    #[test]
+    fn sweep_removes_stale_download_temps_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stale = tmp.path().join("ggml-small-q5_1.download.9999.0");
+        let fresh = tmp.path().join("whisper-bin.download.1234.1");
+        let unrelated = tmp.path().join("notes.md");
+        for f in [&stale, &fresh, &unrelated] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        // Age 0 → everything qualifying is stale; the non-temp file survives.
+        sweep_stale_downloads(tmp.path(), std::time::Duration::ZERO);
+        assert!(!stale.exists() && !fresh.exists());
+        assert!(unrelated.exists(), "non-temp files are never touched");
+
+        // A just-written temp survives a real (1 h) age gate.
+        std::fs::write(&fresh, b"x").unwrap();
+        sweep_stale_downloads(tmp.path(), std::time::Duration::from_secs(3600));
+        assert!(fresh.exists());
     }
 
     /// A managed install (probe file present) reports ready even when the tool

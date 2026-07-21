@@ -41,6 +41,9 @@ export interface NoteSummary {
   folder_id: string | null;
   meeting_id: string | null;
   updated_at: string;
+  /** When the note's meeting happened (started_at), else the note's
+   * created_at — list order and the date shown in rows. */
+  happened_at: string;
 }
 
 export interface SearchHit {
@@ -166,6 +169,10 @@ export interface PipelineProgress {
   done: boolean;
   error: string | null;
 }
+
+/** Managed-artifact id of the whisper.cpp engine — the ONE frontend copy,
+ *  mirroring models::WHISPER_ENGINE_ID in the backend. */
+export const WHISPER_ENGINE_ID = "whisper-bin";
 
 export interface ModelProgress {
   id: string;
@@ -331,9 +338,34 @@ export interface ScreenStatus {
   elapsed_ms: number;
 }
 
-export interface ImportResult {
-  meeting: Meeting;
+export interface ImportFile {
+  id: string;
+  file_name: string;
+  size: number;
+  kind: "audio" | "video";
+  /** Source copy inside the data dir (null for unsupported files). */
+  rel_path: string | null;
+  error: string | null;
+}
+
+/** A note created from imported media that hasn't been transcribed yet. */
+export interface ImportStaged {
   note_id: string;
+  meeting_id: string;
+  files: ImportFile[];
+  /** Set once transcription starts: cumulative end (ms) of each file on the
+   * concatenated timeline, parallel to `files` — maps the pipeline's global
+   * transcription % onto per-file progress. */
+  boundaries_ms: number[];
+  started: boolean;
+}
+
+/** Per-file conversion progress emitted while `import_transcribe` normalizes
+ * the queue (ASR % rides the normal pipeline:progress stream afterwards). */
+export interface ImportProgress {
+  meeting_id: string;
+  file_id: string;
+  stage: "converting" | "converted";
 }
 
 export interface AudioDevice {

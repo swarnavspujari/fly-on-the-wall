@@ -51,16 +51,30 @@ impl Storage {
     }
 
     pub fn search_filtered(&self, query: &str, filter: &SearchFilter) -> Result<Vec<SearchHit>> {
+        let (mut notes, mut transcripts) = self.search_split(query, filter)?;
+        notes.append(&mut transcripts);
+        Ok(notes)
+    }
+
+    /// The two FTS rankings (note hits, transcript hits) separately — each
+    /// rank-ordered by bm25. Hybrid fusion treats them as independent lists;
+    /// [`search_filtered`] concatenates them for the classic API.
+    pub fn search_split(
+        &self,
+        query: &str,
+        filter: &SearchFilter,
+    ) -> Result<(Vec<SearchHit>, Vec<SearchHit>)> {
         let fts_query = sanitize_fts_query(query);
         if fts_query.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], vec![]));
         }
         let limit = filter.limit.max(1) as i64;
         let offset = filter.offset as i64;
         let folder = filter.folder_id.as_deref();
         let since = filter.since.map(|t| t.to_rfc3339());
         let until = filter.until.map(|t| t.to_rfc3339());
-        let mut hits = Vec::new();
+        let mut note_hits = Vec::new();
+        let mut transcript_hits = Vec::new();
 
         let mut stmt = self.conn.prepare(
             "SELECT f.note_id, n.title, snippet(notes_fts, 2, '[[', ']]', ' … ', 12)
@@ -85,7 +99,7 @@ impl Storage {
             },
         )?;
         for row in rows {
-            hits.push(row?);
+            note_hits.push(row?);
         }
 
         // Transcript hits join back to the owning note through meetings;
@@ -114,10 +128,10 @@ impl Storage {
             },
         )?;
         for row in rows {
-            hits.push(row?);
+            transcript_hits.push(row?);
         }
 
-        Ok(hits)
+        Ok((note_hits, transcript_hits))
     }
 }
 

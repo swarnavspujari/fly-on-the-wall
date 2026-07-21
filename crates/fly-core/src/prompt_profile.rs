@@ -150,6 +150,26 @@ const PROFILES: &[(&str, PromptProfile)] = &[
             ..DEFAULT_PROFILE
         },
     ),
+    // claude-sonnet-5 runs adaptive thinking by default and Anthropic counts
+    // thinking tokens against max_tokens, so on a long meeting the shared
+    // 4096 enhance budget got eaten by the trace and the block array came
+    // back truncated mid-JSON — the note filled with raw JSON (field report
+    // 2026-07-16, ~220-segment meeting). Thinking stays ON for Enhance (it
+    // measurably helps cloud quality); the budget makes room for both.
+    // Polish/Extraction already ship ThinkingMode::Disabled and are fine at
+    // their defaults; Ask output is prose, where truncation degrades softly.
+    (
+        "claude-sonnet-5",
+        PromptProfile {
+            max_tokens: TaskMaxTokens {
+                enhance: Some(16_384),
+                polish: None,
+                extract: None,
+                ask: None,
+            },
+            ..DEFAULT_PROFILE
+        },
+    ),
 ];
 
 /// Look up the profile for a resolved model string (`"llama3.1:latest"`,
@@ -169,18 +189,31 @@ mod tests {
 
     #[test]
     fn unknown_models_get_the_default_profile() {
-        // Unmeasured models — including the gemmas and cloud models — keep
-        // byte-identical behavior: no schemas, no thinking change, nothing.
-        for m in [
-            "claude-sonnet-5",
-            "gemma3:4b",
-            "gemma4:e4b",
-            "gpt-4o-mini",
-            "",
-            "mock",
-        ] {
+        // Unmeasured models — including the gemmas and other cloud models —
+        // keep byte-identical behavior: no schemas, no thinking change,
+        // nothing.
+        for m in ["gemma3:4b", "gemma4:e4b", "gpt-4o-mini", "", "mock"] {
             assert_eq!(profile_for(m), &DEFAULT_PROFILE, "model {m:?}");
         }
+    }
+
+    /// claude-sonnet-5 gets ONLY a bigger Enhance budget: adaptive thinking
+    /// counts against max_tokens on Anthropic, and 4096 truncated the block
+    /// array mid-JSON on a long meeting (field report 2026-07-16). Thinking
+    /// itself stays on, prompts stay byte-identical, other tasks untouched.
+    #[test]
+    fn claude_sonnet_5_only_raises_the_enhance_budget() {
+        let p = profile_for("claude-sonnet-5");
+        assert_eq!(p.max_tokens.enhance, Some(16_384));
+        assert_eq!(p.max_tokens.polish, None);
+        assert_eq!(p.max_tokens.extract, None);
+        assert_eq!(p.max_tokens.ask, None);
+        assert!(!p.disable_thinking, "thinking must stay on for Enhance");
+        assert_eq!(p.system_preamble, None);
+        assert!(!p.simplified_contract && !p.constrained_json && !p.constrained_enhance);
+        // Other Anthropic models are NOT matched.
+        assert_eq!(profile_for("claude-sonnet-4-6"), &DEFAULT_PROFILE);
+        assert_eq!(profile_for("claude-opus-4-8"), &DEFAULT_PROFILE);
     }
 
     #[test]

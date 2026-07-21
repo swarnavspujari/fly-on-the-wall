@@ -112,8 +112,8 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
     let exe = match models::ensure_tool_with(
         &on_model,
         &data_dir,
-        "whisper-bin",
-        &["whisper-cli"],
+        models::WHISPER_ENGINE_ID,
+        models::WHISPER_CLI_NAMES,
         "live transcript needs whisper.cpp",
         models::DownloadEffort::SingleAttempt,
     )
@@ -173,6 +173,8 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
         model,
         threads,
         force_cpu: cfg!(target_os = "macos"),
+        // live windows are throwaway snippets — nothing to checkpoint
+        resume: false,
     };
     set_status(
         &app,

@@ -4,6 +4,7 @@ import type {
   Attachment,
   CaptureTarget,
   Folder,
+  ImportStaged,
   Meeting,
   ModelProgress,
   Note,
@@ -38,6 +39,8 @@ import { api } from "../api";
 import { fmtElapsed } from "./RecordingBar";
 import { Button, Modal, SectionLabel } from "./ui";
 import AttendeeEditor from "./AttendeeEditor";
+import DateTimePicker from "./DateTimePicker";
+import ImportQueue from "./ImportQueue";
 import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
@@ -64,6 +67,10 @@ interface Props {
   engineInstalling: boolean;
   recStatus: RecordingStatus;
   screenStatus: ScreenStatus;
+  /** Staged (untranscribed) media import for this note's meeting, if any —
+   * while set and no transcript exists, the import queue replaces the note
+   * content and the view switcher is hidden. */
+  importStaged: ImportStaged | null;
   folders: Folder[];
   templates: Template[];
   /** Absolute app data dir — lets the audio player stream local recordings. */
@@ -78,6 +85,10 @@ interface Props {
   onStartScreen: (target: CaptureTarget) => void;
   onStopScreen: () => void;
   onTranscribe: () => void;
+  /** Start transcribing the staged import in the queue's order (file ids). */
+  onImportTranscribe: (order: string[]) => void;
+  /** Stop the staged import's running transcription (queue back to idle). */
+  onImportCancel: () => void;
   onInstallEngine: () => void;
   onOpenSettings: (focus: "engine" | "groq") => void;
   onRelabel: (speakerKey: string, label: string) => void;
@@ -104,7 +115,11 @@ const CHIP =
 function fmtWhen(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  const date = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const date = d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }),
+  });
   const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
   return `${date} · ${time}`;
 }
@@ -403,6 +418,13 @@ function ScreenControl({
   onStopScreen: () => void;
 }) {
   const [menu, setMenu] = useState(false);
+  // Non-null while the "Window…" picker is showing (the titles open right
+  // now, fetched from the backend when the user asks for window capture).
+  const [windowChoices, setWindowChoices] = useState<string[] | null>(null);
+  const closeMenu = () => {
+    setMenu(false);
+    setWindowChoices(null);
+  };
 
   if (screenStatus.active) {
     return (
@@ -433,13 +455,20 @@ function ScreenControl({
   }
 
   const pick = (choice: "full" | "window" | "region") => {
-    setMenu(false);
     if (choice === "full") {
+      closeMenu();
       onStartScreen({ kind: "full_screen" });
     } else if (choice === "window") {
-      const t = prompt("Exact window title to capture:");
-      if (t) onStartScreen({ kind: "window", title: t });
+      // Swap the menu to a picker of the windows open right now — users
+      // can't know a window's EXACT title (VM/RDP clients decorate them),
+      // and gdigrab needs it exact. On failure show the empty state rather
+      // than a menu that silently does nothing.
+      void api
+        .listCaptureWindows()
+        .then(setWindowChoices)
+        .catch(() => setWindowChoices([]));
     } else {
+      closeMenu();
       const spec = prompt("Region as x,y,width,height:", "0,0,1280,720");
       const parts = spec?.split(",").map((n) => parseInt(n.trim(), 10)) ?? [];
       if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
@@ -452,6 +481,11 @@ function ScreenControl({
         });
       }
     }
+  };
+
+  const pickWindow = (title: string) => {
+    closeMenu();
+    onStartScreen({ kind: "window", title });
   };
 
   return (
@@ -467,34 +501,71 @@ function ScreenControl({
       </Button>
       {menu && (
         <>
-          <span className="fixed inset-0 z-10" onClick={() => setMenu(false)} aria-hidden="true" />
+          <span className="fixed inset-0 z-10" onClick={closeMenu} aria-hidden="true" />
           <span
             className="absolute right-0 z-20 min-w-[154px] p-1"
             style={{
               top: "calc(100% + 6px)",
+              maxWidth: 360,
               background: "var(--surface)",
               border: "1px solid var(--line)",
               borderRadius: "var(--radius-lg)",
               boxShadow: "var(--shadow-pop)",
             }}
           >
-            <SectionLabel className="block px-2.5 pb-1 pt-1.5">Capture</SectionLabel>
-            {(
-              [
-                ["full", "Full screen"],
-                ["window", "Window…"],
-                ["region", "Region…"],
-              ] as const
-            ).map(([v, l]) => (
-              <button
-                key={v}
-                onClick={() => pick(v)}
-                className="block w-full cursor-pointer border-0 bg-transparent px-2.5 py-1.5 text-left text-[13px] text-text hover:bg-surface-3"
-                style={{ borderRadius: "var(--radius-sm)" }}
-              >
-                {l}
-              </button>
-            ))}
+            {windowChoices === null ? (
+              <>
+                <SectionLabel className="block px-2.5 pb-1 pt-1.5">Capture</SectionLabel>
+                {(
+                  [
+                    ["full", "Full screen"],
+                    ["window", "Window…"],
+                    ["region", "Region…"],
+                  ] as const
+                ).map(([v, l]) => (
+                  <button
+                    key={v}
+                    onClick={() => pick(v)}
+                    className="block w-full cursor-pointer border-0 bg-transparent px-2.5 py-1.5 text-left text-[13px] text-text hover:bg-surface-3"
+                    style={{ borderRadius: "var(--radius-sm)" }}
+                  >
+                    {l}
+                  </button>
+                ))}
+              </>
+            ) : (
+              <>
+                <SectionLabel className="block px-2.5 pb-1 pt-1.5">Pick a window</SectionLabel>
+                <span className="block overflow-y-auto" style={{ maxHeight: 280 }}>
+                  {windowChoices.map((title) => (
+                    <button
+                      key={title}
+                      onClick={() => pickWindow(title)}
+                      title={title}
+                      className="block w-full cursor-pointer truncate border-0 bg-transparent px-2.5 py-1.5 text-left text-[13px] text-text hover:bg-surface-3"
+                      style={{ borderRadius: "var(--radius-sm)" }}
+                    >
+                      {title}
+                    </button>
+                  ))}
+                </span>
+                {windowChoices.length === 0 && (
+                  <span
+                    className="block px-2.5 py-1.5 text-text-3"
+                    style={{ fontSize: 12, lineHeight: 1.5 }}
+                  >
+                    No windows found — window capture is Windows-only for now.
+                  </span>
+                )}
+                <button
+                  onClick={() => setWindowChoices(null)}
+                  className="block w-full cursor-pointer border-0 bg-transparent px-2.5 py-1.5 text-left text-[12px] text-text-3 hover:bg-surface-3"
+                  style={{ borderRadius: "var(--radius-sm)" }}
+                >
+                  ‹ Back
+                </button>
+              </>
+            )}
           </span>
         </>
       )}
@@ -534,6 +605,10 @@ function MetaRow({
   onRemoveAttachment: (attachmentId: string) => void;
 }) {
   const [opening, setOpening] = useState(false);
+  // Meeting date editor (the date chip opens it on meeting notes).
+  const [editingWhen, setEditingWhen] = useState(false);
+  const [whenSaving, setWhenSaving] = useState(false);
+  const [whenError, setWhenError] = useState<string | null>(null);
   const tplName =
     templates.find((t) => t.id === templateId)?.name ?? templates[0]?.name ?? "Template";
   const folderName = note.folder_id
@@ -546,10 +621,41 @@ function MetaRow({
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {when && (
+      {when && meeting ? (
+        <button
+          className={`${CHIP} cursor-pointer hover:bg-surface-3`}
+          title="Edit meeting date & time"
+          onClick={() => {
+            setWhenError(null);
+            setEditingWhen(true);
+          }}
+        >
+          <Calendar size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} /> {when}
+        </button>
+      ) : when ? (
         <span className={CHIP}>
           <Calendar size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} /> {when}
         </span>
+      ) : null}
+      {editingWhen && meeting && (
+        <DateTimePicker
+          value={meeting.started_at}
+          saving={whenSaving}
+          error={whenError}
+          onCancel={() => setEditingWhen(false)}
+          onSave={(iso) => {
+            setWhenSaving(true);
+            setWhenError(null);
+            api
+              .updateMeetingStartedAt(meeting.id, iso)
+              .then((updated) => {
+                onMeetingChanged(updated);
+                setEditingWhen(false);
+              })
+              .catch((e) => setWhenError(String(e)))
+              .finally(() => setWhenSaving(false));
+          }}
+        />
       )}
 
       {/* template chip — a styled native select */}
@@ -793,6 +899,7 @@ export default function Editor({
   engineInstalling,
   recStatus,
   screenStatus,
+  importStaged,
   folders,
   templates,
   dataDir,
@@ -804,6 +911,8 @@ export default function Editor({
   onStartScreen,
   onStopScreen,
   onTranscribe,
+  onImportTranscribe,
+  onImportCancel,
   onInstallEngine,
   onOpenSettings,
   onRelabel,
@@ -1037,16 +1146,19 @@ export default function Editor({
     else void api.revealDataDir();
   };
 
-  const showTranscript = view === "transcript" && hasMeeting;
-  const showEnhanced = view === "enhanced" && enhanced;
-  const showNotes = !showTranscript && !showEnhanced;
+  // Import-staged note: the queue replaces every view until the transcript
+  // lands, then the note renders (and behaves) like any recorded note.
+  const pendingImport = importStaged != null && transcript == null;
+  const showTranscript = !pendingImport && view === "transcript" && hasMeeting;
+  const showEnhanced = !pendingImport && view === "enhanced" && enhanced;
+  const showNotes = !pendingImport && !showTranscript && !showEnhanced;
 
   return (
     <div className="flex h-full min-w-0 flex-1">
       <div className="relative flex min-w-0 flex-1 flex-col bg-surface">
         {/* controls bar */}
         <div className="print:hidden flex flex-wrap items-center justify-end gap-2 border-b border-line px-6 py-2.5">
-          {!recStatus.active && (
+          {!recStatus.active && !pendingImport && (
             <Button
               variant="record"
               size="sm"
@@ -1057,11 +1169,13 @@ export default function Editor({
               Record
             </Button>
           )}
-          <ScreenControl
-            screenStatus={screenStatus}
-            onStartScreen={onStartScreen}
-            onStopScreen={onStopScreen}
-          />
+          {!pendingImport && (
+            <ScreenControl
+              screenStatus={screenStatus}
+              onStartScreen={onStartScreen}
+              onStopScreen={onStopScreen}
+            />
+          )}
           <Button
             variant={askOpen ? "soft" : "outline"}
             size="sm"
@@ -1191,6 +1305,19 @@ export default function Editor({
               </div>
             )}
 
+            {/* Import queue — replaces the note content until transcription completes */}
+            {pendingImport && importStaged && (
+              <ImportQueue
+                staged={importStaged}
+                pipeStage={pipeStage}
+                pipeDetail={pipeDetail}
+                pipelineError={pipelineError}
+                onTranscribe={onImportTranscribe}
+                onRetry={onTranscribe}
+                onCancel={onImportCancel}
+              />
+            )}
+
             {/* Transcript view — live pane stays mounted while recording so it keeps
                 listening; it's only shown when the Transcript view is active. */}
             {isRecordingThisNote && recStatus.meeting_id && (
@@ -1282,16 +1409,18 @@ export default function Editor({
           </div>
         </div>
 
-        {/* floating view switcher (Granola-style) */}
-        <ViewSwitcher
-          view={view}
-          setView={setView}
-          hasMeeting={hasMeeting}
-          enhanced={enhanced}
-          transcriptBusy={!!pipeStage || isRecordingThisNote}
-          onEnhance={() => void enhance()}
-          enhancing={enhancing}
-        />
+        {/* floating view switcher (Granola-style) — hidden while an import is staged */}
+        {!pendingImport && (
+          <ViewSwitcher
+            view={view}
+            setView={setView}
+            hasMeeting={hasMeeting}
+            enhanced={enhanced}
+            transcriptBusy={!!pipeStage || isRecordingThisNote}
+            onEnhance={() => void enhance()}
+            enhancing={enhancing}
+          />
+        )}
       </div>
 
       {askOpen && (

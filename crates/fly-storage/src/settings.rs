@@ -22,6 +22,12 @@ impl Storage {
         )?;
         Ok(())
     }
+
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -35,5 +41,8 @@ mod tests {
         s.set_setting("asr.tier", "balanced").unwrap();
         s.set_setting("asr.tier", "best").unwrap();
         assert_eq!(s.get_setting("asr.tier").unwrap().as_deref(), Some("best"));
+        s.delete_setting("asr.tier").unwrap();
+        assert_eq!(s.get_setting("asr.tier").unwrap(), None);
+        s.delete_setting("asr.tier").unwrap(); // deleting a missing key is a no-op
     }
 }

@@ -15,7 +15,7 @@
   (measured: 5.4 %), exactly 2 speakers, correct line attribution, and searchable persistence.
   Heavy + needs downloaded artifacts, so it's `#[ignore]`d in CI; run locally with:
   `cargo test -p fly-app --test pipeline_e2e -- --ignored --nocapture`
-  (artifacts are hardlinked from `%APPDATA%/Looma`; the test skips if absent).
+  (artifacts are hardlinked from `%APPDATA%/FlyOnTheWall`; the test skips if absent).
   `FLYONTHEWALL_E2E_GPU=1` runs it through the pinned Vulkan GPU engine instead (combine with
   `GGML_VK_VISIBLE_DEVICES=<n>` to pick the GPU); the same file also carries
   `gpu_failure_falls_back_to_cpu`, which plants a broken GPU exe and asserts the pipeline

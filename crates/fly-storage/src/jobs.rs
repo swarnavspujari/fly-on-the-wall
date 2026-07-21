@@ -106,6 +106,17 @@ impl Storage {
         self.set_job(meeting_id, JOB_FAILED, Some(attempts), Some(error))
     }
 
+    /// Remove a meeting's job row entirely (transcription cancelled or the
+    /// note deleted). Unlike the failed state there is nothing left to show:
+    /// the user asked for the work to stop. Missing rows are a no-op.
+    pub fn delete_transcription_job(&self, meeting_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM transcription_jobs WHERE meeting_id = ?1",
+            [meeting_id],
+        )?;
+        Ok(())
+    }
+
     /// Startup recovery: anything left 'running' by a previous process died
     /// with it — put it back in the queue.
     pub fn reset_running_transcriptions(&self) -> Result<usize> {
@@ -202,6 +213,22 @@ mod tests {
         // user asks again → failure resets
         assert!(s.enqueue_transcription("m1").unwrap());
         assert_eq!(s.transcription_job("m1").unwrap().unwrap().attempts, 0);
+    }
+
+    #[test]
+    fn delete_removes_the_job_row_entirely() {
+        let (_dir, s) = test_storage();
+        s.enqueue_transcription("m1").unwrap();
+        s.delete_transcription_job("m1").unwrap();
+        assert!(s.transcription_job("m1").unwrap().is_none());
+        assert!(s.next_transcription_job().unwrap().is_none());
+        // a running job's row goes too (cancel of an in-flight run)...
+        s.enqueue_transcription("m2").unwrap();
+        s.mark_transcription_running("m2").unwrap();
+        s.delete_transcription_job("m2").unwrap();
+        assert!(s.transcription_job("m2").unwrap().is_none());
+        // ...and deleting a missing job is a no-op, not an error
+        s.delete_transcription_job("m2").unwrap();
     }
 
     #[test]

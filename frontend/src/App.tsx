@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { PanelLeft, X } from "lucide-react";
 import { api } from "./api";
+import { WHISPER_ENGINE_ID } from "./types";
 import type {
   AppInfo,
   CalendarEvent,
   Folder,
+  ImportStaged,
   Meeting,
   ModelProgress,
   Note,
@@ -33,10 +35,6 @@ import { useUpdater } from "./updater";
 
 /** Window width (px) under which the sidebars collapse into a menu button. */
 const NARROW_BREAKPOINT = 880;
-
-/** Managed-artifact id for the whisper.cpp engine (mirrors models::WHISPER_ENGINE_ID
- *  in the backend). Installing it is what makes local transcription possible. */
-const WHISPER_ENGINE_ID = "whisper-bin";
 
 const IDLE_STATUS: RecordingStatus = {
   active: false,
@@ -67,6 +65,9 @@ export default function App() {
   const [pipeStage, setPipeStage] = useState<string | null>(null);
   const [pipeDetail, setPipeDetail] = useState<string | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
+  // Staged (untranscribed) media import for the open note's meeting — while
+  // set, the editor shows the import queue instead of the note content.
+  const [importStaged, setImportStaged] = useState<ImportStaged | null>(null);
   const [modelProgress, setModelProgress] = useState<ModelProgress | null>(null);
   // Transcription-engine (whisper-cli) readiness — distinct from model
   // weights. `null` until the first settings fetch resolves.
@@ -108,9 +109,33 @@ export default function App() {
   useEffect(() => {
     openMeetingIdRef.current = openMeeting?.id ?? null;
   }, [openMeeting]);
+  // For the pipeline-done handler: which note is open, and whether it was an
+  // import (its meeting must be refetched once the transcript lands).
+  const openNoteIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    openNoteIdRef.current = openNote?.id ?? null;
+  }, [openNote]);
+  const importStagedRef = useRef<ImportStaged | null>(null);
+  useEffect(() => {
+    importStagedRef.current = importStaged;
+  }, [importStaged]);
 
   const refreshFolders = useCallback(async () => {
     setFolders(await api.listFolders());
+  }, []);
+
+  // Re-read whisper-cli readiness (managed install or on PATH). Called after an
+  // in-app install and whenever Settings closes, so a manual `brew install`
+  // outside the app is reflected too. ONE fetch-and-set for every AsrSettings
+  // field the app mirrors — a new field added here updates every caller.
+  const refreshAsrState = useCallback(() => {
+    api
+      .getAsrSettings()
+      .then((s) => {
+        setAutoTranscribe(s.auto_transcribe);
+        setEngine({ installed: s.engine_installed, managed: s.engine_managed });
+      })
+      .catch(console.error);
   }, []);
 
   const firstNotesLogged = useRef(false);
@@ -142,19 +167,13 @@ export default function App() {
       .then(setInfo)
       .catch((e) => setError(String(e)));
     refreshFolders().catch((e) => setError(String(e)));
-    api
-      .getAsrSettings()
-      .then((s) => {
-        setAutoTranscribe(s.auto_transcribe);
-        setEngine({ installed: s.engine_installed, managed: s.engine_managed });
-      })
-      .catch(console.error);
+    refreshAsrState();
     api.listTemplates().then(setTemplates).catch(console.error);
     api
       .getAppSetting("consent.recording_notice_accepted")
       .then((v) => setShowFirstRun(v !== "true"))
       .catch(console.error);
-  }, [refreshFolders]);
+  }, [refreshFolders, refreshAsrState]);
 
   // upcoming calendar meetings: on start + every 5 minutes
   useEffect(() => {
@@ -207,6 +226,23 @@ export default function App() {
     const unPipeline = listen<PipelineProgress>("pipeline:progress", (e) => {
       const p = e.payload;
       if (p.meeting_id !== openMeetingIdRef.current) return;
+      // Cancelled is terminal but neither success nor failure: clear the
+      // progress UI and drop a staged import queue back to idle (the backend
+      // reset its `started` flag).
+      if (p.stage === "cancelled") {
+        setPipeStage(null);
+        setPipeDetail(null);
+        setPipelineError(null);
+        if (importStagedRef.current?.meeting_id === p.meeting_id) {
+          api
+            .importState(p.meeting_id)
+            .then((fresh) => {
+              if (openMeetingIdRef.current === p.meeting_id) setImportStaged(fresh);
+            })
+            .catch(console.error);
+        }
+        return;
+      }
       if (p.done) {
         setPipeStage(null);
         setPipeDetail(null);
@@ -221,6 +257,23 @@ export default function App() {
             if (openMeetingIdRef.current !== p.meeting_id) return;
             setTranscript(raw);
             setCleanedTranscript(cleaned);
+            // An imported note just became a normal note: drop the queue and
+            // refetch the meeting (recording set at transcribe time) and the
+            // note (imported videos were attached to it backend-side).
+            if (importStagedRef.current?.meeting_id === p.meeting_id) {
+              setImportStaged(null);
+              const noteId = openNoteIdRef.current;
+              if (noteId) {
+                const [meeting, note] = await Promise.all([
+                  api.getMeetingForNote(noteId),
+                  api.getNote(noteId),
+                ]);
+                if (openMeetingIdRef.current === p.meeting_id) {
+                  if (meeting) setOpenMeeting(meeting);
+                  setOpenNote(note);
+                }
+              }
+            }
           })().catch(console.error);
         }
       } else {
@@ -249,17 +302,44 @@ export default function App() {
     };
   }, []);
 
-  // debounce search-as-you-type
+  // Search-as-you-type, two passes: instant FTS at 200ms, then a hybrid
+  // (FTS + semantic) pass at 450ms that upgrades the same result list. The
+  // semantic pass never *replaces* good FTS results with nothing: it errors
+  // silently and only newer-query responses win (guarded by searchSeq).
+  const searchSeq = useRef(0);
   useEffect(() => {
     const q = searchQuery.trim();
+    const seq = ++searchSeq.current;
     if (!q) {
       setSearchHits([]);
       return;
     }
-    const t = window.setTimeout(() => {
-      api.search(q).then(setSearchHits).catch(console.error);
+    let semanticDone = false;
+    const fts = window.setTimeout(() => {
+      api
+        .search(q)
+        .then((hits) => {
+          if (searchSeq.current === seq && !semanticDone) setSearchHits(hits);
+        })
+        .catch(console.error);
     }, 200);
-    return () => window.clearTimeout(t);
+    const semantic = window.setTimeout(() => {
+      api
+        .searchSemantic(q)
+        .then((hits) => {
+          if (searchSeq.current === seq) {
+            semanticDone = true;
+            setSearchHits(hits);
+          }
+        })
+        .catch(() => {
+          /* semantic pass is best-effort; FTS results stand */
+        });
+    }, 450);
+    return () => {
+      window.clearTimeout(fts);
+      window.clearTimeout(semantic);
+    };
   }, [searchQuery]);
 
   // Monotonic token: rapid note switches fire overlapping fetch chains, and
@@ -280,19 +360,22 @@ export default function App() {
     setPipelineError(null);
     setPipeDetail(null);
     if (meeting) {
-      const [raw, cleaned, stage] = await Promise.all([
+      const [raw, cleaned, stage, staged] = await Promise.all([
         api.getTranscript(meeting.id),
         api.getCleanedTranscript(meeting.id).catch(() => null),
         api.pipelineStage(meeting.id),
+        api.importState(meeting.id).catch(() => null),
       ]);
       if (!fresh()) return;
       setTranscript(raw);
       setCleanedTranscript(cleaned);
       setPipeStage(stage);
+      setImportStaged(staged);
     } else {
       setTranscript(null);
       setCleanedTranscript(null);
       setPipeStage(null);
+      setImportStaged(null);
     }
   }, []);
 
@@ -308,6 +391,7 @@ export default function App() {
     setCleanedTranscript(null);
     setPipeStage(null);
     setPipeDetail(null);
+    setImportStaged(null);
   };
 
   const deleteNote = async (id: string) => {
@@ -319,6 +403,7 @@ export default function App() {
       setNoteMeetings([]);
       setTranscript(null);
       setCleanedTranscript(null);
+      setImportStaged(null);
     }
     await refreshNotes();
   };
@@ -340,6 +425,51 @@ export default function App() {
   const onNoteChanged = (note: Note) => {
     setOpenNote(note);
     void refreshNotes();
+  };
+
+  // "Import media as a note": multi-select picker → ONE staged note that
+  // opens on the import queue (transcription starts when the user confirms).
+  const importMedia = async () => {
+    try {
+      const staged = await api.importStage();
+      if (!staged) return; // user cancelled the picker
+      await refreshNotes();
+      await openNoteById(staged.note_id);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  // Transcribe the staged queue in the user's order. On failure (e.g. a file
+  // ffmpeg can't decode) the queue drops back to idle with the error surfaced.
+  const importTranscribe = async (order: string[]) => {
+    const staged = importStagedRef.current;
+    if (!staged) return;
+    setPipelineError(null);
+    try {
+      const updated = await api.importTranscribe(staged.meeting_id, order);
+      setImportStaged(updated);
+      if (openNoteIdRef.current === staged.note_id) {
+        setOpenMeeting(await api.getMeetingForNote(staged.note_id));
+      }
+    } catch (e) {
+      setError(String(e));
+      const fresh = await api.importState(staged.meeting_id).catch(() => null);
+      setImportStaged(fresh);
+    }
+  };
+
+  // Stop the staged import's running transcription. The backend unwinds at
+  // the next batch boundary and emits a terminal "cancelled" event; finished
+  // batches stay checkpointed, so a later Transcribe resumes them.
+  const cancelImportTranscribe = async () => {
+    const staged = importStagedRef.current;
+    if (!staged) return;
+    try {
+      await api.cancelTranscription(staged.meeting_id);
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   const startRecording = async () => {
@@ -381,16 +511,6 @@ export default function App() {
     }
   };
 
-  // Re-read whisper-cli readiness (managed install or on PATH). Called after an
-  // in-app install and whenever Settings closes, so a manual `brew install`
-  // outside the app is reflected too.
-  const refreshEngine = useCallback(() => {
-    api
-      .getAsrSettings()
-      .then((s) => setEngine({ installed: s.engine_installed, managed: s.engine_managed }))
-      .catch(console.error);
-  }, []);
-
   // One-click engine install from the transcribe error / Settings. Progress
   // arrives on the shared `model:progress` stream (id "whisper-bin").
   const installEngine = useCallback(async () => {
@@ -398,7 +518,7 @@ export default function App() {
     setPipelineError(null);
     try {
       await api.downloadModel(WHISPER_ENGINE_ID);
-      refreshEngine();
+      refreshAsrState();
     } catch (e) {
       // Tag the failure so the notice selector keeps the actionable engine
       // notice even for non-download errors (e.g. a failed extraction).
@@ -409,7 +529,7 @@ export default function App() {
       // stream, and a concurrent pipeline download must keep its bar.
       setModelProgress((p) => (p && p.id === WHISPER_ENGINE_ID ? null : p));
     }
-  }, [refreshEngine]);
+  }, [refreshAsrState]);
 
   const transcribeNow = async () => {
     if (!openMeeting) return;
@@ -430,6 +550,8 @@ export default function App() {
   const meetingChanged = (m: Meeting) => {
     if (openMeetingIdRef.current === m.id) setOpenMeeting(m);
     setNoteMeetings((list) => list.map((x) => (x.id === m.id ? m : x)));
+    // a date edit reorders the list (sorted by meeting date)
+    void refreshNotes();
   };
 
   // Picker in the transcript view: show an earlier (or the latest) meeting of
@@ -545,6 +667,10 @@ export default function App() {
         })
       }
       onStartFromEvent={(ev) => void startFromEvent(ev)}
+      onImportMedia={() => {
+        setDrawerOpen(false);
+        void importMedia();
+      }}
       onOpenSettings={() => {
         setDrawerOpen(false);
         setShowSettings(true);
@@ -619,6 +745,7 @@ export default function App() {
             engineInstalling={installingEngine}
             recStatus={recStatus}
             screenStatus={screenStatus}
+            importStaged={importStaged}
             folders={folders}
             templates={templates}
             dataDir={info?.data_dir ?? null}
@@ -630,6 +757,8 @@ export default function App() {
             onStartScreen={(target) => void startScreen(target)}
             onStopScreen={() => void stopScreen()}
             onTranscribe={() => void transcribeNow()}
+            onImportTranscribe={(order) => void importTranscribe(order)}
+            onImportCancel={() => void cancelImportTranscribe()}
             onInstallEngine={() => void installEngine()}
             onOpenSettings={(focus) => {
               setSettingsFocus(focus);
@@ -717,13 +846,7 @@ export default function App() {
           onClose={() => {
             setShowSettings(false);
             setSettingsFocus(null);
-            api
-              .getAsrSettings()
-              .then((s) => {
-                setAutoTranscribe(s.auto_transcribe);
-                setEngine({ installed: s.engine_installed, managed: s.engine_managed });
-              })
-              .catch(console.error);
+            refreshAsrState();
             api.listTemplates().then(setTemplates).catch(console.error);
             api.upcomingMeetings().then(setUpcoming).catch(console.error);
           }}

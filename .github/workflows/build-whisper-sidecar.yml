@@ -65,6 +65,8 @@ jobs:
             first transcribe and verified against the SHA-256 pin in
             `src-tauri/src/models.rs`. Not a user-facing app release.
           draft: false
-          prerelease: false
+          # Must stay prerelease: a non-prerelease tools release hijacks
+          # /releases/latest and breaks the Tauri updater's latest.json fetch.
+          prerelease: true
           files: dist/whisper-bin-macos-universal2-*.tar.bz2
           fail_on_unmatched_files: true

@@ -213,6 +213,8 @@ mod windows {
                 model: req.model_path.to_path_buf(),
                 threads: req.threads,
                 force_cpu: false,
+                // a timing sample must never resume (or write) checkpoints
+                resume: false,
             };
             let wav = sample.wav.clone();
             let opts = req.opts.clone();

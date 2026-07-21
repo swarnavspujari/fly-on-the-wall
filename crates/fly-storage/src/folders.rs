@@ -95,6 +95,56 @@ impl Storage {
         Ok(())
     }
 
+    /// Folder names from the root down to (and including) `folder_id` —
+    /// the machine-independent identity of a folder that the portability
+    /// manifest carries (ids are local to one database).
+    pub(crate) fn folder_path_names(&self, folder_id: &str) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        let mut cursor = Some(folder_id.to_string());
+        while let Some(id) = cursor {
+            let (name, parent): (String, Option<String>) = self
+                .conn
+                .query_row(
+                    "SELECT name, parent_id FROM folders WHERE id = ?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| StorageError::NotFound(format!("folder {id}")))?;
+            names.push(name);
+            cursor = parent;
+            if names.len() > 100 {
+                break; // corrupt parent cycle — stop rather than spin
+            }
+        }
+        names.reverse();
+        Ok(names)
+    }
+
+    /// Find-or-create the nested folder path `names` (root → leaf), matching
+    /// by name at each level, and return the leaf's id. Empty input maps to
+    /// `None` (unfiled).
+    pub(crate) fn ensure_folder_path(&self, names: &[String]) -> Result<Option<String>> {
+        let mut parent: Option<String> = None;
+        for name in names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()) {
+            let existing: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM folders
+                     WHERE name = ?1 AND ((?2 IS NULL AND parent_id IS NULL) OR parent_id = ?2)
+                     ORDER BY created_at LIMIT 1",
+                    (name, &parent),
+                    |r| r.get(0),
+                )
+                .optional()?;
+            parent = Some(match existing {
+                Some(id) => id,
+                None => self.create_folder(name, parent.as_deref())?.id,
+            });
+        }
+        Ok(parent)
+    }
+
     pub fn delete_folder(&self, id: &str) -> Result<()> {
         let n = self
             .conn

@@ -7,7 +7,9 @@
 //!   so). Returns no speaker labels; diarization always runs locally
 //!   regardless (spec §6.3).
 
+pub mod checkpoint;
 pub mod groq;
+pub mod retry;
 pub mod whisper_cpp;
 
 use std::path::Path;
@@ -30,6 +32,21 @@ pub enum AsrError {
     /// string-typed layers (the app's job scheduler) can stop retrying.
     #[error("cloud ASR rejected the request: {0}")]
     Rejected(String),
+    /// Cloud ASR quota exhausted (429) — transient by definition: the rolling
+    /// window reopens. Carries the server's wait hint when it sent one.
+    /// Deliberately does NOT share [`REJECTED_MARKER`]'s wording: the
+    /// scheduler must keep retrying jobs that die rate-limited.
+    #[error("cloud ASR rate-limited: {message}")]
+    RateLimited {
+        message: String,
+        retry_after: Option<std::time::Duration>,
+    },
+    /// The caller asked the run to stop (e.g. the note was deleted). Display
+    /// starts with [`CANCELLED_MARKER`] so string-typed layers (the app's job
+    /// scheduler) can tell an abort from a failure — never retried, never
+    /// surfaced as an error to the user.
+    #[error("transcription cancelled")]
+    Cancelled,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -40,6 +57,10 @@ pub type Result<T> = std::result::Result<T, AsrError>;
 /// errors to strings before they reach the scheduler, which matches on this
 /// to mark 4xx request failures permanent (no retry).
 pub const REJECTED_MARKER: &str = "cloud ASR rejected the request";
+
+/// Display text of [`AsrError::Cancelled`], matched by the scheduler to tell
+/// a user-requested abort from a real failure (no retry, no error UI).
+pub const CANCELLED_MARKER: &str = "transcription cancelled";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TranscribeOptions {
@@ -186,14 +207,25 @@ pub struct RawTranscript {
 /// Chunk-level progress from engines that decode a recording in batches.
 /// Both fields are speech milliseconds (silence never reaches the decoder),
 /// so `done_ms / total_ms` is an honest fraction of the remaining work.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranscribeProgress {
     pub done_ms: u64,
     pub total_ms: u64,
+    /// Set while a cloud engine is deliberately pausing before its next
+    /// upload to stay inside the provider quota: estimated wait in ms.
+    /// `done_ms`/`total_ms` still describe completed work, so the UI can say
+    /// "42%, waiting for cloud quota" instead of showing a fake spinner.
+    pub quota_wait_ms: Option<u64>,
 }
 
 /// Sink for [`TranscribeProgress`] events during one transcription run.
 pub type TranscribeProgressFn<'a> = &'a (dyn Fn(TranscribeProgress) + Send + Sync);
+
+/// Polled by engines between batches (and inside long cloud waits) so a
+/// deleted note can abort a marathon decode promptly; `true` means stop and
+/// return [`AsrError::Cancelled`]. Checkpoints make aborts cheap — completed
+/// batches are already persisted.
+pub type CancelFn<'a> = &'a (dyn Fn() -> bool + Send + Sync);
 
 #[async_trait::async_trait]
 pub trait TranscriptionEngine: Send + Sync {
@@ -202,15 +234,17 @@ pub trait TranscriptionEngine: Send + Sync {
     /// False only for cloud engines; the UI shows a privacy notice for those.
     fn is_local(&self) -> bool;
     async fn transcribe(&self, wav_path: &Path, opts: &TranscribeOptions) -> Result<RawTranscript>;
-    /// Like [`transcribe`](Self::transcribe), reporting batch progress where
-    /// the engine can. Default: no progress (single-shot engines like Groq).
+    /// Like [`transcribe`](Self::transcribe), reporting batch progress and
+    /// honoring cooperative cancellation where the engine can. Default: no
+    /// progress, cancellation only takes effect between whole files.
     async fn transcribe_with_progress(
         &self,
         wav_path: &Path,
         opts: &TranscribeOptions,
         on_progress: TranscribeProgressFn<'_>,
+        cancel: CancelFn<'_>,
     ) -> Result<RawTranscript> {
-        let _ = on_progress;
+        let _ = (on_progress, cancel);
         self.transcribe(wav_path, opts).await
     }
 }

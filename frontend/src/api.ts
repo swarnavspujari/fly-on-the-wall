@@ -12,7 +12,7 @@ import type {
   CalendarStatus,
   CalendarToggle,
   CaptureTarget,
-  ImportResult,
+  ImportStaged,
   ScreenStatus,
   AsrSettings,
   AsrSettingsUpdate,
@@ -72,12 +72,17 @@ export const api = {
   ensureVideoThumbnail: (relPath: string) => invoke<string>("ensure_video_thumbnail", { relPath }),
   revealAttachment: (relPath: string) => invoke<void>("reveal_attachment", { relPath }),
   revealDataDir: () => invoke<void>("reveal_data_dir"),
+  revealLogsDir: () => invoke<void>("reveal_logs_dir"),
+  listCaptureWindows: () => invoke<string[]>("list_capture_windows"),
   mcpConfig: () => invoke<string>("mcp_config"),
   getAppSetting: (key: string) => invoke<string | null>("get_app_setting", { key }),
   setAppSetting: (key: string, value: string) => invoke<void>("set_app_setting", { key, value }),
 
   // search
   search: (query: string) => invoke<SearchHit[]>("search", { query }),
+  // hybrid (FTS + semantic) pass; degrades to grouped FTS when the local
+  // embedding model isn't available
+  searchSemantic: (query: string) => invoke<SearchHit[]>("search_semantic", { query }),
 
   // recording
   recordingStatus: () => invoke<RecordingStatus>("recording_status"),
@@ -88,8 +93,7 @@ export const api = {
   getMeetingForNote: (noteId: string) => invoke<Meeting | null>("get_meeting_for_note", { noteId }),
   /** ALL meetings attached to a note, newest first (re-recording into a note
    *  adds a meeting; the earlier ones stay reachable through this). */
-  getMeetingsForNote: (noteId: string) =>
-    invoke<Meeting[]>("get_meetings_for_note", { noteId }),
+  getMeetingsForNote: (noteId: string) => invoke<Meeting[]>("get_meetings_for_note", { noteId }),
   /** Latest live-caption status for a meeting (catch-up for the live pane —
    *  a status emitted before the pane mounted would otherwise be lost). */
   liveStatus: (meetingId: string) =>
@@ -97,6 +101,10 @@ export const api = {
       "live_status",
       { meetingId },
     ),
+  // Set the meeting's start date/time (RFC 3339 UTC). Length is preserved
+  // (ended_at shifts); the meeting folder + manifest re-mirror the date.
+  updateMeetingStartedAt: (meetingId: string, startedAt: string) =>
+    invoke<Meeting>("update_meeting_started_at", { meetingId, startedAt }),
 
   // transcription
   transcribeMeeting: (meetingId: string) => invoke<void>("transcribe_meeting", { meetingId }),
@@ -179,5 +187,13 @@ export const api = {
   startScreenRecording: (noteId: string, target: CaptureTarget) =>
     invoke<ScreenStatus>("start_screen_recording", { noteId, target }),
   stopScreenRecording: () => invoke<Note>("stop_screen_recording"),
-  importMedia: () => invoke<ImportResult | null>("import_media"),
+  // Multi-select picker → ONE staged (untranscribed) note. Null on cancel.
+  importStage: () => invoke<ImportStaged | null>("import_stage"),
+  // The staged queue for a meeting (null once its transcript exists).
+  importState: (meetingId: string) => invoke<ImportStaged | null>("import_state", { meetingId }),
+  // Normalize + join the staged files in `order`, then queue the pipeline.
+  importTranscribe: (meetingId: string, order: string[]) =>
+    invoke<ImportStaged>("import_transcribe", { meetingId, order }),
+  // Stop a queued/running transcription; finished batches stay checkpointed.
+  cancelTranscription: (meetingId: string) => invoke<void>("cancel_transcription", { meetingId }),
 };

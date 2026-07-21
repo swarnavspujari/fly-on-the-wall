@@ -25,6 +25,10 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretStore>,
     /// meeting_id → current pipeline stage, for running transcriptions.
     pub pipeline_stage: Mutex<HashMap<String, String>>,
+    /// Meeting ids whose running pipeline was asked to stop (note deleted,
+    /// import cancelled). Engines poll this between batches; the pipeline
+    /// clears a meeting's entry when a fresh run starts.
+    pub cancel_requests: Mutex<std::collections::HashSet<String>>,
     /// At most one screen capture at a time.
     pub screen: Mutex<Option<ActiveScreenRecording>>,
     /// Nudges the transcription queue worker (job enqueued, recording
@@ -39,13 +43,14 @@ pub struct AppState {
     /// this snapshot lets the pane catch up on mount instead of showing an
     /// optimistic "Listening…" forever.
     pub live_status: Mutex<Option<crate::live::LiveStatus>>,
+    /// Nudges the embedding worker after a content write (embeddings.rs).
+    /// The worker also polls, so a missed nudge only delays indexing.
+    pub embed_notify: tokio::sync::Notify,
 }
 
 impl AppState {
     pub fn init() -> anyhow::Result<Self> {
-        let data_dir = default_data_dir();
-        // Move a pre-rebrand data dir into place before the DB is opened.
-        migrate_from_legacy_data_dir(&data_dir)?;
+        let data_dir = prepared_data_dir()?;
         let secrets = Arc::new(KeychainSecretStore::new());
         // Best-effort: copy secrets out of the pre-rebrand keychain service. A
         // locked or absent keyring must never block launch, and keys can be
@@ -74,10 +79,12 @@ impl AppState {
             recording: Mutex::new(None),
             secrets,
             pipeline_stage: Mutex::new(HashMap::new()),
+            cancel_requests: Mutex::new(std::collections::HashSet::new()),
             screen: Mutex::new(None),
             jobs_notify: tokio::sync::Notify::new(),
             ollama: Mutex::new(None),
             live_status: Mutex::new(None),
+            embed_notify: tokio::sync::Notify::new(),
         })
     }
 
@@ -101,6 +108,17 @@ fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(DATA_DIR)
+}
+
+/// The data dir with the legacy migration already applied — the ONLY safe
+/// way to learn the path before [`AppState::init`]: creating anything inside
+/// a fresh `FlyOnTheWall/` first (e.g. `logs/`) would make the migration
+/// think it already ran and strand a pre-rebrand user's data. Idempotent.
+pub fn prepared_data_dir() -> anyhow::Result<PathBuf> {
+    let data_dir = default_data_dir();
+    // Move a pre-rebrand data dir into place before the DB is opened.
+    migrate_from_legacy_data_dir(&data_dir)?;
+    Ok(data_dir)
 }
 
 /// Move the pre-rebrand data dir (`<data>/Looma`) into place, once, before the

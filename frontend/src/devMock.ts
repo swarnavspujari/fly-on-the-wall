@@ -30,6 +30,8 @@ const folders = [
   { id: "f-personal", name: "Personal", parent_id: null, created_at: ago(7000) },
 ];
 
+// happened_at mirrors the backend's COALESCE(meeting started_at, note
+// created_at): it drives list order and is mutable via the date editor.
 const noteMeta = [
   {
     id: "n1",
@@ -37,6 +39,7 @@ const noteMeta = [
     folder_id: "f-clients",
     meeting_id: "m1",
     updated_at: ago(1),
+    happened_at: ago(30),
   },
   {
     id: "n2",
@@ -44,6 +47,7 @@ const noteMeta = [
     folder_id: "f-team",
     meeting_id: "m2",
     updated_at: ago(120),
+    happened_at: ago(180),
   },
   {
     id: "n3",
@@ -51,6 +55,7 @@ const noteMeta = [
     folder_id: "f-team",
     meeting_id: null,
     updated_at: ago(1500),
+    happened_at: ago(1500),
   },
   {
     id: "n4",
@@ -58,6 +63,7 @@ const noteMeta = [
     folder_id: "f-clients",
     meeting_id: "m4",
     updated_at: ago(2900),
+    happened_at: ago(2900),
   },
   {
     id: "n5",
@@ -65,6 +71,7 @@ const noteMeta = [
     folder_id: null,
     meeting_id: "m5",
     updated_at: ago(5800),
+    happened_at: ago(5800),
   },
   {
     id: "n6",
@@ -72,8 +79,12 @@ const noteMeta = [
     folder_id: "f-personal",
     meeting_id: null,
     updated_at: ago(8600),
+    happened_at: ago(8600),
   },
 ];
+
+const byHappenedDesc = (a: { happened_at: string }, b: { happened_at: string }) =>
+  b.happened_at.localeCompare(a.happened_at);
 
 const scratchpad =
   "acme renewal — procurement pushback on price\n" +
@@ -114,9 +125,12 @@ function note(id: string) {
     folder_id: m.folder_id,
     meeting_id: m.meeting_id,
     scratchpad: m.id === "n1" ? scratchpad : "",
-    blocks: m.meeting_id
-      ? blocks
-      : [{ id: "b0", origin: { kind: "user" }, markdown: "Rough notes go here." }],
+    blocks:
+      m.id === IMPORT_NOTE_ID
+        ? []
+        : m.meeting_id
+          ? blocks
+          : [{ id: "b0", origin: { kind: "user" }, markdown: "Rough notes go here." }],
     attachments:
       m.id === "n1"
         ? [
@@ -155,14 +169,29 @@ let mockUndo: { taken_at: string; changed_segments: number } | null = null;
 function meeting(noteId: string) {
   const m = noteMeta.find((n) => n.id === noteId);
   if (!m || !m.meeting_id) return null;
+  if (m.id === IMPORT_NOTE_ID) {
+    // staged import: no recording until the (mock) transcription starts
+    return {
+      id: m.meeting_id,
+      title: m.title,
+      note_id: m.id,
+      attendees: [],
+      attendees_confirmed: false,
+      started_at: ago(1),
+      ended_at: mockImport?.started ? nowIso() : null,
+      recording: mockImport?.started
+        ? { mic_path: null, system_path: null, mixed_path: "mix.wav", duration_ms: 180_000 }
+        : null,
+    };
+  }
   return {
     id: m.meeting_id,
     title: m.title,
     note_id: m.id,
     attendees: mockAttendees,
     attendees_confirmed: mockAttendeesConfirmed,
-    started_at: ago(30),
-    ended_at: ago(17),
+    started_at: m.happened_at,
+    ended_at: new Date(new Date(m.happened_at).getTime() + 754_000).toISOString(),
     recording: {
       mic_path: "mic.wav",
       system_path: "sys.wav",
@@ -170,6 +199,149 @@ function meeting(noteId: string) {
       duration_ms: 754_000,
     },
   };
+}
+
+/* ---- staged media import (sidebar "Import media as a note") ----
+   Stateful mock of import_stage / import_state / import_transcribe, with a
+   simulated conversion + pipeline event stream so the queue's per-file
+   Waiting → Transcribing % → Done flow is testable in the dev browser. */
+const IMPORT_NOTE_ID = "n-imp";
+const IMPORT_MEETING_ID = "m-imp";
+/** Per-file mock durations (ms) — drive the concat boundaries. */
+const IMPORT_DURATIONS: Record<string, number> = { "if-1": 120_000, "if-2": 60_000 };
+interface MockImportFile {
+  id: string;
+  file_name: string;
+  size: number;
+  kind: "audio" | "video";
+  rel_path: string | null;
+  error: string | null;
+}
+let mockImport: {
+  note_id: string;
+  meeting_id: string;
+  files: MockImportFile[];
+  boundaries_ms: number[];
+  started: boolean;
+} | null = null;
+let mockImportDone = false;
+
+const mockEmit = (event: string, payload: unknown) =>
+  (window as unknown as { fotwMockEmit?: (e: string, p: unknown) => void }).fotwMockEmit?.(
+    event,
+    payload,
+  );
+
+function importStage() {
+  mockImportDone = false;
+  mockImport = {
+    note_id: IMPORT_NOTE_ID,
+    meeting_id: IMPORT_MEETING_ID,
+    files: [
+      {
+        id: "if-1",
+        file_name: "Fuel Bid Meeting 2026-07-09.mp3",
+        size: 18_400_000,
+        kind: "audio",
+        rel_path: "recordings/imp/Fuel Bid Meeting 2026-07-09.mp3",
+        error: null,
+      },
+      {
+        id: "if-2",
+        file_name: "screen-walkthrough.mp4",
+        size: 52_000_000,
+        kind: "video",
+        rel_path: "recordings/imp/screen-walkthrough.mp4",
+        error: null,
+      },
+      {
+        id: "if-3",
+        file_name: "agenda.txt",
+        size: 4_000,
+        kind: "audio",
+        rel_path: null,
+        error: "Unsupported file type — audio or video only",
+      },
+    ],
+    boundaries_ms: [],
+    started: false,
+  };
+  if (!noteMeta.some((n) => n.id === IMPORT_NOTE_ID)) {
+    noteMeta.unshift({
+      id: IMPORT_NOTE_ID,
+      title: "Fuel Bid Meeting 2026-07-09",
+      folder_id: null,
+      meeting_id: IMPORT_MEETING_ID,
+      updated_at: nowIso(),
+      happened_at: nowIso(),
+    });
+  }
+  return mockImport;
+}
+
+function importTranscribe(order: string[]) {
+  if (!mockImport) throw new Error("no staged import for this meeting");
+  if (mockImport.started) return mockImport;
+  const files = order
+    .map((id) => mockImport?.files.find((f) => f.id === id))
+    .filter((f): f is MockImportFile => f != null && f.error == null);
+  const boundaries: number[] = [];
+  let cum = 0;
+  for (const [i, f] of files.entries()) {
+    if (i > 0) cum += 1000; // the backend's inter-file silence gap
+    cum += IMPORT_DURATIONS[f.id] ?? 60_000;
+    boundaries.push(cum);
+  }
+  mockImport = { ...mockImport, files, boundaries_ms: boundaries, started: true };
+
+  // simulated backend events: per-file conversion, then the real pipeline shape
+  const pipe = (
+    stage: string,
+    detail: string | null = null,
+    done = false,
+    error: string | null = null,
+  ) => mockEmit("pipeline:progress", { meeting_id: IMPORT_MEETING_ID, stage, detail, done, error });
+  let t = 200;
+  const at = (ms: number, fn: () => void) => window.setTimeout(fn, ms);
+  for (const f of files) {
+    at(t, () =>
+      mockEmit("import:progress", {
+        meeting_id: IMPORT_MEETING_ID,
+        file_id: f.id,
+        stage: "converting",
+      }),
+    );
+    t += 700;
+    at(t, () =>
+      mockEmit("import:progress", {
+        meeting_id: IMPORT_MEETING_ID,
+        file_id: f.id,
+        stage: "converted",
+      }),
+    );
+  }
+  at((t += 300), () => pipe("waiting"));
+  at((t += 500), () => pipe("starting"));
+  // engine-labeled details like pipeline.rs transcribe_detail emits: a cloud
+  // stretch with one quota-wait notice, then the GPU spillover finishing up
+  for (let pct = 5; pct <= 100; pct += 5) {
+    const detail =
+      pct === 40
+        ? "cloud 40%, waiting for cloud quota (~3m)"
+        : pct < 60
+          ? `cloud ${pct}%`
+          : `GPU ${pct}%`;
+    at((t += 450), () => pipe("transcribing", detail));
+  }
+  at((t += 500), () => pipe("diarizing"));
+  at((t += 1200), () => pipe("aligning"));
+  at((t += 600), () => pipe("saving"));
+  at((t += 500), () => pipe("polishing"));
+  at((t += 1200), () => {
+    mockImportDone = true;
+    pipe("done", null, true);
+  });
+  return mockImport;
 }
 
 const seg = (id: string, key: string, start: number, text: string) => ({
@@ -414,7 +586,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "pong";
     case "app_info":
       return {
-        version: "1.2.3",
+        version: "1.5.1",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
         os: "windows",
       };
@@ -432,13 +604,16 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "delete_folder":
     case "move_note":
     case "delete_note":
+    case "cancel_transcription":
       return null;
     case "list_recent_notes":
-      return noteMeta;
+      return [...noteMeta].sort(byHappenedDesc);
     case "list_notes_in_folder":
-      return args.folderId == null
-        ? noteMeta.filter((n) => !n.folder_id)
-        : noteMeta.filter((n) => n.folder_id === args.folderId);
+      return (
+        args.folderId == null
+          ? noteMeta.filter((n) => !n.folder_id)
+          : noteMeta.filter((n) => n.folder_id === args.folderId)
+      ).sort(byHappenedDesc);
     case "get_note":
       return note(String(args.id));
     case "create_note":
@@ -457,6 +632,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "live_status":
       return null;
     case "get_transcript":
+      // staged import: no transcript until the mock pipeline finishes
+      if (args.meetingId === IMPORT_MEETING_ID && !mockImportDone) return null;
       // fotwMockNoTranscript = "1" → pre-transcription state (the
       // "Transcribe recording" box, where the pipeline notices render).
       if (
@@ -498,6 +675,11 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         });
       return transcript;
     }
+    case "update_meeting_started_at": {
+      const m = noteMeta.find((n) => n.meeting_id === args.meetingId);
+      if (m) m.happened_at = String(args.startedAt);
+      return meeting(m?.id ?? "n1");
+    }
     case "update_meeting_attendees": {
       mockAttendees = (args.attendees as typeof mockAttendees) ?? [];
       mockAttendeesConfirmed = true;
@@ -521,6 +703,10 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return null;
     case "search":
       return searchHits(String(args.query ?? ""));
+    case "search_semantic":
+      // dev-mock has no embedding index; the hybrid pass degrades to the
+      // same grouped-FTS shape (one hit per note, best snippet first)
+      return searchHits(String(args.query ?? "")).slice(0, 1);
     case "recording_status":
       return recordingStatus();
     case "screen_status":
@@ -601,10 +787,26 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return null;
     case "download_model":
       return "";
+    case "reveal_logs_dir":
+      return null;
+    case "list_capture_windows":
+      return [
+        "Weekly sync - Zoom",
+        "IDB VDI IT - VMware Horizon Client",
+        "budget notes.xlsx - Excel",
+      ];
     case "export_note":
       return "C:\\Users\\you\\Desktop\\note.md";
     case "ensure_video_thumbnail":
       return `${String(args.relPath ?? "")}.jpg`;
+    case "import_stage":
+      return importStage();
+    case "import_state":
+      return args.meetingId === IMPORT_MEETING_ID && mockImport && !mockImportDone
+        ? mockImport
+        : null;
+    case "import_transcribe":
+      return importTranscribe((args.order as string[]) ?? []);
     default:
       return null;
   }

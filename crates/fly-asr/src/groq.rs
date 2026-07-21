@@ -13,6 +13,7 @@ use std::path::Path;
 use fly_audio::vad::{detect_speech_spans, map_to_original, stitch_spans, VadConfig};
 use fly_core::Word;
 
+use crate::retry::{classify_http_failure, retry_delay, QuotaPacer};
 use crate::whisper_cpp::{plan_batches, NORMALIZE_MAX_GAIN, NORMALIZE_TARGET_PEAK};
 use crate::{AsrError, RawTranscript, Result, TranscribeOptions, TranscriptionEngine};
 
@@ -29,6 +30,17 @@ pub struct GroqEngine {
     pub api_key: String,
     pub model: String,
     pub base_url: String,
+    /// Persist each completed upload batch next to the input wav and skip
+    /// batches a previous run of the same plan already transcribed
+    /// (crate::checkpoint) — paced cloud runs are long, and finished chunks
+    /// must survive a crash or restart.
+    pub resume: bool,
+    /// Local engine that decodes a chunk whenever the quota pacer would make
+    /// it wait longer than [`crate::retry::SPILL_TO_LOCAL_THRESHOLD_MS`] —
+    /// a benchmark-validated GPU must never idle under a full cloud budget
+    /// (the incident: 100+ minutes of pacer sleep with a 24 s/batch GPU
+    /// below it in the chain). `None` keeps the pure-wait behavior.
+    pub local_spillover: Option<Box<dyn TranscriptionEngine>>,
 }
 
 impl GroqEngine {
@@ -37,6 +49,8 @@ impl GroqEngine {
             api_key,
             model: GROQ_DEFAULT_MODEL.to_string(),
             base_url: "https://api.groq.com/openai/v1".to_string(),
+            resume: false,
+            local_spillover: None,
         }
     }
 }
@@ -52,6 +66,17 @@ impl TranscriptionEngine for GroqEngine {
     }
 
     async fn transcribe(&self, wav_path: &Path, opts: &TranscribeOptions) -> Result<RawTranscript> {
+        self.transcribe_with_progress(wav_path, opts, &|_| {}, &|| false)
+            .await
+    }
+
+    async fn transcribe_with_progress(
+        &self,
+        wav_path: &Path,
+        opts: &TranscribeOptions,
+        on_progress: crate::TranscribeProgressFn<'_>,
+        cancel: crate::CancelFn<'_>,
+    ) -> Result<RawTranscript> {
         // Same preprocessing as the local whisper.cpp path: VAD strips long
         // non-speech (silence reaching a Whisper decoder is how repetition
         // hallucination starts — and it's wasted upload bytes), each payload
@@ -61,22 +86,81 @@ impl TranscriptionEngine for GroqEngine {
             .map_err(|e| AsrError::BadAudio(format!("{}: {e}", wav_path.display())))?;
         let spans = detect_speech_spans(&samples, rate, &VadConfig::default());
         let segment_ms = MAX_CHUNK_BYTES / 2 * 1000 / rate as u64;
+        let total_speech_ms: u64 = spans.iter().map(|s| s.end_ms - s.start_ms).sum();
         tracing::debug!(
             file = %wav_path.display(),
             spans = spans.len(),
-            speech_ms = spans.iter().map(|s| s.end_ms - s.start_ms).sum::<u64>(),
+            speech_ms = total_speech_ms,
             total_ms = samples.len() as u64 * 1000 / rate.max(1) as u64,
             "vad segmentation (groq)"
         );
 
         let mut language = None;
         let mut words = Vec::new();
+        // One pacer per job: uploads are proactively spaced so the whole run
+        // stays inside the free-tier audio-per-hour quota instead of burning
+        // it in minutes and losing the job to a 429.
+        let started = std::time::Instant::now();
+        let mut pacer = QuotaPacer::default();
+        let batches = plan_batches(&spans, segment_ms);
+        let progress_points = crate::whisper_cpp::cumulative_progress(&batches);
+        let mut ckpt = self.resume.then(|| {
+            crate::checkpoint::CheckpointFile::open(
+                crate::checkpoint::checkpoint_path_for(wav_path),
+                crate::checkpoint::plan_key(
+                    "groq",
+                    &self.model,
+                    opts.language.as_deref(),
+                    &batches,
+                ),
+            )
+        });
+        let resumed = ckpt.as_ref().map(|c| c.resumed()).unwrap_or_default();
+        if !resumed.is_empty() {
+            tracing::info!(
+                resumed = resumed.len(),
+                total = batches.len(),
+                "resuming cloud transcription from ASR checkpoint"
+            );
+        }
+        // Initial 0% so the UI shows the cloud run is live before the first —
+        // possibly paced — upload completes (progress parity with the local
+        // engine). A silent recording emits nothing: no work to report.
+        if total_speech_ms > 0 {
+            on_progress(crate::TranscribeProgress {
+                done_ms: 0,
+                total_ms: total_speech_ms,
+                quota_wait_ms: None,
+            });
+        }
         // Uploads are cut at speech-span gaps (plan_batches). Only a single
         // contiguous speech span longer than the payload cap falls back to
         // fixed overlapping chunks stitched at the overlap midpoint.
-        for (bi, batch) in plan_batches(&spans, segment_ms).into_iter().enumerate() {
+        for (bi, (batch, progress)) in batches.iter().zip(progress_points).enumerate() {
+            if let Some(done) = resumed.get(bi) {
+                language = language.or_else(|| done.language.clone());
+                words.extend(done.words.iter().cloned());
+                on_progress(progress);
+                continue;
+            }
+            // between batches is the cheap place to abort: everything decoded
+            // so far is already checkpointed
+            if cancel() {
+                return Err(AsrError::Cancelled);
+            }
+            let batch_speech_ms: u64 = batch.iter().map(|s| s.end_ms - s.start_ms).sum();
+            let ctx = ChunkCtx {
+                on_progress,
+                cancel,
+                done_ms: progress.done_ms - batch_speech_ms,
+                total_ms: total_speech_ms,
+            };
+            let mut batch_language = None;
+            // "groq" unless the quota pacer spilled decoding to the injected
+            // local engine — recorded per batch in the checkpoint.
+            let mut decoded_by: &'static str = "groq";
             let oversized = batch.len() == 1 && batch[0].end_ms - batch[0].start_ms > segment_ms;
-            if oversized {
+            let batch_words: Vec<Word> = if oversized {
                 let span = batch[0];
                 let s0 = (span.start_ms * rate as u64 / 1000) as usize;
                 let e0 = ((span.end_ms * rate as u64 / 1000) as usize).min(samples.len());
@@ -91,44 +175,69 @@ impl TranscriptionEngine for GroqEngine {
                 for (i, &(cs, ce)) in chunks.iter().enumerate() {
                     let s = (cs * rate as u64 / 1000) as usize;
                     let e = ((ce * rate as u64 / 1000) as usize).min(span_samples.len());
-                    let raw = self
-                        .transcribe_bytes(
+                    let (raw, by) = self
+                        .upload_chunk(
+                            &mut pacer,
+                            &started,
                             wav_bytes_mono_16(&span_samples[s..e], rate),
+                            (e - s) as u64 * 1000 / rate as u64,
                             format!("speech-{bi}-{i}.wav"),
                             opts,
+                            &ctx,
                         )
                         .await?;
-                    language = language.or(raw.language);
+                    if by != "groq" {
+                        decoded_by = by;
+                    }
+                    batch_language = batch_language.or(raw.language);
                     per_chunk.push(raw.words);
                 }
                 // stitched timestamps are relative to the span; shift to
                 // absolute original-file time
-                words.extend(offset_words(
-                    stitch_chunk_words(&chunks, per_chunk),
-                    span.start_ms,
-                ));
+                offset_words(stitch_chunk_words(&chunks, per_chunk), span.start_ms)
             } else {
-                let (mut chunk, map) = stitch_spans(&samples, rate, &batch)
+                let (mut chunk, map) = stitch_spans(&samples, rate, batch)
                     .map_err(|e| AsrError::BadAudio(e.to_string()))?;
                 fly_audio::mix::normalize_peak(
                     &mut chunk,
                     NORMALIZE_TARGET_PEAK,
                     NORMALIZE_MAX_GAIN,
                 );
-                let raw = self
-                    .transcribe_bytes(
+                let audio_ms = chunk.len() as u64 * 1000 / rate as u64;
+                let (raw, by) = self
+                    .upload_chunk(
+                        &mut pacer,
+                        &started,
                         wav_bytes_mono_16(&chunk, rate),
+                        audio_ms,
                         format!("speech-{bi}.wav"),
                         opts,
+                        &ctx,
                     )
                     .await?;
-                language = language.or(raw.language);
-                words.extend(raw.words.into_iter().map(|mut w| {
-                    w.start_ms = map_to_original(w.start_ms, &map);
-                    w.end_ms = map_to_original(w.end_ms, &map);
-                    w
-                }));
+                if by != "groq" {
+                    decoded_by = by;
+                }
+                batch_language = raw.language;
+                raw.words
+                    .into_iter()
+                    .map(|mut w| {
+                        w.start_ms = map_to_original(w.start_ms, &map);
+                        w.end_ms = map_to_original(w.end_ms, &map);
+                        w
+                    })
+                    .collect()
+            };
+            if let Some(c) = ckpt.as_mut() {
+                c.push(crate::checkpoint::BatchResult {
+                    language: batch_language.clone(),
+                    words: batch_words.clone(),
+                    engine: Some(decoded_by.to_string()),
+                });
             }
+            language = language.or(batch_language);
+            words.extend(batch_words);
+            on_progress(progress);
         }
 
         Ok(RawTranscript {
@@ -137,6 +246,36 @@ impl TranscriptionEngine for GroqEngine {
             segments: vec![],
         })
     }
+}
+
+/// Progress/cancel context threaded into the per-chunk upload flow, so the
+/// pacer can surface "waiting for quota" instead of sleeping silently and a
+/// cancelled note aborts mid-wait.
+struct ChunkCtx<'a> {
+    on_progress: crate::TranscribeProgressFn<'a>,
+    cancel: crate::CancelFn<'a>,
+    /// Speech ms completed before this batch / job total — the baseline the
+    /// quota-wait events report.
+    done_ms: u64,
+    total_ms: u64,
+}
+
+/// Sleep `ms`, polling `cancel` about once a second: a deleted note must
+/// never wait out a (possibly near-hour) quota window or retry backoff.
+async fn sleep_cancellable(ms: u64, cancel: crate::CancelFn<'_>) -> Result<()> {
+    let mut remaining = ms;
+    while remaining > 0 {
+        if cancel() {
+            return Err(AsrError::Cancelled);
+        }
+        let step = remaining.min(1_000);
+        tokio::time::sleep(std::time::Duration::from_millis(step)).await;
+        remaining -= step;
+    }
+    if cancel() {
+        return Err(AsrError::Cancelled);
+    }
+    Ok(())
 }
 
 /// Shift word timestamps by a constant offset (span-relative → absolute).
@@ -152,6 +291,118 @@ fn offset_words(words: Vec<Word>, offset_ms: u64) -> Vec<Word> {
 }
 
 impl GroqEngine {
+    /// One chunk, resiliently: when the free-tier pacer would wait longer
+    /// than the spill threshold and a local engine is injected, decode THIS
+    /// chunk locally and return to the cloud for the next one; shorter waits
+    /// sleep (surfaced as a quota-wait status, never a silent spinner). Then
+    /// retry transient failures per the policy in [`crate::retry`] — bounded
+    /// backoff for network errors, honored `retry-after` for 429s. Only a
+    /// hard rejection (4xx) or an exhausted retry budget surfaces to the
+    /// caller, whose whole-job local fallback remains the last resort.
+    /// Returns the transcript and the id of the engine that decoded it.
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_chunk(
+        &self,
+        pacer: &mut QuotaPacer,
+        job_started: &std::time::Instant,
+        bytes: Vec<u8>,
+        audio_ms: u64,
+        file_name: String,
+        opts: &TranscribeOptions,
+        ctx: &ChunkCtx<'_>,
+    ) -> Result<(RawTranscript, &'static str)> {
+        if (ctx.cancel)() {
+            return Err(AsrError::Cancelled);
+        }
+        let now_ms = || job_started.elapsed().as_millis() as u64;
+        let pace = pacer.wait_ms(now_ms(), audio_ms);
+        if pace > 0 {
+            if crate::retry::spill_to_local(pace, self.local_spillover.is_some()) {
+                tracing::info!(
+                    wait_secs = pace / 1000,
+                    "cloud quota is full — decoding this chunk locally instead of waiting"
+                );
+                match self.decode_chunk_locally(&bytes, opts).await {
+                    Ok(raw) => {
+                        return Ok((raw, self.local_spillover.as_ref().unwrap().id()));
+                    }
+                    Err(AsrError::Cancelled) => return Err(AsrError::Cancelled),
+                    // spillover is an optimization — its failure falls back
+                    // to the plain quota wait, never sinks the chunk
+                    Err(e) => {
+                        tracing::warn!(error = %e, "local spillover failed — waiting for the cloud window instead");
+                    }
+                }
+            }
+            tracing::info!(
+                wait_secs = pace / 1000,
+                "pacing cloud upload to stay inside the free-tier audio quota"
+            );
+            (ctx.on_progress)(crate::TranscribeProgress {
+                done_ms: ctx.done_ms,
+                total_ms: ctx.total_ms,
+                quota_wait_ms: Some(pace),
+            });
+            sleep_cancellable(pace, ctx.cancel).await?;
+            // wait over — swap the waiting status back to plain progress
+            (ctx.on_progress)(crate::TranscribeProgress {
+                done_ms: ctx.done_ms,
+                total_ms: ctx.total_ms,
+                quota_wait_ms: None,
+            });
+        }
+
+        let mut network_attempts = 0u32;
+        let mut rate_limited_waited = std::time::Duration::ZERO;
+        loop {
+            pacer.record(now_ms(), audio_ms);
+            let err = match self
+                .transcribe_bytes(bytes.clone(), file_name.clone(), opts)
+                .await
+            {
+                Ok(raw) => return Ok((raw, "groq")),
+                Err(e) => e,
+            };
+            let Some(delay) = retry_delay(&err, network_attempts, rate_limited_waited) else {
+                return Err(err);
+            };
+            match &err {
+                AsrError::Network(_) => network_attempts += 1,
+                AsrError::RateLimited { .. } => rate_limited_waited += delay,
+                _ => {}
+            }
+            tracing::warn!(
+                error = %err,
+                retry_in_secs = delay.as_secs(),
+                "cloud chunk upload failed — retrying"
+            );
+            sleep_cancellable(delay.as_millis() as u64, ctx.cancel).await?;
+        }
+    }
+
+    /// Decode one already-prepared chunk with the injected local engine
+    /// (quota spillover): the wav bytes go to a temp file, the local engine
+    /// transcribes it, and its words come back UNCHANGED — still on the
+    /// chunk's own timeline, exactly like a cloud response, so the caller's
+    /// existing timeline mapping applies to both paths. The temp file never
+    /// outlives the call.
+    async fn decode_chunk_locally(
+        &self,
+        bytes: &[u8],
+        opts: &TranscribeOptions,
+    ) -> Result<RawTranscript> {
+        let local = self
+            .local_spillover
+            .as_ref()
+            .ok_or_else(|| AsrError::Engine("no local spillover engine injected".into()))?;
+        let tmp =
+            std::env::temp_dir().join(format!("flyonthewall-spill-{}.wav", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, bytes)?;
+        let result = local.transcribe(&tmp, opts).await;
+        let _ = std::fs::remove_file(&tmp);
+        result
+    }
+
     /// Upload one WAV payload and parse the transcription response.
     async fn transcribe_bytes(
         &self,
@@ -194,23 +445,23 @@ impl GroqEngine {
             .map_err(|e| AsrError::Network(e.to_string()))?;
 
         let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let body = resp
             .text()
             .await
             .map_err(|e| AsrError::Network(e.to_string()))?;
-        if status.is_client_error() {
-            // 4xx (413 payload too large, 401 bad key, …): the identical
-            // request can never succeed — callers must not retry it.
-            return Err(AsrError::Rejected(format!(
-                "groq returned {status}: {}",
-                body.chars().take(300).collect::<String>()
-            )));
-        }
         if !status.is_success() {
-            return Err(AsrError::Engine(format!(
-                "groq returned {status}: {}",
-                body.chars().take(300).collect::<String>()
-            )));
+            // 429 → retryable RateLimited; other 4xx → permanent Rejected;
+            // 5xx → Engine (the scheduler may retry the whole job).
+            return Err(classify_http_failure(
+                status.as_u16(),
+                retry_after.as_deref(),
+                &body,
+            ));
         }
         parse_groq_verbose_json(&body)
     }
@@ -482,6 +733,148 @@ mod tests {
             map_to_original(map[1].concat_start_ms, &map),
             spans[1].start_ms
         );
+    }
+
+    /// Progress parity with the local engine: a fully-checkpointed cloud run
+    /// must emit the initial 0% and then one monotonic point per resumed
+    /// batch (resumed = instantly done), ending at exactly the speech total —
+    /// all without any network (the base_url here is unroutable). This is
+    /// what lets the import queue map real per-file progress for cloud runs.
+    #[tokio::test]
+    async fn resumed_batches_emit_progress_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let rate = 16_000u32;
+        let samples: Vec<f32> = (0..(2 * rate) as usize)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.4)
+            .collect();
+        let wav = dir.path().join("track.16k.wav");
+        fly_audio::mix::write_wav_mono_16(&wav, &samples, rate).unwrap();
+
+        // the same plan the engine will compute
+        let spans = detect_speech_spans(&samples, rate, &VadConfig::default());
+        let segment_ms = MAX_CHUNK_BYTES / 2 * 1000 / rate as u64;
+        let batches = plan_batches(&spans, segment_ms);
+        assert!(!batches.is_empty(), "test wav must contain speech");
+        let key = crate::checkpoint::plan_key("groq", GROQ_DEFAULT_MODEL, Some("en"), &batches);
+        let mut ckpt = crate::checkpoint::CheckpointFile::open(
+            crate::checkpoint::checkpoint_path_for(&wav),
+            key,
+        );
+        for _ in &batches {
+            ckpt.push(crate::checkpoint::BatchResult {
+                language: Some("en".into()),
+                words: vec![word("resumed", 100)],
+                engine: Some("groq".into()),
+            });
+        }
+
+        let engine = GroqEngine {
+            resume: true,
+            base_url: "http://127.0.0.1:9/unroutable".into(),
+            ..GroqEngine::new("test-key".into())
+        };
+        let opts = TranscribeOptions {
+            language: Some("en".into()),
+            ..Default::default()
+        };
+        let events = std::sync::Mutex::new(Vec::<crate::TranscribeProgress>::new());
+        let raw = engine
+            .transcribe_with_progress(&wav, &opts, &|p| events.lock().unwrap().push(p), &|| false)
+            .await
+            .expect("fully-checkpointed cloud run must not touch the network");
+        assert_eq!(raw.words.len(), batches.len());
+
+        let events = events.into_inner().unwrap();
+        let total: u64 = spans.iter().map(|s| s.end_ms - s.start_ms).sum();
+        assert_eq!(
+            events.first().map(|p| p.done_ms),
+            Some(0),
+            "initial 0% event before the first batch"
+        );
+        for w in events.windows(2) {
+            assert!(
+                w[1].done_ms > w[0].done_ms,
+                "done_ms must strictly increase"
+            );
+        }
+        assert_eq!(events.last().unwrap().done_ms, total, "must end at 100%");
+        assert!(events
+            .iter()
+            .all(|p| p.total_ms == total && p.quota_wait_ms.is_none()));
+    }
+
+    /// Cancellation is honored between chunks: with cancel already requested,
+    /// the engine returns Cancelled before attempting any upload (the
+    /// base_url is unroutable — an upload attempt would surface differently).
+    #[tokio::test]
+    async fn cancel_between_chunks_aborts_without_uploading() {
+        let dir = tempfile::tempdir().unwrap();
+        let rate = 16_000u32;
+        let samples: Vec<f32> = (0..(2 * rate) as usize)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.4)
+            .collect();
+        let wav = dir.path().join("track.16k.wav");
+        fly_audio::mix::write_wav_mono_16(&wav, &samples, rate).unwrap();
+
+        let engine = GroqEngine {
+            base_url: "http://127.0.0.1:9/unroutable".into(),
+            ..GroqEngine::new("test-key".into())
+        };
+        let err = engine
+            .transcribe_with_progress(&wav, &TranscribeOptions::default(), &|_| {}, &|| true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AsrError::Cancelled), "{err:?}");
+    }
+
+    /// Local spillover decodes one already-prepared chunk: the wav bytes go
+    /// to a real temp file the local engine can read, the words come back
+    /// unchanged (chunk-relative — the caller maps timelines), and the temp
+    /// file is cleaned up afterwards.
+    #[tokio::test]
+    async fn spillover_decodes_chunk_bytes_with_the_local_engine() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        struct Shared(std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>);
+        #[async_trait::async_trait]
+        impl TranscriptionEngine for Shared {
+            fn id(&self) -> &'static str {
+                "whisper.cpp"
+            }
+            fn is_local(&self) -> bool {
+                true
+            }
+            async fn transcribe(
+                &self,
+                wav_path: &Path,
+                _opts: &TranscribeOptions,
+            ) -> Result<RawTranscript> {
+                let (samples, rate) = fly_audio::mix::read_wav_mono(wav_path).unwrap();
+                assert_eq!(rate, 16_000);
+                assert!(!samples.is_empty());
+                *self.0.lock().unwrap() = Some(wav_path.to_path_buf());
+                Ok(RawTranscript {
+                    language: Some("en".into()),
+                    words: vec![word("local", 250)],
+                    segments: vec![],
+                })
+            }
+        }
+
+        let engine = GroqEngine {
+            local_spillover: Some(Box::new(Shared(seen.clone()))),
+            ..GroqEngine::new("test-key".into())
+        };
+        let samples: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.05).sin() * 0.4).collect();
+        let bytes = wav_bytes_mono_16(&samples, 16_000);
+        let raw = engine
+            .decode_chunk_locally(&bytes, &TranscribeOptions::default())
+            .await
+            .expect("spillover decode must succeed");
+        assert_eq!(raw.words.len(), 1);
+        assert_eq!(raw.words[0].text, "local");
+        assert_eq!(raw.words[0].start_ms, 250, "words stay chunk-relative");
+        let path = seen.lock().unwrap().clone().expect("local engine ran");
+        assert!(!path.exists(), "temp chunk wav must be cleaned up");
     }
 
     #[test]

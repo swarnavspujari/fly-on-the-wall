@@ -29,7 +29,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Root server URL (no `/v1`): the chat provider appends /v1, settings may
 /// store either form.
-fn root_url(state: &AppState) -> String {
+pub(crate) fn root_url(state: &AppState) -> String {
     let configured = state
         .storage
         .lock()
@@ -57,7 +57,7 @@ fn installed_exe(data_dir: &Path) -> Option<PathBuf> {
         .or_else(|| models::find_on_path(&["ollama"]))
 }
 
-async fn server_alive(root: &str) -> bool {
+pub(crate) async fn server_alive(root: &str) -> bool {
     let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_millis(1500))
         .build()

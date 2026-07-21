@@ -4,6 +4,7 @@ import { ChevronDown, Plus, RefreshCw } from "lucide-react";
 import { fmtElapsed } from "./RecordingBar";
 import { Avatar, Button, ProgressBar, SectionLabel, speakerColor } from "./ui";
 import { briefError, selectPipelineNotice } from "../pipelineNotice";
+import { WHISPER_ENGINE_ID } from "../types";
 
 interface Props {
   meeting: Meeting;
@@ -44,9 +45,6 @@ interface Props {
 export function isGenericLabel(key: string, label: string): boolean {
   return label === key || label === "Unknown" || /^Speaker \d+$/.test(label);
 }
-
-/** Managed-artifact id for the whisper.cpp engine (mirrors the backend). */
-const WHISPER_ENGINE_ID = "whisper-bin";
 
 const STAGE_LABELS: Record<string, string> = {
   waiting: "Waiting to transcribe (recording comes first)…",

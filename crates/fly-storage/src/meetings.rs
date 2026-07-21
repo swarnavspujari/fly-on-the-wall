@@ -71,7 +71,43 @@ impl Storage {
         if n == 0 {
             return Err(StorageError::NotFound(format!("meeting {id}")));
         }
+        // the attendee list travels in the portable manifest
+        self.refresh_recording_manifest(id)?;
         self.get_meeting(id)
+    }
+
+    /// Remove a meeting and everything derived from it: the transcript row
+    /// (raw + cleaned, FTS, embedding chunks), extracted items, its
+    /// transcription job, the meeting row, and the recordings folder on
+    /// disk (which also holds the transcript mirrors). Used when the owning
+    /// note is deleted — a meeting must not survive as an orphan.
+    pub fn purge_meeting(&self, id: &str) -> Result<()> {
+        // resolve the on-disk folder before the row disappears
+        let rec_dir = self
+            .get_meeting(id)
+            .ok()
+            .and_then(|m| m.recording)
+            .and_then(|r| recording_dir_rel(&r));
+        self.conn
+            .execute("DELETE FROM transcripts WHERE meeting_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM transcripts_fts WHERE meeting_id = ?1", [id])?;
+        self.delete_chunks("transcript", id)?;
+        self.conn
+            .execute("DELETE FROM meeting_items WHERE meeting_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM transcription_jobs WHERE meeting_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM meetings WHERE id = ?1", [id])?;
+        if let Some(rel) = rec_dir {
+            // best-effort: a locked file only strands the folder, never the delete
+            if let Err(e) = std::fs::remove_dir_all(self.data_dir.join(&rel)) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(dir = %rel, error = %e, "could not remove recordings folder");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Mark a meeting finished and store its recording.
@@ -88,6 +124,58 @@ impl Storage {
             return Err(StorageError::NotFound(format!("meeting {id}")));
         }
         self.get_meeting(id)
+    }
+
+    /// Set a meeting's start date/time (the note header's date editor).
+    /// Length is preserved: `ended_at` shifts by the same delta. The date is
+    /// then re-mirrored everywhere it already lives: the date-prefixed
+    /// `recordings/<date> <title>/` folder is renamed (best-effort, same
+    /// policy as title renames) and the folder's `recording.manifest.json`
+    /// is rewritten so self-heal on another machine resurrects the meeting
+    /// under the edited date.
+    pub fn set_meeting_started_at(&self, id: &str, started_at: DateTime<Utc>) -> Result<Meeting> {
+        let old = self.get_meeting(id)?;
+        let delta = started_at - old.started_at;
+        let ended_at = old.ended_at.map(|e| e + delta);
+        self.conn.execute(
+            "UPDATE meetings SET started_at = ?1, ended_at = ?2 WHERE id = ?3",
+            (
+                started_at.to_rfc3339(),
+                ended_at.map(|e| e.to_rfc3339()),
+                id,
+            ),
+        )?;
+        if old.recording.is_some() {
+            // Folders carry the note's title (the title-edit policy); the
+            // rename pass re-derives each folder name from the meeting's
+            // (now updated) started_at, so it moves date prefixes too.
+            let title = self
+                .get_note(&old.note_id)
+                .map(|n| n.title)
+                .unwrap_or(old.title.clone());
+            self.rename_meeting_dirs_for_note(&old.note_id, &title)?;
+            self.refresh_recording_manifest(id)?;
+        }
+        self.get_meeting(id)
+    }
+
+    /// Rewrite a meeting's `recording.manifest.json` from its current rows
+    /// (full v2 payload: exact dates, attendees, folder path), so edits made
+    /// after the recording stopped port to another machine.
+    pub(crate) fn refresh_recording_manifest(&self, id: &str) -> Result<()> {
+        let meeting = self.get_meeting(id)?;
+        let Some(manifest) = self.build_portable_manifest(&meeting) else {
+            return Ok(());
+        };
+        let Some(rel) = recording_dir_rel(&manifest.recording) else {
+            return Ok(());
+        };
+        let dir = self.data_dir.join(&rel);
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        crate::recovery::write_recording_manifest(&dir, &manifest)?;
+        Ok(())
     }
 
     pub fn get_meeting(&self, id: &str) -> Result<Meeting> {
@@ -147,6 +235,19 @@ impl Storage {
             let Some(rec) = &meeting.recording else {
                 continue;
             };
+            // A running pipeline captured absolute paths at start; renaming
+            // under it invalidates hours of ASR. Keep the old name — the
+            // next title/date edit renames once the job is over.
+            if self
+                .transcription_job(&meeting.id)?
+                .is_some_and(|j| j.status == crate::jobs::JOB_RUNNING)
+            {
+                tracing::info!(
+                    meeting_id = meeting.id,
+                    "transcription running; keeping the meeting folder's old name"
+                );
+                continue;
+            }
             let Some(old_rel) = recording_dir_rel(rec) else {
                 continue;
             };
@@ -193,6 +294,16 @@ impl Storage {
                 "UPDATE meetings SET recording_json = ?1 WHERE id = ?2",
                 (serde_json::to_string(&updated)?, &meeting.id),
             )?;
+            // The manifest inside the folder still carries the old relative
+            // paths — rewrite it, or a post-rename resurrection resolves to
+            // the folder's old (gone) name. Best-effort like the rename.
+            if let Err(e) = self.refresh_recording_manifest(&meeting.id) {
+                tracing::warn!(
+                    meeting_id = meeting.id,
+                    error = %e,
+                    "renamed meeting folder but couldn't rewrite its manifest"
+                );
+            }
         }
         Ok(())
     }
@@ -219,6 +330,51 @@ pub(crate) fn row_to_meeting(r: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting>
 mod tests {
     use crate::test_storage;
     use fly_core::{Attendee, RecordingRef};
+
+    /// Purging removes the meeting row, its transcript, its job, and the
+    /// recordings folder on disk — nothing of the meeting survives the
+    /// owning note's deletion.
+    #[test]
+    fn purge_meeting_removes_rows_and_the_recordings_folder() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("Doomed", None).unwrap();
+        let meeting = s.create_meeting("Doomed", &note.id, &[]).unwrap();
+        let rec_dir = dir.path().join("recordings/doomed");
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        std::fs::write(rec_dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        s.end_meeting(
+            &meeting.id,
+            &RecordingRef {
+                mic_path: None,
+                system_path: None,
+                mixed_path: Some("recordings/doomed/recording.mixed.wav".into()),
+                playback_path: None,
+                duration_ms: 1000,
+            },
+        )
+        .unwrap();
+        s.save_transcript(&fly_core::Transcript {
+            meeting_id: meeting.id.clone(),
+            language: Some("en".into()),
+            engine: "whisper.cpp".into(),
+            segments: vec![],
+            speakers: vec![],
+        })
+        .unwrap();
+        s.enqueue_transcription(&meeting.id).unwrap();
+
+        s.purge_meeting(&meeting.id).unwrap();
+
+        assert!(s.get_meeting(&meeting.id).is_err(), "meeting row must go");
+        assert!(s.get_transcript(&meeting.id).unwrap().is_none());
+        assert!(s.transcription_job(&meeting.id).unwrap().is_none());
+        assert!(!rec_dir.exists(), "recordings folder must go");
+        // purging a meeting that never recorded (no folder) is fine too
+        let note2 = s.create_note("Doomed 2", None).unwrap();
+        let m2 = s.create_meeting("Doomed 2", &note2.id, &[]).unwrap();
+        s.purge_meeting(&m2.id).unwrap();
+        assert!(s.get_meeting(&m2.id).is_err());
+    }
 
     #[test]
     fn meeting_lifecycle() {
@@ -302,6 +458,80 @@ mod tests {
         assert!(s.update_attendees("nope", &[]).is_err());
     }
 
+    /// Editing the meeting date shifts ended_at by the same delta (length
+    /// preserved), renames the date-prefixed folder, rebases recording_json,
+    /// and rewrites the manifest so the edited date ports to other machines
+    /// (the v2 manifest carries started_at explicitly).
+    #[test]
+    fn set_started_at_shifts_ended_and_remirrors_disk_names() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("Board sync", None).unwrap();
+        let meeting = s.create_meeting("Board sync", &note.id, &[]).unwrap();
+        let rec_dir = s
+            .allocate_meeting_dir("Board sync", meeting.started_at)
+            .unwrap();
+        std::fs::write(rec_dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        let rel = format!(
+            "recordings/{}/recording.mixed.wav",
+            rec_dir.file_name().unwrap().to_string_lossy()
+        );
+        let rec = RecordingRef {
+            mic_path: None,
+            system_path: None,
+            mixed_path: Some(rel),
+            playback_path: None,
+            duration_ms: 60_000,
+        };
+        let ended = s.end_meeting(&meeting.id, &rec).unwrap();
+        s.stash_recording_manifest(&meeting.id, &note.id, &rec)
+            .unwrap();
+        let old_span = ended.ended_at.unwrap() - ended.started_at;
+
+        let new_start = "2026-06-01T15:30:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        let updated = s.set_meeting_started_at(&meeting.id, new_start).unwrap();
+        assert_eq!(updated.started_at, new_start);
+        assert_eq!(updated.ended_at.unwrap() - updated.started_at, old_span);
+
+        // folder carries the new date; recording_json follows it
+        let label = crate::naming::disk_label(new_start, "Board sync");
+        let new_dir = dir.path().join("recordings").join(&label);
+        assert!(new_dir.is_dir(), "folder should carry the new date");
+        assert!(!rec_dir.exists(), "old folder should be gone");
+        let mixed = updated.recording.unwrap().mixed_path.unwrap();
+        assert_eq!(mixed, format!("recordings/{label}/recording.mixed.wav"));
+        assert!(dir.path().join(&mixed).exists());
+
+        // manifest travelled + rewritten: rebased paths, portable exact dates
+        let manifest: crate::RecordingManifest = serde_json::from_str(
+            &std::fs::read_to_string(new_dir.join(crate::RECORDING_MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.recording.mixed_path.as_deref(),
+            Some(mixed.as_str())
+        );
+        assert_eq!(manifest.started_at, Some(new_start));
+        assert_eq!(manifest.ended_at, updated.ended_at.unwrap());
+    }
+
+    /// A meeting without a recording (no folder, no manifest) still gets its
+    /// dates updated.
+    #[test]
+    fn set_started_at_without_recording_updates_row_only() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("m", None).unwrap();
+        let meeting = s.create_meeting("m", &note.id, &[]).unwrap();
+        let new_start = "2026-05-05T09:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        let updated = s.set_meeting_started_at(&meeting.id, new_start).unwrap();
+        assert_eq!(updated.started_at, new_start);
+        assert_eq!(updated.ended_at, None);
+        assert!(s.set_meeting_started_at("nope", new_start).is_err());
+    }
+
     /// recording_json rows written before playback_path existed must keep
     /// deserializing (players fall back to the mixed track).
     #[test]
@@ -317,6 +547,104 @@ mod tests {
         assert_eq!(
             rec.mixed_path.as_deref(),
             Some("recordings/x/recording.mixed.wav")
+        );
+    }
+
+    /// A meeting whose transcription job is RUNNING keeps its folder name:
+    /// the pipeline captured absolute paths at start, and a mid-run rename
+    /// invalidates them after hours of ASR (observed: a 586-minute import
+    /// lost ~9 h of decoding when diarization couldn't find its input). The
+    /// rename applies on the next title/date edit once the job ends.
+    #[test]
+    fn rename_skips_meetings_with_a_running_transcription_job() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("Untitled", None).unwrap();
+        let meeting = s.create_meeting("Untitled", &note.id, &[]).unwrap();
+        let rec_dir = s
+            .allocate_meeting_dir("Untitled", meeting.started_at)
+            .unwrap();
+        std::fs::write(rec_dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        let rel = format!(
+            "recordings/{}/recording.mixed.wav",
+            rec_dir.file_name().unwrap().to_string_lossy()
+        );
+        let rec = RecordingRef {
+            mic_path: None,
+            system_path: None,
+            mixed_path: Some(rel.clone()),
+            playback_path: None,
+            duration_ms: 1_000,
+        };
+        s.end_meeting(&meeting.id, &rec).unwrap();
+
+        s.enqueue_transcription(&meeting.id).unwrap();
+        s.mark_transcription_running(&meeting.id).unwrap();
+        s.update_note_title(&note.id, "Power Writing Course")
+            .unwrap();
+        assert!(rec_dir.is_dir(), "folder must keep its name mid-pipeline");
+        assert_eq!(
+            s.get_meeting(&meeting.id)
+                .unwrap()
+                .recording
+                .unwrap()
+                .mixed_path
+                .as_deref(),
+            Some(rel.as_str()),
+            "stored paths must stay untouched mid-pipeline"
+        );
+
+        // job over → the next edit renames as usual
+        s.mark_transcription_done(&meeting.id).unwrap();
+        s.update_note_title(&note.id, "Power Writing Course v2")
+            .unwrap();
+        let label = crate::naming::disk_label(meeting.started_at, "Power Writing Course v2");
+        assert!(dir.path().join("recordings").join(&label).is_dir());
+        assert!(!rec_dir.exists());
+    }
+
+    /// A title rename must also rewrite the manifest inside the renamed
+    /// folder: its relative paths otherwise keep the old folder name, and a
+    /// post-rename resurrection (database lost) would restore broken paths.
+    #[test]
+    fn note_rename_rewrites_manifest_paths() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("Untitled", None).unwrap();
+        let meeting = s.create_meeting("Untitled", &note.id, &[]).unwrap();
+        let rec_dir = s
+            .allocate_meeting_dir("Untitled", meeting.started_at)
+            .unwrap();
+        std::fs::write(rec_dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        let rel = format!(
+            "recordings/{}/recording.mixed.wav",
+            rec_dir.file_name().unwrap().to_string_lossy()
+        );
+        let rec = RecordingRef {
+            mic_path: None,
+            system_path: None,
+            mixed_path: Some(rel),
+            playback_path: None,
+            duration_ms: 1000,
+        };
+        s.end_meeting(&meeting.id, &rec).unwrap();
+        s.stash_recording_manifest(&meeting.id, &note.id, &rec)
+            .unwrap();
+
+        s.update_note_title(&note.id, "Vendor call").unwrap();
+
+        let renamed = crate::naming::disk_label(meeting.started_at, "Vendor call");
+        let manifest: crate::RecordingManifest = serde_json::from_str(
+            &std::fs::read_to_string(
+                dir.path()
+                    .join("recordings")
+                    .join(&renamed)
+                    .join(crate::RECORDING_MANIFEST),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.recording.mixed_path.as_deref(),
+            Some(format!("recordings/{renamed}/recording.mixed.wav").as_str())
         );
     }
 

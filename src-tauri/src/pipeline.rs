@@ -141,6 +141,9 @@ pub async fn run_with(
         }
     }
     emit_stage(state, on_stage, meeting_id, "starting", None);
+    // A cancel request left over from an earlier run of this meeting must
+    // not kill this fresh one; requests arriving from here on stick.
+    state.cancel_requests.lock().unwrap().remove(meeting_id);
 
     let (recording, hint, data_dir) = {
         let storage = state.storage.lock().unwrap();
@@ -252,18 +255,23 @@ pub async fn run_with(
     } else {
         None
     };
+    // The GPU speed test cuts its sample from whichever recording exists
+    // (same pick order as the pipeline's inputs below).
+    let sample_src: PathBuf = mic_wav
+        .clone()
+        .or_else(|| system_wav.clone())
+        .or_else(|| mixed_wav.clone())
+        .expect("checked above: at least one recording file exists");
+
     let asr: GuardedAsr = if let Some(key) = groq_key {
-        let groq = Box::new(fly_asr::groq::GroqEngine::new(key));
-        // A Groq request failure (rate limit, outage, rejected payload) must
-        // not sink the meeting — mirror the GPU→CPU guard below with a
-        // fully-local fallback engine. Best-effort: if the local model can't
-        // be ensured (e.g. offline), Groq still runs alone.
+        // A Groq failure that survives the engine's own per-chunk retries
+        // (outage, exhausted quota budget, rejected payload) must not sink
+        // the meeting — the SAME local chain the no-cloud path uses (GPU
+        // included) backs it, so enabling cloud never forfeits the GPU.
+        // Best-effort: if the local model can't be ensured (e.g. offline),
+        // Groq still runs alone.
         let model_id = model_override
             .unwrap_or_else(|| hw::default_model_for_tier(&tier, max_quality).to_string());
-        let pinned_cpu = {
-            let storage = state.storage.lock().unwrap();
-            cpu_pinned_for_model(&storage, &model_id)
-        };
         let local = async {
             let exe = models::ensure_tool(
                 on_model,
@@ -274,24 +282,51 @@ pub async fn run_with(
             )
             .await?;
             let model = models::ensure(on_model, &data_dir, &model_id).await?;
-            Ok::<_, String>(fly_asr::whisper_cpp::WhisperCppEngine {
-                exe,
-                model,
-                threads,
-                // macOS additionally forces CPU even before any pin exists:
-                // an unpinned machine may be exactly the one whose Metal
-                // init aborts, and this rescue path is where reliability
-                // beats speed.
-                force_cpu: cfg!(target_os = "macos")
-                    || local_fallback_force_cpu(use_gpu, pinned_cpu),
-            })
+            Ok::<_, String>((exe, model))
         }
         .await;
         match local {
-            Ok(engine) => GuardedAsr::with_cpu_fallback(groq, "groq", Box::new(engine), None),
+            Ok((cpu_exe, model_path)) => {
+                let (locals, spillover) = local_tiers(
+                    state,
+                    on_stage,
+                    on_model,
+                    meeting_id,
+                    cpu_exe,
+                    model_path,
+                    &model_id,
+                    threads,
+                    &opts,
+                    &sample_src,
+                    use_gpu,
+                )
+                .await;
+                let mut tiers = vec![AsrTier {
+                    engine: Box::new(fly_asr::groq::GroqEngine {
+                        // finished (paced) cloud chunks survive a restart
+                        resume: true,
+                        // a full quota window must never idle the validated
+                        // local engine below — long pacer waits decode that
+                        // chunk locally, then return to the cloud
+                        local_spillover: spillover,
+                        ..fly_asr::groq::GroqEngine::new(key)
+                    }) as Box<dyn TranscriptionEngine>,
+                    label: Some("groq"),
+                    gpu_model_id: None,
+                }];
+                tiers.extend(locals);
+                GuardedAsr::chain(tiers)
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "no local fallback for Groq available — cloud only");
-                GuardedAsr::single(groq)
+                GuardedAsr::chain(vec![AsrTier {
+                    engine: Box::new(fly_asr::groq::GroqEngine {
+                        resume: true,
+                        ..fly_asr::groq::GroqEngine::new(key)
+                    }) as Box<dyn TranscriptionEngine>,
+                    label: Some("groq"),
+                    gpu_model_id: None,
+                }])
             }
         }
     } else {
@@ -312,7 +347,7 @@ pub async fn run_with(
         // disk — fall back to the best installed one, visibly.
         let (model_id, model_path) = match models::ensure(on_model, &data_dir, &model_id).await {
             Ok(path) => (model_id, path),
-            Err(e) => match models::best_installed_asr_model(&data_dir) {
+            Err(e) => match models::best_installed_asr_model(&data_dir, &model_id) {
                 Some((fallback_id, path)) => {
                     tracing::warn!(
                         wanted = %model_id, using = fallback_id, error = %e,
@@ -343,115 +378,23 @@ pub async fn run_with(
             },
         };
 
-        // GPU offload. Windows: the pinned Vulkan build, but only when a
-        // one-time benchmark measured it faster on this machine (gpu.rs);
-        // any failure falls back to the CPU engine below. macOS/Linux:
-        // whisper.cpp builds there default to Metal/GPU on their own, so
-        // asr.use_gpu only gates a force-to-CPU flag and nothing else about
-        // the shipped path changes.
-        #[cfg(target_os = "windows")]
-        let gpu_exe: Option<PathBuf> = if use_gpu {
-            let sample_src = mic_wav
-                .as_ref()
-                .or(system_wav.as_ref())
-                .or(mixed_wav.as_ref())
-                .expect("checked above: at least one recording file exists");
-            emit_stage(state, on_stage, meeting_id, "benchmarking", None);
-            let notify = |detail: String| {
-                emit_stage(state, on_stage, meeting_id, "benchmarking", Some(detail));
-            };
-            gpu::plan(
+        GuardedAsr::chain(
+            local_tiers(
                 state,
+                on_stage,
                 on_model,
-                &notify,
-                gpu::PlanRequest {
-                    cpu_exe: &whisper_exe,
-                    model_path: &model_path,
-                    model_id: &model_id,
-                    threads,
-                    opts: &opts,
-                    sample_src,
-                },
+                meeting_id,
+                whisper_exe,
+                model_path,
+                &model_id,
+                threads,
+                &opts,
+                &sample_src,
+                use_gpu,
             )
             .await
-        } else {
-            None
-        };
-        #[cfg(not(target_os = "windows"))]
-        let gpu_exe: Option<PathBuf> = None;
-
-        match gpu_exe {
-            Some(exe) => GuardedAsr::with_cpu_fallback(
-                Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
-                    exe,
-                    model: model_path.clone(),
-                    threads,
-                    force_cpu: false,
-                }),
-                "whisper.cpp-vulkan",
-                Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
-                    exe: whisper_exe,
-                    model: model_path,
-                    threads,
-                    force_cpu: false,
-                }),
-                Some(model_id),
-            ),
-            None => {
-                // macOS: whisper.cpp defaults to Metal — but only Apple
-                // Silicon gets it. The Intel smoke test (PR #37) showed Metal
-                // on an AMD GPU SILENTLY CORRUPTING output (exit 0, one bogus
-                // segment), which no crash guard can catch, so Intel Macs go
-                // straight to CPU (`-ng`). On Apple Silicon, Metal runs as a
-                // guarded primary with a forced-CPU fallback — mirroring the
-                // Windows Vulkan guard — and honors a prior runtime-failure
-                // pin so later meetings skip a Metal attempt that failed here
-                // (toggling the Settings switch off→on clears the pin, same
-                // as Windows). The architecture check is a runtime sysctl,
-                // not compile-time: the binary is universal (gpu.rs).
-                #[cfg(target_os = "macos")]
-                {
-                    let pinned_cpu = {
-                        let storage = state.storage.lock().unwrap();
-                        cpu_pinned_for_model(&storage, &model_id)
-                    };
-                    if use_gpu && !pinned_cpu && gpu::is_apple_silicon() {
-                        GuardedAsr::with_cpu_fallback(
-                            Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
-                                exe: whisper_exe.clone(),
-                                model: model_path.clone(),
-                                threads,
-                                force_cpu: false,
-                            }),
-                            "whisper.cpp-metal",
-                            Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
-                                exe: whisper_exe,
-                                model: model_path,
-                                threads,
-                                force_cpu: true,
-                            }),
-                            Some(model_id),
-                        )
-                    } else {
-                        GuardedAsr::single(Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
-                            exe: whisper_exe,
-                            model: model_path,
-                            threads,
-                            force_cpu: true,
-                        }))
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                GuardedAsr::single(Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
-                    exe: whisper_exe,
-                    model: model_path,
-                    threads,
-                    // On a GPU-capable build honor the off switch; the
-                    // Windows CPU build has no GPU backend and ignores it.
-                    force_cpu: !use_gpu,
-                }))
-            }
-        }
+            .0,
+        )
     };
     let diarizer = fly_diarize::sherpa::SherpaDiarizeEngine {
         exe: sherpa_exe,
@@ -491,23 +434,23 @@ pub async fn run_with(
     let on_fallback =
         |detail: String| emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
 
-    // Batch progress from the engine → a live "label (42%)" stage detail.
-    // Percentages are speech-time fractions (silence is never decoded), the
-    // honest measure of remaining work on long recordings. Parentheses, not
-    // an em-dash: the frontend already joins stage and detail with one.
+    // Batch progress from the engine → a live "channel (engine 42%)" stage
+    // detail naming the tier that is actually decoding. Percentages are
+    // speech-time fractions (silence is never decoded), the honest measure
+    // of remaining work on long recordings. Parentheses, not an em-dash:
+    // the frontend already joins stage and detail with one.
     let progress_detail = |label: Option<&'static str>| {
-        move |p: fly_asr::TranscribeProgress| {
-            if p.total_ms == 0 {
-                return;
+        move |kind: TierKind, p: fly_asr::TranscribeProgress| {
+            if let Some(detail) = transcribe_detail(kind, label, p) {
+                emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
             }
-            let pct = (p.done_ms * 100 / p.total_ms).min(100);
-            let detail = match label {
-                Some(l) => format!("{l} ({pct}%)"),
-                None => format!("{pct}%"),
-            };
-            emit_stage(state, on_stage, meeting_id, "transcribing", Some(detail));
         }
     };
+
+    // Cooperative cancellation: the delete/cancel commands drop this meeting
+    // id into `cancel_requests` (cleared at the start of this run); engines
+    // poll it between batches — checkpoints make the abort cheap.
+    let cancelled = || state.cancel_requests.lock().unwrap().contains(meeting_id);
 
     if per_channel {
         let mic_16k = prep(mic_wav.as_ref().unwrap(), "mic.16k.wav")?;
@@ -527,6 +470,7 @@ pub async fn run_with(
                 &opts,
                 &on_fallback,
                 &progress_detail(Some("your microphone")),
+                &cancelled,
             )
             .await?,
             "mic",
@@ -546,12 +490,18 @@ pub async fn run_with(
                 &opts,
                 &on_fallback,
                 &progress_detail(Some("other participants")),
+                &cancelled,
             )
             .await?,
             "system",
         );
         language = language.or(sys_raw.language.clone());
 
+        // ASR checks between batches; catch a cancel that landed after the
+        // last batch before spending minutes on diarization.
+        if cancelled() {
+            return Err(fly_asr::AsrError::Cancelled.to_string());
+        }
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
         // "Just you": no far-end speakers exist, so the engine run is skipped
         // entirely and any surviving far-end speech is attributed to You.
@@ -613,12 +563,23 @@ pub async fn run_with(
 
         emit_stage(state, on_stage, meeting_id, "transcribing", None);
         let raw = guard_loops(
-            asr.transcribe(&track_16k, &opts, &on_fallback, &progress_detail(None))
-                .await?,
+            asr.transcribe(
+                &track_16k,
+                &opts,
+                &on_fallback,
+                &progress_detail(None),
+                &cancelled,
+            )
+            .await?,
             "mixed",
         );
         language = raw.language.clone();
 
+        // ASR checks between batches; catch a cancel that landed after the
+        // last batch before spending minutes on diarization.
+        if cancelled() {
+            return Err(fly_asr::AsrError::Cancelled.to_string());
+        }
         emit_stage(state, on_stage, meeting_id, "diarizing", None);
         if hint.just_you() {
             // single track, just the user: everything is You, no engine run
@@ -659,6 +620,11 @@ pub async fn run_with(
         speakers,
     };
 
+    // Last cancel gate: a deleted note must not get a transcript saved over
+    // its (about to be purged) meeting row.
+    if cancelled() {
+        return Err(fly_asr::AsrError::Cancelled.to_string());
+    }
     emit_stage(state, on_stage, meeting_id, "saving", None);
     {
         let storage = state.storage.lock().unwrap();
@@ -672,13 +638,15 @@ pub async fn run_with(
             .map_err(|e| e.to_string())?;
     }
 
-    // 16 kHz intermediates are pure derived data — drop them once the
-    // transcript is saved so meeting folders hold only the real recordings.
-    // (A failed run keeps them; the retry overwrites them anyway.)
+    // 16 kHz intermediates and their ASR checkpoints are pure derived data —
+    // drop them once the transcript is saved so meeting folders hold only
+    // the real recordings. (A failed run keeps both; the retry resumes from
+    // the checkpoint and overwrites the intermediates.)
     for f in &intermediates {
         if let Err(e) = std::fs::remove_file(f) {
             tracing::warn!(path = %f.display(), error = %e, "could not remove 16k intermediate");
         }
+        let _ = std::fs::remove_file(fly_asr::checkpoint::checkpoint_path_for(f));
     }
 
     // release the per-meeting guard (on failure the scheduler clears it)
@@ -868,66 +836,143 @@ async fn re_diarize_inner(
     })
 }
 
-/// The pipeline's ASR with an automatic, visible CPU fallback: a GPU engine
-/// that fails to launch, exits nonzero, or OOMs must never sink the pipeline.
-/// The failed batch is retried on the validated CPU engine and the rest of
-/// the run stays there; the failure is reported via `runtime_failure` so the
-/// machine gets pinned back to CPU for future meetings.
-struct GuardedAsr {
-    primary: Box<dyn TranscriptionEngine>,
-    /// `Transcript::engine` label while the primary is healthy — the trait
+/// User-facing family of an ASR tier, threaded through progress details so
+/// the transcribing stage always says which engine is decoding ("cloud 42%",
+/// "GPU 42%", "CPU 42%") — the incident UI showed nothing, and the user
+/// assumed a stuck run was parallel cloud work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TierKind {
+    Cloud,
+    Gpu,
+    Cpu,
+}
+
+/// Classify a tier for progress labels: cloud engines by the trait, local
+/// ones by the chain label (only GPU tiers carry one — "whisper.cpp-vulkan"
+/// / "whisper.cpp-metal"; the trait id can't tell the builds apart).
+fn tier_kind(tier: &AsrTier) -> TierKind {
+    if !tier.engine.is_local() {
+        TierKind::Cloud
+    } else if tier
+        .label
+        .is_some_and(|l| l.contains("vulkan") || l.contains("metal"))
+    {
+        TierKind::Gpu
+    } else {
+        TierKind::Cpu
+    }
+}
+
+/// The "transcribing" stage detail for one progress event: engine family +
+/// percent, the channel label around it when one exists, and an explicit
+/// quota-wait notice instead of a fake spinner while the cloud pacer sleeps.
+/// `None` when there is no work to report a fraction of.
+fn transcribe_detail(
+    kind: TierKind,
+    channel: Option<&str>,
+    p: fly_asr::TranscribeProgress,
+) -> Option<String> {
+    if p.total_ms == 0 {
+        return None;
+    }
+    let pct = (p.done_ms * 100 / p.total_ms).min(100);
+    let engine = match kind {
+        TierKind::Cloud => "cloud",
+        TierKind::Gpu => "GPU",
+        TierKind::Cpu => "CPU",
+    };
+    // partial minutes round up — never promise less waiting than reality
+    let wait_m = p.quota_wait_ms.map(|w| w.div_ceil(60_000).max(1));
+    Some(match (channel, wait_m) {
+        (None, None) => format!("{engine} {pct}%"),
+        (None, Some(m)) => format!("{engine} {pct}%, waiting for cloud quota (~{m}m)"),
+        (Some(c), None) => format!("{c} ({engine} {pct}%)"),
+        (Some(c), Some(m)) => {
+            format!("{c} ({engine} {pct}%, waiting for cloud quota ~{m}m)")
+        }
+    })
+}
+
+/// One engine in the pipeline's fallback chain.
+struct AsrTier {
+    engine: Box<dyn TranscriptionEngine>,
+    /// `Transcript::engine` label while this tier is active — the trait
     /// `id()` can't tell the Vulkan build from the CPU one (same engine).
-    primary_label: Option<&'static str>,
-    cpu_fallback: Option<Box<dyn TranscriptionEngine>>,
-    /// Model the GPU decision was made for (verdict re-pinning on failure).
+    label: Option<&'static str>,
+    /// Set when this tier decodes on the GPU: a runtime failure of THIS tier
+    /// (never of a cloud tier above it) pins the machine back to CPU for
+    /// this model.
     gpu_model_id: Option<String>,
-    failure: std::sync::Mutex<Option<String>>,
+}
+
+/// The pipeline's ASR with automatic, visible fallback down a chain of
+/// engines (cloud → GPU-local → CPU-local): a tier that fails to launch,
+/// exits nonzero, OOMs, or exhausts its cloud retries must never sink the
+/// pipeline while a tier below it can still decode. The failed batch is
+/// retried on the next tier and the rest of the run stays there; a GPU
+/// tier's failure is reported via `runtime_failure` so the machine gets
+/// pinned back to CPU for future meetings.
+struct GuardedAsr {
+    tiers: Vec<AsrTier>,
+    active: std::sync::Mutex<usize>,
+    /// (model_id, error) recorded when a GPU tier failed during this run.
+    gpu_failure: std::sync::Mutex<Option<(String, String)>>,
 }
 
 impl GuardedAsr {
+    #[cfg(test)]
     fn single(engine: Box<dyn TranscriptionEngine>) -> Self {
-        Self {
-            primary: engine,
-            primary_label: None,
-            cpu_fallback: None,
+        Self::chain(vec![AsrTier {
+            engine,
+            label: None,
             gpu_model_id: None,
-            failure: std::sync::Mutex::new(None),
-        }
+        }])
     }
 
+    #[cfg(test)]
     fn with_cpu_fallback(
         primary: Box<dyn TranscriptionEngine>,
         primary_label: &'static str,
         cpu: Box<dyn TranscriptionEngine>,
         gpu_model_id: Option<String>,
     ) -> Self {
+        Self::chain(vec![
+            AsrTier {
+                engine: primary,
+                label: Some(primary_label),
+                gpu_model_id,
+            },
+            AsrTier {
+                engine: cpu,
+                label: None,
+                gpu_model_id: None,
+            },
+        ])
+    }
+
+    fn chain(tiers: Vec<AsrTier>) -> Self {
+        assert!(!tiers.is_empty(), "GuardedAsr needs at least one engine");
         Self {
-            primary,
-            primary_label: Some(primary_label),
-            cpu_fallback: Some(cpu),
-            gpu_model_id,
-            failure: std::sync::Mutex::new(None),
+            tiers,
+            active: std::sync::Mutex::new(0),
+            gpu_failure: std::sync::Mutex::new(None),
         }
     }
 
+    #[cfg(test)]
     fn failed_over(&self) -> bool {
-        self.failure.lock().unwrap().is_some()
+        *self.active.lock().unwrap() > 0
     }
 
     /// What actually transcribed this meeting, for `Transcript::engine`.
     fn engine_id(&self) -> String {
-        if self.failed_over() {
-            if let Some(cpu) = &self.cpu_fallback {
-                return cpu.id().to_string();
-            }
-        }
-        self.primary_label.unwrap_or(self.primary.id()).to_string()
+        let tier = &self.tiers[*self.active.lock().unwrap()];
+        tier.label.unwrap_or(tier.engine.id()).to_string()
     }
 
-    /// (model_id, error) when the GPU primary failed during this run.
+    /// (model_id, error) when a GPU tier failed during this run.
     fn runtime_failure(&self) -> Option<(String, String)> {
-        let failure = self.failure.lock().unwrap().clone()?;
-        Some((self.gpu_model_id.clone()?, failure))
+        self.gpu_failure.lock().unwrap().clone()
     }
 
     async fn transcribe(
@@ -935,49 +980,268 @@ impl GuardedAsr {
         wav: &Path,
         opts: &TranscribeOptions,
         notify: &(dyn Fn(String) + Send + Sync),
-        on_progress: fly_asr::TranscribeProgressFn<'_>,
+        on_progress: &(dyn Fn(TierKind, fly_asr::TranscribeProgress) + Send + Sync),
+        cancel: fly_asr::CancelFn<'_>,
     ) -> Result<RawTranscript, String> {
-        if !self.failed_over() {
-            return match self
-                .primary
-                .transcribe_with_progress(wav, opts, on_progress)
-                .await
-            {
-                Ok(raw) => Ok(raw),
-                Err(e) => {
-                    let Some(cpu) = &self.cpu_fallback else {
-                        return Err(e.to_string());
-                    };
-                    let msg = e.to_string();
-                    let ui = if self.primary.is_local() {
-                        "GPU transcription failed — continuing on CPU"
-                    } else {
-                        "Cloud transcription failed — continuing with local transcription"
-                    };
-                    tracing::warn!(error = %msg, "{ui}");
-                    notify(ui.into());
-                    *self.failure.lock().unwrap() = Some(msg);
-                    // The fallback engine emits an immediate 0% event;
-                    // letting it through would clobber the failover notice
-                    // just shown. Progress resumes with the first batch.
-                    let after_first_batch = move |p: fly_asr::TranscribeProgress| {
-                        if p.done_ms > 0 {
-                            on_progress(p);
-                        }
-                    };
-                    cpu.transcribe_with_progress(wav, opts, &after_first_batch)
-                        .await
-                        .map_err(|e| e.to_string())
+        let mut fell_over_this_call = false;
+        loop {
+            let idx = *self.active.lock().unwrap();
+            let tier = &self.tiers[idx];
+            let kind = tier_kind(tier);
+            // After a mid-call failover the next engine emits an immediate
+            // 0% event; letting it through would clobber the failover notice
+            // just shown. Progress resumes with the first batch.
+            let after_first_batch = move |p: fly_asr::TranscribeProgress| {
+                if !fell_over_this_call || p.done_ms > 0 {
+                    on_progress(kind, p);
                 }
             };
+            let err = match tier
+                .engine
+                .transcribe_with_progress(wav, opts, &after_first_batch, cancel)
+                .await
+            {
+                Ok(raw) => return Ok(raw),
+                Err(e) => e,
+            };
+            let msg = err.to_string();
+            // An abort the user asked for is not a tier failure — falling
+            // over would restart the work the cancel was meant to stop.
+            if matches!(err, fly_asr::AsrError::Cancelled) {
+                return Err(msg);
+            }
+            if let Some(model_id) = &tier.gpu_model_id {
+                *self.gpu_failure.lock().unwrap() = Some((model_id.clone(), msg.clone()));
+            }
+            if idx + 1 >= self.tiers.len() {
+                return Err(msg);
+            }
+            let ui = if tier.engine.is_local() {
+                "GPU transcription failed — continuing on CPU"
+            } else {
+                "Cloud transcription failed — continuing with local transcription"
+            };
+            tracing::warn!(error = %msg, "{ui}");
+            notify(ui.into());
+            *self.active.lock().unwrap() = idx + 1;
+            fell_over_this_call = true;
         }
-        self.cpu_fallback
-            .as_ref()
-            .expect("failed_over implies a fallback engine")
-            .transcribe_with_progress(wav, opts, on_progress)
-            .await
-            .map_err(|e| e.to_string())
     }
+}
+
+/// Which OS shape the local-engine chain takes (parameterized so every
+/// platform's plan is testable from any platform — only the current target's
+/// variant is constructed outside tests).
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LocalOs {
+    Windows,
+    MacOs,
+    Other,
+}
+
+const fn current_os() -> LocalOs {
+    #[cfg(target_os = "windows")]
+    {
+        LocalOs::Windows
+    }
+    #[cfg(target_os = "macos")]
+    {
+        LocalOs::MacOs
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        LocalOs::Other
+    }
+}
+
+/// Blueprint for one local whisper tier (pure data so the plan is testable
+/// without touching disk or sidecars).
+#[derive(Debug, PartialEq)]
+struct LocalTierSpec {
+    exe: PathBuf,
+    force_cpu: bool,
+    label: Option<&'static str>,
+    /// Model to pin back to CPU if this (GPU) tier fails at runtime.
+    gpu_pin: Option<String>,
+}
+
+/// The local whisper tiers for this machine, in fallback order. Used by BOTH
+/// the local path and the Groq fallback, so enabling cloud transcription
+/// never silently forfeits a GPU the benchmark already validated (the bug
+/// behind the 11-hour CPU passes on a Vulkan-capable machine).
+///
+/// `gpu_exe` is the benchmark-approved Vulkan build (Windows only; `None`
+/// when the switch is off, the verdict said CPU, or the build is missing).
+fn local_tier_specs(
+    os: LocalOs,
+    gpu_exe: Option<PathBuf>,
+    cpu_exe: &Path,
+    model_id: &str,
+    use_gpu: bool,
+    pinned_cpu: bool,
+) -> Vec<LocalTierSpec> {
+    match os {
+        LocalOs::Windows => match gpu_exe {
+            Some(exe) => vec![
+                LocalTierSpec {
+                    exe,
+                    force_cpu: false,
+                    label: Some("whisper.cpp-vulkan"),
+                    gpu_pin: Some(model_id.to_string()),
+                },
+                LocalTierSpec {
+                    exe: cpu_exe.to_path_buf(),
+                    force_cpu: false,
+                    label: None,
+                    gpu_pin: None,
+                },
+            ],
+            // On a GPU-capable build honor the off switch; the Windows CPU
+            // build has no GPU backend and ignores it.
+            None => vec![LocalTierSpec {
+                exe: cpu_exe.to_path_buf(),
+                force_cpu: !use_gpu,
+                label: None,
+                gpu_pin: None,
+            }],
+        },
+        // macOS: whisper.cpp defaults to Metal, and on GPUs that Metal can't
+        // actually serve (e.g. Intel-era Macs) ggml's Metal init aborts with
+        // SIGABRT — that crash must not sink the meeting. Run Metal as a
+        // guarded tier with a forced-CPU tier below, honoring a prior
+        // runtime-failure pin so later meetings skip the doomed attempt.
+        LocalOs::MacOs => {
+            if use_gpu && !pinned_cpu {
+                vec![
+                    LocalTierSpec {
+                        exe: cpu_exe.to_path_buf(),
+                        force_cpu: false,
+                        label: Some("whisper.cpp-metal"),
+                        gpu_pin: Some(model_id.to_string()),
+                    },
+                    LocalTierSpec {
+                        exe: cpu_exe.to_path_buf(),
+                        force_cpu: true,
+                        label: None,
+                        gpu_pin: None,
+                    },
+                ]
+            } else {
+                vec![LocalTierSpec {
+                    exe: cpu_exe.to_path_buf(),
+                    force_cpu: true,
+                    label: None,
+                    gpu_pin: None,
+                }]
+            }
+        }
+        LocalOs::Other => vec![LocalTierSpec {
+            exe: cpu_exe.to_path_buf(),
+            force_cpu: !use_gpu,
+            label: None,
+            gpu_pin: None,
+        }],
+    }
+}
+
+/// Resolve the local whisper fallback chain for this machine: on Windows the
+/// benchmark-gated Vulkan build leads when approved (running the one-time
+/// speed test if there is no verdict yet), macOS runs guarded Metal, and the
+/// CPU build always anchors the chain. Shared by the local path and the Groq
+/// fallback so both see the same hardware. Also returns a second instance of
+/// the chain's best engine for the cloud tier's quota spillover (resume off:
+/// those one-off chunk decodes are recorded in the cloud checkpoint, a
+/// nested whisper checkpoint beside a temp wav would be junk).
+#[allow(clippy::too_many_arguments)]
+async fn local_tiers(
+    state: &AppState,
+    on_stage: StageSink<'_>,
+    on_model: models::ProgressSink<'_>,
+    meeting_id: &str,
+    cpu_exe: PathBuf,
+    model_path: PathBuf,
+    model_id: &str,
+    threads: usize,
+    opts: &TranscribeOptions,
+    sample_src: &Path,
+    use_gpu: bool,
+) -> (Vec<AsrTier>, Option<Box<dyn TranscriptionEngine>>) {
+    let pinned_cpu = {
+        let storage = state.storage.lock().unwrap();
+        cpu_pinned_for_model(&storage, model_id)
+    };
+    #[cfg(target_os = "windows")]
+    let gpu_exe: Option<PathBuf> = if use_gpu {
+        emit_stage(state, on_stage, meeting_id, "benchmarking", None);
+        let notify = |detail: String| {
+            emit_stage(state, on_stage, meeting_id, "benchmarking", Some(detail));
+        };
+        gpu::plan(
+            state,
+            on_model,
+            &notify,
+            gpu::PlanRequest {
+                cpu_exe: &cpu_exe,
+                model_path: &model_path,
+                model_id,
+                threads,
+                opts,
+                sample_src,
+            },
+        )
+        .await
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "windows"))]
+    let gpu_exe: Option<PathBuf> = {
+        let _ = (on_stage, on_model, meeting_id, opts, sample_src);
+        None
+    };
+
+    // Intel Macs never get the Metal tier: the PR #37 smoke test showed
+    // Metal on an AMD GPU silently corrupting output (exit 0, one bogus
+    // segment) — a failure mode no runtime crash guard can see. Runtime
+    // sysctl, not cfg!(target_arch): the shipped binary is universal
+    // (see gpu::is_apple_silicon). Apple Silicon keeps guarded Metal with
+    // the same runtime-failure pin semantics as the Windows Vulkan tier.
+    #[cfg(target_os = "macos")]
+    let use_gpu = use_gpu && gpu::is_apple_silicon();
+    let specs = local_tier_specs(
+        current_os(),
+        gpu_exe,
+        &cpu_exe,
+        model_id,
+        use_gpu,
+        pinned_cpu,
+    );
+    let spillover = specs.first().map(|spec| {
+        Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
+            exe: spec.exe.clone(),
+            model: model_path.clone(),
+            threads,
+            force_cpu: spec.force_cpu,
+            resume: false,
+        }) as Box<dyn TranscriptionEngine>
+    });
+    let tiers = specs
+        .into_iter()
+        .map(|spec| AsrTier {
+            engine: Box::new(fly_asr::whisper_cpp::WhisperCppEngine {
+                exe: spec.exe,
+                model: model_path.clone(),
+                threads,
+                force_cpu: spec.force_cpu,
+                // completed batches survive crashes, restarts, and failovers —
+                // the CPU tier resumes exactly where a failed GPU tier stopped
+                resume: true,
+            }) as Box<dyn TranscriptionEngine>,
+            label: spec.label,
+            gpu_model_id: spec.gpu_pin,
+        })
+        .collect();
+    (tiers, spillover)
 }
 
 /// Whether a stored GPU verdict pins this machine (and model) to CPU — a
@@ -986,16 +1250,6 @@ impl GuardedAsr {
 /// verdict itself.
 fn cpu_pinned_for_model(storage: &fly_storage::Storage, model_id: &str) -> bool {
     gpu::stored(storage).is_some_and(|b| b.verdict == "cpu" && b.model_id == model_id)
-}
-
-/// `force_cpu` for the local engine backing the Groq cloud fallback. It is
-/// the last engine in the chain — nothing rescues the meeting if it crashes
-/// — so besides the GPU switch it honors a stored CPU pin: a Groq outage
-/// must never land on an engine already known to abort on this machine's
-/// GPU. Harmless where the resolved whisper-bin is the CPU build (Windows),
-/// which ignores `-ng`.
-fn local_fallback_force_cpu(gpu_setting_on: bool, pinned_cpu: bool) -> bool {
-    !gpu_setting_on || pinned_cpu
 }
 
 /// Recovery for a meeting folder wrongly parked under `recordings/_unlinked/`:
@@ -1203,7 +1457,8 @@ mod tests {
                 Path::new("unused.wav"),
                 &TranscribeOptions::default(),
                 &notify,
-                &|_| {},
+                &|_, _| {},
+                &|| false,
             )
             .await
             .expect("fallback must rescue the meeting");
@@ -1219,33 +1474,409 @@ mod tests {
         );
     }
 
-    /// A stored CPU pin (benchmark verdict or recorded Metal runtime
-    /// failure) must force the Groq-fallback local engine onto CPU: it is
-    /// the last engine in the chain, so a doomed GPU attempt there would
-    /// sink the meeting a Groq outage already put at risk.
+    /// Local engine that always fails (a Vulkan build whose init aborts).
+    struct FailingLocalGpu;
+    #[async_trait::async_trait]
+    impl TranscriptionEngine for FailingLocalGpu {
+        fn id(&self) -> &'static str {
+            "whisper.cpp"
+        }
+        fn is_local(&self) -> bool {
+            true
+        }
+        async fn transcribe(
+            &self,
+            _wav: &Path,
+            _opts: &TranscribeOptions,
+        ) -> fly_asr::Result<RawTranscript> {
+            Err(fly_asr::AsrError::Engine(
+                "whisper-cli exited with signal: vulkan init failed".into(),
+            ))
+        }
+    }
+
+    fn tier(
+        engine: Box<dyn TranscriptionEngine>,
+        label: Option<&'static str>,
+        gpu_model_id: Option<&str>,
+    ) -> AsrTier {
+        AsrTier {
+            engine,
+            label,
+            gpu_model_id: gpu_model_id.map(str::to_string),
+        }
+    }
+
+    /// The incident fix: with Groq enabled, a cloud failure must land on the
+    /// GPU-local tier (not a CPU-only engine), and a cloud failure alone
+    /// must never record a GPU pin.
+    #[tokio::test]
+    async fn cloud_failure_lands_on_gpu_tier_without_pinning() {
+        let asr = GuardedAsr::chain(vec![
+            tier(Box::new(RejectingCloud), Some("groq"), None),
+            tier(
+                Box::new(FixedLocal),
+                Some("whisper.cpp-vulkan"),
+                Some("large-v3"),
+            ),
+            tier(Box::new(FixedLocal), None, None),
+        ]);
+        let notes = std::sync::Mutex::new(Vec::new());
+        let notify = |d: String| notes.lock().unwrap().push(d);
+        let raw = asr
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &notify,
+                &|_, _| {},
+                &|| false,
+            )
+            .await
+            .expect("the GPU tier must rescue the meeting");
+        assert_eq!(raw.words[0].text, "local");
+        assert!(asr.failed_over());
+        assert_eq!(asr.engine_id(), "whisper.cpp-vulkan");
+        assert!(
+            asr.runtime_failure().is_none(),
+            "a cloud failure must never pin the GPU to CPU"
+        );
+        let notes = notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("Cloud transcription failed"));
+    }
+
+    /// Chain walks all the way down: cloud fails, the GPU tier fails too,
+    /// CPU decodes — and only the GPU tier's failure is recorded for the pin.
+    #[tokio::test]
+    async fn gpu_tier_failure_falls_to_cpu_and_records_the_pin() {
+        let asr = GuardedAsr::chain(vec![
+            tier(Box::new(RejectingCloud), Some("groq"), None),
+            tier(
+                Box::new(FailingLocalGpu),
+                Some("whisper.cpp-vulkan"),
+                Some("large-v3"),
+            ),
+            tier(Box::new(FixedLocal), None, None),
+        ]);
+        let notes = std::sync::Mutex::new(Vec::new());
+        let notify = |d: String| notes.lock().unwrap().push(d);
+        let raw = asr
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &notify,
+                &|_, _| {},
+                &|| false,
+            )
+            .await
+            .expect("the CPU tier must rescue the meeting");
+        assert_eq!(raw.words[0].text, "local");
+        assert_eq!(asr.engine_id(), "whisper.cpp");
+        let (model, error) = asr.runtime_failure().expect("GPU failure must pin");
+        assert_eq!(model, "large-v3");
+        assert!(error.contains("vulkan init failed"));
+        let notes = notes.lock().unwrap();
+        assert!(notes[0].contains("Cloud transcription failed"));
+        assert!(notes[1].contains("GPU transcription failed"));
+    }
+
+    /// The Windows plan: a benchmark-approved Vulkan build leads the chain
+    /// (with its model pinned for runtime failures); without one the single
+    /// CPU tier honors the GPU switch.
     #[test]
-    fn pinned_cpu_verdict_forces_cpu_on_groq_fallback_path() {
+    fn windows_tier_specs_put_the_vulkan_build_first() {
+        let specs = local_tier_specs(
+            LocalOs::Windows,
+            Some(PathBuf::from("vulkan/whisper-cli.exe")),
+            Path::new("cpu/whisper-cli.exe"),
+            "large-v3",
+            true,
+            false,
+        );
+        assert_eq!(
+            specs,
+            vec![
+                LocalTierSpec {
+                    exe: PathBuf::from("vulkan/whisper-cli.exe"),
+                    force_cpu: false,
+                    label: Some("whisper.cpp-vulkan"),
+                    gpu_pin: Some("large-v3".into()),
+                },
+                LocalTierSpec {
+                    exe: PathBuf::from("cpu/whisper-cli.exe"),
+                    force_cpu: false,
+                    label: None,
+                    gpu_pin: None,
+                },
+            ]
+        );
+
+        let specs = local_tier_specs(
+            LocalOs::Windows,
+            None,
+            Path::new("cpu/whisper-cli.exe"),
+            "large-v3",
+            false,
+            false,
+        );
+        assert_eq!(
+            specs,
+            vec![LocalTierSpec {
+                exe: PathBuf::from("cpu/whisper-cli.exe"),
+                force_cpu: true,
+                label: None,
+                gpu_pin: None,
+            }]
+        );
+    }
+
+    /// The macOS plan mirrors the old inline logic: Metal guarded by a
+    /// forced-CPU tier, collapsing to CPU-only once pinned (or switched off).
+    #[test]
+    fn macos_tier_specs_guard_metal_and_honor_the_pin() {
+        let cpu = Path::new("whisper-cli");
+        let metal = local_tier_specs(LocalOs::MacOs, None, cpu, "small-q5", true, false);
+        assert_eq!(metal.len(), 2);
+        assert_eq!(metal[0].label, Some("whisper.cpp-metal"));
+        assert!(!metal[0].force_cpu);
+        assert_eq!(metal[0].gpu_pin.as_deref(), Some("small-q5"));
+        assert!(metal[1].force_cpu);
+
+        for pinned_or_off in [
+            local_tier_specs(LocalOs::MacOs, None, cpu, "small-q5", true, true),
+            local_tier_specs(LocalOs::MacOs, None, cpu, "small-q5", false, false),
+        ] {
+            assert_eq!(pinned_or_off.len(), 1);
+            assert!(pinned_or_off[0].force_cpu);
+            assert!(pinned_or_off[0].gpu_pin.is_none());
+        }
+    }
+
+    /// A stored CPU pin (benchmark verdict or recorded runtime failure) is
+    /// per-model and feeds the tier plan, which then keeps a doomed GPU
+    /// attempt out of every chain — including the Groq fallback.
+    #[test]
+    fn pinned_cpu_verdict_tracks_the_model_it_was_recorded_for() {
         let dir = tempfile::tempdir().unwrap();
         let storage = fly_storage::Storage::open(dir.path()).unwrap();
 
-        // No verdict stored — only the GPU switch decides.
         assert!(!cpu_pinned_for_model(&storage, "small-q5"));
-        assert!(!local_fallback_force_cpu(
-            true,
-            cpu_pinned_for_model(&storage, "small-q5")
-        ));
-        assert!(local_fallback_force_cpu(false, false), "switch off → CPU");
-
-        // A Metal runtime failure pins this machine+model to CPU.
         gpu::record_runtime_failure(&storage, "small-q5", "ggml_metal_init: error");
         assert!(cpu_pinned_for_model(&storage, "small-q5"));
-        assert!(local_fallback_force_cpu(
-            true,
-            cpu_pinned_for_model(&storage, "small-q5")
-        ));
-
         // A different model invalidates the pin (same rule as gpu::plan).
         assert!(!cpu_pinned_for_model(&storage, "large-v3"));
+
+        // ...and the pin collapses the macOS chain to forced CPU.
+        let specs = local_tier_specs(
+            LocalOs::MacOs,
+            None,
+            Path::new("whisper-cli"),
+            "small-q5",
+            true,
+            cpu_pinned_for_model(&storage, "small-q5"),
+        );
+        assert_eq!(specs.len(), 1);
+        assert!(specs[0].force_cpu);
+    }
+
+    #[test]
+    fn tier_kinds_classify_cloud_gpu_cpu() {
+        assert_eq!(
+            tier_kind(&tier(Box::new(RejectingCloud), Some("groq"), None)),
+            TierKind::Cloud
+        );
+        assert_eq!(
+            tier_kind(&tier(
+                Box::new(FixedLocal),
+                Some("whisper.cpp-vulkan"),
+                Some("large-v3")
+            )),
+            TierKind::Gpu
+        );
+        assert_eq!(
+            tier_kind(&tier(
+                Box::new(FixedLocal),
+                Some("whisper.cpp-metal"),
+                Some("small-q5")
+            )),
+            TierKind::Gpu
+        );
+        assert_eq!(
+            tier_kind(&tier(Box::new(FixedLocal), None, None)),
+            TierKind::Cpu
+        );
+    }
+
+    /// The "transcribing" details the frontend parses: engine family +
+    /// percent, wrapped in the channel label when one exists.
+    #[test]
+    fn transcribe_details_name_the_engine_and_percent() {
+        let p = |done, total| fly_asr::TranscribeProgress {
+            done_ms: done,
+            total_ms: total,
+            quota_wait_ms: None,
+        };
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, p(42, 100)),
+            Some("cloud 42%".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Gpu, None, p(1, 3)),
+            Some("GPU 33%".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Cpu, Some("your microphone"), p(50, 100)),
+            Some("your microphone (CPU 50%)".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, p(0, 0)),
+            None,
+            "no speech, no fraction to report"
+        );
+    }
+
+    /// While the cloud pacer waits, the detail says so with an ETA — the UI
+    /// must never show a fake spinner over a deliberate quota sleep.
+    #[test]
+    fn quota_wait_details_replace_the_spinner() {
+        let w = |wait_ms| fly_asr::TranscribeProgress {
+            done_ms: 40,
+            total_ms: 100,
+            quota_wait_ms: Some(wait_ms),
+        };
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, w(180_000)),
+            Some("cloud 40%, waiting for cloud quota (~3m)".into())
+        );
+        // partial minutes round up — never promise less waiting than reality
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, w(61_000)),
+            Some("cloud 40%, waiting for cloud quota (~2m)".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, None, w(5_000)),
+            Some("cloud 40%, waiting for cloud quota (~1m)".into())
+        );
+        assert_eq!(
+            transcribe_detail(TierKind::Cloud, Some("other participants"), w(120_000)),
+            Some("other participants (cloud 40%, waiting for cloud quota ~2m)".into())
+        );
+    }
+
+    /// Progress events carry the tier that is ACTUALLY decoding: after a
+    /// cloud failover the same run's events switch to the GPU tier's kind.
+    #[tokio::test]
+    async fn progress_events_carry_the_active_tier_kind() {
+        struct ProgressLocal;
+        #[async_trait::async_trait]
+        impl TranscriptionEngine for ProgressLocal {
+            fn id(&self) -> &'static str {
+                "whisper.cpp"
+            }
+            fn is_local(&self) -> bool {
+                true
+            }
+            async fn transcribe(
+                &self,
+                _wav: &Path,
+                _opts: &TranscribeOptions,
+            ) -> fly_asr::Result<RawTranscript> {
+                unreachable!("transcribe_with_progress is overridden")
+            }
+            async fn transcribe_with_progress(
+                &self,
+                _wav: &Path,
+                _opts: &TranscribeOptions,
+                on_progress: fly_asr::TranscribeProgressFn<'_>,
+                _cancel: fly_asr::CancelFn<'_>,
+            ) -> fly_asr::Result<RawTranscript> {
+                on_progress(fly_asr::TranscribeProgress {
+                    done_ms: 50,
+                    total_ms: 100,
+                    quota_wait_ms: None,
+                });
+                Ok(RawTranscript {
+                    language: None,
+                    words: vec![],
+                    segments: vec![],
+                })
+            }
+        }
+
+        let asr = GuardedAsr::chain(vec![
+            tier(Box::new(RejectingCloud), Some("groq"), None),
+            tier(
+                Box::new(ProgressLocal),
+                Some("whisper.cpp-vulkan"),
+                Some("large-v3"),
+            ),
+        ]);
+        let events = std::sync::Mutex::new(Vec::new());
+        asr.transcribe(
+            Path::new("unused.wav"),
+            &TranscribeOptions::default(),
+            &|_| {},
+            &|kind, p| events.lock().unwrap().push((kind, p.done_ms)),
+            &|| false,
+        )
+        .await
+        .expect("the GPU tier must rescue the meeting");
+        assert_eq!(
+            events.into_inner().unwrap(),
+            vec![(TierKind::Gpu, 50)],
+            "events after the failover must be labeled with the ACTIVE (GPU) tier"
+        );
+    }
+
+    /// A user-requested abort must not fail over to the next tier — that
+    /// would restart the very work the cancel was meant to stop.
+    #[tokio::test]
+    async fn cancelled_run_does_not_fail_over() {
+        struct CancelledCloud;
+        #[async_trait::async_trait]
+        impl TranscriptionEngine for CancelledCloud {
+            fn id(&self) -> &'static str {
+                "groq"
+            }
+            fn is_local(&self) -> bool {
+                false
+            }
+            async fn transcribe(
+                &self,
+                _wav: &Path,
+                _opts: &TranscribeOptions,
+            ) -> fly_asr::Result<RawTranscript> {
+                Err(fly_asr::AsrError::Cancelled)
+            }
+        }
+
+        let asr = GuardedAsr::with_cpu_fallback(
+            Box::new(CancelledCloud),
+            "groq",
+            Box::new(FixedLocal),
+            None,
+        );
+        let notes = std::sync::Mutex::new(Vec::new());
+        let notify = |d: String| notes.lock().unwrap().push(d);
+        let err = asr
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &notify,
+                &|_, _| {},
+                &|| true,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains(fly_asr::CANCELLED_MARKER),
+            "scheduler must see the cancel marker, got: {err}"
+        );
+        assert!(!asr.failed_over(), "a cancel is not a tier failure");
+        assert!(
+            notes.lock().unwrap().is_empty(),
+            "no failover notice for a cancel"
+        );
     }
 
     #[tokio::test]
@@ -1256,7 +1887,8 @@ mod tests {
                 Path::new("unused.wav"),
                 &TranscribeOptions::default(),
                 &|_| {},
-                &|_| {},
+                &|_, _| {},
+                &|| false,
             )
             .await
             .unwrap_err();

@@ -171,12 +171,29 @@ pub async fn enhance_note(
         .map_err(|e| e.to_string())?;
 
     let blocks = enhance::parse_enhanced_blocks(&output, &prompt.segment_ids);
-    state
+    // Empty means the model attempted the JSON contract but nothing usable
+    // survived (e.g. the response was cut off before the first block closed).
+    // Saving would wipe the enhanced doc or paste raw JSON — fail visibly.
+    if blocks.is_empty() {
+        tracing::warn!(
+            note_id,
+            output_len = output.len(),
+            "enhance output unusable (truncated or malformed JSON) — not saved"
+        );
+        return Err(
+            "the AI response came back cut off or malformed — nothing was saved. \
+             Try Enhance again."
+                .into(),
+        );
+    }
+    let note = state
         .storage
         .lock()
         .unwrap()
         .update_note_blocks(&note_id, &blocks)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    state.embed_notify.notify_one();
+    Ok(note)
 }
 
 /// Edit one enhanced block (AI blocks are reclaimed as user text).
@@ -187,12 +204,14 @@ pub fn edit_note_block(
     block_id: String,
     markdown: String,
 ) -> CmdResult<Note> {
-    state
+    let note = state
         .storage
         .lock()
         .unwrap()
         .edit_note_block(&note_id, &block_id, &markdown)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    state.embed_notify.notify_one();
+    Ok(note)
 }
 
 // ---------------------------------------------------------------------------
