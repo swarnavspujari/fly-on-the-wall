@@ -168,9 +168,15 @@ Updates never interrupt a recording — the prompt waits until you're finished.
    xattr -cr "/Applications/Fly on the Wall.app"
    ```
 3. When it asks for permission to use your microphone, choose **Allow**.
+4. On macOS 14.2 or newer, the first recording also asks for permission to record
+   **system audio** (the other participants' sound). Choose **Allow** — you can change it
+   later under **System Settings → Privacy & Security → Screen & System Audio Recording**.
 
-> On a Mac, recording the other participants' sound isn't available yet, so Fly on the
-> Wall records only your microphone and tells you so. Everything else works.
+> Everything downloads itself on first use — the transcription engine and speech models
+> arrive automatically; nothing needs Homebrew. Apple Silicon Macs (M1 and newer)
+> transcribe on the GPU; Intel Macs use the CPU. On macOS older than 14.2, or when the
+> system-audio permission can't be granted, Fly on the Wall records only your microphone
+> and says so in the recording bar — everything else works.
 
 ### Linux
 
