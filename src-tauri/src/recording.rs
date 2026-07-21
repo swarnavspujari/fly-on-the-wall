@@ -244,6 +244,26 @@ pub fn get_meeting_for_note(
         .map_err(|e| e.to_string())
 }
 
+/// ALL meetings attached to a note, newest first. Re-recording into an open
+/// note repoints `notes.meeting_id` at the new meeting, and
+/// `get_meeting_for_note` returns only the newest — without this list the
+/// earlier meetings (and their transcripts) are intact in storage but
+/// unreachable from the UI.
+#[tauri::command]
+pub fn get_meetings_for_note(
+    state: State<'_, AppState>,
+    note_id: String,
+) -> CmdResult<Vec<Meeting>> {
+    let mut meetings = state
+        .storage
+        .lock()
+        .unwrap()
+        .meetings_for_note(&note_id)
+        .map_err(|e| e.to_string())?;
+    meetings.reverse(); // storage returns oldest first
+    Ok(meetings)
+}
+
 #[tauri::command]
 pub fn list_mic_devices(state: State<'_, AppState>) -> CmdResult<Vec<fly_audio::AudioDevice>> {
     state.audio.list_mic_devices().map_err(|e| e.to_string())

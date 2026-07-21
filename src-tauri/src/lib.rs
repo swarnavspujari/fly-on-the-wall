@@ -164,6 +164,7 @@ pub fn run() {
             recording::resume_recording,
             recording::stop_recording,
             recording::get_meeting_for_note,
+            recording::get_meetings_for_note,
             recording::list_mic_devices,
             live::live_status,
             asr_commands::transcribe_meeting,

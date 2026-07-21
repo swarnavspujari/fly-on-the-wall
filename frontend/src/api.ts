@@ -86,6 +86,10 @@ export const api = {
   resumeRecording: () => invoke<RecordingStatus>("resume_recording"),
   stopRecording: () => invoke<Meeting>("stop_recording"),
   getMeetingForNote: (noteId: string) => invoke<Meeting | null>("get_meeting_for_note", { noteId }),
+  /** ALL meetings attached to a note, newest first (re-recording into a note
+   *  adds a meeting; the earlier ones stay reachable through this). */
+  getMeetingsForNote: (noteId: string) =>
+    invoke<Meeting[]>("get_meetings_for_note", { noteId }),
   /** Latest live-caption status for a meeting (catch-up for the live pane —
    *  a status emitted before the pane mounted would otherwise be lost). */
   liveStatus: (meetingId: string) =>
