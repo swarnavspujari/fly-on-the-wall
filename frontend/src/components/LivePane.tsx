@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { api } from "../api";
 import { Badge } from "./ui";
 import { fmtElapsed } from "./RecordingBar";
 
@@ -37,6 +38,18 @@ export default function LivePane({ meetingId }: { meetingId: string }) {
       if (e.payload.meeting_id !== meetingId) return;
       setStatus(e.payload);
     });
+    // Catch up on a status emitted before this pane mounted (the live loop
+    // can fail within the first second of a recording, ahead of the poll
+    // that mounts this pane) — events alone would leave "Listening…" up
+    // forever. Late events still win via the listener above.
+    api
+      .liveStatus(meetingId)
+      .then((s) => {
+        if (s && s.meeting_id === meetingId) {
+          setStatus((prev) => prev ?? s);
+        }
+      })
+      .catch(() => {});
     return () => {
       void unSeg.then((f) => f());
       void unStatus.then((f) => f());

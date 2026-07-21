@@ -510,14 +510,41 @@ export default function TranscriptPanel({
   return (
     <div>
       {stage === "polishing" && stageBanner}
-      {pipelineError && (
-        <div
-          className="print:hidden mb-4 rounded-lg border border-line px-3 py-2 text-[13px]"
-          style={{ background: "var(--error-soft)", color: "var(--error-text)" }}
-          role="alert"
-        >
-          Re-transcription failed — showing the previous transcript. {briefError(pipelineError)}
+      {/* Re-transcription failures get the same actionable notices as a first
+          transcription (engine install / download retry / Groq link) — the raw
+          error box is only the fallback for errors neither notice covers. */}
+      {engineMissing || downloadFailed ? (
+        <div className="print:hidden mb-4">
+          <div className="text-[12.5px]" style={{ color: "var(--text-3)" }}>
+            Re-transcription failed — showing the previous transcript.
+          </div>
+          {engineMissing ? (
+            <EngineMissingNotice
+              engine={engine!}
+              installing={engineInstalling}
+              installPct={installPct}
+              installError={notice.installError}
+              onInstall={onInstallEngine}
+              onOpenSettings={onOpenSettings}
+            />
+          ) : (
+            <DownloadFailedNotice
+              error={pipelineError!}
+              onRetry={onTranscribe}
+              onOpenSettings={onOpenSettings}
+            />
+          )}
         </div>
+      ) : (
+        pipelineError && (
+          <div
+            className="print:hidden mb-4 rounded-lg border border-line px-3 py-2 text-[13px]"
+            style={{ background: "var(--error-soft)", color: "var(--error-text)" }}
+            role="alert"
+          >
+            Re-transcription failed — showing the previous transcript. {briefError(pipelineError)}
+          </div>
+        )
       )}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-baseline gap-2">

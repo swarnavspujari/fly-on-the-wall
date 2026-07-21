@@ -23,6 +23,8 @@ const MIN_CHUNK_SECS: u64 = 8;
 /// …and never take more than this in one bite.
 const MAX_CHUNK_SECS: u64 = 30;
 const LIVE_MODEL: &str = "ggml-small-q5_1";
+/// Consecutive failed chunks before the live pane is told "unavailable".
+const FAILURES_BEFORE_UNAVAILABLE: u32 = 3;
 
 #[derive(Clone, serde::Serialize)]
 struct LiveSegment {
@@ -33,10 +35,31 @@ struct LiveSegment {
 }
 
 #[derive(Clone, serde::Serialize)]
-struct LiveStatus {
+pub struct LiveStatus {
     meeting_id: String,
     state: &'static str, // "ready" | "unavailable"
     detail: String,
+}
+
+/// Emit a `live:status` event AND remember it in AppState: the pane mounts
+/// on its own schedule (it appears when the recording-status poll notices
+/// the capture), so a status emitted before its listener exists would be
+/// lost — `live_status` (the command below) lets it catch up.
+fn set_status(app: &tauri::AppHandle, status: LiveStatus) {
+    *app.state::<AppState>().live_status.lock().unwrap() = Some(status.clone());
+    let _ = app.emit("live:status", status);
+}
+
+/// Latest live-caption status for a meeting (None: nothing reported yet —
+/// the pane keeps its optimistic "Listening…" line).
+#[tauri::command]
+pub fn live_status(state: tauri::State<'_, AppState>, meeting_id: String) -> Option<LiveStatus> {
+    state
+        .live_status
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|s| s.meeting_id == meeting_id)
 }
 
 struct ChannelCursor {
@@ -98,8 +121,8 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
     {
         Ok(p) => p,
         Err(e) => {
-            let _ = app.emit(
-                "live:status",
+            set_status(
+                &app,
                 LiveStatus {
                     meeting_id,
                     state: "unavailable",
@@ -119,8 +142,8 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
     {
         Ok(p) => p,
         Err(e) => {
-            let _ = app.emit(
-                "live:status",
+            set_status(
+                &app,
                 LiveStatus {
                     meeting_id,
                     state: "unavailable",
@@ -153,8 +176,8 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
         // live windows are throwaway snippets — nothing to checkpoint
         resume: false,
     };
-    let _ = app.emit(
-        "live:status",
+    set_status(
+        &app,
         LiveStatus {
             meeting_id: meeting_id.clone(),
             state: "ready",
@@ -178,6 +201,15 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
     ];
     let tmp_dir = out_dir.join("live-tmp");
     let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Chunk failures across both channels, reset by any success. Engine
+    // resolution succeeding does not mean the engine RUNS (missing dylib,
+    // deleted model file mid-meeting): after a few consecutive failures the
+    // pane must say "unavailable" instead of listening optimistically —
+    // errors here were previously swallowed at debug level and the status
+    // never downgraded. The loop keeps trying (a later chunk may recover,
+    // which flips the status back to ready).
+    let mut consecutive_failures: u32 = 0;
 
     while !stop.load(Ordering::Relaxed) {
         tokio::time::sleep(std::time::Duration::from_millis(TICK_MS)).await;
@@ -214,14 +246,46 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
                         ..Default::default()
                     };
                     let text = match engine.transcribe(&chunk_path, &opts).await {
-                        Ok(raw) => raw
-                            .words
-                            .iter()
-                            .map(|w| w.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" "),
+                        Ok(raw) => {
+                            if consecutive_failures >= FAILURES_BEFORE_UNAVAILABLE {
+                                set_status(
+                                    &app,
+                                    LiveStatus {
+                                        meeting_id: meeting_id.clone(),
+                                        state: "ready",
+                                        detail: String::new(),
+                                    },
+                                );
+                            }
+                            consecutive_failures = 0;
+                            raw.words
+                                .iter()
+                                .map(|w| w.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        }
                         Err(e) => {
-                            tracing::debug!("live chunk transcription failed: {e}");
+                            consecutive_failures += 1;
+                            if consecutive_failures == FAILURES_BEFORE_UNAVAILABLE {
+                                tracing::warn!(
+                                    failures = consecutive_failures,
+                                    "live chunk transcription keeps failing — captions \
+                                     unavailable: {e}"
+                                );
+                                set_status(
+                                    &app,
+                                    LiveStatus {
+                                        meeting_id: meeting_id.clone(),
+                                        state: "unavailable",
+                                        detail: format!(
+                                            "Live captions are unavailable ({e}) — the full \
+                                             transcript still arrives after Stop."
+                                        ),
+                                    },
+                                );
+                            } else {
+                                tracing::debug!("live chunk transcription failed: {e}");
+                            }
                             String::new()
                         }
                     };

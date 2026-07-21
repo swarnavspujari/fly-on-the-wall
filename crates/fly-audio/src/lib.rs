@@ -1,13 +1,16 @@
 //! fly-audio: the `AudioCapture` trait and platform backends.
 //!
-//! Windows backend (cpal/WASAPI, incl. system loopback) lands in M2.
-//! macOS (Core Audio process taps) and mobile impls are future work — see
-//! docs/PORTING.md. UI and domain code must only ever see the trait.
+//! System loopback per OS: WASAPI loopback (Windows), the Pulse/PipeWire
+//! monitor source (Linux), Core Audio process taps (macOS 14.2+). Mobile
+//! impls are future work — see docs/PORTING.md. UI and domain code must
+//! only ever see the trait.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
+mod coreaudio_tap;
 pub mod cpal_backend;
 pub mod mix;
 pub mod null;

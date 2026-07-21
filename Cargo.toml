@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.5.1"
+version = "1.6.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/swarnavspujari/fly-on-the-wall"
@@ -57,6 +57,7 @@ hound = "3.5"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 tar = "0.4"
 bzip2 = "0.6"
+flate2 = "1"
 xz2 = { version = "0.1", features = ["static"] }
 
 [profile.release]

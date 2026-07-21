@@ -81,6 +81,44 @@ pub fn record_runtime_failure(storage: &fly_storage::Storage, model_id: &str, er
     );
 }
 
+/// Whether this Mac's hardware is Apple Silicon, asked of the kernel at
+/// runtime (`hw.optional.arm64`), not the compiler: the shipped binary is
+/// universal, so `cfg!(target_arch)` reports whichever slice happens to be
+/// executing (an x86_64 slice under Rosetta still runs on an arm64 machine,
+/// and vice versa never holds a GPU truth). Intel-era Macs don't have the
+/// key at all — sysctl fails there, and any failure is treated as Intel
+/// because CPU is the engine that works everywhere (the Intel smoke test
+/// showed Metal on AMD GPUs silently corrupting output, not crashing).
+#[cfg(target_os = "macos")]
+pub fn is_apple_silicon() -> bool {
+    static IS_ARM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IS_ARM.get_or_init(|| {
+        extern "C" {
+            fn sysctlbyname(
+                name: *const std::os::raw::c_char,
+                oldp: *mut std::os::raw::c_void,
+                oldlenp: *mut usize,
+                newp: *mut std::os::raw::c_void,
+                newlen: usize,
+            ) -> std::os::raw::c_int;
+        }
+        let mut val: i32 = 0;
+        let mut len = std::mem::size_of::<i32>();
+        let rc = unsafe {
+            sysctlbyname(
+                c"hw.optional.arm64".as_ptr(),
+                &mut val as *mut i32 as *mut _,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        let arm = rc == 0 && val == 1;
+        tracing::info!(apple_silicon = arm, "runtime CPU architecture detected");
+        arm
+    })
+}
+
 #[cfg(target_os = "windows")]
 pub use windows::{plan, PlanRequest};
 

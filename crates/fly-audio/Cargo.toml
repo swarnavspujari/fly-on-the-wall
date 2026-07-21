@@ -20,6 +20,25 @@ windows = { version = "0.62", features = [
   "Win32_System_Com",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# System-audio loopback: Core Audio process taps (macOS 14.2+, gated at
+# runtime). All of these are already in the dependency graph via tauri/cpal.
+objc2 = "0.6"
+objc2-core-audio = "0.3"
+objc2-core-audio-types = "0.3"
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+  "CFDictionary",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "NSArray",
+  "NSString",
+  "NSUUID",
+  "std",
+] }
+block2 = "0.6"
+dispatch2 = "0.3"
+core-foundation = "0.10"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # System-audio loopback: record the default sink's monitor source. Works on
 # PulseAudio and PipeWire (via pipewire-pulse) alike.

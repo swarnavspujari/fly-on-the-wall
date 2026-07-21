@@ -91,6 +91,16 @@ export const api = {
   resumeRecording: () => invoke<RecordingStatus>("resume_recording"),
   stopRecording: () => invoke<Meeting>("stop_recording"),
   getMeetingForNote: (noteId: string) => invoke<Meeting | null>("get_meeting_for_note", { noteId }),
+  /** ALL meetings attached to a note, newest first (re-recording into a note
+   *  adds a meeting; the earlier ones stay reachable through this). */
+  getMeetingsForNote: (noteId: string) => invoke<Meeting[]>("get_meetings_for_note", { noteId }),
+  /** Latest live-caption status for a meeting (catch-up for the live pane —
+   *  a status emitted before the pane mounted would otherwise be lost). */
+  liveStatus: (meetingId: string) =>
+    invoke<{ meeting_id: string; state: "ready" | "unavailable"; detail: string } | null>(
+      "live_status",
+      { meetingId },
+    ),
   // Set the meeting's start date/time (RFC 3339 UTC). Length is preserved
   // (ended_at shifts); the meeting folder + manifest re-mirror the date.
   updateMeetingStartedAt: (meetingId: string, startedAt: string) =>
@@ -185,6 +195,5 @@ export const api = {
   importTranscribe: (meetingId: string, order: string[]) =>
     invoke<ImportStaged>("import_transcribe", { meetingId, order }),
   // Stop a queued/running transcription; finished batches stay checkpointed.
-  cancelTranscription: (meetingId: string) =>
-    invoke<void>("cancel_transcription", { meetingId }),
+  cancelTranscription: (meetingId: string) => invoke<void>("cancel_transcription", { meetingId }),
 };

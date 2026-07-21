@@ -50,6 +50,11 @@ import AskPanel from "./AskPanel";
 interface Props {
   note: Note;
   meeting: Meeting | null;
+  /** ALL meetings attached to this note, newest first (a note re-recorded
+   *  into has several). The transcript view offers a picker when there is
+   *  more than one, so earlier recordings stay reachable. */
+  meetings: Meeting[];
+  onSelectMeeting: (meeting: Meeting) => void;
   transcript: Transcript | null;
   /** LLM-polished variant (null until the cleanup pass has run). */
   cleanedTranscript: Transcript | null;
@@ -882,6 +887,8 @@ function ViewSwitcher({
 export default function Editor({
   note,
   meeting,
+  meetings,
+  onSelectMeeting,
   transcript,
   cleanedTranscript,
   pipeStage,
@@ -1320,6 +1327,39 @@ export default function Editor({
             )}
             {showTranscript && !isRecordingThisNote && meeting && (
               <div>
+                {meetings.length > 1 && (
+                  <div className="mb-3.5 flex flex-wrap items-center gap-1.5">
+                    <span
+                      className="text-[10.5px] font-semibold uppercase"
+                      style={{ letterSpacing: ".07em", color: "var(--text-3)" }}
+                    >
+                      Recordings
+                    </span>
+                    {meetings.map((m, i) => {
+                      const active = m.id === meeting.id;
+                      return (
+                        <button
+                          key={m.id}
+                          onClick={() => !active && onSelectMeeting(m)}
+                          title={
+                            active
+                              ? "Currently shown"
+                              : "Show this recording's transcript and audio"
+                          }
+                          className={`inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-semibold ${
+                            active
+                              ? "border-transparent bg-primary text-on-primary"
+                              : "border-line bg-surface-2 text-text-2 hover:bg-surface-3"
+                          }`}
+                        >
+                          <Mic size={11} strokeWidth={1.75} />
+                          {fmtWhen(m.started_at)}
+                          {i === 0 ? " · latest" : ""}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 {audioPath && (
                   <AudioPlayer
                     src={audioSrc}

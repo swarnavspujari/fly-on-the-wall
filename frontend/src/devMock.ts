@@ -417,6 +417,7 @@ const asrSettings = {
   has_groq_key: false,
   auto_transcribe: true,
   use_gpu: true,
+  gpu_available: true,
   gpu_bench: null,
   hw: {
     ram_gb: 32,
@@ -585,7 +586,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "pong";
     case "app_info":
       return {
-        version: "1.5.1",
+        version: "1.6.0",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
         os: "windows",
       };
@@ -624,6 +625,12 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return note(String(args.id ?? args.noteId ?? "n1"));
     case "get_meeting_for_note":
       return meeting(String(args.noteId));
+    case "get_meetings_for_note": {
+      const m = meeting(String(args.noteId));
+      return m ? [m] : [];
+    }
+    case "live_status":
+      return null;
     case "get_transcript":
       // staged import: no transcript until the mock pipeline finishes
       if (args.meetingId === IMPORT_MEETING_ID && !mockImportDone) return null;

@@ -38,10 +38,53 @@ local speaker turns (spec §6.3): "who said what" never depends on the network.
 
 | Artifact | Version | Size | Purpose |
 |---|---|---|---|
-| whisper.cpp CLI (`whisper-cli.exe`) | v1.9.1 (CPU build) | ~8 MB zip | ASR; the same zip ships `parakeet-cli.exe` for a future Parakeet engine |
+| whisper.cpp CLI (`whisper-cli.exe`, Windows) | v1.9.1 (CPU build) | ~8 MB zip | ASR; the same zip ships `parakeet-cli.exe` for a future Parakeet engine |
 | whisper.cpp CLI (Vulkan GPU, Windows) | v1.9.1 (`GGML_VULKAN=1` build) | ~24 MB zip | optional GPU ASR — one cross-vendor build (NVIDIA/AMD/Intel); see below |
+| whisper.cpp CLI (macOS universal) | v1.9.1 (static, Metal embedded) | ~2.4 MB tar.bz2 | ASR — one archive for Intel + Apple Silicon; see "Building the macOS engine" |
 | sherpa-onnx diarization CLI | v1.13.3 | ~19 MB | speaker diarization |
 | ffmpeg | n8.1 (BtbN autobuild, dated tag) | ~79 MB zip | screen capture (gdigrab) + media import conversion |
+
+### Building the macOS engine
+
+Upstream whisper.cpp ships **no** macOS or Linux binary, so those platforms
+historically depended on a `whisper-cli` on `PATH` (e.g. `brew install
+whisper-cpp`) — which most users don't have, producing a dead-end transcribe
+error. To close that on macOS, the maintainer builds the same pinned commit
+(v1.9.1, `f049fff`) and hosts it as a `tools-whisper-v1.9.1` release on THIS
+repo — the same pattern as the Windows Vulkan build — so `ensure_tool`
+auto-downloads it on first transcribe exactly like Windows.
+
+Maintainer flow (all hosted from this repo, never a fork):
+
+1. Run the **Build whisper sidecar (macOS)** workflow
+   (`.github/workflows/build-whisper-sidecar.yml`, `workflow_dispatch`) with
+   `create_release` on. It builds via
+   [`scripts/build-whisper-sidecar.sh`](../scripts/build-whisper-sidecar.sh) —
+   a **static** universal (x86_64 + arm64, hard-asserted via `lipo -archs`)
+   binary with Metal embedded, minimum macOS pinned to the app's
+   `minimumSystemVersion` — attaches the tarball to the tools release, and
+   prints the `Artifact` pin (url / sha256 / bytes) in the job summary.
+2. Paste the pin over the placeholder `whisper-bin` entry in the macOS `TOOLS`
+   array in `src-tauri/src/models.rs` (id `whisper-bin`, `probe_rel`
+   `bin/whisper/whisper-cli`).
+
+The script also runs locally (`scripts/build-whisper-sidecar.sh macos`, needs
+`git` + `cmake`) to reproduce and inspect the build: it verifies HEAD equals
+the pinned commit, checks the binary links only system libraries, packages it
+flat (archive root holds just `whisper-cli`), and prints the same pin.
+(Rebuilds are not bit-identical — timestamps land in the tar header —
+integrity rests on the SHA-256 pin of the one hosted artifact.)
+
+Status: **hosted and pinned** (2026-07-16) — built by workflow run
+29546886480, attached to `tools-whisper-v1.9.1`, and pinned in `models.rs`
+after independently re-hashing the hosted asset and verifying both fat-binary
+slices (x86_64 + arm64). Awaiting the Apple Silicon and Intel-Mac smoke tests
+in `docs/pr-triage/pr-26-rehost-checklist.md` before this branch merges — the
+arm64 slice has never been executed on real hardware. **Linux** stays
+PATH-resolved (`whisper-cli` on PATH); the script's `linux` target exists for
+whoever adds that platform later. Where no engine is resolvable, the app
+shows an actionable "engine not installed" prompt (Install / Settings)
+rather than a raw error.
 
 ## GPU transcription (post-meeting only)
 
@@ -56,14 +99,14 @@ launch, or mid-run — falls back to CPU visibly and re-pins the machine to CPU
 Per-OS strategy: **Windows** downloads the pinned Vulkan build above (upstream
 whisper.cpp publishes no Vulkan Windows binary — only CPU/BLAS/CUDA-only — so
 this one is built from the upstream v1.9.1 tag with `-DGGML_VULKAN=1` and
-hosted as a tools release on this repo). **macOS** whisper.cpp builds
-(including brew's, found via PATH) default to Metal already; Metal runs as a
-guarded primary with a forced-CPU (`-ng`) fallback, because on GPUs that
-Metal can't serve (e.g. Intel-era Macs) ggml's Metal init aborts — that
-failure falls back to CPU mid-run and pins the machine to CPU like Windows
-does. The live transcript loop always stays on CPU (`-ng` on macOS, the CPU
-build on Windows): it runs during capture, exactly when the GPU is busy
-with the call.
+hosted as a tools release on this repo). **macOS** whisper.cpp builds default
+to Metal already — the managed universal archive above is built with Metal
+embedded, and a brew/PATH build works the same. Metal runs as a guarded
+primary with a forced-CPU (`-ng`) fallback, because on GPUs that Metal can't
+serve (e.g. Intel-era Macs) ggml's Metal init aborts — that failure falls
+back to CPU mid-run and pins the machine to CPU like Windows does. The live
+transcript loop always stays on CPU (`-ng` on macOS, the CPU build on
+Windows): it runs during capture, exactly when the GPU is busy with the call.
 
 ## Model registry
 

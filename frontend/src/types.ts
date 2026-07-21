@@ -213,6 +213,9 @@ export interface AsrSettings {
   has_groq_key: boolean;
   auto_transcribe: boolean;
   use_gpu: boolean;
+  /** GPU transcription is possible on this machine at all — false on Intel
+   *  Macs, where the toggle renders as unavailable. */
+  gpu_available: boolean;
   gpu_bench: GpuBench | null;
   hw: HwInfo;
   models: ModelStatus[];

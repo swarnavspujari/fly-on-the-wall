@@ -55,6 +55,9 @@ export default function App() {
   const [notes, setNotes] = useState<NoteSummary[]>(readNotesCache);
   const [openNote, setOpenNote] = useState<Note | null>(null);
   const [openMeeting, setOpenMeeting] = useState<Meeting | null>(null);
+  // ALL meetings attached to the open note, newest first. Re-recording into a
+  // note adds a meeting; earlier ones stay reachable through this list.
+  const [noteMeetings, setNoteMeetings] = useState<Meeting[]>([]);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   // The LLM-polished variant (same segment ids/speakers/timestamps as the raw
   // transcript, cleaner text). Null until the cleanup pass has run.
@@ -349,8 +352,10 @@ export default function App() {
     const note = await api.getNote(id);
     if (!fresh()) return;
     setOpenNote(note);
-    const meeting = await api.getMeetingForNote(id);
+    const meetings = await api.getMeetingsForNote(id).catch(() => [] as Meeting[]);
     if (!fresh()) return;
+    setNoteMeetings(meetings);
+    const meeting = meetings[0] ?? null; // newest is the primary
     setOpenMeeting(meeting);
     setPipelineError(null);
     setPipeDetail(null);
@@ -381,6 +386,7 @@ export default function App() {
     await refreshNotes();
     setOpenNote(note);
     setOpenMeeting(null);
+    setNoteMeetings([]);
     setTranscript(null);
     setCleanedTranscript(null);
     setPipeStage(null);
@@ -394,6 +400,7 @@ export default function App() {
       openSeq.current++;
       setOpenNote(null);
       setOpenMeeting(null);
+      setNoteMeetings([]);
       setTranscript(null);
       setCleanedTranscript(null);
       setImportStaged(null);
@@ -473,7 +480,9 @@ export default function App() {
         await refreshNotes();
         await openNoteById(status.note_id);
       } else if (openNote) {
-        setOpenMeeting(await api.getMeetingForNote(openNote.id));
+        const meetings = await api.getMeetingsForNote(openNote.id);
+        setNoteMeetings(meetings);
+        setOpenMeeting(meetings[0] ?? null);
       }
     } catch (e) {
       setError(String(e));
@@ -486,6 +495,7 @@ export default function App() {
       setRecStatus(IDLE_STATUS);
       if (openNote?.id === meeting.note_id) {
         setOpenMeeting(meeting);
+        api.getMeetingsForNote(meeting.note_id).then(setNoteMeetings).catch(console.error);
       }
       await refreshNotes();
       if (autoTranscribe) {
@@ -539,9 +549,30 @@ export default function App() {
   // Attendee edits (editor Save / "Someone else…") return the updated meeting.
   const meetingChanged = (m: Meeting) => {
     if (openMeetingIdRef.current === m.id) setOpenMeeting(m);
+    setNoteMeetings((list) => list.map((x) => (x.id === m.id ? m : x)));
     // a date edit reorders the list (sorted by meeting date)
     void refreshNotes();
   };
+
+  // Picker in the transcript view: show an earlier (or the latest) meeting of
+  // this note. Uses the same monotonic token as openNoteById so a stale fetch
+  // can never overwrite a newer selection.
+  const selectMeeting = useCallback(async (m: Meeting) => {
+    const seq = ++openSeq.current;
+    const fresh = () => openSeq.current === seq;
+    setOpenMeeting(m);
+    setPipelineError(null);
+    setPipeDetail(null);
+    const [raw, cleaned, stage] = await Promise.all([
+      api.getTranscript(m.id),
+      api.getCleanedTranscript(m.id).catch(() => null),
+      api.pipelineStage(m.id),
+    ]);
+    if (!fresh()) return;
+    setTranscript(raw);
+    setCleanedTranscript(cleaned);
+    setPipeStage(stage);
+  }, []);
 
   // Undo of a re-diarize hands back the restored raw transcript; the cleaned
   // variant was restored backend-side too, so refetch it.
@@ -702,6 +733,8 @@ export default function App() {
           <Editor
             note={openNote}
             meeting={openMeeting}
+            meetings={noteMeetings}
+            onSelectMeeting={(m) => void selectMeeting(m)}
             transcript={transcript}
             cleanedTranscript={cleanedTranscript}
             pipeStage={pipeStage}

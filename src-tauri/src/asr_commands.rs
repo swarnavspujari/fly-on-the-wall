@@ -220,6 +220,10 @@ pub struct AsrSettings {
     pub has_groq_key: bool,
     pub auto_transcribe: bool,
     pub use_gpu: bool,
+    /// Whether GPU transcription is possible on this machine at all. False on
+    /// Intel Macs (Metal there silently corrupts output — see gpu.rs), where
+    /// the Settings toggle shows as unavailable instead of promising a GPU.
+    pub gpu_available: bool,
     /// This machine's one-time GPU-vs-CPU benchmark verdict, if it ran.
     pub gpu_bench: Option<gpu::GpuBench>,
     pub hw: hw::HwInfo,
@@ -293,6 +297,10 @@ pub async fn get_asr_settings(state: State<'_, AppState>) -> CmdResult<AsrSettin
             .is_some(),
         auto_transcribe: get("asr.auto_transcribe").as_deref() != Some("false"),
         use_gpu: gpu::enabled(&storage),
+        #[cfg(target_os = "macos")]
+        gpu_available: gpu::is_apple_silicon(),
+        #[cfg(not(target_os = "macos"))]
+        gpu_available: true,
         gpu_bench: gpu::stored(&storage),
         hw: hw_info,
         models,

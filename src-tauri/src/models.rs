@@ -36,7 +36,8 @@ pub struct Artifact {
 /// Platform tool binaries. Checksums pinned from upstream release digests
 /// (GitHub asset `digest` fields), same method as the original Windows pins.
 /// whisper.cpp and ffmpeg publish no macOS binaries (and whisper.cpp none for
-/// Linux either) — `ensure_tool` falls back to the same tool on PATH there.
+/// Linux either) — macOS gets a self-built whisper engine hosted on this
+/// repo (below); elsewhere `ensure_tool` falls back to the tool on PATH.
 #[cfg(target_os = "windows")]
 const TOOLS: &[Artifact] = &[
     Artifact {
@@ -126,16 +127,63 @@ const TOOLS: &[Artifact] = &[
 ];
 
 #[cfg(target_os = "macos")]
-const TOOLS: &[Artifact] = &[Artifact {
-    id: "sherpa-bin",
-    display: "sherpa-onnx diarization CLI (v1.13.3)",
-    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.3/sherpa-onnx-v1.13.3-osx-universal2-shared.tar.bz2",
-    sha256: "2317b975f42f5edf3e69068809dec456c068b68e48d091e6b578e7a977227361",
-    bytes: 56_024_420,
-    kind: ArtifactKind::Archive,
-    dest_rel: "bin/sherpa",
-    probe_rel: "bin/sherpa/sherpa-onnx-v1.13.3-osx-universal2-shared/bin/sherpa-onnx-offline-speaker-diarization",
-}];
+const TOOLS: &[Artifact] = &[
+    // Upstream whisper.cpp publishes no macOS binary, so we build it ourselves
+    // (static, universal, Metal embedded — see scripts/build-whisper-sidecar.sh
+    // and .github/workflows/build-whisper-sidecar.yml) and host it as a tools
+    // release on this repo, like the Windows Vulkan build above. This lets
+    // `ensure_tool` auto-download the engine on first transcribe, exactly like
+    // Windows, instead of requiring a `whisper-cli` on PATH (e.g. `brew
+    // install whisper-cpp`). While no managed copy is installed yet, a
+    // brew/PATH build still wins (resolution: installed → PATH → download).
+    // Pin verified 2026-07-16 by hashing the hosted asset independently of
+    // the workflow's summary; fat header confirmed x86_64 + arm64 slices.
+    Artifact {
+        id: "whisper-bin",
+        display: "whisper.cpp CLI (macOS universal, v1.9.1)",
+        url: "https://github.com/swarnavspujari/fly-on-the-wall/releases/download/tools-whisper-v1.9.1/whisper-bin-macos-universal2-v1.9.1.tar.bz2",
+        sha256: "f9a4bcae555dd3d14f0a8795aad63b8a7a006d59f705bca94e83ef2215805070",
+        bytes: 2_388_157,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/whisper",
+        probe_rel: "bin/whisper/whisper-cli",
+    },
+    // v1.13.x macOS builds bundle an onnxruntime compiled against SDK 15.5
+    // whose CoreML EP hard-references MLComputePlan (macOS 14.4+): dyld
+    // aborts on every macOS from the app's 12.0 floor through 14.3
+    // (reproduced on this repo's 14.3 Apple Silicon smoke machine). The
+    // v1.12.34 release publishes an onnxruntime-1.17.1 variant with
+    // minos 11.0 that runs and diarizes correctly there — verified on real
+    // audio with the pinned pyannote+CAM++ models. Digest matches the
+    // GitHub asset digest (sha256 re-verified locally 2026-07-21).
+    Artifact {
+        id: "sherpa-bin",
+        display: "sherpa-onnx diarization CLI (v1.12.34, onnxruntime 1.17.1)",
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.34/sherpa-onnx-v1.12.34-onnxruntime-1.17.1-osx-universal2-shared.tar.bz2",
+        sha256: "86ed07a11d2a15fc1615e1ad0a69514a8bee556c1b9a85c7ab3822c66f57bdf7",
+        bytes: 42_657_343,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/sherpa",
+        probe_rel: "bin/sherpa/sherpa-onnx-v1.12.34-onnxruntime-1.17.1-osx-universal2-shared/bin/sherpa-onnx-offline-speaker-diarization",
+    },
+    // Local LLM runtime for the "ollama" provider — same managed, opt-in
+    // story as the Windows entry (ollama.rs `can_install` keys off this).
+    // The CLI tarball ships the arm64 Metal/MLX runners: verified on the
+    // Apple Silicon smoke machine — `ollama serve` reports inference
+    // compute library=Metal (Apple M3 Pro), so pulled models run on the
+    // GPU. Digest matches the GitHub asset digest (re-hashed locally
+    // 2026-07-21). Tarball root holds `ollama` + its dylibs.
+    Artifact {
+        id: "ollama-bin",
+        display: "Ollama (local AI runtime, v0.31.2)",
+        url: "https://github.com/ollama/ollama/releases/download/v0.31.2/ollama-darwin.tgz",
+        sha256: "d72381baa260f6ce014c8e942e605eac76cac5313fcb3401eaf5495f659cfd6d",
+        bytes: 128_859_228,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/ollama",
+        probe_rel: "bin/ollama/ollama",
+    },
+];
 
 /// OS-independent model weights. Checksums pinned from upstream release
 /// digests / HF LFS metadata, re-verified locally on 2026-07-01.
@@ -216,6 +264,17 @@ pub fn artifact(id: &str) -> Option<&'static Artifact> {
 /// resolve the exact same binary.
 pub const WHISPER_ENGINE_ID: &str = "whisper-bin";
 pub const WHISPER_CLI_NAMES: &[&str] = &["whisper-cli"];
+
+/// Markers for failures only a person can fix, mirroring
+/// `fly_asr::REJECTED_MARKER`: the pipeline reduces errors to strings before
+/// they reach the scheduler, which matches on these substrings to fail the
+/// job once (with its actionable notice) instead of burning every retry on
+/// an identical outcome. Sharing the constant between the producers below
+/// and `scheduler::permanent_failure` keeps a message reword from silently
+/// decoupling them. The frontend's notice selector (pipelineNotice.ts)
+/// matches the same phrases — change them in both places or not at all.
+pub const ENGINE_MISSING_MARKER: &str = "is not installed";
+pub const DOWNLOAD_FAILED_MARKER: &str = "download failed for";
 
 /// True when a tool binary is already usable without downloading anything — a
 /// managed install (this OS ships an artifact for it) or the same tool on
@@ -299,7 +358,10 @@ pub async fn ensure_tool_with(
     if artifact(id).is_some() {
         return ensure_with(progress, data_dir, id, effort).await;
     }
-    Err(format!("{} is not installed — {}", path_names[0], guidance))
+    Err(format!(
+        "{} {ENGINE_MISSING_MARKER} — {}",
+        path_names[0], guidance
+    ))
 }
 
 pub fn installed_path(data_dir: &Path, a: &Artifact) -> Option<PathBuf> {
@@ -572,8 +634,17 @@ pub async fn ensure_with(
         DownloadEffort::SingleAttempt => (vec![a.url.to_string()], 1u8),
     };
     // One shared client: retries and mirror hops reuse the connection pool
-    // instead of paying a fresh TLS handshake per attempt.
-    let client = reqwest::Client::new();
+    // instead of paying a fresh TLS handshake per attempt. Bounded connect +
+    // per-chunk read: with no timeouts an offline machine sits in TCP connect
+    // limbo for the OS default (observed 60+ s on macOS) before any caller —
+    // the live loop's prompt "unavailable" verdict most of all — hears about
+    // it. No overall request timeout: model downloads legitimately run for
+    // minutes.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let mut errors: Vec<String> = Vec::new();
     let mut downloaded: u64 = 0;
     let mut fetched = false;
@@ -612,7 +683,7 @@ pub async fn ensure_with(
             ""
         };
         let msg = format!(
-            "download failed for {} after trying {} source(s) (last error: {last}).{hf_hint}",
+            "{DOWNLOAD_FAILED_MARKER} {} after trying {} source(s) (last error: {last}).{hf_hint}",
             a.display,
             candidates.len(),
         );
@@ -695,6 +766,10 @@ async fn extract_archive(archive: &Path, dest: &Path, src_name: &str) -> Result<
             tar::Archive::new(bzip2::read::BzDecoder::new(reader))
                 .unpack(&dest)
                 .map_err(|e| format!("extraction failed: {e}"))
+        } else if name.ends_with(".tgz") || name.ends_with(".tar.gz") {
+            tar::Archive::new(flate2::read::GzDecoder::new(reader))
+                .unpack(&dest)
+                .map_err(|e| format!("extraction failed: {e}"))
         } else if name.ends_with(".tar.xz") {
             tar::Archive::new(xz2::read::XzDecoder::new(reader))
                 .unpack(&dest)
@@ -749,6 +824,18 @@ mod tests {
         assert_extracts(
             enc.finish().unwrap(),
             "https://example.com/sherpa-onnx-v1.13.3.tar.bz2",
+            "inner/dir/probe.txt",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn extracts_tgz_in_process() {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&tar_bytes()).unwrap();
+        assert_extracts(
+            enc.finish().unwrap(),
+            "https://example.com/ollama-darwin.tgz",
             "inner/dir/probe.txt",
         )
         .await;

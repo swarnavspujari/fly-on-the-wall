@@ -762,14 +762,27 @@ export default function SettingsModal({
                   still runs locally. Audio goes to Groq first, paced to stay inside the free
                   tier&apos;s hourly limit; whenever the quota is busy, this machine&apos;s GPU or
                   CPU transcribes in the meantime. Finished parts are saved as they complete, so a
-                  quit or restart picks up where it left off — nothing is transcribed twice.
-                  Applied when you press Save.
+                  quit or restart picks up where it left off — nothing is transcribed twice. Applied
+                  when you press Save.
                 </p>
               </Card>
             </div>
           )}
 
-          {tier !== "cloud" && (
+          {tier !== "cloud" && settings?.gpu_available === false && (
+            <>
+              <Checkbox
+                checked={false}
+                disabled
+                label="Use GPU for transcription when it is faster on this machine"
+              />
+              <p className="pl-7 text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
+                Not available on this Mac — GPU transcription needs Apple Silicon, so this machine
+                transcribes on the CPU.
+              </p>
+            </>
+          )}
+          {tier !== "cloud" && settings?.gpu_available !== false && (
             <>
               <Checkbox
                 checked={useGpu}

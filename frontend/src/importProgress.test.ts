@@ -62,7 +62,11 @@ describe("parseTranscribingDetail", () => {
       engine: "cloud",
       quotaWaitMin: null,
     });
-    expect(parseTranscribingDetail("GPU 7%")).toEqual({ pct: 7, engine: "GPU", quotaWaitMin: null });
+    expect(parseTranscribingDetail("GPU 7%")).toEqual({
+      pct: 7,
+      engine: "GPU",
+      quotaWaitMin: null,
+    });
     expect(parseTranscribingDetail("CPU 99%")).toEqual({
       pct: 99,
       engine: "CPU",

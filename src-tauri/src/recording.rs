@@ -244,6 +244,26 @@ pub fn get_meeting_for_note(
         .map_err(|e| e.to_string())
 }
 
+/// ALL meetings attached to a note, newest first. Re-recording into an open
+/// note repoints `notes.meeting_id` at the new meeting, and
+/// `get_meeting_for_note` returns only the newest — without this list the
+/// earlier meetings (and their transcripts) are intact in storage but
+/// unreachable from the UI.
+#[tauri::command]
+pub fn get_meetings_for_note(
+    state: State<'_, AppState>,
+    note_id: String,
+) -> CmdResult<Vec<Meeting>> {
+    let mut meetings = state
+        .storage
+        .lock()
+        .unwrap()
+        .meetings_for_note(&note_id)
+        .map_err(|e| e.to_string())?;
+    meetings.reverse(); // storage returns oldest first
+    Ok(meetings)
+}
+
 /// Set a meeting's start date/time (the note header's date editor). RFC 3339
 /// input; length is preserved (ended_at shifts), and the meeting folder +
 /// manifest re-mirror the new date (see Storage::set_meeting_started_at).

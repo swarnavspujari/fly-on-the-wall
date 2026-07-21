@@ -7,23 +7,35 @@ storage, and UI are untouched.
 
 ## macOS
 
-> **Status (v0.2):** Fly on the Wall builds and runs on macOS (CI-verified; not yet exercised on a
-> physical Mac). Capture is **mic-only**: process taps need a signed binary (see the third
-> trap below) and v0.2 ships unsigned, so a tap impl would record silence for every user.
-> Diarization downloads the universal2 sherpa-onnx build; whisper-cli and ffmpeg are picked
-> up from PATH (`brew install whisper-cpp ffmpeg`). Screen capture is full-screen via
-> ffmpeg avfoundation. Once releases are signed, implement the taps below and move screen
-> capture to ScreenCaptureKit.
+> **Status (PR #37):** system-audio capture via Core Audio process taps is IMPLEMENTED
+> (`fly-audio/src/coreaudio_tap.rs`, macOS 14.2+ gated at runtime; < 14.2 keeps the mic-only
+> + banner behavior). The whisper engine and sherpa-onnx diarizer are managed downloads —
+> nothing needs brew. Screen capture is full-screen via ffmpeg avfoundation (ffmpeg still
+> from PATH). Remaining trap, verified live on a 14.3 Apple Silicon machine: an
+> **unsigned/un-entitled build's tap runs perfectly and delivers only zeros** — the IOProc
+> fires, the file is written and padded, no error anywhere. The app now detects this during
+> the recording (tap timeline ≥5 s, zero non-silent samples, output device
+> `IsRunningSomewhere`) and warns in the recording bar. For real capture the release build
+> needs: (1) `NSAudioCaptureUsageDescription` in Info.plist (present), (2) a **code-signed
+> app bundle** (Developer ID + notarization for distribution) so TCC can attribute consent,
+> and (3) the user's one-time consent — the system prompt on first tap, or System Settings →
+> Privacy & Security → Screen & System Audio Recording. No special entitlement is involved;
+> it is signature + TCC consent. Release-build (signed) verification is still pending.
 
 - **AudioCapture → Core Audio Process Taps** (macOS 14.2+, `CATapDescription`) — the clean
-  audio-only path; preferred over ScreenCaptureKit for system audio. Known traps to encode in
-  the impl:
+  audio-only path; preferred over ScreenCaptureKit for system audio. Traps encoded in the
+  impl (coreaudio_tap.rs):
   - `AVAudioEngine` **cannot** be retargeted to a tap-backed aggregate device — use
     `AudioDeviceCreateIOProcIDWithBlock` directly.
   - The aggregate device needs a **real output device as its main sub-device**, the tap as a
     sub-tap, and `kAudioAggregateDeviceTapAutoStartKey: true`.
   - Requires `NSAudioCaptureUsageDescription` **and a signed binary**, or the IO callbacks
-    silently return all-zero samples.
+    silently return all-zero samples (detected at runtime, see above).
+  - `AudioHardwareCreateProcessTap`/`DestroyProcessTap` are 14.2+ symbols: resolve them with
+    `dlsym`, or the binary won't launch on the macOS 12.0 deployment floor.
+  - sherpa-onnx ≥ v1.13 macOS builds bundle an onnxruntime whose CoreML EP hard-references
+    `MLComputePlan` (14.4+): dyld kills the diarizer on macOS 12–14.3. The macOS pin is the
+    v1.12.34 `onnxruntime-1.17.1` variant (minos 11.0) for that reason.
 - **ScreenRecorder → ScreenCaptureKit.**
 - **ASR/diarization:** whisper.cpp runs on Metal; sherpa-onnx on CPU. On Apple Silicon consider
   **FluidAudio** (Parakeet on the Neural Engine; also diarizes) behind the existing traits.

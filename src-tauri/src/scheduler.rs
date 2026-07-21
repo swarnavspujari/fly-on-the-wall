@@ -68,11 +68,17 @@ pub fn enqueue(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> R
 }
 
 /// True for failures that retrying the identical job can never fix:
-/// missing recording files never come back on their own, and a 4xx
-/// request rejection (413 payload too large, 401 bad key) reproduces
-/// byte-for-byte on every retry.
+/// missing recording files never come back on their own, a 4xx request
+/// rejection (413 payload too large, 401 bad key) reproduces byte-for-byte
+/// on every retry, and a missing engine or a failed model download needs a
+/// person (install / go online / pick another model) — those already ran
+/// their own multi-source retries inside `models::ensure`, so the job fails
+/// once with its actionable notice instead of re-downloading three times.
 fn permanent_failure(error: &str) -> bool {
-    error.contains(pipeline::ERR_NO_RECORDING_FILES) || error.contains(fly_asr::REJECTED_MARKER)
+    error.contains(pipeline::ERR_NO_RECORDING_FILES)
+        || error.contains(fly_asr::REJECTED_MARKER)
+        || error.contains(models::ENGINE_MISSING_MARKER)
+        || error.contains(models::DOWNLOAD_FAILED_MARKER)
 }
 
 /// True when the pipeline stopped because the user asked it to (note
@@ -433,6 +439,24 @@ mod tests {
         let e = fly_asr::AsrError::Engine("groq returned 500 Internal Server Error".into());
         assert!(!permanent_failure(&e.to_string()));
         assert!(permanent_failure(pipeline::ERR_NO_RECORDING_FILES));
+    }
+
+    /// Human-fixable failures fail ONCE with their actionable notice: the
+    /// exact messages `models::ensure_tool` / `models::ensure` produce
+    /// (via the shared marker constants) must be recognized as permanent.
+    #[test]
+    fn engine_missing_and_download_failures_are_permanent() {
+        // models.rs `ensure_tool` shape (no managed artifact, nothing on PATH)
+        assert!(permanent_failure(&format!(
+            "whisper-cli {} — install whisper.cpp (macOS: brew install whisper-cpp)",
+            models::ENGINE_MISSING_MARKER
+        )));
+        // models.rs `ensure_with` shape (offline / CDN outage, all sources tried)
+        assert!(permanent_failure(&format!(
+            "{} Whisper small (Q5, ~190 MB) after trying 2 source(s) (last error: download \
+             failed: connection reset)",
+            models::DOWNLOAD_FAILED_MARKER
+        )));
     }
 
     /// A cancel is neither retried (the user asked for the stop) nor a

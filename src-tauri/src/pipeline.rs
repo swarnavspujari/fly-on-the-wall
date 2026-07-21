@@ -1200,6 +1200,14 @@ async fn local_tiers(
         None
     };
 
+    // Intel Macs never get the Metal tier: the PR #37 smoke test showed
+    // Metal on an AMD GPU silently corrupting output (exit 0, one bogus
+    // segment) — a failure mode no runtime crash guard can see. Runtime
+    // sysctl, not cfg!(target_arch): the shipped binary is universal
+    // (see gpu::is_apple_silicon). Apple Silicon keeps guarded Metal with
+    // the same runtime-failure pin semantics as the Windows Vulkan tier.
+    #[cfg(target_os = "macos")]
+    let use_gpu = use_gpu && gpu::is_apple_silicon();
     let specs = local_tier_specs(
         current_os(),
         gpu_exe,
