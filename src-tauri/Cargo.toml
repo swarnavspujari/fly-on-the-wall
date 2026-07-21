@@ -37,6 +37,7 @@ sha2.workspace = true
 zip.workspace = true
 tar.workspace = true
 bzip2.workspace = true
+flate2.workspace = true
 xz2.workspace = true
 hex = "0.4"
 sysinfo = "0.39"

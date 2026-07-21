@@ -1240,6 +1240,7 @@ dependencies = [
  "bzip2",
  "chrono",
  "dirs",
+ "flate2",
  "fly-asr",
  "fly-audio",
  "fly-calendar",

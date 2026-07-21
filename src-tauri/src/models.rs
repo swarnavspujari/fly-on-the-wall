@@ -166,6 +166,23 @@ const TOOLS: &[Artifact] = &[
         dest_rel: "bin/sherpa",
         probe_rel: "bin/sherpa/sherpa-onnx-v1.12.34-onnxruntime-1.17.1-osx-universal2-shared/bin/sherpa-onnx-offline-speaker-diarization",
     },
+    // Local LLM runtime for the "ollama" provider — same managed, opt-in
+    // story as the Windows entry (ollama.rs `can_install` keys off this).
+    // The CLI tarball ships the arm64 Metal/MLX runners: verified on the
+    // Apple Silicon smoke machine — `ollama serve` reports inference
+    // compute library=Metal (Apple M3 Pro), so pulled models run on the
+    // GPU. Digest matches the GitHub asset digest (re-hashed locally
+    // 2026-07-21). Tarball root holds `ollama` + its dylibs.
+    Artifact {
+        id: "ollama-bin",
+        display: "Ollama (local AI runtime, v0.31.2)",
+        url: "https://github.com/ollama/ollama/releases/download/v0.31.2/ollama-darwin.tgz",
+        sha256: "d72381baa260f6ce014c8e942e605eac76cac5313fcb3401eaf5495f659cfd6d",
+        bytes: 128_859_228,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/ollama",
+        probe_rel: "bin/ollama/ollama",
+    },
 ];
 
 /// OS-independent model weights. Checksums pinned from upstream release
@@ -673,6 +690,10 @@ async fn extract_archive(archive: &Path, dest: &Path, src_name: &str) -> Result<
             tar::Archive::new(bzip2::read::BzDecoder::new(reader))
                 .unpack(&dest)
                 .map_err(|e| format!("extraction failed: {e}"))
+        } else if name.ends_with(".tgz") || name.ends_with(".tar.gz") {
+            tar::Archive::new(flate2::read::GzDecoder::new(reader))
+                .unpack(&dest)
+                .map_err(|e| format!("extraction failed: {e}"))
         } else if name.ends_with(".tar.xz") {
             tar::Archive::new(xz2::read::XzDecoder::new(reader))
                 .unpack(&dest)
@@ -727,6 +748,18 @@ mod tests {
         assert_extracts(
             enc.finish().unwrap(),
             "https://example.com/sherpa-onnx-v1.13.3.tar.bz2",
+            "inner/dir/probe.txt",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn extracts_tgz_in_process() {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&tar_bytes()).unwrap();
+        assert_extracts(
+            enc.finish().unwrap(),
+            "https://example.com/ollama-darwin.tgz",
             "inner/dir/probe.txt",
         )
         .await;
