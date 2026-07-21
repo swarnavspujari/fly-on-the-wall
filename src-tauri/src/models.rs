@@ -148,15 +148,23 @@ const TOOLS: &[Artifact] = &[
         dest_rel: "bin/whisper",
         probe_rel: "bin/whisper/whisper-cli",
     },
+    // v1.13.x macOS builds bundle an onnxruntime compiled against SDK 15.5
+    // whose CoreML EP hard-references MLComputePlan (macOS 14.4+): dyld
+    // aborts on every macOS from the app's 12.0 floor through 14.3
+    // (reproduced on this repo's 14.3 Apple Silicon smoke machine). The
+    // v1.12.34 release publishes an onnxruntime-1.17.1 variant with
+    // minos 11.0 that runs and diarizes correctly there — verified on real
+    // audio with the pinned pyannote+CAM++ models. Digest matches the
+    // GitHub asset digest (sha256 re-verified locally 2026-07-21).
     Artifact {
         id: "sherpa-bin",
-        display: "sherpa-onnx diarization CLI (v1.13.3)",
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.3/sherpa-onnx-v1.13.3-osx-universal2-shared.tar.bz2",
-        sha256: "2317b975f42f5edf3e69068809dec456c068b68e48d091e6b578e7a977227361",
-        bytes: 56_024_420,
+        display: "sherpa-onnx diarization CLI (v1.12.34, onnxruntime 1.17.1)",
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.34/sherpa-onnx-v1.12.34-onnxruntime-1.17.1-osx-universal2-shared.tar.bz2",
+        sha256: "86ed07a11d2a15fc1615e1ad0a69514a8bee556c1b9a85c7ab3822c66f57bdf7",
+        bytes: 42_657_343,
         kind: ArtifactKind::Archive,
         dest_rel: "bin/sherpa",
-        probe_rel: "bin/sherpa/sherpa-onnx-v1.13.3-osx-universal2-shared/bin/sherpa-onnx-offline-speaker-diarization",
+        probe_rel: "bin/sherpa/sherpa-onnx-v1.12.34-onnxruntime-1.17.1-osx-universal2-shared/bin/sherpa-onnx-offline-speaker-diarization",
     },
 ];
 
