@@ -9,6 +9,7 @@
     "lint": "npm --prefix frontend run lint",
     "format:check": "npm --prefix frontend run format:check",
     "prepare-sidecars": "cargo build --release -p fly-mcp && node scripts/prepare-sidecars.mjs",
+    "macos:selfsign": "bash scripts/macos-selfsign.sh",
     "tauri": "tauri"
   },
   "devDependencies": {
