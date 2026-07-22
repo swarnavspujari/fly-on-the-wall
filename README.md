@@ -178,6 +178,33 @@ Updates never interrupt a recording — the prompt waits until you're finished.
 > system-audio permission can't be granted, Fly on the Wall records only your microphone
 > and says so in the recording bar — everything else works.
 
+<details>
+<summary><b>Advanced (optional): recording the other participants' audio</b></summary>
+
+The public macOS downloads are **not yet signed with an Apple Developer ID**. macOS only
+hands real system audio to an app with a stable code-signing identity, so on an unsigned
+build the "other participants" track comes out silent (the app detects this and falls back
+to mic-only with a warning). You can give the app a **free, self-signed identity** on your
+own Mac to unlock real system-audio capture — this works only on your machine, and is meant
+for people who want the full feature before we ship a signed build:
+
+```bash
+# One-time: clone the repo just for the helper script (no build needed)
+git clone https://github.com/swarnavspujari/fly-on-the-wall.git
+cd fly-on-the-wall
+
+# Sign the installed app with a free self-signed certificate (created for you).
+# You may be asked for your login password once, to trust the certificate.
+bash scripts/macos-selfsign.sh "/Applications/Fly on the Wall.app"
+```
+
+Then launch the app (right-click → **Open** the first time if macOS warns), start a
+recording, and choose **Allow** when it asks to record system audio. The recording bar
+tells you if the tap is silent, so you'll know right away that it's working. To go back to
+the plain download, just reinstall from the `.dmg`.
+
+</details>
+
 ### Linux
 
 1. Download the **.AppImage** (works on most Linux systems) or the **.deb** (Debian and
@@ -382,6 +409,31 @@ Run the test suite:
 ```powershell
 cargo test --workspace
 ```
+
+### Build & run (macOS): recording system audio from a self-signed build
+
+The Rust/Node build is the same on macOS (`npm run tauri build` produces a `.app` and
+`.dmg` under `target/release/bundle/`). One extra step is needed to capture the other
+participants' audio locally.
+
+System-audio capture uses a Core Audio process tap (macOS 14.2+). macOS only delivers real
+audio to that tap if the app has a **stable code-signing identity** it can attach the
+"System Audio Recording" consent to — an unsigned or ad-hoc build gets a tap that silently
+returns zeros. `scripts/macos-selfsign.sh` gives the built app a **free self-signed
+identity** so capture works on your own machine:
+
+```bash
+npm run tauri build
+npm run macos:selfsign          # signs target/release/bundle/macos/Fly on the Wall.app
+# or point it anywhere:  bash scripts/macos-selfsign.sh "/Applications/Fly on the Wall.app"
+```
+
+The script creates a self-signed code-signing certificate the first time (override with
+`SIGN_IDENTITY="Developer ID Application: You (TEAMID)"` to use a real one), signs the
+bundle and its sidecars, and prints the one-time consent step. This is a **local**
+identity only — it is trusted on the machine that holds it, not on anyone else's, so it is
+for development and validation, not distribution. Shipping working system audio to other
+people needs a paid Apple Developer ID + notarization (see below and `docs/PORTING.md`).
 
 ### Cutting a release
 
