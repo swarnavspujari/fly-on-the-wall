@@ -160,10 +160,11 @@ Updates never interrupt a recording — the prompt waits until you're finished.
 1. Download the `.dmg` for your Mac — choose **macos-arm64** if you have an Apple Silicon
    Mac (M1 or newer), or **macos-x64** if you have an Intel Mac. Open it and drag **Fly on
    the Wall** into your **Applications** folder.
-2. The first time you open it, macOS may block it, or say it "can't be checked" or "is
-   damaged." Either right-click the app and choose **Open**, then **Open** again — or, if
-   macOS still refuses, open the **Terminal** app, run this line once, and then open the
-   app normally:
+2. **Releases up to v1.6.0 only:** macOS may block the app, or say it "can't be checked"
+   or "is damaged" — those builds weren't signed yet. (Newer releases are signed and
+   notarized with an Apple Developer ID and open normally — skip this step.) Don't click
+   *Move to Trash*; instead open the **Terminal** app, run this line once, and then open
+   the app normally:
    ```
    xattr -cr "/Applications/Fly on the Wall.app"
    ```
@@ -181,21 +182,16 @@ Updates never interrupt a recording — the prompt waits until you're finished.
 <details>
 <summary><b>Advanced (optional): recording the other participants' audio</b></summary>
 
-The public macOS downloads are **not yet signed with an Apple Developer ID**. macOS only
-hands real system audio to an app with a stable code-signing identity, so on an unsigned
-build the "other participants" track comes out silent (the app detects this and falls back
-to mic-only with a warning). You can give the app a **free, self-signed identity** on your
-own Mac to unlock real system-audio capture — this works only on your machine, and is meant
-for people who want the full feature before we ship a signed build:
+**This only applies to releases up to v1.6.0** — newer downloads are signed with an Apple
+Developer ID, so system audio works out of the box. On the older unsigned builds, macOS
+only hands real system audio to an app with a stable code-signing identity, so the "other
+participants" track comes out silent (the app detects this and falls back to mic-only with
+a warning). You can give the app a **free, self-signed identity** on your own Mac to
+unlock real system-audio capture. One line in Terminal — no git, no build tools; it may
+ask for your login password once, to trust the certificate it creates:
 
 ```bash
-# One-time: clone the repo just for the helper script (no build needed)
-git clone https://github.com/swarnavspujari/fly-on-the-wall.git
-cd fly-on-the-wall
-
-# Sign the installed app with a free self-signed certificate (created for you).
-# You may be asked for your login password once, to trust the certificate.
-bash scripts/macos-selfsign.sh "/Applications/Fly on the Wall.app"
+curl -fsSL https://raw.githubusercontent.com/swarnavspujari/fly-on-the-wall/main/scripts/macos-selfsign.sh | bash -s -- "/Applications/Fly on the Wall.app"
 ```
 
 Then launch the app (right-click → **Open** the first time if macOS warns), start a
@@ -465,11 +461,22 @@ Local production builds don't need the key: `npm run tauri build` skips updater 
 To reproduce the CI build exactly, set both `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` env
 vars and add `--config src-tauri/tauri.updater.conf.json`.
 
-The installers are **unsigned** for now, which is why users see the
-SmartScreen/Gatekeeper warnings documented in [Install](#install). Signing removes them
-with no code changes: an OV/EV Authenticode certificate + `signtool` on Windows, and an
-Apple Developer ID certificate with notarization (`codesign` + `notarytool`) on macOS —
-both wire into `tauri.conf.json`/CI secrets. Linux needs no signing.
+**macOS bundles are signed and notarized** in CI (Tauri handles `codesign` with hardened
+runtime + `src-tauri/Entitlements.plist`, then `notarytool`) when six more repo secrets
+are set — the workflow fails fast if any is missing:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE` | base64 of the **Developer ID Application** certificate exported as `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | the password chosen when exporting that `.p12` |
+| `APPLE_SIGNING_IDENTITY` | the cert's full name, e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_ID` | the Apple ID email of the developer account |
+| `APPLE_PASSWORD` | an **app-specific password** for that Apple ID (account.apple.com → Sign-In and Security) |
+| `APPLE_TEAM_ID` | the 10-character Team ID (developer.apple.com → Membership) |
+
+The **Windows** installers remain unsigned (SmartScreen warning documented in
+[Install](#install)); an OV/EV Authenticode certificate + `signtool` would remove that
+with no code changes. Linux needs no signing.
 
 ### Repository layout
 

@@ -2,8 +2,13 @@ name: Release
 
 # Builds installers for Windows (NSIS), macOS (.app/.dmg, both architectures)
 # and Linux (AppImage + .deb) on every version tag and attaches them to a
-# GitHub Release. Binaries are UNSIGNED — see README "Install Fly on the Wall" for the
-# SmartScreen/Gatekeeper notes shipped to users.
+# GitHub Release.
+#
+# macOS bundles are Developer ID-signed and notarized when the APPLE_*
+# secrets are set (Tauri imports the cert into a temp keychain, codesigns
+# with hardened runtime + src-tauri/Entitlements.plist, and submits to
+# notarytool). Windows installers remain unsigned — see README "Install
+# Fly on the Wall" for the SmartScreen notes shipped to users.
 #
 # The Windows leg additionally feeds the in-app auto-updater: it signs the
 # NSIS installer with the Tauri updater key (TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]
@@ -106,6 +111,27 @@ jobs:
             exit 1
           fi
 
+      # Same fail-fast idea for macOS: a missing Apple secret would otherwise
+      # surface only after the full compile, as an unsigned (or un-notarized)
+      # dmg that Gatekeeper calls "damaged" on users' machines.
+      - name: Apple signing preflight
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          for v in APPLE_CERTIFICATE APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -z "${!v}" ] && missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing Apple signing secrets:$missing — required to sign + notarize macOS bundles (see README 'Cutting a release')."
+            exit 1
+          fi
+
       # tauri build runs beforeBuildCommand (frontend build + prepare-sidecars).
       # On windows-x64, buildArgs layers in createUpdaterArtifacts, which signs
       # the NSIS installer into a detached .sig using the env vars below.
@@ -113,6 +139,16 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS Developer ID signing + notarization (Tauri picks these up
+          # automatically; harmless no-ops on the other runners).
+          # APPLE_CERTIFICATE is the base64 of the Developer ID Application .p12.
+          # APPLE_PASSWORD is an app-specific password from account.apple.com.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Bundled calendar OAuth defaults, read at compile time by
           # src-tauri/src/calendar_defaults.rs (option_env!). These let invited
           # testers connect in one click; if the secrets are unset, the build is
