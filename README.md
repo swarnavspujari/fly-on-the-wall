@@ -157,8 +157,12 @@ Updates never interrupt a recording — the prompt waits until you're finished.
 
 ### macOS
 
-1. Download the `.dmg` for your Mac — choose **macos-arm64** if you have an Apple Silicon
-   Mac (M1 or newer), or **macos-x64** if you have an Intel Mac. Open it and drag **Fly on
+1. Download the `.dmg` for your Mac — choose **macos-apple-silicon** if you have an
+   Apple Silicon Mac (M1 or newer, i.e. any Mac from 2021 on), or **macos-intel** if you
+   have an older Intel Mac. Not sure which you have? Click the Apple menu →
+   **About This Mac**: a "Chip" line saying Apple M1/M2/M3/M4 means Apple Silicon, a
+   "Processor" line saying Intel means Intel. (On v1.7.0 and earlier the files are named
+   `aarch64-macos-arm64` and `x64-macos-x64` instead.) Open the `.dmg` and drag **Fly on
    the Wall** into your **Applications** folder.
 2. **Releases up to v1.6.0 only:** macOS may block the app, or say it "can't be checked"
    or "is damaged" — those builds weren't signed yet. (Newer releases are signed and
@@ -467,7 +471,7 @@ are set — the workflow fails fast if any is missing:
 
 | Secret | Value |
 | --- | --- |
-| `APPLE_CERTIFICATE` | base64 of the **Developer ID Application** certificate exported as `.p12` |
+| `APPLE_CERTIFICATE` | base64 of the **Developer ID Application** certificate exported as `.p12` — export with **legacy encryption** (Keychain Access does this by default; with OpenSSL pass `-legacy`, or `-certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1`). macOS `security import` can't read OpenSSL 3's default PBES2/AES-256 `.p12` and fails with a misleading "MAC verification failed (wrong password?)" |
 | `APPLE_CERTIFICATE_PASSWORD` | the password chosen when exporting that `.p12` |
 | `APPLE_SIGNING_IDENTITY` | the cert's full name, e.g. `Developer ID Application: Your Name (TEAMID)` |
 | `APPLE_ID` | the Apple ID email of the developer account |
