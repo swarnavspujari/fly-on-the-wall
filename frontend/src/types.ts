@@ -59,6 +59,8 @@ export interface AppInfo {
   data_dir: string;
   /** "windows" | "macos" | "linux" — auto-update is gated on this. */
   os: string;
+  /** True when running from a Linux AppImage — the only Linux install the updater can replace. */
+  appimage: boolean;
 }
 
 export interface RecordingRef {

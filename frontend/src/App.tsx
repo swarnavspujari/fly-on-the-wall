@@ -103,7 +103,7 @@ export default function App() {
   // Auto-update (Windows-only). Recording is sacred: while anything records,
   // the banner is unmounted and Settings disables install/restart.
   const recordingActive = recStatus.active || screenStatus.active;
-  const updater = useUpdater(info?.os ?? null, recordingActive);
+  const updater = useUpdater(info?.os ?? null, recordingActive, info?.appimage ?? false);
 
   const openMeetingIdRef = useRef<string | null>(null);
   useEffect(() => {

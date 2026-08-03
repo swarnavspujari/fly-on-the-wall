@@ -22,6 +22,9 @@ pub struct AppInfo {
     pub data_dir: String,
     /// "windows" | "macos" | "linux" — the UI gates auto-update on this.
     pub os: String,
+    /// True when running from an AppImage (the only Linux install the Tauri
+    /// updater can replace in place; deb installs update via apt/releases).
+    pub appimage: bool,
 }
 
 /// Smoke-test command: proves IPC works.
@@ -42,6 +45,7 @@ pub async fn app_info(state: State<'_, AppState>) -> CmdResult<AppInfo> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: state.data_dir.display().to_string(),
         os: std::env::consts::OS.to_string(),
+        appimage: std::env::var_os("APPIMAGE").is_some(),
     })
 }
 

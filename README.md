@@ -151,10 +151,6 @@ app is signed. Here's how to get past it for now.
    downloads the speech models it needs (you'll see a progress bar). After that, it works
    without any internet connection.
 
-After this one manual step, the app keeps itself up to date: it checks for a new version
-when it starts, downloads it quietly in the background, and restarts once when you say so.
-Updates never interrupt a recording — the prompt waits until you're finished.
-
 ### macOS
 
 1. Download the `.dmg` for your Mac — choose **macos-apple-silicon** if you have an
@@ -216,6 +212,14 @@ the plain download, just reinstall from the `.dmg`.
 3. Your API keys and calendar sign-ins are kept in your system keyring. On a minimal
    setup, make sure `gnome-keyring` (or KWallet) is running so they have somewhere to
    live.
+
+### Staying up to date
+
+After the one-time install, the app keeps itself up to date on every platform: it checks
+for a new version when it starts, downloads it quietly in the background, and restarts
+once when you say so. Updates never interrupt a recording — the prompt waits until you're
+finished. The one exception is a Linux `.deb` install, which is managed by your package
+manager instead — grab new versions from the releases page (the AppImage self-updates).
 
 ## Your first meeting
 
@@ -438,9 +442,12 @@ people needs a paid Apple Developer ID + notarization (see below and `docs/PORTI
 ### Cutting a release
 
 Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) on
-every `v*` tag. The Windows leg also feeds the auto-updater: it signs the NSIS installer
-(detached `.sig`) and attaches `latest.json`, which installed apps poll at
-`releases/latest/download/latest.json`.
+every `v*` tag. Every leg feeds the auto-updater: each signs its updater artifact with a
+detached `.sig` (NSIS installer on Windows, `.app.tar.gz` on macOS, AppImage on Linux) and
+uploads a manifest fragment; a final job merges all four platform entries into
+`latest.json`, which installed apps poll at `releases/latest/download/latest.json`. The
+manifest is only published when **all four** legs succeed — a partial manifest would
+silently strand the missing platforms on the current version forever.
 
 1. Bump the version in `src-tauri/tauri.conf.json` **and** the workspace `Cargo.toml`
    (`[workspace.package] version`) — the workflow refuses a tag that doesn't match the

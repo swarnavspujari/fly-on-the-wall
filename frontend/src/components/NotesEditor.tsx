@@ -49,6 +49,9 @@ const RT_CSS = `
 .fotw-notes h2{font-family:var(--font-display);font-size:19px;font-weight:700;letter-spacing:-0.01em;margin:26px 0 8px;color:var(--text)}
 .fotw-notes p{margin:0 0 11px}
 .fotw-notes ul,.fotw-notes ol{margin:0 0 13px;padding-left:22px}
+.fotw-notes ul{list-style:disc}
+.fotw-notes ol{list-style:decimal}
+.fotw-notes ul ul{list-style:circle}
 .fotw-notes li{margin:4px 0}
 .fotw-notes a{color:var(--primary-text);text-decoration:underline;text-underline-offset:2px}
 .fotw-notes strong{font-weight:700}
@@ -131,6 +134,43 @@ export default function NotesEditor({ markdown, revision, onChange, placeholder 
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => onChange(td.turndown(n.innerHTML).trim()), 400);
   };
+  const emitRef = useRef(emit);
+  useEffect(() => {
+    emitRef.current = emit;
+  });
+
+  // Markdown autoformat: typing "* " / "- " / "1. " at the start of a block
+  // becomes a real list, like the stored markdown would render. Native
+  // beforeinput (not React's synthetic one) so inputType/data are reliable.
+  useEffect(() => {
+    const n = ref.current;
+    if (!n) return;
+    const onBeforeInput = (e: InputEvent) => {
+      if (e.inputType !== "insertText" || e.data !== " ") return;
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount || !sel.isCollapsed) return;
+      const caret = sel.getRangeAt(0);
+      const node = caret.startContainer;
+      const el = node instanceof Element ? node : node.parentElement;
+      if (!el || !n.contains(el) || el.closest("li")) return;
+      const block = el === n ? n : (el.closest("p,h2,blockquote,div") ?? n);
+      const probe = caret.cloneRange();
+      probe.setStart(block, 0);
+      const before = probe.toString();
+      const cmd = /^[*+-]$/.test(before)
+        ? "insertUnorderedList"
+        : /^\d+\.$/.test(before)
+          ? "insertOrderedList"
+          : null;
+      if (!cmd) return;
+      e.preventDefault();
+      probe.deleteContents();
+      document.execCommand(cmd);
+      emitRef.current();
+    };
+    n.addEventListener("beforeinput", onBeforeInput);
+    return () => n.removeEventListener("beforeinput", onBeforeInput);
+  }, []);
 
   const exec = (cmd: string, val?: string) => {
     ref.current?.focus();

@@ -52,10 +52,11 @@
 Every push: ESLint + Prettier check, `tsc` typecheck, frontend build, rustfmt check, clippy
 (`-D warnings`), `cargo test`, `cargo build` on `windows-latest`, plus a build-and-test
 matrix on `macos-latest` and `ubuntu-22.04`. Tag pushes (`v*`) build the three-OS
-installers and attach them to a GitHub Release; the Windows leg also signs the installer
-with the updater key and attaches `latest.json` for the in-app auto-updater (requires the
-`TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` secrets — see README "Cutting a release").
-`main` stays green.
+installers and attach them to a GitHub Release; every leg signs its updater artifact with
+the updater key (NSIS on Windows, `.app.tar.gz` on macOS, AppImage on Linux) and a final
+job merges the four platform entries into `latest.json` for the in-app auto-updater
+(requires the `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` secrets — see README "Cutting a
+release"). `main` stays green.
 
 ## Manual checklist (run before tagging a milestone)
 
