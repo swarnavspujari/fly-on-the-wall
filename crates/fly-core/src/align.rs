@@ -70,6 +70,106 @@ pub fn align_words_to_speakers(
     segments
 }
 
+/// Maximum words one "sentence" may hold when the ASR emits no terminal
+/// punctuation (whisper on far-field audio sometimes doesn't) — bounds how
+/// far a majority vote can smear a genuine mid-run speaker switch.
+const SENTENCE_MAX_WORDS: usize = 30;
+
+/// Does this word close a sentence? Terminal punctuation, allowing for a
+/// trailing quote/bracket.
+fn ends_sentence(text: &str) -> bool {
+    text.trim_end()
+        .trim_end_matches(['"', '\'', ')', ']', '\u{201d}', '\u{2019}'])
+        .ends_with(['.', '?', '!', '\u{2026}'])
+}
+
+/// Sentence-granularity variant of `align_words_to_speakers`: words are
+/// grouped into sentences — punctuation-bounded, with pause and length
+/// backstops for punctuation-free ASR output — and every word in a sentence
+/// takes the sentence's duration-weighted majority speaker. Diarization
+/// boundary jitter lands mid-sentence under per-word assignment; the
+/// majority vote absorbs it, so speaker switches happen where a reader
+/// expects them. Words the diarizer never covered vote only when the whole
+/// sentence is uncovered (then it keeps the fallback speaker).
+pub fn align_words_to_speakers_by_sentence(
+    words: &[Word],
+    turns: &[SpeakerTurn],
+    opts: &AlignOptions,
+) -> Vec<TranscriptSegment> {
+    let mut sentences: Vec<&[Word]> = Vec::new();
+    let mut start = 0usize;
+    for i in 0..words.len() {
+        let gap_to_next = words
+            .get(i + 1)
+            .map(|n| n.start_ms.saturating_sub(words[i].end_ms))
+            .unwrap_or(u64::MAX);
+        if ends_sentence(&words[i].text)
+            || i + 1 - start >= SENTENCE_MAX_WORDS
+            || gap_to_next > opts.max_gap_ms
+        {
+            sentences.push(&words[start..=i]);
+            start = i + 1;
+        }
+    }
+    if start < words.len() {
+        sentences.push(&words[start..]);
+    }
+
+    let mut segments: Vec<TranscriptSegment> = Vec::new();
+    for sentence in sentences {
+        // duration-weighted vote among words that actually hit a turn
+        let mut tally: Vec<(String, u64)> = Vec::new();
+        for word in sentence {
+            let key = speaker_for(word, turns, opts);
+            if key == opts.fallback_speaker {
+                continue;
+            }
+            let weight = word.end_ms.saturating_sub(word.start_ms).max(1);
+            match tally.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, acc)) => *acc += weight,
+                None => tally.push((key, weight)),
+            }
+        }
+        let speaker = tally
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, (_, w))| (*w, std::cmp::Reverse(*i)))
+            .map(|(_, (k, _))| k.clone())
+            .unwrap_or_else(|| opts.fallback_speaker.clone());
+
+        for word in sentence {
+            let start_new = match segments.last() {
+                None => true,
+                Some(seg) => {
+                    seg.speaker_key != speaker
+                        || word.start_ms.saturating_sub(seg.end_ms) > opts.max_gap_ms
+                }
+            };
+            if start_new {
+                segments.push(TranscriptSegment {
+                    id: crate::new_id(),
+                    speaker_key: speaker.clone(),
+                    start_ms: word.start_ms,
+                    end_ms: word.end_ms,
+                    text: word.text.clone(),
+                    words: vec![word.clone()],
+                });
+            } else {
+                let seg = segments.last_mut().expect("checked above");
+                seg.end_ms = seg.end_ms.max(word.end_ms);
+                if !seg.text.is_empty()
+                    && !word.text.starts_with(|c: char| c.is_ascii_punctuation())
+                {
+                    seg.text.push(' ');
+                }
+                seg.text.push_str(&word.text);
+                seg.words.push(word.clone());
+            }
+        }
+    }
+    segments
+}
+
 /// Group a single known speaker's words into pause-separated segments —
 /// used for the mic channel, where the speaker is you by construction
 /// (spec §6.4) and no diarization is needed.
@@ -220,6 +320,74 @@ mod tests {
         assert!(segs.iter().all(|s| s.speaker_key == "mic"));
         assert_eq!(segs[0].text, "hello there");
         assert_eq!(segs[1].text, "again");
+    }
+
+    #[test]
+    fn sentence_vote_absorbs_boundary_jitter() {
+        // The last two words of A's sentence poke into B's turn (diarizer
+        // jitter). Word-level assignment flips them; the sentence vote holds.
+        let words = vec![
+            w("we", 0, 300),
+            w("should", 300, 600),
+            w("ship", 600, 900),
+            w("it.", 950, 1250),
+            w("agreed,", 1400, 1700),
+            w("next", 1750, 2000),
+            w("topic.", 2050, 2400),
+        ];
+        let turns = vec![t("spk_0", 0, 800), t("spk_1", 800, 2500)];
+        let word_level = align_words_to_speakers(&words, &turns, &AlignOptions::default());
+        let it_seg = word_level
+            .iter()
+            .find(|s| s.words.iter().any(|w| w.text == "it."))
+            .expect("'it.' is in some segment");
+        assert_eq!(
+            it_seg.speaker_key, "spk_1",
+            "premise: word-level hands the sentence tail to the wrong speaker"
+        );
+        let by_sentence =
+            align_words_to_speakers_by_sentence(&words, &turns, &AlignOptions::default());
+        assert_eq!(by_sentence.len(), 2);
+        assert_eq!(by_sentence[0].speaker_key, "spk_0");
+        assert_eq!(by_sentence[0].text, "we should ship it.");
+        assert_eq!(by_sentence[1].speaker_key, "spk_1");
+        assert_eq!(by_sentence[1].text, "agreed, next topic.");
+    }
+
+    #[test]
+    fn unpunctuated_stream_splits_on_pause() {
+        // no terminal punctuation anywhere — the pause backstop must divide
+        let words = vec![
+            w("alpha", 0, 300),
+            w("beta", 350, 600),
+            w("gamma", 5_000, 5_300),
+            w("delta", 5_350, 5_600),
+        ];
+        let turns = vec![t("spk_0", 0, 700), t("spk_1", 4_900, 5_700)];
+        let segs = align_words_to_speakers_by_sentence(&words, &turns, &AlignOptions::default());
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].speaker_key, "spk_0");
+        assert_eq!(segs[1].speaker_key, "spk_1");
+    }
+
+    #[test]
+    fn fully_uncovered_sentence_keeps_fallback_speaker() {
+        let words = vec![w("stray", 60_000, 60_300), w("words.", 60_350, 60_700)];
+        let turns = vec![t("spk_0", 0, 2_000)];
+        let segs = align_words_to_speakers_by_sentence(&words, &turns, &AlignOptions::default());
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].speaker_key, "spk_unknown");
+    }
+
+    #[test]
+    fn sentence_segments_match_word_segment_shape() {
+        // same speaker, one long pause: still splits into two segments like
+        // the word-level aligner would
+        let words = vec![w("first.", 0, 300), w("second.", 9_000, 9_300)];
+        let turns = vec![t("spk_0", 0, 10_000)];
+        let segs = align_words_to_speakers_by_sentence(&words, &turns, &AlignOptions::default());
+        assert_eq!(segs.len(), 2);
+        assert!(segs.iter().all(|s| s.speaker_key == "spk_0"));
     }
 
     #[test]

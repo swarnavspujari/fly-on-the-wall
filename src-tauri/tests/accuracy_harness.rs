@@ -9,18 +9,43 @@
 //!     cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
 //!
 //! Run the pipeline over a recording folder (recording.mic.wav +
-//! recording.system.wav), optionally trimmed for fast iteration:
+//! recording.system.wav, or a single recording.mixed.wav), optionally
+//! trimmed for fast iteration:
 //!   FLYONTHEWALL_HARNESS_DIR=path\to\recording-folder \
 //!   FLYONTHEWALL_HARNESS_MODEL=ggml-large-v3-turbo-q5_0 \
 //!   FLYONTHEWALL_HARNESS_MAX_SECS=300 \
 //!     cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
 //!
-//! Score against a human-grade reference transcript (Fathom .txt export) —
-//! adds per-channel WER, speaker-attributed WER, attribution error, and the
-//! cross-talk duplication rate to any of the modes above:
-//!   FLYONTHEWALL_HARNESS_REFERENCE=path\to\fathom-export.txt \
+//! Score against a reference transcript — a Fathom .txt export or a
+//! Microsoft Teams .vtt transcript (picked by extension) — adds per-channel
+//! WER, speaker-attributed WER, attribution error, and the cross-talk
+//! duplication rate to any of the modes above:
+//!   FLYONTHEWALL_HARNESS_REFERENCE=path\to\fathom-export.txt-or-teams.vtt \
 //!   FLYONTHEWALL_HARNESS_REF_SELF=Swarnav          # substring of the ref speaker who is "You"
 //!   FLYONTHEWALL_HARNESS_XTALK_MS=500              # dup window (default 500)
+//! Teams .vtt references carry utterance END timestamps too, which
+//! additionally enables the diarization block: time-weighted DER
+//! (speaker-confusion + missed-speech + false-alarm over reference speech
+//! time) with and without a 250 ms collar, plus speaker-count accuracy.
+//! Teams timestamps are utterance-level, not frame-level — the collared
+//! number is the trustworthy one.
+//!
+//! Diarize-only sweep mode: re-run diarization + word→speaker alignment on
+//! top of an existing baseline transcript (ASR is NOT re-run — words come
+//! from the baseline), score, and exit. Cheap enough to sweep parameters:
+//!   FLYONTHEWALL_HARNESS_DIARIZE_WAV=path\to\channel.wav   # what the diarizer hears
+//!   FLYONTHEWALL_HARNESS_BASE_JSON=path\to\baseline.json   # prior OUT_JSON transcript
+//!   FLYONTHEWALL_HARNESS_CLUSTER_THRESHOLD=0.9             # optional knobs…
+//!   FLYONTHEWALL_HARNESS_NUM_SPEAKERS=2
+//!   FLYONTHEWALL_HARNESS_DUST_FLOOR_MS=15000
+//!   FLYONTHEWALL_HARNESS_DUST_FRACTION=0.05
+//!   FLYONTHEWALL_HARNESS_EMBEDDING=path\to\other-embedding.onnx
+//!
+//! Every mode: FLYONTHEWALL_HARNESS_RESULTS_JSON=path writes all metrics of
+//! the run as one stable-keyed JSON file — the committed baselines under
+//! docs/data/diarization/ are exactly these files, so a re-run or sweep
+//! shows up as a git diff. FLYONTHEWALL_HARNESS_FIXTURE=name labels the
+//! fixture inside the file.
 //!
 //! Cloud-reference mode (diagnostic only, no local pipeline): transcribe the
 //! mic and system channels with Groq to separate model quality from audio
@@ -30,10 +55,10 @@
 //!   FLYONTHEWALL_HARNESS_GROQ_CACHE=path\to\cache-dir   # optional per-chunk response cache
 //!     cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use fly_core::repeat::loop_token;
-use fly_core::{RecordingRef, Transcript};
+use fly_core::{RecordingRef, SpeakerTurn, Transcript};
 
 /// One reportable repetition run: `reps` consecutive occurrences of an
 /// `n`-word phrase starting at `start_ms`.
@@ -95,7 +120,7 @@ fn mmss(ms: u64) -> String {
     format!("{:02}:{:02}", ms / 60_000, ms % 60_000 / 1000)
 }
 
-fn report(t: &Transcript) {
+fn report(t: &Transcript) -> serde_json::Value {
     let keys: std::collections::BTreeSet<&str> =
         t.segments.iter().map(|s| s.speaker_key.as_str()).collect();
     let non_unknown = keys
@@ -139,11 +164,24 @@ fn report(t: &Transcript) {
         worst.insert(format!("worst_reps_{label}"), serde_json::json!(max_reps));
     }
 
+    // per-cluster attributed seconds — the over-splitting signature is one
+    // voice spread across several substantial clusters, visible right here
+    let mut speaker_seconds: std::collections::BTreeMap<&str, f64> = Default::default();
+    for s in &t.segments {
+        *speaker_seconds.entry(s.speaker_key.as_str()).or_default() +=
+            s.end_ms.saturating_sub(s.start_ms) as f64 / 1000.0;
+    }
+    let speaker_seconds: serde_json::Map<String, serde_json::Value> = speaker_seconds
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), serde_json::json!((v * 10.0).round() / 10.0)))
+        .collect();
+
     let metrics = serde_json::json!({
         "segments": t.segments.len(),
         "speakers_listed": t.speakers.len(),
         "speaker_keys": keys.len(),
         "system_speakers": non_unknown,
+        "speaker_seconds": speaker_seconds,
         "words_total": mic.len() + system.len(),
         "words_mic": mic.len(),
         "words_system": system.len(),
@@ -151,6 +189,7 @@ fn report(t: &Transcript) {
         "worst_reps_system": worst["worst_reps_system"],
     });
     eprintln!("HARNESS_METRICS_JSON: {metrics}");
+    metrics
 }
 
 // ---------------------------------------------------------------------------
@@ -187,11 +226,23 @@ fn tokenize(s: &str) -> Vec<String> {
     out
 }
 
-/// The reference transcript: interned speaker names + one flat token stream.
+/// One timed reference utterance. Only Teams .vtt references carry end
+/// timestamps; Fathom .txt has turn starts only, so its `turns` stay empty
+/// and DER scoring is skipped for it.
+struct RefTurn {
+    speaker: usize,
+    start_ms: u64,
+    end_ms: u64,
+}
+
+/// The reference transcript: interned speaker names + one flat token stream,
+/// plus timed utterances when the format provides them.
 struct Reference {
     speakers: Vec<String>,
     /// (normalized token, speaker index)
     tokens: Vec<(String, usize)>,
+    /// Timed utterances (empty when the reference has no end timestamps).
+    turns: Vec<RefTurn>,
 }
 
 fn parse_mmss(s: &str) -> Option<u64> {
@@ -262,7 +313,118 @@ fn parse_fathom_reference(path: &str) -> Reference {
         !tokens.is_empty(),
         "reference transcript parsed to zero words: {path}"
     );
-    Reference { speakers, tokens }
+    Reference {
+        speakers,
+        tokens,
+        turns: Vec::new(),
+    }
+}
+
+/// "HH:MM:SS.mmm" or "MM:SS.mmm" → ms.
+fn parse_vtt_ts(s: &str) -> Option<u64> {
+    let (main, frac) = s.trim().split_once('.')?;
+    if frac.len() != 3 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let parts: Vec<&str> = main.split(':').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    let mut secs = 0u64;
+    for p in parts {
+        if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        secs = secs * 60 + p.parse::<u64>().ok()?;
+    }
+    Some(secs * 1000 + frac.parse::<u64>().ok()?)
+}
+
+/// The five entities WebVTT payload text may escape. `&amp;` goes last so a
+/// literal "&amp;lt;" doesn't double-decode.
+fn decode_vtt_entities(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Parse a Microsoft Teams transcript export (.vtt): cues carry utterance
+/// timestamps and `<v Display Name>speech</v>` voice spans. Teams labels
+/// each cue from that participant's own audio stream and signed-in identity,
+/// so speaker attribution AND utterance timing are ground truth (timing is
+/// utterance-level — the DER collar absorbs that).
+fn parse_teams_vtt_reference(path: &str) -> Reference {
+    let raw = std::fs::read_to_string(path).expect("read reference transcript");
+    let mut speakers: Vec<String> = Vec::new();
+    let mut tokens: Vec<(String, usize)> = Vec::new();
+    let mut turns: Vec<RefTurn> = Vec::new();
+    let mut lines = raw.lines().peekable();
+    while let Some(line) = lines.next() {
+        // cue timing line: "00:00:03.435 --> 00:00:07.772" (+ optional settings)
+        let Some((from, to)) = line.split_once("-->") else {
+            continue;
+        };
+        let (Some(start_ms), Some(end_ms)) = (
+            parse_vtt_ts(from),
+            parse_vtt_ts(to.trim().split_whitespace().next().unwrap_or("")),
+        ) else {
+            continue;
+        };
+        // payload: lines until the blank cue separator
+        let mut payload = String::new();
+        while let Some(next) = lines.peek() {
+            if next.trim().is_empty() {
+                break;
+            }
+            if !payload.is_empty() {
+                payload.push(' ');
+            }
+            payload.push_str(lines.next().expect("peeked").trim());
+        }
+        // voice spans: "<v Name>speech</v>" (Teams: exactly one per cue)
+        for span in payload.split("<v ").skip(1) {
+            let Some((name, speech)) = span.split_once('>') else {
+                continue;
+            };
+            let name = decode_vtt_entities(name).trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let speech = decode_vtt_entities(&speech.replace("</v>", ""));
+            let idx = speakers.iter().position(|s| *s == name).unwrap_or_else(|| {
+                speakers.push(name);
+                speakers.len() - 1
+            });
+            for tok in tokenize(&speech) {
+                tokens.push((tok, idx));
+            }
+            turns.push(RefTurn {
+                speaker: idx,
+                start_ms,
+                end_ms,
+            });
+        }
+    }
+    assert!(
+        !tokens.is_empty(),
+        "teams vtt parsed to zero words: {path}"
+    );
+    Reference {
+        speakers,
+        tokens,
+        turns,
+    }
+}
+
+/// Reference format dispatch: Teams .vtt by extension, else Fathom .txt.
+fn parse_reference(path: &str) -> Reference {
+    if path.to_ascii_lowercase().ends_with(".vtt") {
+        parse_teams_vtt_reference(path)
+    } else {
+        parse_fathom_reference(path)
+    }
 }
 
 /// One hypothesis token with its timing and the speaker key of its segment.
@@ -459,49 +621,352 @@ fn detect_self(reference: &Reference, mic: &[HypWord]) -> usize {
     best.0
 }
 
+// ---------------------------------------------------------------------------
+// Diarization error rate (vs a timed reference — Teams .vtt only)
+// ---------------------------------------------------------------------------
+
+/// Merge into disjoint sorted intervals. Touching intervals fuse — Teams
+/// splits one utterance into contiguous cues, and those internal boundaries
+/// are artifacts, not speaker changes.
+fn union_intervals(mut v: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    v.retain(|(s, e)| e > s);
+    v.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(v.len());
+    for (s, e) in v {
+        match out.last_mut() {
+            Some((_, last_e)) if s <= *last_e => *last_e = (*last_e).max(e),
+            _ => out.push((s, e)),
+        }
+    }
+    out
+}
+
+/// Time-weighted DER components, all in ms. DER = (miss + fa + conf) /
+/// ref_speech, the NIST md-eval decomposition: regions are scored with
+/// possibly-overlapping speakers on both sides, and hypothesis speakers are
+/// mapped to reference speakers by the time-overlap-maximizing assignment.
+struct DerScore {
+    /// Denominator: Σ region-length × ref-speaker-count over scored regions.
+    ref_speech_ms: u64,
+    miss_ms: u64,
+    fa_ms: u64,
+    conf_ms: u64,
+}
+
+impl DerScore {
+    fn der(&self) -> f64 {
+        (self.miss_ms + self.fa_ms + self.conf_ms) as f64 / self.ref_speech_ms.max(1) as f64
+    }
+    fn frac(&self, ms: u64) -> f64 {
+        ms as f64 / self.ref_speech_ms.max(1) as f64
+    }
+}
+
+/// Score hypothesis speaker spans against timed reference utterances.
+/// `collar_ms` is excluded around every merged reference-utterance boundary
+/// (±collar), the standard tolerance for imprecise reference timing.
+/// Returns the score plus the optimal ref→hyp key mapping.
+fn score_der(
+    ref_turns: &[RefTurn],
+    n_ref: usize,
+    hyp_turns: &[SpeakerTurn],
+    collar_ms: u64,
+) -> (DerScore, Vec<Option<String>>) {
+    // per-speaker unioned intervals, both sides
+    let mut ref_by: Vec<Vec<(u64, u64)>> = vec![Vec::new(); n_ref];
+    for t in ref_turns {
+        ref_by[t.speaker].push((t.start_ms, t.end_ms));
+    }
+    let ref_by: Vec<Vec<(u64, u64)>> = ref_by.into_iter().map(union_intervals).collect();
+
+    let mut hyp_keys: Vec<String> = Vec::new();
+    let mut hyp_by: Vec<Vec<(u64, u64)>> = Vec::new();
+    for t in hyp_turns {
+        let i = hyp_keys
+            .iter()
+            .position(|k| *k == t.speaker_key)
+            .unwrap_or_else(|| {
+                hyp_keys.push(t.speaker_key.clone());
+                hyp_by.push(Vec::new());
+                hyp_keys.len() - 1
+            });
+        hyp_by[i].push((t.start_ms, t.end_ms));
+    }
+    let hyp_by: Vec<Vec<(u64, u64)>> = hyp_by.into_iter().map(union_intervals).collect();
+
+    // collar: ±collar around every merged reference boundary is unscored
+    let mut excluded: Vec<(u64, u64)> = Vec::new();
+    if collar_ms > 0 {
+        for &(s, e) in ref_by.iter().flatten() {
+            excluded.push((s.saturating_sub(collar_ms), s + collar_ms));
+            excluded.push((e.saturating_sub(collar_ms), e + collar_ms));
+        }
+    }
+    let excluded = union_intervals(excluded);
+
+    // elementary timeline: membership is constant between boundaries
+    let mut points: Vec<u64> = Vec::new();
+    for &(s, e) in ref_by
+        .iter()
+        .flatten()
+        .chain(hyp_by.iter().flatten())
+        .chain(excluded.iter())
+    {
+        points.push(s);
+        points.push(e);
+    }
+    points.sort_unstable();
+    points.dedup();
+    let active = |ivs: &[(u64, u64)], t: u64| -> bool {
+        let i = ivs.partition_point(|&(s, _)| s <= t);
+        i > 0 && ivs[i - 1].1 > t
+    };
+
+    // pass 1: overlap matrix over scored regions
+    let (nr, nh) = (n_ref, hyp_keys.len());
+    let mut ov = vec![0u64; nr.max(1) * nh.max(1)];
+    let mut regions: Vec<(u64, Vec<usize>, Vec<usize>)> = Vec::new();
+    for w in points.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if b <= a || active(&excluded, a) {
+            continue;
+        }
+        let rs: Vec<usize> = (0..nr).filter(|&r| active(&ref_by[r], a)).collect();
+        let hs: Vec<usize> = (0..nh).filter(|&h| active(&hyp_by[h], a)).collect();
+        if rs.is_empty() && hs.is_empty() {
+            continue;
+        }
+        let len = b - a;
+        for &r in &rs {
+            for &h in &hs {
+                ov[r * nh + h] += len;
+            }
+        }
+        regions.push((len, rs, hs));
+    }
+
+    // optimal injective ref→hyp assignment maximizing matched time: DP over
+    // the ref bitmask, one hyp column at a time. tables[h] = dp after the
+    // first h hyp columns; kept whole for the backtrack.
+    assert!(nr <= 12, "assignment DP caps at 12 reference speakers");
+    let full = 1usize << nr;
+    let mut tables: Vec<Vec<u64>> = vec![vec![0; full]];
+    for h in 0..nh {
+        let prev = tables.last().expect("seeded").clone();
+        let mut dp = prev.clone();
+        for mask in 0..full {
+            for r in 0..nr {
+                if mask & (1 << r) == 0 {
+                    continue;
+                }
+                let cand = prev[mask ^ (1 << r)] + ov[r * nh + h];
+                if cand > dp[mask] {
+                    dp[mask] = cand;
+                }
+            }
+        }
+        tables.push(dp);
+    }
+    let mut mapping: Vec<Option<usize>> = vec![None; nr];
+    {
+        let mut mask = full - 1;
+        for h in (0..nh).rev() {
+            if tables[h + 1][mask] == tables[h][mask] {
+                continue; // column h contributes nothing at this mask
+            }
+            for r in 0..nr {
+                if mask & (1 << r) != 0
+                    && tables[h + 1][mask] == tables[h][mask ^ (1 << r)] + ov[r * nh + h]
+                {
+                    mapping[r] = Some(h);
+                    mask ^= 1 << r;
+                    break;
+                }
+            }
+        }
+        // a zero-overlap pairing is no pairing
+        for r in 0..nr {
+            if let Some(h) = mapping[r] {
+                if ov[r * nh + h] == 0 {
+                    mapping[r] = None;
+                }
+            }
+        }
+    }
+
+    // pass 2: NIST decomposition per region under that mapping
+    let mut score = DerScore {
+        ref_speech_ms: 0,
+        miss_ms: 0,
+        fa_ms: 0,
+        conf_ms: 0,
+    };
+    for (len, rs, hs) in &regions {
+        let (r_n, h_n) = (rs.len() as u64, hs.len() as u64);
+        score.ref_speech_ms += len * r_n;
+        let matched = rs
+            .iter()
+            .filter(|&&r| mapping[r].is_some_and(|h| hs.contains(&h)))
+            .count() as u64;
+        score.miss_ms += len * r_n.saturating_sub(h_n);
+        score.fa_ms += len * h_n.saturating_sub(r_n);
+        score.conf_ms += len * (r_n.min(h_n).saturating_sub(matched));
+    }
+    let mapping = mapping
+        .into_iter()
+        .map(|h| h.map(|h| hyp_keys[h].clone()))
+        .collect();
+    (score, mapping)
+}
+
+/// Hypothesis speaker spans as the user sees them: one span per transcript
+/// segment (includes alignment effects, the pre-labeled mic channel, and
+/// unknown-fallback spans).
+fn transcript_turns(t: &Transcript) -> Vec<SpeakerTurn> {
+    t.segments
+        .iter()
+        .map(|s| SpeakerTurn {
+            speaker_key: s.speaker_key.clone(),
+            start_ms: s.start_ms,
+            end_ms: s.end_ms,
+        })
+        .collect()
+}
+
+/// DER (collared + uncollared) and speaker-count accuracy for one hypothesis
+/// span set; `label` names the span source in the log lines ("attributed" =
+/// transcript segments, "turns" = raw diarizer output).
+fn score_diarization(
+    reference: &Reference,
+    hyp_turns: &[SpeakerTurn],
+    label: &str,
+) -> Option<serde_json::Value> {
+    if reference.turns.is_empty() {
+        eprintln!("(reference has no utterance end timestamps — DER skipped)");
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+
+    // speaker-count accuracy: clusters the product would show as speakers
+    let clusters: std::collections::BTreeSet<&str> = hyp_turns
+        .iter()
+        .map(|t| t.speaker_key.as_str())
+        .filter(|k| *k != "mic" && *k != "spk_unknown")
+        .collect();
+    out.insert(
+        "ref_speakers".into(),
+        serde_json::json!(reference.speakers.len()),
+    );
+    out.insert("hyp_clusters".into(), serde_json::json!(clusters.len()));
+    eprintln!(
+        "speaker count ({label}): predicted {} clusters vs {} reference speakers",
+        clusters.len(),
+        reference.speakers.len()
+    );
+
+    for collar in [250u64, 0] {
+        let (s, mapping) = score_der(
+            &reference.turns,
+            reference.speakers.len(),
+            hyp_turns,
+            collar,
+        );
+        eprintln!(
+            "DER ({label}, collar {collar}ms): {:5.1}% = confusion {:.1}% + miss {:.1}% + false-alarm {:.1}%  (scored ref speech {:.0}s)",
+            s.der() * 100.0,
+            s.frac(s.conf_ms) * 100.0,
+            s.frac(s.miss_ms) * 100.0,
+            s.frac(s.fa_ms) * 100.0,
+            s.ref_speech_ms as f64 / 1000.0
+        );
+        out.insert(
+            format!("der_collar_{collar}"),
+            serde_json::json!({
+                "der": s.der(),
+                "confusion": s.frac(s.conf_ms),
+                "miss": s.frac(s.miss_ms),
+                "false_alarm": s.frac(s.fa_ms),
+                "ref_speech_s": s.ref_speech_ms as f64 / 1000.0,
+            }),
+        );
+        if collar == 250 {
+            let map: serde_json::Map<String, serde_json::Value> = mapping
+                .iter()
+                .enumerate()
+                .map(|(r, h)| (format!("ref_{r}"), serde_json::json!(h)))
+                .collect();
+            out.insert("mapping_collar_250".into(), serde_json::Value::Object(map));
+        }
+    }
+    Some(serde_json::Value::Object(out))
+}
+
 /// Full reference scoring block: per-channel WER, merged + speaker-attributed
 /// WER, attribution error, cross-talk duplication, per-channel bleed.
-fn score_against_reference(t: &Transcript, ref_path: &str) {
-    let reference = parse_fathom_reference(ref_path);
+fn score_against_reference(t: &Transcript, ref_path: &str) -> serde_json::Value {
+    let reference = parse_reference(ref_path);
     let mic = hyp_words(t, |k| k == "mic");
     let system = hyp_words(t, |k| k != "mic");
     let merged = hyp_words(t, |_| true);
 
-    let self_idx = detect_self(&reference, &mic);
+    // Mixed/import transcripts have no mic channel: the "you"-vs-others
+    // splits, bleed, and cross-talk metrics are meaningless there — skipped.
+    let self_idx = (!mic.is_empty()).then(|| detect_self(&reference, &mic));
     let ref_you: Vec<(String, usize)> = reference
         .tokens
         .iter()
-        .filter(|(_, s)| *s == self_idx)
+        .filter(|(_, s)| Some(*s) == self_idx)
         .cloned()
         .collect();
     let ref_others: Vec<(String, usize)> = reference
         .tokens
         .iter()
-        .filter(|(_, s)| *s != self_idx)
+        .filter(|(_, s)| Some(*s) != self_idx)
         .cloned()
         .collect();
 
     eprintln!("== reference scoring vs {ref_path} ==");
-    eprintln!(
-        "ref: {} words total — {} = \"You\" ({} words), others {} words",
-        reference.tokens.len(),
-        reference.speakers[self_idx],
-        ref_you.len(),
-        ref_others.len()
-    );
+    let mut m = serde_json::Map::new();
+    m.insert("ref_words".into(), serde_json::json!(reference.tokens.len()));
 
-    let mic_vs_you = score_channel(&ref_you, &mic);
-    // Diagnostic 0 crux: how well did the MIC transcribe the far-end speaker?
-    // Compare this against `system vs ref[others]` to decide which channel's
-    // copy of the far-end to keep when de-duplicating cross-talk.
-    let mic_vs_others = score_channel(&ref_others, &mic);
-    let mic_vs_all = score_channel(&reference.tokens, &mic);
-    let sys_vs_others = score_channel(&ref_others, &system);
+    if let Some(self_idx) = self_idx {
+        eprintln!(
+            "ref: {} words total — {} = \"You\" ({} words), others {} words",
+            reference.tokens.len(),
+            reference.speakers[self_idx],
+            ref_you.len(),
+            ref_others.len()
+        );
+        let mic_vs_you = score_channel(&ref_you, &mic);
+        // Diagnostic 0 crux: how well did the MIC transcribe the far-end speaker?
+        // Compare this against `system vs ref[others]` to decide which channel's
+        // copy of the far-end to keep when de-duplicating cross-talk.
+        let mic_vs_others = score_channel(&ref_others, &mic);
+        let mic_vs_all = score_channel(&reference.tokens, &mic);
+        let sys_vs_others = score_channel(&ref_others, &system);
+        eprintln!("mic    vs ref[you]:    {}", mic_vs_you.line());
+        eprintln!("mic    vs ref[others]: {}", mic_vs_others.line());
+        eprintln!("mic    vs ref[all]:    {}", mic_vs_all.line());
+        eprintln!("system vs ref[others]: {}", sys_vs_others.line());
+        m.insert("ref_words_you".into(), serde_json::json!(ref_you.len()));
+        m.insert("wer_mic_vs_you".into(), serde_json::json!(mic_vs_you.wer()));
+        m.insert(
+            "wer_mic_vs_others".into(),
+            serde_json::json!(mic_vs_others.wer()),
+        );
+        m.insert("wer_mic_vs_all".into(), serde_json::json!(mic_vs_all.wer()));
+        m.insert(
+            "wer_system_vs_others".into(),
+            serde_json::json!(sys_vs_others.wer()),
+        );
+    } else {
+        eprintln!(
+            "ref: {} words total across {} speakers (no mic channel — single-track scoring)",
+            reference.tokens.len(),
+            reference.speakers.len()
+        );
+    }
     let sys_vs_all = score_channel(&reference.tokens, &system);
-    eprintln!("mic    vs ref[you]:    {}", mic_vs_you.line());
-    eprintln!("mic    vs ref[others]: {}", mic_vs_others.line());
-    eprintln!("mic    vs ref[all]:    {}", mic_vs_all.line());
-    eprintln!("system vs ref[others]: {}", sys_vs_others.line());
     eprintln!("system vs ref[all]:    {}", sys_vs_all.line());
 
     // ---- merged transcript: WER + speaker attribution ----
@@ -524,15 +989,14 @@ fn score_against_reference(t: &Transcript, ref_path: &str) {
     }
     let mut mapping: std::collections::BTreeMap<&str, usize> = Default::default();
     for (key, counts) in &votes {
-        let best = if *key == "mic" {
-            self_idx
-        } else {
-            counts
+        let best = match (*key, self_idx) {
+            ("mic", Some(self_idx)) => self_idx,
+            _ => counts
                 .iter()
                 .enumerate()
                 .max_by_key(|(_, c)| **c)
                 .map(|(i, _)| i)
-                .unwrap_or(0)
+                .unwrap_or(0),
         };
         mapping.insert(key, best);
         eprintln!(
@@ -565,67 +1029,82 @@ fn score_against_reference(t: &Transcript, ref_path: &str) {
     eprintln!("speaker-attributed WER (merged): {:5.1}%", sa_wer * 100.0);
 
     // ---- cross-talk duplication: ref words matched on BOTH channels ----
-    let window_ms: u64 = std::env::var("FLYONTHEWALL_HARNESS_XTALK_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(500);
-    let on_mic = match_map(&reference.tokens, &mic);
-    let on_sys = match_map(&reference.tokens, &system);
-    let (mut dup_windowed, mut dup_any) = (0usize, 0usize);
-    let (mut you_on_sys, mut others_on_mic) = (0usize, 0usize);
-    for (ri, (mi, si)) in on_mic.iter().zip(&on_sys).enumerate() {
-        let speaker = reference.tokens[ri].1;
-        if mi.is_some() && speaker != self_idx {
-            others_on_mic += 1;
-        }
-        if si.is_some() && speaker == self_idx {
-            you_on_sys += 1;
-        }
-        if let (Some(mi), Some(si)) = (mi, si) {
-            dup_any += 1;
-            if mic[*mi].start_ms.abs_diff(system[*si].start_ms) <= window_ms {
-                dup_windowed += 1;
+    // (two-channel recordings only — a mixed track has no second channel)
+    if let Some(self_idx) = self_idx {
+        let window_ms: u64 = std::env::var("FLYONTHEWALL_HARNESS_XTALK_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500);
+        let on_mic = match_map(&reference.tokens, &mic);
+        let on_sys = match_map(&reference.tokens, &system);
+        let (mut dup_windowed, mut dup_any) = (0usize, 0usize);
+        let (mut you_on_sys, mut others_on_mic) = (0usize, 0usize);
+        for (ri, (mi, si)) in on_mic.iter().zip(&on_sys).enumerate() {
+            let speaker = reference.tokens[ri].1;
+            if mi.is_some() && speaker != self_idx {
+                others_on_mic += 1;
+            }
+            if si.is_some() && speaker == self_idx {
+                you_on_sys += 1;
+            }
+            if let (Some(mi), Some(si)) = (mi, si) {
+                dup_any += 1;
+                if mic[*mi].start_ms.abs_diff(system[*si].start_ms) <= window_ms {
+                    dup_windowed += 1;
+                }
             }
         }
+        let n = reference.tokens.len();
+        eprintln!(
+            "cross-talk duplication: {:5.1}% of ref words on BOTH channels within {window_ms}ms ({dup_windowed}/{n}); {:5.1}% regardless of timing ({dup_any}/{n})",
+            dup_windowed as f64 / n as f64 * 100.0,
+            dup_any as f64 / n as f64 * 100.0
+        );
+        eprintln!(
+            "bleed: {:5.1}% of ref[others] words appear in MIC channel ({others_on_mic}/{}); {:5.1}% of ref[you] words appear in SYSTEM channel ({you_on_sys}/{})",
+            others_on_mic as f64 / ref_others.len().max(1) as f64 * 100.0,
+            ref_others.len(),
+            you_on_sys as f64 / ref_you.len().max(1) as f64 * 100.0,
+            ref_you.len()
+        );
+        m.insert(
+            "xtalk_dup_windowed".into(),
+            serde_json::json!(dup_windowed as f64 / n as f64),
+        );
+        m.insert(
+            "xtalk_dup_any".into(),
+            serde_json::json!(dup_any as f64 / n as f64),
+        );
+        m.insert(
+            "bleed_others_on_mic".into(),
+            serde_json::json!(others_on_mic as f64 / ref_others.len().max(1) as f64),
+        );
+        m.insert(
+            "bleed_you_on_system".into(),
+            serde_json::json!(you_on_sys as f64 / ref_you.len().max(1) as f64),
+        );
+        m.insert("xtalk_window_ms".into(), serde_json::json!(window_ms));
     }
-    let n = reference.tokens.len();
-    eprintln!(
-        "cross-talk duplication: {:5.1}% of ref words on BOTH channels within {window_ms}ms ({dup_windowed}/{n}); {:5.1}% regardless of timing ({dup_any}/{n})",
-        dup_windowed as f64 / n as f64 * 100.0,
-        dup_any as f64 / n as f64 * 100.0
-    );
-    eprintln!(
-        "bleed: {:5.1}% of ref[others] words appear in MIC channel ({others_on_mic}/{}); {:5.1}% of ref[you] words appear in SYSTEM channel ({you_on_sys}/{})",
-        others_on_mic as f64 / ref_others.len().max(1) as f64 * 100.0,
-        ref_others.len(),
-        you_on_sys as f64 / ref_you.len().max(1) as f64 * 100.0,
-        ref_you.len()
-    );
 
-    let metrics = serde_json::json!({
-        "ref_words": n,
-        "ref_words_you": ref_you.len(),
-        "wer_mic_vs_you": mic_vs_you.wer(),
-        "wer_mic_vs_others": mic_vs_others.wer(),
-        "wer_mic_vs_all": mic_vs_all.wer(),
-        "wer_system_vs_others": sys_vs_others.wer(),
-        "wer_system_vs_all": sys_vs_all.wer(),
-        "wer_merged": merged_wer.wer(),
-        "sa_wer_merged": sa_wer,
-        "attribution_error": attr_err,
-        "xtalk_dup_windowed": dup_windowed as f64 / n as f64,
-        "xtalk_dup_any": dup_any as f64 / n as f64,
-        "bleed_others_on_mic": others_on_mic as f64 / ref_others.len().max(1) as f64,
-        "bleed_you_on_system": you_on_sys as f64 / ref_you.len().max(1) as f64,
-        "xtalk_window_ms": window_ms,
-    });
+    m.insert("wer_system_vs_all".into(), serde_json::json!(sys_vs_all.wer()));
+    m.insert("wer_merged".into(), serde_json::json!(merged_wer.wer()));
+    m.insert("sa_wer_merged".into(), serde_json::json!(sa_wer));
+    m.insert("attribution_error".into(), serde_json::json!(attr_err));
+
+    // ---- diarization: DER over the attributed segment spans ----
+    if let Some(d) = score_diarization(&reference, &transcript_turns(t), "attributed") {
+        m.insert("diarization".into(), d);
+    }
+
+    let metrics = serde_json::Value::Object(m);
     eprintln!("HARNESS_REFERENCE_METRICS_JSON: {metrics}");
+    metrics
 }
 
-fn maybe_score_reference(t: &Transcript) {
-    if let Ok(ref_path) = std::env::var("FLYONTHEWALL_HARNESS_REFERENCE") {
-        score_against_reference(t, &ref_path);
-    }
+fn maybe_score_reference(t: &Transcript) -> Option<serde_json::Value> {
+    std::env::var("FLYONTHEWALL_HARNESS_REFERENCE")
+        .ok()
+        .map(|ref_path| score_against_reference(t, &ref_path))
 }
 
 // ---------------------------------------------------------------------------
@@ -900,6 +1379,242 @@ fn stage_channel(src: &Path, dst: &Path, max_secs: Option<u64>) -> Result<u64, S
     }
 }
 
+// ---------------------------------------------------------------------------
+// Sweep knobs, artifact resolution, results publishing
+// ---------------------------------------------------------------------------
+
+fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// Diarization options for the diarize-only sweep mode: the shipped defaults
+/// unless overridden from the environment (see file docs).
+fn sweep_diarize_options() -> fly_diarize::DiarizeOptions {
+    let mut opts = fly_diarize::DiarizeOptions::default();
+    if let Some(t) = env_parse::<f32>("FLYONTHEWALL_HARNESS_CLUSTER_THRESHOLD") {
+        opts.cluster_threshold = Some(t);
+    }
+    if let Some(n) = env_parse::<usize>("FLYONTHEWALL_HARNESS_NUM_SPEAKERS") {
+        opts.num_speakers = Some(n);
+    }
+    opts
+}
+
+fn sweep_dust() -> (u64, f64) {
+    (
+        env_parse("FLYONTHEWALL_HARNESS_DUST_FLOOR_MS").unwrap_or(fly_diarize::DUST_FLOOR_MS),
+        env_parse("FLYONTHEWALL_HARNESS_DUST_FRACTION").unwrap_or(fly_diarize::DUST_FRACTION),
+    )
+}
+
+/// The run configuration echoed into the results JSON. `sweep` = the
+/// diarize-only mode, where the env knobs actually apply; the pipeline mode
+/// always runs the shipped defaults.
+fn config_json(mode: &str, sweep: bool) -> serde_json::Value {
+    let opts = if sweep {
+        sweep_diarize_options()
+    } else {
+        fly_diarize::DiarizeOptions::default()
+    };
+    let (floor, fraction) = if sweep {
+        sweep_dust()
+    } else {
+        (fly_diarize::DUST_FLOOR_MS, fly_diarize::DUST_FRACTION)
+    };
+    let embedding = std::env::var("FLYONTHEWALL_HARNESS_EMBEDDING")
+        .ok()
+        .filter(|_| sweep)
+        .and_then(|p| {
+            Path::new(&p)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "campplus.onnx (pinned)".into());
+    let sentence_align = sweep
+        && std::env::var("FLYONTHEWALL_HARNESS_SENTENCE_ALIGN")
+            .is_ok_and(|v| !v.is_empty() && v != "0");
+    serde_json::json!({
+        "mode": mode,
+        "cluster_threshold": opts.cluster_threshold,
+        "num_speakers": opts.num_speakers,
+        "dust_floor_ms": floor,
+        "dust_fraction": fraction,
+        "embedding": embedding,
+        "align": if sentence_align { "sentence" } else { "word" },
+    })
+}
+
+/// Write the run's full metric set to FLYONTHEWALL_HARNESS_RESULTS_JSON (when
+/// set). The committed per-fixture baselines under docs/data/diarization/
+/// are these files verbatim — a sweep or regression shows up as a git diff.
+fn write_results(results: serde_json::Map<String, serde_json::Value>) {
+    let Ok(path) = std::env::var("FLYONTHEWALL_HARNESS_RESULTS_JSON") else {
+        return;
+    };
+    let mut all = serde_json::Map::new();
+    if let Ok(name) = std::env::var("FLYONTHEWALL_HARNESS_FIXTURE") {
+        all.insert("fixture".into(), serde_json::json!(name));
+    }
+    all.extend(results);
+    let body = serde_json::to_string_pretty(&serde_json::Value::Object(all)).expect("serialize");
+    std::fs::write(&path, body + "\n").expect("write results json");
+    eprintln!("results written to {path}");
+}
+
+struct DiarizerPaths {
+    exe: PathBuf,
+    seg: PathBuf,
+    emb: PathBuf,
+}
+
+/// Resolve the diarization sidecar + model paths through the models registry
+/// (the single source of truth for artifact locations — no hard-coded
+/// platform strings). Missing artifacts → SKIP message + None, the same
+/// contract as rediarize_e2e.
+fn diarizer_paths(real_data: &Path) -> Option<DiarizerPaths> {
+    let rel = |id: &str| {
+        fly_app_lib::models::artifact(id).map(|a| real_data.join(a.probe_rel))
+    };
+    let (Some(exe), Some(seg), Some(default_emb)) = (
+        rel("sherpa-bin"),
+        rel("pyannote-seg"),
+        rel("campplus-embedding"),
+    ) else {
+        eprintln!("SKIP: diarization artifacts not registered for this OS");
+        return None;
+    };
+    let emb = std::env::var("FLYONTHEWALL_HARNESS_EMBEDDING")
+        .map(PathBuf::from)
+        .unwrap_or(default_emb);
+    for p in [&exe, &seg, &emb] {
+        if !p.exists() {
+            eprintln!("SKIP: artifact not installed: {}", p.display());
+            return None;
+        }
+    }
+    Some(DiarizerPaths { exe, seg, emb })
+}
+
+/// Diarize-only sweep mode: fresh diarization over one audio channel, words
+/// re-attributed from an existing baseline transcript (mic segments pass
+/// through untouched — they are pre-labeled by construction), then the full
+/// scoring stack. No ASR run, so a parameter sweep costs only diarization.
+fn diarize_only(wav: &str) {
+    let base_json = std::env::var("FLYONTHEWALL_HARNESS_BASE_JSON").expect(
+        "diarize-only mode needs FLYONTHEWALL_HARNESS_BASE_JSON (a prior FLYONTHEWALL_HARNESS_OUT_JSON transcript)",
+    );
+    let base: Transcript = serde_json::from_str(
+        &std::fs::read_to_string(&base_json).expect("read base transcript json"),
+    )
+    .expect("parse base transcript json");
+
+    let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
+    let Some(paths) = diarizer_paths(&real_data) else {
+        return;
+    };
+
+    // words to re-attribute: everything not pre-labeled "mic"
+    let mut far_words: Vec<fly_core::Word> = base
+        .segments
+        .iter()
+        .filter(|s| s.speaker_key != "mic")
+        .flat_map(|s| s.words.iter().cloned())
+        .collect();
+    far_words.sort_by_key(|w| (w.start_ms, w.end_ms));
+    let mic_segments: Vec<fly_core::TranscriptSegment> = base
+        .segments
+        .iter()
+        .filter(|s| s.speaker_key == "mic")
+        .cloned()
+        .collect();
+
+    // 16 kHz mono input for the diarizer
+    let tmp = tempfile::tempdir().unwrap();
+    let (samples, rate) = fly_audio::mix::read_wav_mono(Path::new(wav)).expect("read diarize wav");
+    let wav16 = if rate == 16_000 {
+        PathBuf::from(wav)
+    } else {
+        let p = tmp.path().join("diarize.16k.wav");
+        let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
+        fly_audio::mix::write_wav_mono_16(&p, &resampled, 16_000).expect("write 16k wav");
+        p
+    };
+
+    let opts = sweep_diarize_options();
+    let (floor, fraction) = sweep_dust();
+    let engine = fly_diarize::sherpa::SherpaDiarizeEngine {
+        exe: paths.exe,
+        segmentation_model: paths.seg,
+        embedding_model: paths.emb,
+        threads: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+    };
+    use fly_diarize::DiarizationEngine as _;
+    let started = std::time::Instant::now();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let raw_turns = runtime
+        .block_on(engine.diarize(&wav16, &opts))
+        .expect("diarize");
+    let diarize_secs = started.elapsed().as_secs_f64();
+    eprintln!(
+        "diarize took {diarize_secs:.1}s: {} raw turns, threshold={:?} num_speakers={:?}",
+        raw_turns.len(),
+        opts.cluster_threshold,
+        opts.num_speakers
+    );
+    let turns = fly_diarize::drop_dust_clusters_with(raw_turns, floor, fraction);
+
+    let align_opts = fly_core::AlignOptions::default();
+    let sentence_align =
+        std::env::var("FLYONTHEWALL_HARNESS_SENTENCE_ALIGN").is_ok_and(|v| !v.is_empty() && v != "0");
+    let mut segments = mic_segments;
+    segments.extend(if sentence_align {
+        fly_core::align::align_words_to_speakers_by_sentence(&far_words, &turns, &align_opts)
+    } else {
+        fly_core::align::align_words_to_speakers(&far_words, &turns, &align_opts)
+    });
+    segments.sort_by_key(|s| (s.start_ms, s.end_ms));
+    let mut speakers: Vec<fly_core::Speaker> = Vec::new();
+    for s in &segments {
+        if !speakers.iter().any(|sp| sp.key == s.speaker_key) {
+            speakers.push(fly_core::Speaker {
+                key: s.speaker_key.clone(),
+                label: s.speaker_key.clone(),
+            });
+        }
+    }
+    let t = Transcript {
+        meeting_id: base.meeting_id.clone(),
+        language: base.language.clone(),
+        engine: format!("{}+rediarize", base.engine),
+        segments,
+        speakers,
+    };
+
+    if let Ok(out) = std::env::var("FLYONTHEWALL_HARNESS_OUT_JSON") {
+        std::fs::write(&out, serde_json::to_string_pretty(&t).unwrap()).unwrap();
+        eprintln!("transcript written to {out}");
+    }
+
+    let mut results = serde_json::Map::new();
+    results.insert("config".into(), config_json("diarize-only", true));
+    results.insert("diarize_secs".into(), serde_json::json!(diarize_secs));
+    results.insert("transcript".into(), report(&t));
+    if let Some(r) = maybe_score_reference(&t) {
+        results.insert("reference".into(), r);
+    }
+    // raw diarizer turns scored separately from the attributed segments:
+    // separates clustering error from alignment error
+    if let Ok(ref_path) = std::env::var("FLYONTHEWALL_HARNESS_REFERENCE") {
+        let reference = parse_reference(&ref_path);
+        if let Some(d) = score_diarization(&reference, &turns, "turns") {
+            results.insert("diarization_turns".into(), d);
+        }
+    }
+    write_results(results);
+}
+
 #[test]
 #[ignore = "offline accuracy harness; needs artifacts + a recording, see file docs"]
 fn accuracy_harness() {
@@ -915,20 +1630,35 @@ fn accuracy_harness() {
     if let Ok(json_path) = std::env::var("FLYONTHEWALL_HARNESS_SCORE_JSON") {
         let raw = std::fs::read_to_string(&json_path).expect("read score json");
         let t: Transcript = serde_json::from_str(&raw).expect("parse transcript json");
-        report(&t);
-        maybe_score_reference(&t);
+        let mut results = serde_json::Map::new();
+        results.insert("config".into(), config_json("score-json", false));
+        results.insert("transcript".into(), report(&t));
+        if let Some(r) = maybe_score_reference(&t) {
+            results.insert("reference".into(), r);
+        }
+        write_results(results);
+        return;
+    }
+
+    // ---- diarize-only sweep mode: no ASR, see file docs ----
+    if let Ok(wav) = std::env::var("FLYONTHEWALL_HARNESS_DIARIZE_WAV") {
+        diarize_only(&wav);
         return;
     }
 
     let Ok(rec_dir) = std::env::var("FLYONTHEWALL_HARNESS_DIR") else {
-        eprintln!("SKIP: set FLYONTHEWALL_HARNESS_DIR or FLYONTHEWALL_HARNESS_SCORE_JSON");
+        eprintln!("SKIP: set FLYONTHEWALL_HARNESS_DIR, FLYONTHEWALL_HARNESS_SCORE_JSON, or FLYONTHEWALL_HARNESS_DIARIZE_WAV");
         return;
     };
     let rec_dir = std::path::PathBuf::from(rec_dir);
     let mic_src = rec_dir.join("recording.mic.wav");
     let sys_src = rec_dir.join("recording.system.wav");
-    assert!(mic_src.exists(), "missing {}", mic_src.display());
-    assert!(sys_src.exists(), "missing {}", sys_src.display());
+    let mixed_src = rec_dir.join("recording.mixed.wav");
+    let per_channel = mic_src.exists() && sys_src.exists();
+    assert!(
+        per_channel || mixed_src.exists(),
+        "FLYONTHEWALL_HARNESS_DIR needs recording.mic.wav + recording.system.wav, or a recording.mixed.wav"
+    );
 
     let model = std::env::var("FLYONTHEWALL_HARNESS_MODEL")
         .unwrap_or_else(|_| "ggml-large-v3-turbo-q5_0".into());
@@ -943,47 +1673,68 @@ fn accuracy_harness() {
             std::fs::write(&out, serde_json::to_string_pretty(&t).unwrap()).unwrap();
             eprintln!("transcript written to {out}");
         }
-        report(&t);
-        maybe_score_reference(&t);
+        let mut results = serde_json::Map::new();
+        results.insert("config".into(), config_json("groq", false));
+        results.insert("transcript".into(), report(&t));
+        if let Some(r) = maybe_score_reference(&t) {
+            results.insert("reference".into(), r);
+        }
+        write_results(results);
         return;
     }
 
-    // ---- artifacts, hardlinked from the real data dir like the golden E2E ----
+    // ---- artifacts: resolved via the models registry, hardlinked from the
+    // real data dir like the golden E2E; missing → skip, not panic ----
     let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
-    let needed = [
-        "bin/whisper/Release/whisper-cli.exe".to_string(),
-        "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe".to_string(),
-        "models/diarize/sherpa-onnx-pyannote-segmentation-3-0/model.onnx".to_string(),
-        "models/diarize/campplus.onnx".to_string(),
-        format!("models/asr/{model}.bin"),
-    ];
-    if let Some(missing) = needed.iter().find(|p| !real_data.join(p).exists()) {
-        panic!(
-            "artifact not installed: {}",
-            real_data.join(missing).display()
+    if diarizer_paths(&real_data).is_none() {
+        return; // SKIP already printed
+    }
+    if !fly_app_lib::models::tool_installed(
+        &real_data,
+        fly_app_lib::models::WHISPER_ENGINE_ID,
+        fly_app_lib::models::WHISPER_CLI_NAMES,
+    ) {
+        eprintln!("SKIP: whisper engine not installed (no managed artifact, nothing on PATH)");
+        return;
+    }
+    let model_rel = fly_app_lib::models::artifact(&model)
+        .map(|a| a.probe_rel.to_string())
+        .unwrap_or_else(|| format!("models/asr/{model}.bin"));
+    if !real_data.join(&model_rel).exists() {
+        eprintln!(
+            "SKIP: ASR model not installed: {}",
+            real_data.join(&model_rel).display()
         );
+        return;
     }
 
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
-    for sub in ["bin/whisper", "bin/sherpa", "models/diarize"] {
-        link_tree(&real_data.join(sub), &data_dir.join(sub)).unwrap();
+    let mut link_subs: Vec<&str> = vec!["models/diarize"];
+    for id in ["whisper-bin", "sherpa-bin"] {
+        if let Some(a) = fly_app_lib::models::artifact(id) {
+            if real_data.join(a.probe_rel).exists() {
+                link_subs.push(a.dest_rel);
+            }
+        }
     }
     // GPU modes need the Vulkan build in place (no download inside the test)
-    if std::env::var("FLYONTHEWALL_HARNESS_GPU").is_ok_and(|v| !v.is_empty() && v != "0") {
-        let vulkan = real_data.join("bin/whisper-vulkan");
-        assert!(
-            vulkan.join("Release/whisper-cli.exe").exists(),
-            "FLYONTHEWALL_HARNESS_GPU set but whisper-bin-vulkan is not installed"
-        );
-        link_tree(&vulkan, &data_dir.join("bin/whisper-vulkan")).unwrap();
+    let gpu = std::env::var("FLYONTHEWALL_HARNESS_GPU").is_ok_and(|v| !v.is_empty() && v != "0");
+    if gpu {
+        match fly_app_lib::models::artifact("whisper-bin-vulkan") {
+            Some(a) if real_data.join(a.probe_rel).exists() => link_subs.push(a.dest_rel),
+            _ => {
+                eprintln!("SKIP: FLYONTHEWALL_HARNESS_GPU set but whisper-bin-vulkan is not installed");
+                return;
+            }
+        }
     }
-    std::fs::create_dir_all(data_dir.join("models/asr")).unwrap();
-    std::fs::hard_link(
-        real_data.join(format!("models/asr/{model}.bin")),
-        data_dir.join(format!("models/asr/{model}.bin")),
-    )
-    .unwrap();
+    for sub in link_subs {
+        link_tree(&real_data.join(sub), &data_dir.join(sub)).unwrap();
+    }
+    let model_dst = data_dir.join(&model_rel);
+    std::fs::create_dir_all(model_dst.parent().expect("model path has a parent")).unwrap();
+    std::fs::hard_link(real_data.join(&model_rel), &model_dst).unwrap();
 
     let state = fly_app_lib::state::AppState::init_with(
         data_dir.clone(),
@@ -1025,22 +1776,31 @@ fn accuracy_harness() {
             .unwrap();
         let meet_dir = data_dir.join("recordings").join(&meeting.id);
         std::fs::create_dir_all(&meet_dir).unwrap();
-        let dur_mic =
-            stage_channel(&mic_src, &meet_dir.join("recording.mic.wav"), max_secs).unwrap();
-        let dur_sys =
-            stage_channel(&sys_src, &meet_dir.join("recording.system.wav"), max_secs).unwrap();
-        storage
-            .end_meeting(
-                &meeting.id,
-                &RecordingRef {
-                    mic_path: Some(format!("recordings/{}/recording.mic.wav", meeting.id)),
-                    system_path: Some(format!("recordings/{}/recording.system.wav", meeting.id)),
-                    mixed_path: None,
-                    playback_path: None,
-                    duration_ms: dur_mic.max(dur_sys),
-                },
-            )
-            .unwrap();
+        let recording = if per_channel {
+            let dur_mic =
+                stage_channel(&mic_src, &meet_dir.join("recording.mic.wav"), max_secs).unwrap();
+            let dur_sys =
+                stage_channel(&sys_src, &meet_dir.join("recording.system.wav"), max_secs).unwrap();
+            RecordingRef {
+                mic_path: Some(format!("recordings/{}/recording.mic.wav", meeting.id)),
+                system_path: Some(format!("recordings/{}/recording.system.wav", meeting.id)),
+                mixed_path: None,
+                playback_path: None,
+                duration_ms: dur_mic.max(dur_sys),
+            }
+        } else {
+            // single mixed track — the import path: the whole track is diarized
+            let dur =
+                stage_channel(&mixed_src, &meet_dir.join("recording.mixed.wav"), max_secs).unwrap();
+            RecordingRef {
+                mic_path: None,
+                system_path: None,
+                mixed_path: Some(format!("recordings/{}/recording.mixed.wav", meeting.id)),
+                playback_path: None,
+                duration_ms: dur,
+            }
+        };
+        storage.end_meeting(&meeting.id, &recording).unwrap();
         meeting.id
     };
 
@@ -1063,7 +1823,8 @@ fn accuracy_harness() {
             &meeting_id,
         ))
         .expect("pipeline should succeed");
-    eprintln!("pipeline took {:.1}s", started.elapsed().as_secs_f32());
+    let pipeline_secs = started.elapsed().as_secs_f64();
+    eprintln!("pipeline took {pipeline_secs:.1}s");
 
     // keep the produced transcript for spot-checking against the audio
     if let Ok(out) = std::env::var("FLYONTHEWALL_HARNESS_OUT_JSON") {
@@ -1071,6 +1832,164 @@ fn accuracy_harness() {
         eprintln!("transcript written to {out}");
     }
 
-    report(&transcript);
-    maybe_score_reference(&transcript);
+    let mut results = serde_json::Map::new();
+    let mut config = config_json("pipeline", false);
+    config["asr_model"] = serde_json::json!(model);
+    config["gpu"] = serde_json::json!(gpu);
+    config["max_secs"] = serde_json::json!(max_secs);
+    results.insert("config".into(), config);
+    results.insert("pipeline_secs".into(), serde_json::json!(pipeline_secs));
+    results.insert("transcript".into(), report(&transcript));
+    if let Some(r) = maybe_score_reference(&transcript) {
+        results.insert("reference".into(), r);
+    }
+    write_results(results);
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests (not #[ignore]d — pure parsing/scoring math, no artifacts)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod der_tests {
+    use super::*;
+
+    fn turn(key: &str, start_ms: u64, end_ms: u64) -> SpeakerTurn {
+        SpeakerTurn {
+            speaker_key: key.into(),
+            start_ms,
+            end_ms,
+        }
+    }
+
+    fn rt(speaker: usize, start_ms: u64, end_ms: u64) -> RefTurn {
+        RefTurn {
+            speaker,
+            start_ms,
+            end_ms,
+        }
+    }
+
+    #[test]
+    fn vtt_timestamps_parse() {
+        assert_eq!(parse_vtt_ts("00:00:03.435"), Some(3_435));
+        assert_eq!(parse_vtt_ts("01:02:03.004"), Some(3_723_004));
+        assert_eq!(parse_vtt_ts("02:03.004 "), Some(123_004));
+        assert_eq!(parse_vtt_ts("nope"), None);
+        assert_eq!(parse_vtt_ts("00:00:03"), None);
+    }
+
+    #[test]
+    fn teams_vtt_parses_speakers_tokens_and_turns() {
+        let vtt = "\
+WEBVTT
+
+abc/1-0
+00:00:01.000 --> 00:00:03.000
+<v Ada Lovelace>Hello there,
+this continues.</v>
+
+abc/2-0
+00:00:03.000 --> 00:00:04.500
+<v Bob>Hi Ada &amp; all.</v>
+";
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ref.vtt");
+        std::fs::write(&p, vtt).unwrap();
+        let r = parse_teams_vtt_reference(p.to_str().unwrap());
+        assert_eq!(r.speakers, vec!["Ada Lovelace", "Bob"]);
+        assert_eq!(r.turns.len(), 2);
+        assert_eq!(r.turns[0].start_ms, 1000);
+        assert_eq!(r.turns[0].end_ms, 3000);
+        assert_eq!(r.turns[1].speaker, 1);
+        let toks: Vec<&str> = r.tokens.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            toks,
+            vec!["hello", "there", "this", "continues", "hi", "ada", "all"]
+        );
+    }
+
+    #[test]
+    fn intervals_union_and_fuse() {
+        assert_eq!(
+            union_intervals(vec![(5, 10), (0, 5), (20, 30), (8, 12), (30, 30)]),
+            vec![(0, 12), (20, 30)]
+        );
+    }
+
+    #[test]
+    fn perfect_hypothesis_scores_zero() {
+        let refs = [rt(0, 0, 10_000), rt(1, 10_000, 20_000)];
+        let hyps = [turn("spk_0", 0, 10_000), turn("spk_1", 10_000, 20_000)];
+        let (s, mapping) = score_der(&refs, 2, &hyps, 0);
+        assert_eq!(s.miss_ms + s.fa_ms + s.conf_ms, 0);
+        assert_eq!(s.ref_speech_ms, 20_000);
+        assert_eq!(mapping[0].as_deref(), Some("spk_0"));
+        assert_eq!(mapping[1].as_deref(), Some("spk_1"));
+    }
+
+    #[test]
+    fn one_cluster_for_two_speakers_is_half_confusion() {
+        let refs = [rt(0, 0, 10_000), rt(1, 10_000, 20_000)];
+        let hyps = [turn("spk_0", 0, 20_000)];
+        let (s, _) = score_der(&refs, 2, &hyps, 0);
+        assert_eq!(s.conf_ms, 10_000);
+        assert_eq!(s.miss_ms, 0);
+        assert_eq!(s.fa_ms, 0);
+        assert!((s.der() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn empty_hypothesis_is_all_miss() {
+        let refs = [rt(0, 0, 10_000)];
+        let (s, _) = score_der(&refs, 1, &[], 0);
+        assert_eq!(s.miss_ms, 10_000);
+        assert!((s.der() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hyp_speech_outside_ref_is_false_alarm() {
+        let refs = [rt(0, 0, 10_000)];
+        let hyps = [turn("spk_0", 0, 10_000), turn("spk_0", 30_000, 35_000)];
+        let (s, _) = score_der(&refs, 1, &hyps, 0);
+        assert_eq!(s.fa_ms, 5_000);
+        assert_eq!(s.conf_ms + s.miss_ms, 0);
+    }
+
+    #[test]
+    fn collar_absorbs_boundary_jitter() {
+        // hypothesis switches 200 ms late — inside a 250 ms collar
+        let refs = [rt(0, 0, 10_000), rt(1, 10_000, 20_000)];
+        let hyps = [turn("spk_0", 0, 10_200), turn("spk_1", 10_200, 20_000)];
+        let (strict, _) = score_der(&refs, 2, &hyps, 0);
+        assert_eq!(strict.conf_ms, 200);
+        let (collared, _) = score_der(&refs, 2, &hyps, 250);
+        assert_eq!(collared.conf_ms, 0);
+        assert_eq!(collared.miss_ms + collared.fa_ms, 0);
+    }
+
+    #[test]
+    fn overlapping_reference_speech_needs_both_speakers() {
+        // both ref speakers talk 5-10 s; hypothesis only ever has one active
+        let refs = [rt(0, 0, 10_000), rt(1, 5_000, 10_000)];
+        let hyps = [turn("spk_0", 0, 10_000)];
+        let (s, _) = score_der(&refs, 2, &hyps, 0);
+        assert_eq!(s.ref_speech_ms, 15_000);
+        assert_eq!(s.miss_ms, 5_000); // the second concurrent speaker
+    }
+
+    #[test]
+    fn mapping_is_globally_optimal_not_greedy() {
+        // spk_a covers ref0 60% / ref1 100% of their time; a greedy pass that
+        // hands spk_a to ref0 first would strand ref1. Optimal: a→1, b→0.
+        let refs = [rt(0, 0, 10_000), rt(1, 10_000, 16_000)];
+        let hyps = [
+            turn("spk_a", 4_000, 16_000),
+            turn("spk_b", 0, 4_000),
+        ];
+        let (s, mapping) = score_der(&refs, 2, &hyps, 0);
+        assert_eq!(mapping[0].as_deref(), Some("spk_b"));
+        assert_eq!(mapping[1].as_deref(), Some("spk_a"));
+        assert_eq!(s.conf_ms, 6_000); // ref0's 4-10 s attributed to spk_a
+    }
 }
