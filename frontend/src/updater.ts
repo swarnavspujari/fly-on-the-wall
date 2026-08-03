@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { check as pluginCheck, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 
-/* Auto-update lifecycle. Windows-only for now: latest.json on GitHub Releases
-   carries a windows-x86_64 entry, so mac/linux builds never even check.
+/* Auto-update lifecycle. latest.json on GitHub Releases carries entries for
+   windows-x86_64, darwin-aarch64, darwin-x86_64 and linux-x86_64. The one
+   install the updater cannot replace is a Linux deb (apt owns it), so that's
+   the only case `supported` is false.
 
    Hard rule: an update must NEVER interrupt an active recording. The app never
    restarts itself — install + relaunch only ever run from an explicit user
@@ -28,7 +30,7 @@ export interface Updater {
   /** 0..1 while downloading; null when the server sent no content length. */
   progress: number | null;
   error: string | null;
-  /** False on macOS/Linux — new versions ship via GitHub Releases only. */
+  /** False only for Linux deb installs — those update via apt/GitHub Releases. */
   supported: boolean;
   /** True once the banner's "Later" was clicked; Settings keeps working. */
   dismissed: boolean;
@@ -41,8 +43,12 @@ export interface Updater {
 /** Startup check waits for first-run IO (models, DB migrations) to settle. */
 const AUTO_CHECK_DELAY_MS = 5_000;
 
-export function useUpdater(os: string | null, recordingActive: boolean): Updater {
-  const supported = os === "windows";
+export function useUpdater(
+  os: string | null,
+  recordingActive: boolean,
+  appImage: boolean = false,
+): Updater {
+  const supported = os === "windows" || os === "macos" || (os === "linux" && appImage);
 
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [version, setVersion] = useState<string | null>(null);
@@ -83,7 +89,7 @@ export function useUpdater(os: string | null, recordingActive: boolean): Updater
     }
   }, []);
 
-  // One silent check shortly after startup (Windows only).
+  // One silent check shortly after startup (skipped on unsupported installs).
   useEffect(() => {
     if (!supported || autoChecked.current) return;
     autoChecked.current = true;
@@ -96,8 +102,8 @@ export function useUpdater(os: string | null, recordingActive: boolean): Updater
     if (!update) return;
     setPhase("installing");
     try {
-      // On Windows the installer kills the app and relaunches it; relaunch()
-      // is the documented fallback for platforms where it doesn't.
+      // On Windows the installer kills the app and relaunches it; on macOS
+      // (.app swap) and Linux (AppImage swap) relaunch() does the restart.
       await update.install();
       await relaunch();
     } catch (e) {

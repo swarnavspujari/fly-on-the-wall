@@ -10,10 +10,13 @@ name: Release
 # notarytool). Windows installers remain unsigned — see README "Install
 # Fly on the Wall" for the SmartScreen notes shipped to users.
 #
-# The Windows leg additionally feeds the in-app auto-updater: it signs the
-# NSIS installer with the Tauri updater key (TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]
-# repo secrets) and attaches latest.json, which installed apps poll via
-# .../releases/latest/download/latest.json.
+# Every leg additionally feeds the in-app auto-updater: it signs its updater
+# artifact with the Tauri updater key (TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]
+# repo secrets) — NSIS installer on Windows, .app.tar.gz on macOS, AppImage on
+# Linux — and uploads a per-platform manifest fragment. The updater-manifest
+# job then merges all four into latest.json, which installed apps poll via
+# .../releases/latest/download/latest.json. (Linux deb installs are apt's job;
+# only the AppImage self-updates.)
 on:
   push:
     tags: ["v*"]
@@ -29,31 +32,52 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Updater artifacts (.sig) are opt-in via the tauri.updater.conf.json
+          # overlay so plain local `npx tauri build` keeps working without the
+          # signing key. updaterPlatform/updaterAsset/updaterSig drive the
+          # per-leg manifest fragment merged into latest.json by the
+          # updater-manifest job (updaterAsset globs the RENAMED name in
+          # dist-upload/; updaterSig globs the original bundle dir).
           - name: windows-x64
             os: windows-latest
-            # Updater artifacts (.sig) are opt-in via this overlay so plain
-            # local `npx tauri build` keeps working without the signing key.
             buildArgs: --config src-tauri/tauri.updater.conf.json
             bundles: |
               target/release/bundle/nsis/*.exe
+            updaterPlatform: windows-x86_64
+            updaterAsset: "*-setup-windows-x64.exe"
+            updaterSig: target/release/bundle/nsis/*-setup.exe.sig
           # The matrix name doubles as the asset-name suffix (see "Rename
           # artifacts"), so spell out which Mac each dmg is for — download
           # pages show "apple-silicon" / "intel", not cpu arch jargon.
           - name: macos-apple-silicon
             os: macos-latest
+            buildArgs: --config src-tauri/tauri.updater.conf.json
             bundles: |
               target/release/bundle/dmg/*.dmg
+              target/release/bundle/macos/*.app.tar.gz
+            updaterPlatform: darwin-aarch64
+            updaterAsset: "*-macos-apple-silicon.tar.gz"
+            updaterSig: target/release/bundle/macos/*.app.tar.gz.sig
           - name: macos-intel
             # macos-13 was retired in Dec 2025 (the v0.2.0 run queued 24 h and
             # was cancelled); macos-15-intel is GitHub's supported Intel runner.
             os: macos-15-intel
+            buildArgs: --config src-tauri/tauri.updater.conf.json
             bundles: |
               target/release/bundle/dmg/*.dmg
+              target/release/bundle/macos/*.app.tar.gz
+            updaterPlatform: darwin-x86_64
+            updaterAsset: "*-macos-intel.tar.gz"
+            updaterSig: target/release/bundle/macos/*.app.tar.gz.sig
           - name: linux-x64
             os: ubuntu-22.04
+            buildArgs: --config src-tauri/tauri.updater.conf.json
             bundles: |
               target/release/bundle/appimage/*.AppImage
               target/release/bundle/deb/*.deb
+            updaterPlatform: linux-x86_64
+            updaterAsset: "*-linux-x64.AppImage"
+            updaterSig: target/release/bundle/appimage/*.AppImage.sig
     steps:
       - uses: actions/checkout@v4
 
@@ -94,11 +118,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Fail in seconds, not after a 20-minute compile: the updater leg needs
-      # the signing secret, and a tag that disagrees with the app version would
+      # Fail in seconds, not after a 20-minute compile: every leg signs updater
+      # artifacts now, and a tag that disagrees with the app version would
       # ship a latest.json that installed apps re-download forever.
       - name: Updater preflight
-        if: matrix.name == 'windows-x64'
         shell: bash
         env:
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -154,8 +177,8 @@ jobs:
           rm -f "$p12"
 
       # tauri build runs beforeBuildCommand (frontend build + prepare-sidecars).
-      # On windows-x64, buildArgs layers in createUpdaterArtifacts, which signs
-      # the NSIS installer into a detached .sig using the env vars below.
+      # buildArgs layers in createUpdaterArtifacts on every leg, which signs
+      # the updater artifact into a detached .sig using the env vars below.
       - name: Build installers
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -189,8 +212,12 @@ jobs:
             [ -z "$pat" ] && continue
             for f in $pat; do
               base=$(basename "$f")
-              stem="${base%.*}"
-              ext="${base##*.}"
+              # .app.tar.gz must keep its compound extension — a suffix spliced
+              # before ".gz" alone would break the name latest.json points at.
+              case "$base" in
+                *.tar.gz) stem="${base%.tar.gz}"; ext="tar.gz";;
+                *) stem="${base%.*}"; ext="${base##*.}";;
+              esac
               # GitHub replaces spaces in release-asset names with dots on upload,
               # so pre-apply that here: the on-disk name then equals the served
               # asset name equals the url latest.json is built from. A spaced url
@@ -202,27 +229,31 @@ jobs:
           done <<< "${{ matrix.bundles }}"
           ls -la dist-upload/
 
-      # The manifest installed apps poll for updates. Windows-only for now:
-      # signature is the detached .sig of the (byte-identical, pre-rename)
-      # NSIS installer; url points at the renamed release asset.
-      - name: Generate updater manifest (latest.json)
-        if: matrix.name == 'windows-x64'
+      # One platform entry of latest.json: signature is the detached .sig of
+      # the (byte-identical, pre-rename) updater artifact; url points at the
+      # renamed release asset. The updater-manifest job merges all legs.
+      - name: Generate updater manifest fragment
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          setup=(dist-upload/*-setup-windows-x64.exe)
-          sig=(target/release/bundle/nsis/*-setup.exe.sig)
-          [ -f "${setup[0]}" ] || { echo "::error::renamed NSIS installer not found in dist-upload/"; exit 1; }
+          asset=(dist-upload/${{ matrix.updaterAsset }})
+          sig=(${{ matrix.updaterSig }})
+          [ -f "${asset[0]}" ] || { echo "::error::renamed updater asset (${{ matrix.updaterAsset }}) not found in dist-upload/"; exit 1; }
           [ -f "${sig[0]}" ] || { echo "::error::updater .sig not found — did createUpdaterArtifacts run?"; exit 1; }
+          mkdir -p updater-fragment
           jq -n \
-            --arg version "$version" \
-            --arg notes "Fly on the Wall ${version} — full notes: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
-            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$(basename "${setup[0]}")" \
+            --arg platform "${{ matrix.updaterPlatform }}" \
+            --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$(basename "${asset[0]}")" \
             --arg signature "$(cat "${sig[0]}")" \
-            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"windows-x86_64": {signature: $signature, url: $url}}}' \
-            > dist-upload/latest.json
-          cat dist-upload/latest.json
+            '{platforms: {($platform): {signature: $signature, url: $url}}}' \
+            > "updater-fragment/${{ matrix.name }}.json"
+          cat "updater-fragment/${{ matrix.name }}.json"
+
+      - name: Upload updater fragment
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-fragment-${{ matrix.name }}
+          path: updater-fragment/*.json
+          retention-days: 1
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
@@ -230,4 +261,45 @@ jobs:
           draft: false
           generate_release_notes: true
           files: dist-upload/*
+          fail_on_unmatched_files: true
+
+  # latest.json can only exist once ALL legs signed their artifact — installed
+  # apps poll .../releases/latest/download/latest.json, so publishing a partial
+  # manifest would silently strand every platform missing from it. If a leg
+  # fails, this job is skipped and the release ships without auto-update;
+  # re-run the failed leg to publish the manifest.
+  updater-manifest:
+    name: Publish updater manifest
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download updater fragments
+        uses: actions/download-artifact@v4
+        with:
+          pattern: updater-fragment-*
+          merge-multiple: true
+          path: fragments
+
+      - name: Merge latest.json
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          count=$(ls fragments/*.json | wc -l)
+          if [ "$count" -ne 4 ]; then
+            echo "::error::expected 4 updater fragments, found $count — refusing to publish a partial latest.json"
+            exit 1
+          fi
+          jq -s \
+            --arg version "$version" \
+            --arg notes "Fly on the Wall ${version} — full notes: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: (map(.platforms) | add)}' \
+            fragments/*.json > latest.json
+          cat latest.json
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          files: latest.json
           fail_on_unmatched_files: true

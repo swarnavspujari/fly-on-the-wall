@@ -1698,8 +1698,8 @@ export default function SettingsModal({
             </Card>
           ) : (
             <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-              Auto-update is Windows-only for now — new versions are published on the GitHub
-              releases page.
+              Auto-update isn't available for this install (deb packages are managed by apt) — new
+              versions are published on the GitHub releases page.
             </p>
           )}
         </section>
