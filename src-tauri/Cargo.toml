@@ -57,3 +57,9 @@ tauri-plugin-single-instance = "2"
 [dev-dependencies]
 tempfile = "3"
 async-trait.workspace = true
+
+[features]
+# Accuracy-harness lab only: in-process embedding extraction + VBx clustering
+# experiments (pulls onnxruntime via `ort`). Never enabled for shipped builds
+# or CI — run with: cargo test -p fly-app --features vbx-lab --test accuracy_harness
+vbx-lab = ["fly-diarize/vbx"]

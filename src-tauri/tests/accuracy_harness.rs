@@ -1435,7 +1435,10 @@ fn config_json(mode: &str, sweep: bool) -> serde_json::Value {
             .is_ok_and(|v| !v.is_empty() && v != "0");
     serde_json::json!({
         "mode": mode,
-        "cluster_threshold": opts.cluster_threshold,
+        // f32 → short f64 so committed baselines stay readable (0.9, not 0.899…)
+        "cluster_threshold": opts
+            .cluster_threshold
+            .map(|t| (t as f64 * 10_000.0).round() / 10_000.0),
         "num_speakers": opts.num_speakers,
         "dust_floor_ms": floor,
         "dust_fraction": fraction,
@@ -1495,6 +1498,316 @@ fn diarizer_paths(real_data: &Path) -> Option<DiarizerPaths> {
     Some(DiarizerPaths { exe, seg, emb })
 }
 
+/// VBx lab (cargo feature `vbx-lab`): replace the sherpa sidecar's final
+/// clustering with VBx resegmentation. The sidecar still provides
+/// segmentation + an (over-split) initial clustering; subsegment embeddings
+/// are extracted in-process from the same pinned ONNX file, whitened by a
+/// two-covariance model estimated from the init clustering itself (the
+/// PLDA substitute — no externally trained parameters), and VBx merges the
+/// shattered clusters.
+#[cfg(feature = "vbx-lab")]
+mod vbx_lab {
+    use std::path::Path;
+
+    use fly_core::SpeakerTurn;
+
+    /// 1.44 s windows, 0.72 s hop — the standard VBx subsegmentation.
+    const WIN_MS: u64 = 1_440;
+    const HOP_MS: u64 = 720;
+    const MIN_MS: u64 = 300;
+
+    pub struct Lab {
+        /// (start_ms, end_ms, init_label) per embedded subsegment, time order.
+        subsegs: Vec<(u64, u64, usize)>,
+        /// whitened embeddings, row-major T×D
+        x: Vec<f64>,
+        d: usize,
+        n_init: usize,
+        phi: Vec<f64>,
+        pub embed_secs: f64,
+        pub n_subsegs: usize,
+    }
+
+    impl Lab {
+        /// Cut init turns into subsegments, embed each, whiten.
+        pub fn prepare(
+            samples_16k: &[f32],
+            init_turns: &[SpeakerTurn],
+            embedding_model: &Path,
+            threads: usize,
+        ) -> Result<Self, String> {
+            // init labels: dense-index the sherpa cluster keys
+            let mut keys: Vec<&str> = Vec::new();
+            let mut cuts: Vec<(u64, u64, usize)> = Vec::new();
+            for t in init_turns {
+                let label = match keys.iter().position(|k| *k == t.speaker_key) {
+                    Some(i) => i,
+                    None => {
+                        keys.push(&t.speaker_key);
+                        keys.len() - 1
+                    }
+                };
+                let (s, e) = (t.start_ms, t.end_ms);
+                if e.saturating_sub(s) < MIN_MS {
+                    continue;
+                }
+                if e - s <= WIN_MS {
+                    cuts.push((s, e, label));
+                    continue;
+                }
+                let mut at = s;
+                while at + WIN_MS <= e {
+                    cuts.push((at, at + WIN_MS, label));
+                    at += HOP_MS;
+                }
+                if at < e && e - at >= MIN_MS {
+                    // tail window anchored to the turn end
+                    cuts.push((e - WIN_MS.min(e - s), e, label));
+                }
+            }
+            cuts.sort_unstable();
+
+            let started = std::time::Instant::now();
+            let mut extractor =
+                fly_diarize::embed::EmbeddingExtractor::new(embedding_model, threads)?;
+            let mut subsegs = Vec::with_capacity(cuts.len());
+            let mut embs: Vec<Vec<f32>> = Vec::with_capacity(cuts.len());
+            for (s, e, label) in cuts {
+                let (a, b) = (
+                    (s as usize * 16).min(samples_16k.len()),
+                    (e as usize * 16).min(samples_16k.len()),
+                );
+                if b <= a {
+                    continue;
+                }
+                if let Some(emb) = extractor.embed(&samples_16k[a..b])? {
+                    subsegs.push((s, e, label));
+                    embs.push(emb);
+                }
+            }
+            let embed_secs = started.elapsed().as_secs_f64();
+            if embs.is_empty() {
+                return Err("no subsegment produced an embedding".into());
+            }
+            let n_init = subsegs.iter().map(|c| c.2).max().unwrap_or(0) + 1;
+
+            // --- two-covariance whitening estimated from the init clusters ---
+            let (t_n, d) = (embs.len(), embs[0].len());
+            let mut x: Vec<f64> = Vec::with_capacity(t_n * d);
+            for e in &embs {
+                x.extend(e.iter().map(|v| *v as f64));
+            }
+            // global mean out
+            let mut mean = vec![0.0f64; d];
+            for i in 0..t_n {
+                for k in 0..d {
+                    mean[k] += x[i * d + k];
+                }
+            }
+            for m in mean.iter_mut() {
+                *m /= t_n as f64;
+            }
+            for i in 0..t_n {
+                for k in 0..d {
+                    x[i * d + k] -= mean[k];
+                }
+            }
+            // per-dim within-class variance over init clusters
+            let mut cluster_mean = vec![0.0f64; n_init * d];
+            let mut cluster_n = vec![0usize; n_init];
+            for (i, (_, _, l)) in subsegs.iter().enumerate() {
+                cluster_n[*l] += 1;
+                for k in 0..d {
+                    cluster_mean[l * d + k] += x[i * d + k];
+                }
+            }
+            for l in 0..n_init {
+                for k in 0..d {
+                    cluster_mean[l * d + k] /= cluster_n[l].max(1) as f64;
+                }
+            }
+            let mut within = vec![0.0f64; d];
+            for (i, (_, _, l)) in subsegs.iter().enumerate() {
+                for k in 0..d {
+                    let dv = x[i * d + k] - cluster_mean[l * d + k];
+                    within[k] += dv * dv;
+                }
+            }
+            for w in within.iter_mut() {
+                *w = (*w / t_n as f64).max(1e-8);
+            }
+            // whiten to unit within-class variance
+            for i in 0..t_n {
+                for k in 0..d {
+                    x[i * d + k] /= within[k].sqrt();
+                }
+            }
+            // across-class variance (of cluster means) in the whitened space
+            let mut phi = vec![0.0f64; d];
+            for l in 0..n_init {
+                let w = cluster_n[l] as f64 / t_n as f64;
+                for k in 0..d {
+                    let m = cluster_mean[l * d + k] / within[k].sqrt();
+                    phi[k] += w * m * m;
+                }
+            }
+            for p in phi.iter_mut() {
+                *p = p.max(1e-3);
+            }
+
+            Ok(Self {
+                n_subsegs: subsegs.len(),
+                subsegs,
+                x,
+                d,
+                n_init,
+                phi,
+                embed_secs,
+            })
+        }
+
+        /// One VBx run → speaker turns (keys `spk_N` in first-appearance order).
+        pub fn run(&self, fa: f64, fb: f64, loop_p: f64) -> (Vec<SpeakerTurn>, usize) {
+            let params = fly_diarize::vbx::VbxParams {
+                fa,
+                fb,
+                loop_prob: loop_p,
+                ..Default::default()
+            };
+            let init_labels: Vec<usize> = self.subsegs.iter().map(|c| c.2).collect();
+            let out = fly_diarize::vbx::vbx(
+                &self.x,
+                self.subsegs.len(),
+                self.d,
+                &self.phi,
+                &init_labels,
+                self.n_init,
+                &params,
+            );
+            let iterations = out.elbo.len();
+            // dense relabel by first appearance
+            let mut order: Vec<usize> = Vec::new();
+            let dense: Vec<usize> = out
+                .labels
+                .iter()
+                .map(|l| match order.iter().position(|o| o == l) {
+                    Some(i) => i,
+                    None => {
+                        order.push(*l);
+                        order.len() - 1
+                    }
+                })
+                .collect();
+            // merge adjacent same-label subsegments; different-label overlaps
+            // split at the midpoint of the overlap (BUT merge_adjacent_labels)
+            let mut turns: Vec<SpeakerTurn> = Vec::new();
+            for (i, &(s, e, _)) in self.subsegs.iter().enumerate() {
+                let label = dense[i];
+                let key = format!("spk_{label}");
+                match turns.last_mut() {
+                    Some(last) if last.speaker_key == key && s <= last.end_ms => {
+                        last.end_ms = last.end_ms.max(e);
+                    }
+                    Some(last) if s < last.end_ms => {
+                        let mid = (s + last.end_ms) / 2;
+                        last.end_ms = mid;
+                        turns.push(SpeakerTurn {
+                            speaker_key: key,
+                            start_ms: mid,
+                            end_ms: e,
+                        });
+                    }
+                    _ => turns.push(SpeakerTurn {
+                        speaker_key: key,
+                        start_ms: s,
+                        end_ms: e,
+                    }),
+                }
+            }
+            (turns, iterations)
+        }
+    }
+}
+
+/// VBx refinement of the sherpa init clustering (see `vbx_lab`). Returns the
+/// refined turns + a lab-info JSON. Grid mode
+/// (FLYONTHEWALL_HARNESS_VBX_GRID=1, needs a reference) scores every
+/// (Fa, Fb, loopP) combo on raw-turn DER and keeps the best.
+#[cfg(feature = "vbx-lab")]
+fn vbx_refine(
+    samples_16k: &[f32],
+    raw_turns: &[SpeakerTurn],
+    emb_model: &Path,
+    threads: usize,
+) -> (Vec<SpeakerTurn>, serde_json::Value) {
+    let lab = vbx_lab::Lab::prepare(samples_16k, raw_turns, emb_model, threads)
+        .expect("vbx lab prepare");
+    eprintln!(
+        "vbx: {} subsegments embedded in {:.1}s",
+        lab.n_subsegs, lab.embed_secs
+    );
+    let fa: f64 = env_parse("FLYONTHEWALL_HARNESS_VBX_FA").unwrap_or(0.3);
+    let fb: f64 = env_parse("FLYONTHEWALL_HARNESS_VBX_FB").unwrap_or(17.0);
+    let lp: f64 = env_parse("FLYONTHEWALL_HARNESS_VBX_LOOPP").unwrap_or(0.99);
+    let grid =
+        std::env::var("FLYONTHEWALL_HARNESS_VBX_GRID").is_ok_and(|v| !v.is_empty() && v != "0");
+    let mut info = serde_json::Map::new();
+    info.insert("n_subsegs".into(), serde_json::json!(lab.n_subsegs));
+    info.insert("embed_secs".into(), serde_json::json!(lab.embed_secs));
+
+    if grid {
+        let reference = std::env::var("FLYONTHEWALL_HARNESS_REFERENCE")
+            .map(|p| parse_reference(&p))
+            .expect("VBX_GRID needs FLYONTHEWALL_HARNESS_REFERENCE to score combos");
+        let mut rows = Vec::new();
+        let mut best: Option<(f64, (f64, f64, f64), Vec<SpeakerTurn>)> = None;
+        for fa in [0.1, 0.3, 1.0] {
+            for fb in [4.0, 17.0, 64.0] {
+                for lp in [0.9, 0.99] {
+                    let (turns, iters) = lab.run(fa, fb, lp);
+                    let label = format!("vbx fa={fa} fb={fb} loopP={lp}");
+                    let score = score_diarization(&reference, &turns, &label)
+                        .expect("vtt reference scores DER");
+                    let der = score["der_collar_250"]["der"].as_f64().unwrap_or(1.0);
+                    let clusters = score["hyp_clusters"].as_u64().unwrap_or(0);
+                    rows.push(serde_json::json!({
+                        "fa": fa, "fb": fb, "loop_p": lp, "iters": iters,
+                        "der_collar_250": der, "clusters": clusters,
+                    }));
+                    if best.as_ref().map(|(b, _, _)| der < *b).unwrap_or(true) {
+                        best = Some((der, (fa, fb, lp), turns));
+                    }
+                }
+            }
+        }
+        let (der, (fa, fb, lp), turns) = best.expect("grid ran");
+        eprintln!("vbx grid best: fa={fa} fb={fb} loopP={lp} → turn-DER250 {:.1}%", der * 100.0);
+        info.insert("grid".into(), serde_json::json!(rows));
+        info.insert(
+            "chosen".into(),
+            serde_json::json!({"fa": fa, "fb": fb, "loop_p": lp}),
+        );
+        (turns, serde_json::Value::Object(info))
+    } else {
+        let (turns, iters) = lab.run(fa, fb, lp);
+        info.insert(
+            "chosen".into(),
+            serde_json::json!({"fa": fa, "fb": fb, "loop_p": lp, "iters": iters}),
+        );
+        (turns, serde_json::Value::Object(info))
+    }
+}
+
+#[cfg(not(feature = "vbx-lab"))]
+fn vbx_refine(
+    _samples_16k: &[f32],
+    _raw_turns: &[SpeakerTurn],
+    _emb_model: &Path,
+    _threads: usize,
+) -> (Vec<SpeakerTurn>, serde_json::Value) {
+    panic!("FLYONTHEWALL_HARNESS_VBX=1 requires building with --features vbx-lab");
+}
+
 /// Diarize-only sweep mode: fresh diarization over one audio channel, words
 /// re-attributed from an existing baseline transcript (mic segments pass
 /// through untouched — they are pre-labeled by construction), then the full
@@ -1531,24 +1844,30 @@ fn diarize_only(wav: &str) {
     // 16 kHz mono input for the diarizer
     let tmp = tempfile::tempdir().unwrap();
     let (samples, rate) = fly_audio::mix::read_wav_mono(Path::new(wav)).expect("read diarize wav");
+    let samples_16k = if rate == 16_000 {
+        samples
+    } else {
+        fly_audio::mix::resample_linear(&samples, rate, 16_000)
+    };
     let wav16 = if rate == 16_000 {
         PathBuf::from(wav)
     } else {
         let p = tmp.path().join("diarize.16k.wav");
-        let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
-        fly_audio::mix::write_wav_mono_16(&p, &resampled, 16_000).expect("write 16k wav");
+        fly_audio::mix::write_wav_mono_16(&p, &samples_16k, 16_000).expect("write 16k wav");
         p
     };
 
     let opts = sweep_diarize_options();
     let (floor, fraction) = sweep_dust();
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let emb_model = paths.emb.clone();
     let engine = fly_diarize::sherpa::SherpaDiarizeEngine {
         exe: paths.exe,
         segmentation_model: paths.seg,
         embedding_model: paths.emb,
-        threads: std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4),
+        threads,
     };
     use fly_diarize::DiarizationEngine as _;
     let started = std::time::Instant::now();
@@ -1563,7 +1882,19 @@ fn diarize_only(wav: &str) {
         opts.cluster_threshold,
         opts.num_speakers
     );
-    let turns = fly_diarize::drop_dust_clusters_with(raw_turns, floor, fraction);
+
+    // VBx mode replaces the dust filter: the init clustering (however
+    // shattered) is refined instead of pruned.
+    let vbx_mode =
+        std::env::var("FLYONTHEWALL_HARNESS_VBX").is_ok_and(|v| !v.is_empty() && v != "0");
+    let mut vbx_info: Option<serde_json::Value> = None;
+    let turns = if vbx_mode {
+        let (turns, info) = vbx_refine(&samples_16k, &raw_turns, &emb_model, threads);
+        vbx_info = Some(info);
+        turns
+    } else {
+        fly_diarize::drop_dust_clusters_with(raw_turns, floor, fraction)
+    };
 
     let align_opts = fly_core::AlignOptions::default();
     let sentence_align =
@@ -1600,6 +1931,9 @@ fn diarize_only(wav: &str) {
     let mut results = serde_json::Map::new();
     results.insert("config".into(), config_json("diarize-only", true));
     results.insert("diarize_secs".into(), serde_json::json!(diarize_secs));
+    if let Some(info) = vbx_info {
+        results.insert("vbx_lab".into(), info);
+    }
     results.insert("transcript".into(), report(&t));
     if let Some(r) = maybe_score_reference(&t) {
         results.insert("reference".into(), r);

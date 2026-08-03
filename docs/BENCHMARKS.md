@@ -458,3 +458,70 @@ LLM_BENCH_MODELS="ollama:qwen3.5:4b" LLM_BENCH_THINKING=disabled \
 
 Adding a per-model prompt profile after a decision: follow the checklist in
 `crates/fly-core/src/prompt_profile.rs`.
+
+---
+
+# Speaker Diarization Benchmarks
+
+*Established 2026-08-03 on the same Windows 11 laptop (12 cores, RTX 3050 Laptop for ASR only —
+diarization itself always runs on CPU). Committed per-fixture results live in
+`docs/data/diarization/*.json`; they are written verbatim by the harness, so re-running a
+fixture produces a reviewable git diff instead of prose claims.*
+
+## Fixtures
+
+Three real meetings (audio is **not** committed — other participants did not consent to being
+in git history; the JSONs reference them by content only):
+
+| Fixture | Path exercised | Length | Speakers | Reference |
+|---|---|---|---|---|
+| `teams-2spk-legislation` | mixed single-track (import path) | 42 min | 2 | Teams .vtt transcript |
+| `teams-3spk-contracts` | mixed single-track (import path) | 49 min | 3 | Teams .vtt transcript |
+| `fotw-2ch-1on1` | two-channel (primary app path: mic pre-labeled, system diarized) | 49 min | 2 (1 far-end) | none (structural metrics only) |
+
+Teams labels each utterance from that participant's own audio stream and signed-in identity,
+so speaker attribution and utterance timing are ground truth. Timestamps are utterance-level,
+not frame-level — that is exactly what the ±250 ms collar absorbs, so **the collared DER is
+the trustworthy number**; the uncollared one is reported for completeness. WER against a
+Teams .vtt measures agreement with Teams' own ASR, not true WER — use it only to compare
+runs, not as an absolute quality claim.
+
+## Metrics
+
+`DER = confusion + missed speech + false alarm` over reference speech time (NIST md-eval
+decomposition, optimal speaker mapping, overlap-aware), computed over the *attributed
+transcript segments* — the spans a user actually sees, including word-alignment effects. The
+diarize-only sweep mode also scores the raw diarizer turns before alignment
+(`diarization_turns` in the JSONs), which separates clustering error from alignment error.
+Speaker-count accuracy is `hyp_clusters` (distinct non-mic, non-unknown keys) vs
+`ref_speakers`.
+
+## How to reproduce
+
+```
+# full pipeline baseline (writes the committed JSON + a words cache for sweeps)
+FLYONTHEWALL_HARNESS_DIR=path\to\fixture FLYONTHEWALL_HARNESS_MODEL=ggml-small-q5_1 \
+FLYONTHEWALL_HARNESS_GPU=1 FLYONTHEWALL_HARNESS_REFERENCE=path\to\teams.vtt \
+FLYONTHEWALL_HARNESS_FIXTURE=name FLYONTHEWALL_HARNESS_OUT_JSON=baseline.transcript.json \
+FLYONTHEWALL_HARNESS_RESULTS_JSON=docs\data\diarization\name.json \
+  cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
+
+# sweep arm (diarization + realignment only, ~4-7 min per 45-min fixture; see the
+# harness header for all FLYONTHEWALL_HARNESS_* knobs)
+FLYONTHEWALL_HARNESS_DIARIZE_WAV=... FLYONTHEWALL_HARNESS_BASE_JSON=baseline.transcript.json \
+FLYONTHEWALL_HARNESS_CLUSTER_THRESHOLD=0.9 ... \
+  cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
+```
+
+## Baseline (shipped defaults: CAM++ embeddings, threshold 0.9, dust 15 s / 5 %, word-level alignment)
+
+| Fixture | clusters vs real | DER (collar 250 ms) | confusion | miss | false alarm | attribution err |
+|---|---|---|---|---|---|---|
+| `teams-2spk-legislation` | **3 / 2** | 7.6 % | 3.1 % | 1.3 % | 3.3 % | 0.7 % |
+| `teams-3spk-contracts` | **4 / 3** | 11.5 % | 2.0 % | 3.6 % | 6.0 % | 1.4 % |
+
+Both mixed-path fixtures over-split: one phantom cluster each survives the dust filter
+(66 s of Swarnav split off in legislation; a 36 s phantom in contracts), and the contracts
+cluster keys (`spk_0/2/6/8` surviving) show the raw clustering produced ≥ 9 clusters before
+the dust filter discarded six. Over-splitting is the dominant structural failure; the dust
+filter is load-bearing.

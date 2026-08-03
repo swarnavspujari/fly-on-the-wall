@@ -11,3 +11,12 @@ thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
+# vbx feature only (experimental in-process embedding + VBx clustering lab;
+# not compiled into the shipped app unless the feature is enabled)
+rustfft = { version = "6", optional = true }
+ort = { version = "2.0.0-rc.13", optional = true }
+
+[features]
+# In-process speaker-embedding extraction (fbank + ONNX) and VBx (Bayesian
+# HMM) clustering. Used by the accuracy harness lab; off by default.
+vbx = ["dep:rustfft", "dep:ort"]

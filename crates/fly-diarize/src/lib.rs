@@ -7,6 +7,13 @@
 
 pub mod sherpa;
 
+#[cfg(feature = "vbx")]
+pub mod embed;
+#[cfg(feature = "vbx")]
+pub mod fbank;
+#[cfg(feature = "vbx")]
+pub mod vbx;
+
 use std::path::Path;
 
 use fly_core::SpeakerTurn;
