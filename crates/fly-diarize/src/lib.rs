@@ -36,13 +36,12 @@ pub struct DiarizeOptions {
     pub num_speakers: Option<usize>,
     /// Agglomerative clustering distance threshold when the speaker count is
     /// unknown: larger = fewer clusters. sherpa's own default (0.5) shattered
-    /// a one-hour single-speaker channel into 75+ clusters. With VBx
-    /// refinement (the shipped path) this is the INITIAL clustering VBx
-    /// starts from, and it is deliberately over-split at 0.8 — VBx merges
-    /// shattered clusters but cannot split merged ones, so erring toward too
-    /// many init clusters is the safe side (docs/BENCHMARKS.md, Phase 3).
-    /// Without refinement (`SherpaDiarizeEngine::refine = None`, bench
-    /// comparisons only) 0.95 measured best. `None` = engine default.
+    /// a one-hour single-speaker channel into 75+ clusters; 0.95 measured
+    /// best for plain agglomerative output (docs/BENCHMARKS.md, Phase 2a) —
+    /// the operating point when VBx refinement is off (Intel macOS builds,
+    /// bench comparison arms). When refinement is ON the engine ignores this
+    /// and runs its own deliberately over-split init instead (sherpa.rs
+    /// VBX_INIT_THRESHOLD). `None` = engine default.
     pub cluster_threshold: Option<f32>,
     /// Prefix for generated speaker keys ("spk" → "spk_0", "spk_1", …).
     pub speaker_key_prefix: String,
@@ -52,7 +51,7 @@ impl Default for DiarizeOptions {
     fn default() -> Self {
         Self {
             num_speakers: None,
-            cluster_threshold: Some(0.8),
+            cluster_threshold: Some(0.95),
             speaker_key_prefix: "spk".to_string(),
         }
     }

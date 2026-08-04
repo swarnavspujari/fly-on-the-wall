@@ -12,6 +12,10 @@ use fly_core::SpeakerTurn;
 use crate::vbx::VbxParams;
 use crate::{DiarizationEngine, DiarizeError, DiarizeOptions, Result};
 
+/// Initial-clustering cut used when VBx refinement follows (measured
+/// operating point, docs/BENCHMARKS.md Phase 3).
+const VBX_INIT_THRESHOLD: f32 = 0.8;
+
 pub struct SherpaDiarizeEngine {
     /// Path to sherpa-onnx-offline-speaker-diarization(.exe).
     pub exe: PathBuf,
@@ -50,8 +54,16 @@ impl DiarizationEngine for SherpaDiarizeEngine {
             return Err(DiarizeError::BadAudio(wav_path.display().to_string()));
         }
 
+        // With VBx refinement on (and no forced speaker count), the sidecar's
+        // clustering is only the init — run it deliberately over-split: VBx
+        // merges shattered clusters but cannot split merged ones, so too many
+        // init clusters is the safe side (docs/BENCHMARKS.md, Phase 3).
+        let mut init_opts = opts.clone();
+        if self.refine.is_some() && opts.num_speakers.is_none() {
+            init_opts.cluster_threshold = Some(VBX_INIT_THRESHOLD);
+        }
         let mut cmd = tokio::process::Command::new(&self.exe);
-        cmd.args(self.cli_args(opts));
+        cmd.args(self.cli_args(&init_opts));
         cmd.arg(wav_path);
         #[cfg(windows)]
         {
@@ -261,7 +273,7 @@ Started
         let args = engine().cli_args(&DiarizeOptions::default());
         assert!(args
             .iter()
-            .any(|a| a == "--clustering.cluster-threshold=0.8"));
+            .any(|a| a == "--clustering.cluster-threshold=0.95"));
         assert!(!args
             .iter()
             .any(|a| a.starts_with("--clustering.num-clusters")));

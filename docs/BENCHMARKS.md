@@ -612,7 +612,9 @@ resolved as: no trained PLDA exists for CAM++ embeddings, and the self-calibrate
 two-covariance substitute measured well — the Fa/Fb/loopP grid was insensitive
 (every combo within 0.1 pp on both Teams fixtures); Fa 0.1 / Fb 17 / loopP 0.99 shipped.
 A user-confirmed speaker count bypasses refinement (count is forced; VBx could only
-merge below it).
+merge below it). Platform note: Intel macOS builds ship without the in-process refiner
+(ort has no x86_64-apple-darwin onnxruntime prebuilt) and keep the Phase 2a operating
+point (agglomerative, threshold 0.95).
 
 Versus the tuned Phase 2 baseline (threshold 0.95), same fixtures, same ASR:
 

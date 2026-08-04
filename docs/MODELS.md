@@ -24,7 +24,7 @@ quantization — negligible accuracy loss, big RAM/disk savings, especially on L
 | **NVIDIA Parakeet** | optional ASR | NVIDIA GPUs; Apple ANE via FluidAudio (macOS port) | weights CC-BY-4.0 — En + 25 EU languages; near-zero silence hallucination |
 | **Groq** | cloud ASR **fallback only** | network | free tier ~2k req/day, ~7,200 audio-s/hour; word+segment timestamps. Preprocessing matches the local path: VAD strips non-speech before upload (anti-hallucination, smaller payloads), peak normalization, greedy decode (temperature 0); word timestamps are mapped back to the original timeline so local diarization stays aligned |
 | **sherpa-onnx** | diarization (segmentation + initial clustering), **always local** | CPU everywhere incl. phones | Apache-2.0 |
-| **VBx (in-process)** | diarization refinement: Bayesian-HMM clustering of subsegment embeddings merges the over-split initial clusters (docs/BENCHMARKS.md, Phase 3) | CPU, in the app itself (onnxruntime via `ort` for the embedding forward; same pinned CAM++ file, no extra download) | port of BUTSpeechFIT/VBx, Apache-2.0 (Burget & Diez, 2021) |
+| **VBx (in-process)** | diarization refinement: Bayesian-HMM clustering of subsegment embeddings merges the over-split initial clusters (docs/BENCHMARKS.md, Phase 3) | CPU, in the app itself (onnxruntime via `ort` for the embedding forward; same pinned CAM++ file, no extra download). Exception: Intel macOS — ort publishes no x86_64-apple-darwin onnxruntime, so that build keeps the tuned agglomerative clustering (threshold 0.95) | port of BUTSpeechFIT/VBx, Apache-2.0 (Burget & Diez, 2021) |
 
 ## Diarization models (always downloaded, all tiers)
 
