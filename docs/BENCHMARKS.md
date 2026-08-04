@@ -574,3 +574,22 @@ collapses to one cluster by thr 0.7); sherpa embeds short per-chunk speaker regi
 ERes2NetV2 export is the Chinese-only checkpoint. ResNet293 also costs ~6× CAM++
 diarization time (≈0.7× realtime for a meeting — unshippable as a default regardless).
 **CAM++ stays pinned; no model change ships.**
+
+## Phase 2c — sentence-granularity speaker assignment (measured, not shipped)
+
+`align_words_to_speakers_by_sentence` (duration-weighted majority vote per
+punctuation-bounded sentence, pause/length backstops) vs the shipped per-word
+max-overlap, both at thr 0.9 / CAM++:
+
+| Fixture | word DER / attr | sentence DER / attr |
+|---|---|---|
+| legislation | **7.6 % / 0.7 %** | 8.1 % / 1.0 % |
+| contracts | **11.5 % / 1.4 %** | 12.1 % / 1.9 % |
+| TB (structural) | 205 s Unknown, 35 s phantom | **10 s Unknown**, 108 s phantom |
+
+whisper-small emits sparse terminal punctuation on this audio (~1 sentence mark per
+22 words), so vote units run long and smear genuine mid-unit speaker switches — the
+hypothesis that boundary jitter dominates lost to the measurement. The sentence vote
+does absorb diarizer-uncovered words beautifully (TB Unknown 205 → 10 s) but feeds
+phantom clusters the same way. Net negative where scoreable → **word-level stays**;
+the function remains as the harness A/B arm (FLYONTHEWALL_HARNESS_SENTENCE_ALIGN=1).
