@@ -508,7 +508,10 @@ const calendarStatus = {
 };
 
 function upcoming() {
-  return [
+  return {
+    // Flip to ["google"] to preview the sidebar's Reconnect row.
+    needs_reconnect: [],
+    events: [
     {
       id: "e1",
       provider: "google",
@@ -527,7 +530,8 @@ function upcoming() {
       attendees: ["Priya N."],
       join_url: null,
     },
-  ];
+    ],
+  };
 }
 
 function recordingStatus() {

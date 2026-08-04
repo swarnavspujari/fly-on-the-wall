@@ -260,6 +260,23 @@ fn end_of_local_day() -> chrono::DateTime<Utc> {
         .unwrap_or_else(|| Utc::now() + Duration::hours(24))
 }
 
+/// Upcoming events plus which connected providers failed with an auth error
+/// (expired/revoked refresh token) — those need an interactive reconnect,
+/// which the sidebar surfaces as a "Reconnect" button.
+#[derive(Serialize)]
+pub struct UpcomingMeetings {
+    pub events: Vec<CalendarEvent>,
+    /// Provider ids ("google" | "msgraph") whose stored token no longer works.
+    pub needs_reconnect: Vec<String>,
+}
+
+fn is_auth_error(e: &fly_calendar::CalendarError) -> bool {
+    matches!(
+        e,
+        fly_calendar::CalendarError::NotConnected | fly_calendar::CalendarError::Auth(_)
+    )
+}
+
 /// Events for the rest of the current local day across every enabled calendar
 /// of every connected provider. The lower bound is now − 30 min (so in-progress
 /// meetings still show); the upper bound is local midnight tonight, so at 8 PM
@@ -270,16 +287,22 @@ fn end_of_local_day() -> chrono::DateTime<Utc> {
 pub async fn upcoming_meetings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> CmdResult<Vec<CalendarEvent>> {
+) -> CmdResult<UpcomingMeetings> {
     let from = Utc::now() - Duration::minutes(30); // include in-progress meetings
     let to = end_of_local_day();
     let mut events = Vec::new();
+    let mut needs_reconnect = Vec::new();
 
     if is_connected(&state, fly_secrets::keys::GOOGLE_OAUTH_TOKEN) {
         match build_google(&app, &state) {
             Ok(p) => match p.upcoming(from, to).await {
                 Ok(mut ev) => events.append(&mut ev),
-                Err(e) => tracing::warn!("google calendar fetch failed: {e}"),
+                Err(e) => {
+                    tracing::warn!("google calendar fetch failed: {e}");
+                    if is_auth_error(&e) {
+                        needs_reconnect.push("google".to_string());
+                    }
+                }
             },
             Err(e) => tracing::warn!("google calendar not buildable: {e}"),
         }
@@ -288,14 +311,22 @@ pub async fn upcoming_meetings(
         match build_msgraph(&app, &state) {
             Ok(p) => match p.upcoming(from, to).await {
                 Ok(mut ev) => events.append(&mut ev),
-                Err(e) => tracing::warn!("microsoft calendar fetch failed: {e}"),
+                Err(e) => {
+                    tracing::warn!("microsoft calendar fetch failed: {e}");
+                    if is_auth_error(&e) {
+                        needs_reconnect.push("msgraph".to_string());
+                    }
+                }
             },
             Err(e) => tracing::warn!("microsoft calendar not buildable: {e}"),
         }
     }
 
     // Drop link-less events, de-dupe, sort by start.
-    Ok(fly_calendar::merge_upcoming(events))
+    Ok(UpcomingMeetings {
+        events: fly_calendar::merge_upcoming(events),
+        needs_reconnect,
+    })
 }
 
 /// One of the user's calendars plus its on/off state, for the settings list.

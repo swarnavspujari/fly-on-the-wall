@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Fly on the Wall",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "identifier": "com.flyonthewall.app",
   "build": {
     "beforeDevCommand": "npm run prepare-sidecars && npm run dev",
@@ -24,6 +24,7 @@
     "windows": [
       {
         "title": "Fly on the Wall",
+        "center": true,
         "width": 1280,
         "height": 840,
         "minWidth": 900,
