@@ -168,7 +168,7 @@ Started
         let args = engine().cli_args(&DiarizeOptions::default());
         assert!(args
             .iter()
-            .any(|a| a == "--clustering.cluster-threshold=0.9"));
+            .any(|a| a == "--clustering.cluster-threshold=0.95"));
         assert!(!args
             .iter()
             .any(|a| a.starts_with("--clustering.num-clusters")));

@@ -39,8 +39,11 @@ pub struct DiarizeOptions {
     pub num_speakers: Option<usize>,
     /// Agglomerative clustering distance threshold when the speaker count is
     /// unknown: larger = fewer speakers. sherpa's own default (0.5) shattered
-    /// a one-hour single-speaker channel into 75+ clusters; upstream docs
-    /// recommend ~0.9 for unknown counts. `None` = engine default.
+    /// a one-hour single-speaker channel into 75+ clusters. 0.95 measured
+    /// best on the committed fixtures (docs/BENCHMARKS.md, 2026-08-04): it
+    /// absorbed a phantom cluster on the 3-speaker meeting (DER 11.5→10.7 %,
+    /// correct speaker count) without merging real speakers even at 0.97,
+    /// and changed nothing elsewhere. `None` = engine default.
     pub cluster_threshold: Option<f32>,
     /// Prefix for generated speaker keys ("spk" → "spk_0", "spk_1", …).
     pub speaker_key_prefix: String,
@@ -50,7 +53,7 @@ impl Default for DiarizeOptions {
     fn default() -> Self {
         Self {
             num_speakers: None,
-            cluster_threshold: Some(0.9),
+            cluster_threshold: Some(0.95),
             speaker_key_prefix: "spk".to_string(),
         }
     }

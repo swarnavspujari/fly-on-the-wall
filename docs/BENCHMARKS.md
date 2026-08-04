@@ -525,3 +525,32 @@ Both mixed-path fixtures over-split: one phantom cluster each survives the dust 
 cluster keys (`spk_0/2/6/8` surviving) show the raw clustering produced ≥ 9 clusters before
 the dust filter discarded six. Over-splitting is the dominant structural failure; the dust
 filter is load-bearing.
+
+## Phase 2a — cluster-threshold sweep (diarize-only mode, CAM++, word alignment)
+
+DER = collar-250 attributed; "clu" = predicted clusters vs real speakers. The 0.9 rows
+reproduce the pipeline baselines exactly (sweep-mode fidelity check).
+
+| thr | legislation (2 spk) | contracts (3 spk) | TB system channel (1 spk) |
+|---|---|---|---|
+| 0.5 (sherpa default) | 15.4 %, 7 clu | 48.7 %, 11 clu | 8 clu + 368 s unknown |
+| 0.6 | 12.7 %, 5 clu | 15.5 %, 7 clu | — |
+| 0.7 | 9.1 %, 4 clu | 14.4 %, 6 clu | 4 clu + 299 s unknown |
+| 0.8 | 8.6 %, 4 clu | 12.7 %, 5 clu | — |
+| **0.9 (shipped)** | **7.6 %, 3 clu** | 11.5 %, 4 clu | 2 clu + 206 s unknown |
+| **0.95** | 7.7 %, 3 clu | **10.7 %, 3 clu ✓** | 2 clu + 206 s unknown (same) |
+| 0.97 | 7.7 %, 3 clu | 10.7 %, 3 clu | — |
+
+Findings:
+- 0.95 strictly improves contracts (−0.8 pp DER, correct speaker count, confusion
+  2.0 → 1.1 %) and changes nothing measurable elsewhere (+0.06 pp on legislation).
+  0.97 adds nothing beyond 0.95.
+- The residual phantom clusters (66 s in legislation, 35 s in TB) survive **every**
+  threshold up to 0.97 — their embeddings are near-orthogonal to the true speaker's
+  cluster under complete linkage, so no threshold fixes them.
+- Dust-floor probe at thr 0.9: raising 15 s → 90 s kills those phantoms (legislation
+  2/2 clusters, DER 7.6 → 7.0 %; TB exactly 1 cluster) but pushes their words into
+  attribution error (0.7 → 1.0 %) and "Unknown" time (TB +27 s), and no fixture has a
+  brief-but-real speaker to measure the harm a 90 s floor would do to one. Not shipped:
+  dropping is the wrong operation — the phantoms need *reassignment*, which is the
+  Phase 3 (VBx) question.
