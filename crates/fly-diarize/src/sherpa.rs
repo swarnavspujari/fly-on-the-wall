@@ -84,6 +84,7 @@ impl DiarizationEngine for SherpaDiarizeEngine {
         if turns.is_empty() {
             return Ok(turns);
         }
+        ensure_ort_dylib(&self.exe)?;
         let samples = crate::refine::read_wav_mono_16k(wav_path)
             .map_err(|e| DiarizeError::BadAudio(format!("{}: {e}", wav_path.display())))?;
         let (model, threads, params, prefix) = (
@@ -139,6 +140,47 @@ impl SherpaDiarizeEngine {
         }
         args
     }
+}
+
+/// Linux only: `ort` is built with load-dynamic there (its static prebuilts
+/// need glibc ≥ 2.38; releases build on ubuntu-22.04 = glibc 2.35, the users'
+/// floor), so before the first in-process session it must dlopen the
+/// libonnxruntime.so that ships INSIDE the sherpa sidecar bundle — the exact
+/// library already running on the user's machine. Windows/macOS statically
+/// link and this is a no-op.
+#[cfg(target_os = "linux")]
+fn ensure_ort_dylib(sherpa_exe: &Path) -> Result<()> {
+    static INIT: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+    let result = INIT.get_or_init(|| {
+        let exe_dir = sherpa_exe.parent().unwrap_or(Path::new("."));
+        let candidates = [exe_dir.join("../lib"), exe_dir.to_path_buf()];
+        for dir in candidates {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with("libonnxruntime.so") {
+                    return ort::init_from(entry.path().to_string_lossy().as_ref())
+                        .commit()
+                        .map(|_| ())
+                        .map_err(|e| e.to_string());
+                }
+            }
+        }
+        Err(format!(
+            "libonnxruntime.so not found next to the sherpa sidecar ({})",
+            sherpa_exe.display()
+        ))
+    });
+    result
+        .clone()
+        .map_err(|e| DiarizeError::Engine(format!("onnxruntime dylib init failed: {e}")))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_ort_dylib(_sherpa_exe: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Parse lines shaped `0.318 -- 6.865 speaker_00` (sherpa prints config and

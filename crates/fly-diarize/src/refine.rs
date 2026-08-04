@@ -338,7 +338,7 @@ mod tests {
         assert!(cuts.iter().all(|&(s, e, _)| e > s));
         assert_eq!(cuts.first().unwrap().0, 0);
         assert_eq!(cuts.iter().filter(|c| c.2 == 1).count(), 1); // short turn = one cut
-        let tail = cuts.iter().filter(|c| c.2 == 0).next_back().unwrap();
+        let tail = cuts.iter().rfind(|c| c.2 == 0).unwrap();
         assert_eq!(tail.1, 3_600);
     }
 

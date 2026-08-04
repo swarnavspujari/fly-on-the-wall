@@ -228,9 +228,7 @@ pub fn vbx(
 
         // (24) pi update
         let mut new_pi = vec![0.0f64; s];
-        for j in 0..s {
-            new_pi[j] = gamma[j];
-        }
+        new_pi[..s].copy_from_slice(&gamma[..s]);
         for i in 1..t {
             let row_lse = logsumexp(&lfw[(i - 1) * s..i * s]);
             for j in 0..s {

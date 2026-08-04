@@ -368,7 +368,7 @@ fn parse_teams_vtt_reference(path: &str) -> Reference {
         };
         let (Some(start_ms), Some(end_ms)) = (
             parse_vtt_ts(from),
-            parse_vtt_ts(to.trim().split_whitespace().next().unwrap_or("")),
+            parse_vtt_ts(to.split_whitespace().next().unwrap_or("")),
         ) else {
             continue;
         };
@@ -1545,8 +1545,9 @@ fn vbx_refine(
         let reference = std::env::var("FLYONTHEWALL_HARNESS_REFERENCE")
             .map(|p| parse_reference(&p))
             .expect("VBX_GRID needs FLYONTHEWALL_HARNESS_REFERENCE to score combos");
+        type BestCombo = (f64, (f64, f64, f64), Vec<SpeakerTurn>);
         let mut rows = Vec::new();
-        let mut best: Option<(f64, (f64, f64, f64), Vec<SpeakerTurn>)> = None;
+        let mut best: Option<BestCombo> = None;
         for fa in [0.1, 0.3, 1.0] {
             for fb in [4.0, 17.0, 64.0] {
                 for lp in [0.9, 0.99] {

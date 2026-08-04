@@ -14,5 +14,15 @@ tokio.workspace = true
 # VBx refinement: in-process fbank + ONNX speaker embeddings over the same
 # pinned model file the sherpa sidecar uses, then Bayesian-HMM clustering.
 rustfft = "6"
-ort = "2.0.0-rc.13"
 hound.workspace = true
+
+# Windows/macOS statically link ort's prebuilt onnxruntime. Linux must NOT:
+# those prebuilts need glibc ≥ 2.38 and the release builds on ubuntu-22.04
+# (glibc 2.35) on purpose — that is the users' distro floor. Linux instead
+# dlopens the libonnxruntime.so already shipped inside the sherpa sidecar
+# bundle (see sherpa.rs::ensure_ort_dylib), which is built portable.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+ort = "2.0.0-rc.13"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ort = { version = "2.0.0-rc.13", features = ["load-dynamic"] }
