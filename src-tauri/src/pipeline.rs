@@ -79,6 +79,22 @@ fn diarize_opts(num_speakers: Option<usize>) -> DiarizeOptions {
     }
 }
 
+/// VBx refinement for the diarization engine — on everywhere ort can link
+/// its onnxruntime. Intel macOS is the exception (ort publishes no
+/// x86_64-apple-darwin prebuilt): that build ships the plain agglomerative
+/// path at its measured operating point (DiarizeOptions default 0.95,
+/// docs/BENCHMARKS.md Phase 2a).
+fn diarize_refine() -> Option<fly_diarize::vbx::VbxParams> {
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        None
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    {
+        Some(fly_diarize::vbx::VbxParams::default())
+    }
+}
+
 /// Marker for the one failure retrying can never fix: the recording files are
 /// gone from disk. The scheduler matches on this prefix to skip its retries.
 pub const ERR_NO_RECORDING_FILES: &str = "recording files not found on disk";
@@ -401,7 +417,7 @@ pub async fn run_with(
         segmentation_model: seg_model,
         embedding_model: emb_model,
         threads,
-        refine: Some(fly_diarize::vbx::VbxParams::default()),
+        refine: diarize_refine(),
     };
 
     // ---- prepare 16 kHz mono inputs ----
@@ -742,7 +758,7 @@ async fn re_diarize_inner(
             segmentation_model: seg_model,
             embedding_model: emb_model,
             threads: sidecar_threads(),
-            refine: Some(fly_diarize::vbx::VbxParams::default()),
+            refine: diarize_refine(),
         };
 
         let abs = |rel: &Option<String>| -> Option<PathBuf> {
