@@ -23,13 +23,17 @@ quantization — negligible accuracy loss, big RAM/disk savings, especially on L
 | **whisper.cpp** | primary ASR | CPU, CUDA, Metal, Vulkan; desktop + mobile | MIT (weights: OpenAI Whisper, MIT) — 99 languages |
 | **NVIDIA Parakeet** | optional ASR | NVIDIA GPUs; Apple ANE via FluidAudio (macOS port) | weights CC-BY-4.0 — En + 25 EU languages; near-zero silence hallucination |
 | **Groq** | cloud ASR **fallback only** | network | free tier ~2k req/day, ~7,200 audio-s/hour; word+segment timestamps. Preprocessing matches the local path: VAD strips non-speech before upload (anti-hallucination, smaller payloads), peak normalization, greedy decode (temperature 0); word timestamps are mapped back to the original timeline so local diarization stays aligned |
-| **sherpa-onnx** | diarization, **always local** | CPU everywhere incl. phones | Apache-2.0 |
+| **sherpa-onnx** | diarization (segmentation + initial clustering), **always local** | CPU everywhere incl. phones | Apache-2.0 |
+| **VBx (in-process)** | diarization refinement: Bayesian-HMM clustering of subsegment embeddings merges the over-split initial clusters (docs/BENCHMARKS.md, Phase 3) | CPU, in the app itself (onnxruntime via `ort` for the embedding forward; same pinned CAM++ file, no extra download) | port of BUTSpeechFIT/VBx, Apache-2.0 (Burget & Diez, 2021) |
 
 ## Diarization models (always downloaded, all tiers)
 
 - `pyannote-segmentation-3.0` (ONNX) — ~6 MB — speaker segmentation (license: MIT, gated
   upstream on HF; Fly on the Wall fetches the ONNX conversion published for sherpa-onnx)
-- Speaker embedding: 3D-Speaker CAM++ (or WeSpeaker) ONNX — ~26 MB — Apache-2.0
+- Speaker embedding: 3D-Speaker CAM++ (zh_en advanced) ONNX — ~26 MB — Apache-2.0. Used twice:
+  by the sherpa sidecar for its initial clustering, and in-process by the VBx refinement
+  stage (candidates ERes2NetV2 and WeSpeaker ResNet293-LM were benchmarked 2026-08-04 and
+  lost badly on real meeting audio — see docs/BENCHMARKS.md Phase 2b; CAM++ stays)
 
 Even on the Cloud tier, diarization runs locally and Groq's word timestamps are merged with the
 local speaker turns (spec §6.3): "who said what" never depends on the network.

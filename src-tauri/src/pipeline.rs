@@ -401,6 +401,7 @@ pub async fn run_with(
         segmentation_model: seg_model,
         embedding_model: emb_model,
         threads,
+        refine: Some(fly_diarize::vbx::VbxParams::default()),
     };
 
     // ---- prepare 16 kHz mono inputs ----
@@ -741,6 +742,7 @@ async fn re_diarize_inner(
             segmentation_model: seg_model,
             embedding_model: emb_model,
             threads: sidecar_threads(),
+            refine: Some(fly_diarize::vbx::VbxParams::default()),
         };
 
         let abs = |rel: &Option<String>| -> Option<PathBuf> {

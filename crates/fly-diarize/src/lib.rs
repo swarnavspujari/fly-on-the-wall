@@ -5,7 +5,11 @@
 //! light enough for phones, so "who said what" never depends on the network
 //! (spec §6.3). The word↔speaker aligner itself lives in fly-core.
 
+pub mod embed;
+pub mod fbank;
+pub mod refine;
 pub mod sherpa;
+pub mod vbx;
 
 use std::path::Path;
 
@@ -31,9 +35,14 @@ pub struct DiarizeOptions {
     /// Known speaker count if the user provided one; `None` = auto.
     pub num_speakers: Option<usize>,
     /// Agglomerative clustering distance threshold when the speaker count is
-    /// unknown: larger = fewer speakers. sherpa's own default (0.5) shattered
-    /// a one-hour single-speaker channel into 75+ clusters; upstream docs
-    /// recommend ~0.9 for unknown counts. `None` = engine default.
+    /// unknown: larger = fewer clusters. sherpa's own default (0.5) shattered
+    /// a one-hour single-speaker channel into 75+ clusters. With VBx
+    /// refinement (the shipped path) this is the INITIAL clustering VBx
+    /// starts from, and it is deliberately over-split at 0.8 — VBx merges
+    /// shattered clusters but cannot split merged ones, so erring toward too
+    /// many init clusters is the safe side (docs/BENCHMARKS.md, Phase 3).
+    /// Without refinement (`SherpaDiarizeEngine::refine = None`, bench
+    /// comparisons only) 0.95 measured best. `None` = engine default.
     pub cluster_threshold: Option<f32>,
     /// Prefix for generated speaker keys ("spk" → "spk_0", "spk_1", …).
     pub speaker_key_prefix: String,
@@ -43,7 +52,7 @@ impl Default for DiarizeOptions {
     fn default() -> Self {
         Self {
             num_speakers: None,
-            cluster_threshold: Some(0.9),
+            cluster_threshold: Some(0.8),
             speaker_key_prefix: "spk".to_string(),
         }
     }
@@ -55,25 +64,35 @@ pub trait DiarizationEngine: Send + Sync {
     async fn diarize(&self, wav_path: &Path, opts: &DiarizeOptions) -> Result<Vec<SpeakerTurn>>;
 }
 
+/// A cluster totalling less than this is dust…
+pub const DUST_FLOOR_MS: u64 = 15_000;
+/// …unless the whole recording is short: the floor never exceeds this
+/// fraction of all attributed speech.
+pub const DUST_FRACTION: f64 = 0.05;
+
 /// Drop turns belonging to "dust" clusters — speakers whose total time is
 /// negligible. Hour-long single-speaker audio still shatters into a dozen
 /// sub-10-second clusters even at a sane clustering threshold; discarding
 /// their turns lets the word aligner fall back to the nearest real speaker
 /// instead of inventing phantom ones. The floor scales down for short
 /// recordings so brief-but-real speakers survive.
-pub fn drop_dust_clusters(mut turns: Vec<SpeakerTurn>) -> Vec<SpeakerTurn> {
-    /// A cluster totalling less than this is dust…
-    const DUST_FLOOR_MS: u64 = 15_000;
-    /// …unless the whole recording is short: the floor never exceeds this
-    /// fraction of all attributed speech.
-    const DUST_FRACTION: f64 = 0.05;
+pub fn drop_dust_clusters(turns: Vec<SpeakerTurn>) -> Vec<SpeakerTurn> {
+    drop_dust_clusters_with(turns, DUST_FLOOR_MS, DUST_FRACTION)
+}
 
+/// `drop_dust_clusters` with explicit constants — the accuracy harness sweeps
+/// these; the pipeline always uses the defaults above.
+pub fn drop_dust_clusters_with(
+    mut turns: Vec<SpeakerTurn>,
+    floor_ms: u64,
+    fraction: f64,
+) -> Vec<SpeakerTurn> {
     let mut totals: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for t in &turns {
         *totals.entry(t.speaker_key.clone()).or_default() += t.end_ms.saturating_sub(t.start_ms);
     }
     let all: u64 = totals.values().sum();
-    let floor = DUST_FLOOR_MS.min((all as f64 * DUST_FRACTION) as u64);
+    let floor = floor_ms.min((all as f64 * fraction) as u64);
     turns.retain(|t| totals[&t.speaker_key] >= floor);
     turns
 }

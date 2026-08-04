@@ -1,10 +1,15 @@
 //! sherpa-onnx sidecar diarization: pyannote segmentation + speaker
-//! embedding + clustering, all on CPU, all local — on every tier (§6.3).
+//! embedding + agglomerative clustering, all on CPU, all local — on every
+//! tier (§6.3). When the speaker count is unknown, the sidecar's clustering
+//! is only the INITIAL pass: its (deliberately over-split) clusters are
+//! refined in-process by VBx (crate::refine), which merges the shattered
+//! clusters that agglomerative thresholds cannot fix.
 
 use std::path::{Path, PathBuf};
 
 use fly_core::SpeakerTurn;
 
+use crate::vbx::VbxParams;
 use crate::{DiarizationEngine, DiarizeError, DiarizeOptions, Result};
 
 pub struct SherpaDiarizeEngine {
@@ -12,9 +17,15 @@ pub struct SherpaDiarizeEngine {
     pub exe: PathBuf,
     /// pyannote segmentation model (model.onnx).
     pub segmentation_model: PathBuf,
-    /// Speaker embedding model (CAM++ ONNX).
+    /// Speaker embedding model (CAM++ ONNX) — used by the sidecar AND by
+    /// the in-process VBx refinement.
     pub embedding_model: PathBuf,
     pub threads: usize,
+    /// VBx refinement of the sidecar's clustering (the shipped path is
+    /// `Some(VbxParams::default())`). `None` = raw sidecar output — kept for
+    /// harness A/B comparisons. A user-provided speaker count bypasses
+    /// refinement either way: the count is forced, and VBx can only merge.
+    pub refine: Option<VbxParams>,
 }
 
 #[async_trait::async_trait]
@@ -63,7 +74,46 @@ impl DiarizationEngine for SherpaDiarizeEngine {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_diarization_output(&stdout, &opts.speaker_key_prefix))
+        let turns = parse_diarization_output(&stdout, &opts.speaker_key_prefix);
+
+        // VBx refinement: only when the speaker count is unknown (a forced
+        // count already fixes the cluster structure) and refinement is on.
+        let (Some(params), None) = (&self.refine, opts.num_speakers) else {
+            return Ok(turns);
+        };
+        if turns.is_empty() {
+            return Ok(turns);
+        }
+        ensure_ort_dylib(&self.exe)?;
+        let samples = crate::refine::read_wav_mono_16k(wav_path)
+            .map_err(|e| DiarizeError::BadAudio(format!("{}: {e}", wav_path.display())))?;
+        let (model, threads, params, prefix) = (
+            self.embedding_model.clone(),
+            self.threads.max(1),
+            params.clone(),
+            opts.speaker_key_prefix.clone(),
+        );
+        // CPU-bound minute of work — off the async runtime.
+        let refined = tokio::task::spawn_blocking(move || {
+            crate::refine::refine_with_vbx(&samples, &turns, &model, threads, &params).map(
+                |refined| {
+                    refined
+                        .into_iter()
+                        .map(|mut t| {
+                            // refine emits spk_N; honor the caller's prefix
+                            if let Some(idx) = t.speaker_key.strip_prefix("spk_") {
+                                t.speaker_key = format!("{prefix}_{idx}");
+                            }
+                            t
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+        })
+        .await
+        .map_err(|e| DiarizeError::Engine(format!("vbx refinement task failed: {e}")))?
+        .map_err(DiarizeError::Engine)?;
+        Ok(refined)
     }
 }
 
@@ -90,6 +140,48 @@ impl SherpaDiarizeEngine {
         }
         args
     }
+}
+
+/// Linux only: `ort` is built with load-dynamic there (its static prebuilts
+/// need glibc ≥ 2.38; releases build on ubuntu-22.04 = glibc 2.35, the users'
+/// floor), so before the first in-process session it must dlopen the
+/// libonnxruntime.so that ships INSIDE the sherpa sidecar bundle — the exact
+/// library already running on the user's machine. Windows/macOS statically
+/// link and this is a no-op.
+#[cfg(target_os = "linux")]
+fn ensure_ort_dylib(sherpa_exe: &Path) -> Result<()> {
+    static INIT: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+    let result = INIT.get_or_init(|| {
+        let exe_dir = sherpa_exe.parent().unwrap_or(Path::new("."));
+        let candidates = [exe_dir.join("../lib"), exe_dir.to_path_buf()];
+        for dir in candidates {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with("libonnxruntime.so") {
+                    return ort::init_from(entry.path().to_string_lossy().as_ref())
+                        .map(|builder| {
+                            builder.commit();
+                        })
+                        .map_err(|e| e.to_string());
+                }
+            }
+        }
+        Err(format!(
+            "libonnxruntime.so not found next to the sherpa sidecar ({})",
+            sherpa_exe.display()
+        ))
+    });
+    result
+        .clone()
+        .map_err(|e| DiarizeError::Engine(format!("onnxruntime dylib init failed: {e}")))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_ort_dylib(_sherpa_exe: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Parse lines shaped `0.318 -- 6.865 speaker_00` (sherpa prints config and
@@ -160,6 +252,7 @@ Started
             segmentation_model: "seg.onnx".into(),
             embedding_model: "emb.onnx".into(),
             threads: 4,
+            refine: None,
         }
     }
 
@@ -168,7 +261,7 @@ Started
         let args = engine().cli_args(&DiarizeOptions::default());
         assert!(args
             .iter()
-            .any(|a| a == "--clustering.cluster-threshold=0.9"));
+            .any(|a| a == "--clustering.cluster-threshold=0.8"));
         assert!(!args
             .iter()
             .any(|a| a.starts_with("--clustering.num-clusters")));

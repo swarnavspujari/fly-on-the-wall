@@ -70,8 +70,16 @@ Anthropic key and use Claude — see [Add your API keys](#add-your-api-keys).
   depends on which meeting app the other side chose. If it makes sound on your computer,
   it can be captured.
 - **On-device transcription and speaker labeling.** Speech-to-text and diarization run
-  locally. The first transcript downloads the speech models once; after that it works
-  with no internet connection at all.
+  locally, and transcription uses your GPU when a quick benchmark shows it's faster
+  (Apple Silicon on Macs, Vulkan on Windows). v2.0 rebuilt speaker separation around
+  **VBx Bayesian resegmentation** — the clustering technique behind today's best open
+  diarization pipelines: on real-meeting benchmarks it finds exactly the right number of
+  speakers where the old clustering invented phantom ones, and cuts speaker-confusion
+  errors by up to two-thirds (measured in
+  [docs/BENCHMARKS.md](docs/BENCHMARKS.md)). Know who attended? Confirm the attendee
+  list and the app re-labels speakers instantly without re-transcribing. The first
+  transcript downloads the speech models once; after that it works with no internet
+  connection at all.
 - **Private by default, cloud by choice.** Exactly two features can touch the internet —
   Groq for faster transcription and a cloud AI for Enhance/Ask — both off until you turn
   them on, both clearly labeled in the app when active, both using *your* keys.
@@ -137,9 +145,12 @@ processing agreement to negotiate, because there is no vendor in the loop.
 Download the installer for your system from the
 [latest release](https://github.com/swarnavspujari/fly-on-the-wall/releases/latest).
 
-The app isn't signed with a paid certificate yet, so each system shows a one-time warning
-the first time you open it. This is expected, and it goes away in a later release once the
-app is signed. Here's how to get past it for now.
+**macOS downloads are signed and notarized with an Apple Developer ID certificate** — they
+open normally, no warnings. Windows installers aren't signed with a paid certificate yet,
+so Windows shows a one-time SmartScreen notice the first time you run the installer; the
+steps below get you past it. (Building the macOS app from source yourself? There's a free
+**self-signing pathway** that unlocks system-audio capture on your own Mac — see
+[Build & run (macOS)](#build--run-macos-recording-system-audio-from-a-self-signed-build).)
 
 ### Windows
 

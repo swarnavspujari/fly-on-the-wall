@@ -458,3 +458,173 @@ LLM_BENCH_MODELS="ollama:qwen3.5:4b" LLM_BENCH_THINKING=disabled \
 
 Adding a per-model prompt profile after a decision: follow the checklist in
 `crates/fly-core/src/prompt_profile.rs`.
+
+---
+
+# Speaker Diarization Benchmarks
+
+*Established 2026-08-03 on the same Windows 11 laptop (12 cores, RTX 3050 Laptop for ASR only —
+diarization itself always runs on CPU). Committed per-fixture results live in
+`docs/data/diarization/*.json`; they are written verbatim by the harness, so re-running a
+fixture produces a reviewable git diff instead of prose claims.*
+
+## Fixtures
+
+Three real meetings (audio is **not** committed — other participants did not consent to being
+in git history; the JSONs reference them by content only):
+
+| Fixture | Path exercised | Length | Speakers | Reference |
+|---|---|---|---|---|
+| `teams-2spk-legislation` | mixed single-track (import path) | 42 min | 2 | Teams .vtt transcript |
+| `teams-3spk-contracts` | mixed single-track (import path) | 49 min | 3 | Teams .vtt transcript |
+| `fotw-2ch-1on1` | two-channel (primary app path: mic pre-labeled, system diarized) | 49 min | 2 (1 far-end) | none (structural metrics only) |
+
+Teams labels each utterance from that participant's own audio stream and signed-in identity,
+so speaker attribution and utterance timing are ground truth. Timestamps are utterance-level,
+not frame-level — that is exactly what the ±250 ms collar absorbs, so **the collared DER is
+the trustworthy number**; the uncollared one is reported for completeness. WER against a
+Teams .vtt measures agreement with Teams' own ASR, not true WER — use it only to compare
+runs, not as an absolute quality claim.
+
+## Metrics
+
+`DER = confusion + missed speech + false alarm` over reference speech time (NIST md-eval
+decomposition, optimal speaker mapping, overlap-aware), computed over the *attributed
+transcript segments* — the spans a user actually sees, including word-alignment effects. The
+diarize-only sweep mode also scores the raw diarizer turns before alignment
+(`diarization_turns` in the JSONs), which separates clustering error from alignment error.
+Speaker-count accuracy is `hyp_clusters` (distinct non-mic, non-unknown keys) vs
+`ref_speakers`.
+
+## How to reproduce
+
+```
+# full pipeline baseline (writes the committed JSON + a words cache for sweeps)
+FLYONTHEWALL_HARNESS_DIR=path\to\fixture FLYONTHEWALL_HARNESS_MODEL=ggml-small-q5_1 \
+FLYONTHEWALL_HARNESS_GPU=1 FLYONTHEWALL_HARNESS_REFERENCE=path\to\teams.vtt \
+FLYONTHEWALL_HARNESS_FIXTURE=name FLYONTHEWALL_HARNESS_OUT_JSON=baseline.transcript.json \
+FLYONTHEWALL_HARNESS_RESULTS_JSON=docs\data\diarization\name.json \
+  cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
+
+# sweep arm (diarization + realignment only, ~4-7 min per 45-min fixture; see the
+# harness header for all FLYONTHEWALL_HARNESS_* knobs)
+FLYONTHEWALL_HARNESS_DIARIZE_WAV=... FLYONTHEWALL_HARNESS_BASE_JSON=baseline.transcript.json \
+FLYONTHEWALL_HARNESS_CLUSTER_THRESHOLD=0.9 ... \
+  cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
+```
+
+## Baseline before this work (2026-08-03: agglomerative-only, threshold 0.9, dust 15 s / 5 %, word-level alignment)
+
+*The committed JSONs under `docs/data/diarization/` now hold the shipped-engine (VBx)
+numbers; these tables preserve the starting point the phases below measured against.*
+
+| Fixture | clusters vs real | DER (collar 250 ms) | confusion | miss | false alarm | attribution err |
+|---|---|---|---|---|---|---|
+| `teams-2spk-legislation` | **3 / 2** | 7.6 % | 3.1 % | 1.3 % | 3.3 % | 0.7 % |
+| `teams-3spk-contracts` | **4 / 3** | 11.5 % | 2.0 % | 3.6 % | 6.0 % | 1.4 % |
+
+Both mixed-path fixtures over-split: one phantom cluster each survives the dust filter
+(66 s of Swarnav split off in legislation; a 36 s phantom in contracts), and the contracts
+cluster keys (`spk_0/2/6/8` surviving) show the raw clustering produced ≥ 9 clusters before
+the dust filter discarded six. Over-splitting is the dominant structural failure; the dust
+filter is load-bearing.
+
+## Phase 2a — cluster-threshold sweep (diarize-only mode, CAM++, word alignment)
+
+DER = collar-250 attributed; "clu" = predicted clusters vs real speakers. The 0.9 rows
+reproduce the pipeline baselines exactly (sweep-mode fidelity check).
+
+| thr | legislation (2 spk) | contracts (3 spk) | TB system channel (1 spk) |
+|---|---|---|---|
+| 0.5 (sherpa default) | 15.4 %, 7 clu | 48.7 %, 11 clu | 8 clu + 368 s unknown |
+| 0.6 | 12.7 %, 5 clu | 15.5 %, 7 clu | — |
+| 0.7 | 9.1 %, 4 clu | 14.4 %, 6 clu | 4 clu + 299 s unknown |
+| 0.8 | 8.6 %, 4 clu | 12.7 %, 5 clu | — |
+| **0.9 (shipped)** | **7.6 %, 3 clu** | 11.5 %, 4 clu | 2 clu + 206 s unknown |
+| **0.95** | 7.7 %, 3 clu | **10.7 %, 3 clu ✓** | 2 clu + 206 s unknown (same) |
+| 0.97 | 7.7 %, 3 clu | 10.7 %, 3 clu | — |
+
+Findings:
+- 0.95 strictly improves contracts (−0.8 pp DER, correct speaker count, confusion
+  2.0 → 1.1 %) and changes nothing measurable elsewhere (+0.06 pp on legislation).
+  0.97 adds nothing beyond 0.95.
+- The residual phantom clusters (66 s in legislation, 35 s in TB) survive **every**
+  threshold up to 0.97 — their embeddings are near-orthogonal to the true speaker's
+  cluster under complete linkage, so no threshold fixes them.
+- Dust-floor probe at thr 0.9: raising 15 s → 90 s kills those phantoms (legislation
+  2/2 clusters, DER 7.6 → 7.0 %; TB exactly 1 cluster) but pushes their words into
+  attribution error (0.7 → 1.0 %) and "Unknown" time (TB +27 s), and no fixture has a
+  brief-but-real speaker to measure the harm a 90 s floor would do to one. Not shipped:
+  dropping is the wrong operation — the phantoms need *reassignment*, which is the
+  Phase 3 (VBx) question.
+
+## Phase 2b — embedding-model comparison (legislation fixture, diarize-only mode)
+
+Candidates ran with their own threshold mini-sweep (the cut is embedding-specific —
+it slices that model's cosine-dissimilarity distribution):
+
+| Embedding | best measured operating point | DER (collar 250) | confusion | diarize time |
+|---|---|---|---|---|
+| **CAM++ zh_en advanced (pinned)** | thr 0.9–0.95 | **7.6 %** | 3.1 % | ~5 min |
+| 3D-Speaker ERes2NetV2 (zh-cn) | thr 0.7–0.8 (0.5/0.7/0.8 measured) | 34.6 % | 30.1 % | ~13 min |
+| WeSpeaker ResNet293-LM (VoxCeleb) | thr 0.5 (0.35/0.5/0.7 measured) | 37.2 % | 32.4 % | **~30 min** |
+
+The published speaker-verification numbers (ResNet293-LM ~25-30 % better VoxCeleb EER
+than CAM++) **did not translate** to DER through sherpa's pipeline on this audio. Both
+candidates produce clusters that cross speakers at every threshold tried (ResNet293
+collapses to one cluster by thr 0.7); sherpa embeds short per-chunk speaker regions
+(often 1–4 s), far from the full-utterance conditions behind the EER claims, and the
+ERes2NetV2 export is the Chinese-only checkpoint. ResNet293 also costs ~6× CAM++
+diarization time (≈0.7× realtime for a meeting — unshippable as a default regardless).
+**CAM++ stays pinned; no model change ships.**
+
+## Phase 2c — sentence-granularity speaker assignment (measured, not shipped)
+
+`align_words_to_speakers_by_sentence` (duration-weighted majority vote per
+punctuation-bounded sentence, pause/length backstops) vs the shipped per-word
+max-overlap, both at thr 0.9 / CAM++:
+
+| Fixture | word DER / attr | sentence DER / attr |
+|---|---|---|
+| legislation | **7.6 % / 0.7 %** | 8.1 % / 1.0 % |
+| contracts | **11.5 % / 1.4 %** | 12.1 % / 1.9 % |
+| TB (structural) | 205 s Unknown, 35 s phantom | **10 s Unknown**, 108 s phantom |
+
+whisper-small emits sparse terminal punctuation on this audio (~1 sentence mark per
+22 words), so vote units run long and smear genuine mid-unit speaker switches — the
+hypothesis that boundary jitter dominates lost to the measurement. The sentence vote
+does absorb diarizer-uncovered words beautifully (TB Unknown 205 → 10 s) but feeds
+phantom clusters the same way. Net negative where scoreable → **word-level stays**;
+the function remains as the harness A/B arm (FLYONTHEWALL_HARNESS_SENTENCE_ALIGN=1).
+
+## Phase 3 — VBx refinement (shipped)
+
+The Phase 2a finding — phantom clusters whose embeddings survive every agglomerative
+threshold — is the textbook VBx case: clustering needs to *reassign* outlier time, not
+drop it. Shipped architecture: the sherpa sidecar keeps segmentation + an initial
+clustering that is now deliberately over-split (init threshold 0.8; VBx merges but
+cannot split, so over-splitting is the safe side). Its turns are cut into
+1.44 s / 0.72 s subsegments, embedded in-process with the **same pinned CAM++ file**
+(kaldi-style fbank + onnxruntime — no new model artifact), whitened by a two-covariance
+model estimated from the initial clusters, and VBx (Bayesian HMM; Rust port of
+BUTSpeechFIT/VBx, Apache-2.0) reassigns per-subsegment. The PLDA feasibility question
+resolved as: no trained PLDA exists for CAM++ embeddings, and the self-calibrated
+two-covariance substitute measured well — the Fa/Fb/loopP grid was insensitive
+(every combo within 0.1 pp on both Teams fixtures); Fa 0.1 / Fb 17 / loopP 0.99 shipped.
+A user-confirmed speaker count bypasses refinement (count is forced; VBx could only
+merge below it).
+
+Versus the tuned Phase 2 baseline (threshold 0.95), same fixtures, same ASR:
+
+| Fixture | tuned Phase 2 | VBx (shipped) |
+|---|---|---|
+| legislation (2 spk) | 7.7 %, 3/2 clusters | **5.5 %, 2/2 clusters**, confusion 3.1 → 0.9 %, attr 0.7 → 0.6 % |
+| contracts (3 spk) | 10.7 %, 3/3 clusters | **10.6 %, 3/3 clusters**, attr 1.4 → 1.2 % |
+| TB system channel (1 spk) | 2 clusters + 206 s Unknown | **1 cluster + 72 s Unknown** |
+
+Cost: one embedding pass (~60 s for a 45-minute meeting, CPU) on top of the sidecar
+run — ~+20 % diarization time. Remaining DER is miss + false-alarm against
+utterance-level reference timing, not speaker confusion. `rediarize_e2e` passes: the
+re-diarize / revert / polish contract (segment ids, text, word timings untouched)
+holds through the new engine. The committed per-fixture JSONs were regenerated with
+the shipped engine — the git history of `docs/data/diarization/` is the before/after.

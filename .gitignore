@@ -43,3 +43,4 @@ Thumbs.db
 # whisper.cpp engine build (scripts/build-whisper-sidecar.sh)
 /.whisper-build/
 /dist/
+target-vbx/

@@ -1,0 +1,62 @@
+{
+  "config": {
+    "align": "word",
+    "asr_model": "ggml-small-q5_1",
+    "cluster_threshold": 0.8,
+    "dust_floor_ms": 15000,
+    "dust_fraction": 0.05,
+    "embedding": "campplus.onnx (pinned)",
+    "gpu": true,
+    "max_secs": null,
+    "mode": "pipeline",
+    "num_speakers": null,
+    "vbx": true
+  },
+  "fixture": "teams-2spk-legislation",
+  "pipeline_secs": 464.7441616,
+  "reference": {
+    "attribution_error": 0.005871725383920506,
+    "diarization": {
+      "der_collar_0": {
+        "confusion": 0.012615369285509659,
+        "der": 0.10144816218752206,
+        "false_alarm": 0.058509821180202363,
+        "miss": 0.030322971721810036,
+        "ref_speech_s": 2408.57
+      },
+      "der_collar_250": {
+        "confusion": 0.008819985649754737,
+        "der": 0.055349979016150797,
+        "false_alarm": 0.03289951669456992,
+        "miss": 0.013630476671826137,
+        "ref_speech_s": 2215.99
+      },
+      "hyp_clusters": 2,
+      "mapping_collar_250": {
+        "ref_0": "spk_0",
+        "ref_1": "spk_1"
+      },
+      "ref_speakers": 2
+    },
+    "ref_words": 7158,
+    "sa_wer_merged": 0.08340318524727577,
+    "wer_merged": 0.07795473595976529,
+    "wer_system_vs_all": 0.07795473595976529
+  },
+  "transcript": {
+    "segments": 65,
+    "speaker_keys": 3,
+    "speaker_seconds": {
+      "spk_0": 1305.7,
+      "spk_1": 1170.0,
+      "spk_unknown": 0.8
+    },
+    "speakers_listed": 3,
+    "system_speakers": 2,
+    "words_mic": 0,
+    "words_system": 6903,
+    "words_total": 6903,
+    "worst_reps_mic": 1,
+    "worst_reps_system": 1
+  }
+}
