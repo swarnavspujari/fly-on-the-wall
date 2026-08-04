@@ -5,13 +5,10 @@
 //! light enough for phones, so "who said what" never depends on the network
 //! (spec §6.3). The word↔speaker aligner itself lives in fly-core.
 
-pub mod sherpa;
-
-#[cfg(feature = "vbx")]
 pub mod embed;
-#[cfg(feature = "vbx")]
 pub mod fbank;
-#[cfg(feature = "vbx")]
+pub mod refine;
+pub mod sherpa;
 pub mod vbx;
 
 use std::path::Path;
@@ -38,12 +35,14 @@ pub struct DiarizeOptions {
     /// Known speaker count if the user provided one; `None` = auto.
     pub num_speakers: Option<usize>,
     /// Agglomerative clustering distance threshold when the speaker count is
-    /// unknown: larger = fewer speakers. sherpa's own default (0.5) shattered
-    /// a one-hour single-speaker channel into 75+ clusters. 0.95 measured
-    /// best on the committed fixtures (docs/BENCHMARKS.md, 2026-08-04): it
-    /// absorbed a phantom cluster on the 3-speaker meeting (DER 11.5→10.7 %,
-    /// correct speaker count) without merging real speakers even at 0.97,
-    /// and changed nothing elsewhere. `None` = engine default.
+    /// unknown: larger = fewer clusters. sherpa's own default (0.5) shattered
+    /// a one-hour single-speaker channel into 75+ clusters. With VBx
+    /// refinement (the shipped path) this is the INITIAL clustering VBx
+    /// starts from, and it is deliberately over-split at 0.8 — VBx merges
+    /// shattered clusters but cannot split merged ones, so erring toward too
+    /// many init clusters is the safe side (docs/BENCHMARKS.md, Phase 3).
+    /// Without refinement (`SherpaDiarizeEngine::refine = None`, bench
+    /// comparisons only) 0.95 measured best. `None` = engine default.
     pub cluster_threshold: Option<f32>,
     /// Prefix for generated speaker keys ("spk" → "spk_0", "spk_1", …).
     pub speaker_key_prefix: String,
@@ -53,7 +52,7 @@ impl Default for DiarizeOptions {
     fn default() -> Self {
         Self {
             num_speakers: None,
-            cluster_threshold: Some(0.95),
+            cluster_threshold: Some(0.8),
             speaker_key_prefix: "spk".to_string(),
         }
     }

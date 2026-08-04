@@ -52,9 +52,8 @@ impl EmbeddingExtractor {
             return Ok(None);
         }
         apply_cmn(&mut feats, n_frames);
-        let tensor =
-            ort::value::Tensor::from_array(([1usize, n_frames, NUM_BINS], feats))
-                .map_err(|e| e.to_string())?;
+        let tensor = ort::value::Tensor::from_array(([1usize, n_frames, NUM_BINS], feats))
+            .map_err(|e| e.to_string())?;
         let outputs = self
             .session
             .run(ort::inputs![self.input_name.as_str() => tensor])

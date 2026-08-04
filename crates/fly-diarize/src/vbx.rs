@@ -31,10 +31,13 @@ pub struct VbxParams {
 impl Default for VbxParams {
     fn default() -> Self {
         Self {
-            // VoxConverse operating point from the BUT recipe; Fa/Fb/loopP
-            // are swept by the harness lab before anything ships.
+            // Measured on the committed fixtures (docs/BENCHMARKS.md,
+            // Phase 3): the harness grid was insensitive across
+            // Fa ∈ {0.1..1.0}, Fb ∈ {4..64}, loopP ∈ {0.9, 0.99}, with
+            // Fa = 0.1 best everywhere; this exact combo validated on all
+            // three fixtures.
             loop_prob: 0.99,
-            fa: 0.3,
+            fa: 0.1,
             fb: 17.0,
             max_iters: 40,
             epsilon: 1e-6,
@@ -309,7 +312,11 @@ mod tests {
         let mut init = Vec::new();
         for i in 0..40 {
             let s = i / 20;
-            let base = if s == 0 { [2.0, 0.0, 0.5] } else { [0.0, 2.0, -0.5] };
+            let base = if s == 0 {
+                [2.0, 0.0, 0.5]
+            } else {
+                [0.0, 2.0, -0.5]
+            };
             let noise = ((i * 17 % 7) as f64 - 3.0) / 20.0;
             x.extend(base.iter().map(|v| v + noise));
             init.push(i % 3);
@@ -317,11 +324,7 @@ mod tests {
         let phi = vec![1.5; d];
         let out = vbx(&x, 40, d, &phi, &init, 3, &VbxParams::default());
         for w in out.elbo.windows(2) {
-            assert!(
-                w[1] >= w[0] - 1e-6,
-                "ELBO decreased: {:?}",
-                out.elbo
-            );
+            assert!(w[1] >= w[0] - 1e-6, "ELBO decreased: {:?}", out.elbo);
         }
     }
 

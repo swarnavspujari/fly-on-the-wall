@@ -230,7 +230,10 @@ mod tests {
             assert!(mean.abs() < 1e-3);
         }
         for (x, y) in a.iter().zip(&b) {
-            assert!((x - y).abs() < 1e-2, "scale must cancel after CMN: {x} vs {y}");
+            assert!(
+                (x - y).abs() < 1e-2,
+                "scale must cancel after CMN: {x} vs {y}"
+            );
         }
     }
 }
