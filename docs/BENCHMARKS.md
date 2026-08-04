@@ -554,3 +554,23 @@ Findings:
   brief-but-real speaker to measure the harm a 90 s floor would do to one. Not shipped:
   dropping is the wrong operation — the phantoms need *reassignment*, which is the
   Phase 3 (VBx) question.
+
+## Phase 2b — embedding-model comparison (legislation fixture, diarize-only mode)
+
+Candidates ran with their own threshold mini-sweep (the cut is embedding-specific —
+it slices that model's cosine-dissimilarity distribution):
+
+| Embedding | best measured operating point | DER (collar 250) | confusion | diarize time |
+|---|---|---|---|---|
+| **CAM++ zh_en advanced (pinned)** | thr 0.9–0.95 | **7.6 %** | 3.1 % | ~5 min |
+| 3D-Speaker ERes2NetV2 (zh-cn) | thr 0.7–0.8 (0.5/0.7/0.8 measured) | 34.6 % | 30.1 % | ~13 min |
+| WeSpeaker ResNet293-LM (VoxCeleb) | thr 0.5 (0.35/0.5/0.7 measured) | 37.2 % | 32.4 % | **~30 min** |
+
+The published speaker-verification numbers (ResNet293-LM ~25-30 % better VoxCeleb EER
+than CAM++) **did not translate** to DER through sherpa's pipeline on this audio. Both
+candidates produce clusters that cross speakers at every threshold tried (ResNet293
+collapses to one cluster by thr 0.7); sherpa embeds short per-chunk speaker regions
+(often 1–4 s), far from the full-utterance conditions behind the EER claims, and the
+ERes2NetV2 export is the Chinese-only checkpoint. ResNet293 also costs ~6× CAM++
+diarization time (≈0.7× realtime for a meeting — unshippable as a default regardless).
+**CAM++ stays pinned; no model change ships.**
