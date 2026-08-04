@@ -512,24 +512,24 @@ function upcoming() {
     // Flip to ["google"] to preview the sidebar's Reconnect row.
     needs_reconnect: [],
     events: [
-    {
-      id: "e1",
-      provider: "google",
-      title: "Acme — renewal review",
-      start: ago(5),
-      end: new Date(Date.now() + 25 * 60_000).toISOString(),
-      attendees: ["Dana Osei", "Marc Reyes"],
-      join_url: "https://meet.google.com/abc",
-    },
-    {
-      id: "e2",
-      provider: "msgraph",
-      title: "Design weekly",
-      start: new Date(Date.now() + 150 * 60_000).toISOString(),
-      end: new Date(Date.now() + 180 * 60_000).toISOString(),
-      attendees: ["Priya N."],
-      join_url: null,
-    },
+      {
+        id: "e1",
+        provider: "google",
+        title: "Acme — renewal review",
+        start: ago(5),
+        end: new Date(Date.now() + 25 * 60_000).toISOString(),
+        attendees: ["Dana Osei", "Marc Reyes"],
+        join_url: "https://meet.google.com/abc",
+      },
+      {
+        id: "e2",
+        provider: "msgraph",
+        title: "Design weekly",
+        start: new Date(Date.now() + 150 * 60_000).toISOString(),
+        end: new Date(Date.now() + 180 * 60_000).toISOString(),
+        attendees: ["Priya N."],
+        join_url: null,
+      },
     ],
   };
 }
