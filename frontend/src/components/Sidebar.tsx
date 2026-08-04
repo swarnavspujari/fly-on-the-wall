@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Inbox, List, Plus, Settings as SettingsIcon, Upload, X } from "lucide-react";
+import {
+  Inbox,
+  List,
+  Plus,
+  Settings as SettingsIcon,
+  TriangleAlert,
+  Upload,
+  X,
+} from "lucide-react";
 import type { CalendarEvent, Folder } from "../types";
 import { Badge, Button, SectionLabel } from "./ui";
 import logoLight from "../assets/brand/fly-on-the-wall-logo.svg";
@@ -10,6 +18,9 @@ export type Selection = { view: "all" } | { view: "unfiled" } | { view: "folder"
 interface Props {
   folders: Folder[];
   upcoming: CalendarEvent[];
+  /** Providers whose calendar token expired — shows a persistent Reconnect row. */
+  calendarNeedsReconnect?: ("google" | "msgraph")[];
+  onReconnectCalendar?: (provider: "google" | "msgraph") => void;
   selection: Selection;
   onSelect: (sel: Selection) => void;
   onCreateFolder: (name: string, parentId: string | null) => void;
@@ -127,6 +138,8 @@ const INPUT =
 export default function Sidebar({
   folders,
   upcoming,
+  calendarNeedsReconnect = [],
+  onReconnectCalendar,
   selection,
   onSelect,
   onCreateFolder,
@@ -338,46 +351,72 @@ export default function Sidebar({
         <SectionLabel className="px-2.5 pb-1.5" style={{ marginTop: 26 }}>
           Up next
         </SectionLabel>
-        {upcoming.length === 0 ? (
-          <div className="px-2.5 py-1.5 text-[12.5px] text-text-3">
-            Nothing scheduled for today.
-          </div>
-        ) : (
-          upcoming.map((ev) => {
-            const live =
-              now > 0 && new Date(ev.start).getTime() <= now && now <= new Date(ev.end).getTime();
-            return (
-              <div
-                key={`${ev.provider}-${ev.id}`}
-                className="group mt-0.5 rounded-lg px-2.5 py-1.5 hover:bg-surface-3"
-              >
-                <div className="flex items-center gap-1.5">
-                  {live && (
-                    <Badge tone="live" size="sm" uppercase>
-                      Live
-                    </Badge>
-                  )}
-                  <span className="truncate text-[13px] font-semibold text-text">{ev.title}</span>
-                </div>
-                <div className="flex items-center justify-between gap-1.5">
-                  <span className="truncate text-[11.5px] text-text-3">
-                    {eventWhen(ev.start)} · {ev.provider === "google" ? "Google" : "Outlook"}
-                  </span>
-                  <span className="hidden flex-none group-hover:inline-flex">
-                    <Button
-                      variant="soft"
-                      size="xs"
-                      title="Start note + recording for this meeting"
-                      onClick={() => onStartFromEvent(ev)}
-                    >
-                      Start
-                    </Button>
-                  </span>
-                </div>
+        {/* Persistent (always visible, not hover-gated) reconnect rows: shown
+            whenever a connected provider's token stopped working. */}
+        {calendarNeedsReconnect.map((provider) => (
+          <div
+            key={provider}
+            className="mx-2.5 mb-1.5 flex items-center justify-between gap-2 rounded-lg border border-line bg-surface px-2.5 py-2"
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-text">
+                <TriangleAlert size={13} strokeWidth={2} className="flex-none text-spk-amber" />
+                <span className="truncate">
+                  {provider === "google" ? "Google" : "Outlook"} disconnected
+                </span>
               </div>
-            );
-          })
-        )}
+              <div className="text-[11px] text-text-3">Sign in again to see meetings.</div>
+            </div>
+            <Button
+              variant="soft"
+              size="xs"
+              title={`Reconnect ${provider === "google" ? "Google Calendar" : "Outlook"}`}
+              onClick={() => onReconnectCalendar?.(provider)}
+            >
+              Reconnect
+            </Button>
+          </div>
+        ))}
+        {upcoming.length === 0
+          ? calendarNeedsReconnect.length === 0 && (
+              <div className="px-2.5 py-1.5 text-[12.5px] text-text-3">
+                Nothing scheduled for today.
+              </div>
+            )
+          : upcoming.map((ev) => {
+              const live =
+                now > 0 && new Date(ev.start).getTime() <= now && now <= new Date(ev.end).getTime();
+              return (
+                <div
+                  key={`${ev.provider}-${ev.id}`}
+                  className="group mt-0.5 rounded-lg px-2.5 py-1.5 hover:bg-surface-3"
+                >
+                  <div className="flex items-center gap-1.5">
+                    {live && (
+                      <Badge tone="live" size="sm" uppercase>
+                        Live
+                      </Badge>
+                    )}
+                    <span className="truncate text-[13px] font-semibold text-text">{ev.title}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="truncate text-[11.5px] text-text-3">
+                      {eventWhen(ev.start)} · {ev.provider === "google" ? "Google" : "Outlook"}
+                    </span>
+                    <span className="hidden flex-none group-hover:inline-flex">
+                      <Button
+                        variant="soft"
+                        size="xs"
+                        title="Start note + recording for this meeting"
+                        onClick={() => onStartFromEvent(ev)}
+                      >
+                        Start
+                      </Button>
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
         <div className="mt-4 flex items-center justify-between pb-1 pl-2.5 pr-1">
           <SectionLabel>Folders</SectionLabel>
           <Button

@@ -7,7 +7,6 @@ import type {
   AskMessage,
   Attendee,
   AudioDevice,
-  CalendarEvent,
   CalendarSettingsUpdate,
   CalendarStatus,
   CalendarToggle,
@@ -30,6 +29,7 @@ import type {
   SpeakerUndoState,
   Template,
   Transcript,
+  UpcomingMeetings,
 } from "./types";
 
 export const api = {
@@ -176,7 +176,7 @@ export const api = {
   listCalendars: () => invoke<CalendarToggle[]>("list_calendars"),
   setCalendarEnabled: (provider: string, calendarId: string, enabled: boolean) =>
     invoke<void>("set_calendar_enabled", { provider, calendarId, enabled }),
-  upcomingMeetings: () => invoke<CalendarEvent[]>("upcoming_meetings"),
+  upcomingMeetings: () => invoke<UpcomingMeetings>("upcoming_meetings"),
   startMeetingFromEvent: (title: string, attendees: string[]) =>
     invoke<RecordingStatus>("start_meeting_from_event", { title, attendees }),
 

@@ -87,12 +87,37 @@ export default function App() {
   const [autoTranscribe, setAutoTranscribe] = useState(true);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [upcoming, setUpcoming] = useState<CalendarEvent[]>([]);
+  // Connected providers whose stored token stopped working (expired/revoked)
+  // — the sidebar shows a persistent Reconnect button for each.
+  const [calendarNeedsReconnect, setCalendarNeedsReconnect] = useState<("google" | "msgraph")[]>(
+    [],
+  );
+  const refreshUpcoming = useCallback(() => {
+    api
+      .upcomingMeetings()
+      .then((u) => {
+        setUpcoming(u.events);
+        setCalendarNeedsReconnect(u.needs_reconnect);
+      })
+      .catch(console.error);
+  }, []);
   const [showSettings, setShowSettings] = useState(false);
   // When Settings is opened from the transcribe error, deep-link to the engine
   // row; null for a normal open.
   const [settingsFocus, setSettingsFocus] = useState<"engine" | "groq" | null>(null);
   const [showFirstRun, setShowFirstRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Re-run the interactive OAuth flow for a provider whose token expired,
+  // then refresh "Up next" so the Reconnect row clears on success.
+  const reconnectCalendar = useCallback(
+    (provider: "google" | "msgraph") => {
+      void api
+        .connectCalendar(provider)
+        .then(refreshUpcoming)
+        .catch((e) => setError(String(e)));
+    },
+    [refreshUpcoming],
+  );
   // Notepad mode: below this width both sidebars fold into a menu button and
   // only the note itself stays visible, so the app works docked in a corner.
   const [narrow, setNarrow] = useState(
@@ -177,13 +202,10 @@ export default function App() {
 
   // upcoming calendar meetings: on start + every 5 minutes
   useEffect(() => {
-    const fetchUpcoming = () => {
-      api.upcomingMeetings().then(setUpcoming).catch(console.error);
-    };
-    fetchUpcoming();
-    const t = window.setInterval(fetchUpcoming, 5 * 60_000);
+    refreshUpcoming();
+    const t = window.setInterval(refreshUpcoming, 5 * 60_000);
     return () => window.clearInterval(t);
-  }, []);
+  }, [refreshUpcoming]);
 
   // poll recording + screen status once a second (indicators, elapsed time)
   useEffect(() => {
@@ -651,6 +673,8 @@ export default function App() {
     <Sidebar
       folders={folders}
       upcoming={upcoming}
+      calendarNeedsReconnect={calendarNeedsReconnect}
+      onReconnectCalendar={reconnectCalendar}
       selection={selection}
       onSelect={setSelection}
       onCreateFolder={(name, parentId) =>
@@ -848,7 +872,7 @@ export default function App() {
             setSettingsFocus(null);
             refreshAsrState();
             api.listTemplates().then(setTemplates).catch(console.error);
-            api.upcomingMeetings().then(setUpcoming).catch(console.error);
+            refreshUpcoming();
           }}
         />
       )}

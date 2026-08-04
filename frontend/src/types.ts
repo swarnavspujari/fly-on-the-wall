@@ -303,6 +303,12 @@ export interface CalendarEvent {
   join_url: string | null;
 }
 
+/** Upcoming events + which connected providers need an interactive reconnect. */
+export interface UpcomingMeetings {
+  events: CalendarEvent[];
+  needs_reconnect: ("google" | "msgraph")[];
+}
+
 export interface CalendarStatus {
   google_client_id: string;
   google_has_secret: boolean;
