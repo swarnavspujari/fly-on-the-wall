@@ -2,28 +2,28 @@
   "config": {
     "align": "word",
     "asr_model": "ggml-small-q5_1",
-    "cluster_threshold": 0.9,
+    "cluster_threshold": 0.8,
     "dust_floor_ms": 15000,
     "dust_fraction": 0.05,
     "embedding": "campplus.onnx (pinned)",
     "gpu": true,
     "max_secs": null,
     "mode": "pipeline",
-    "num_speakers": null
+    "num_speakers": null,
+    "vbx": true
   },
   "fixture": "fotw-2ch-1on1",
-  "pipeline_secs": 473.0091493,
+  "pipeline_secs": 432.0908143,
   "transcript": {
-    "segments": 101,
-    "speaker_keys": 4,
+    "segments": 89,
+    "speaker_keys": 3,
     "speaker_seconds": {
       "mic": 2001.7,
-      "spk_0": 2439.4,
-      "spk_2": 35.2,
-      "spk_unknown": 205.5
+      "spk_0": 2607.9,
+      "spk_unknown": 72.2
     },
-    "speakers_listed": 4,
-    "system_speakers": 2,
+    "speakers_listed": 3,
+    "system_speakers": 1,
     "words_mic": 1902,
     "words_system": 5742,
     "words_total": 7644,

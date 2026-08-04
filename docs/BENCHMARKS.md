@@ -513,7 +513,10 @@ FLYONTHEWALL_HARNESS_CLUSTER_THRESHOLD=0.9 ... \
   cargo test -p fly-app --test accuracy_harness -- --ignored --nocapture
 ```
 
-## Baseline (shipped defaults: CAM++ embeddings, threshold 0.9, dust 15 s / 5 %, word-level alignment)
+## Baseline before this work (2026-08-03: agglomerative-only, threshold 0.9, dust 15 s / 5 %, word-level alignment)
+
+*The committed JSONs under `docs/data/diarization/` now hold the shipped-engine (VBx)
+numbers; these tables preserve the starting point the phases below measured against.*
 
 | Fixture | clusters vs real | DER (collar 250 ms) | confusion | miss | false alarm | attribution err |
 |---|---|---|---|---|---|---|
@@ -593,3 +596,35 @@ hypothesis that boundary jitter dominates lost to the measurement. The sentence 
 does absorb diarizer-uncovered words beautifully (TB Unknown 205 → 10 s) but feeds
 phantom clusters the same way. Net negative where scoreable → **word-level stays**;
 the function remains as the harness A/B arm (FLYONTHEWALL_HARNESS_SENTENCE_ALIGN=1).
+
+## Phase 3 — VBx refinement (shipped)
+
+The Phase 2a finding — phantom clusters whose embeddings survive every agglomerative
+threshold — is the textbook VBx case: clustering needs to *reassign* outlier time, not
+drop it. Shipped architecture: the sherpa sidecar keeps segmentation + an initial
+clustering that is now deliberately over-split (init threshold 0.8; VBx merges but
+cannot split, so over-splitting is the safe side). Its turns are cut into
+1.44 s / 0.72 s subsegments, embedded in-process with the **same pinned CAM++ file**
+(kaldi-style fbank + onnxruntime — no new model artifact), whitened by a two-covariance
+model estimated from the initial clusters, and VBx (Bayesian HMM; Rust port of
+BUTSpeechFIT/VBx, Apache-2.0) reassigns per-subsegment. The PLDA feasibility question
+resolved as: no trained PLDA exists for CAM++ embeddings, and the self-calibrated
+two-covariance substitute measured well — the Fa/Fb/loopP grid was insensitive
+(every combo within 0.1 pp on both Teams fixtures); Fa 0.1 / Fb 17 / loopP 0.99 shipped.
+A user-confirmed speaker count bypasses refinement (count is forced; VBx could only
+merge below it).
+
+Versus the tuned Phase 2 baseline (threshold 0.95), same fixtures, same ASR:
+
+| Fixture | tuned Phase 2 | VBx (shipped) |
+|---|---|---|
+| legislation (2 spk) | 7.7 %, 3/2 clusters | **5.5 %, 2/2 clusters**, confusion 3.1 → 0.9 %, attr 0.7 → 0.6 % |
+| contracts (3 spk) | 10.7 %, 3/3 clusters | **10.6 %, 3/3 clusters**, attr 1.4 → 1.2 % |
+| TB system channel (1 spk) | 2 clusters + 206 s Unknown | **1 cluster + 72 s Unknown** |
+
+Cost: one embedding pass (~60 s for a 45-minute meeting, CPU) on top of the sidecar
+run — ~+20 % diarization time. Remaining DER is miss + false-alarm against
+utterance-level reference timing, not speaker confusion. `rediarize_e2e` passes: the
+re-diarize / revert / polish contract (segment ids, text, word timings untouched)
+holds through the new engine. The committed per-fixture JSONs were regenerated with
+the shipped engine — the git history of `docs/data/diarization/` is the before/after.

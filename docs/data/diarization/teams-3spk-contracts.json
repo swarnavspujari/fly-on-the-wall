@@ -2,59 +2,59 @@
   "config": {
     "align": "word",
     "asr_model": "ggml-small-q5_1",
-    "cluster_threshold": 0.9,
+    "cluster_threshold": 0.8,
     "dust_floor_ms": 15000,
     "dust_fraction": 0.05,
     "embedding": "campplus.onnx (pinned)",
     "gpu": true,
     "max_secs": null,
     "mode": "pipeline",
-    "num_speakers": null
+    "num_speakers": null,
+    "vbx": true
   },
   "fixture": "teams-3spk-contracts",
-  "pipeline_secs": 430.5963861,
+  "pipeline_secs": 450.1791881,
   "reference": {
-    "attribution_error": 0.013974931566056763,
+    "attribution_error": 0.011669788214954617,
     "diarization": {
       "der_collar_0": {
-        "confusion": 0.02614301695456989,
-        "der": 0.16744126919556596,
-        "false_alarm": 0.08698987374874693,
-        "miss": 0.054308378492249135,
+        "confusion": 0.016411936482108352,
+        "der": 0.15789106652525753,
+        "false_alarm": 0.08644288184103092,
+        "miss": 0.055036248202118235,
         "ref_speech_s": 2753.24
       },
       "der_collar_250": {
-        "confusion": 0.019511772992553834,
-        "der": 0.11526303079090361,
-        "false_alarm": 0.05990621855504125,
-        "miss": 0.035845039243308514,
+        "confusion": 0.010716441940028175,
+        "der": 0.10641859529080298,
+        "false_alarm": 0.059601931978265243,
+        "miss": 0.03610022137250956,
         "ref_speech_s": 2484.5
       },
-      "hyp_clusters": 4,
+      "hyp_clusters": 3,
       "mapping_collar_250": {
         "ref_0": "spk_0",
-        "ref_1": "spk_2",
-        "ref_2": "spk_6"
+        "ref_1": "spk_1",
+        "ref_2": "spk_2"
       },
       "ref_speakers": 3
     },
     "ref_words": 7479,
-    "sa_wer_merged": 0.10041449391629897,
+    "sa_wer_merged": 0.09827517047733654,
     "wer_merged": 0.08744484556758925,
     "wer_system_vs_all": 0.08744484556758925
   },
   "transcript": {
-    "segments": 97,
-    "speaker_keys": 5,
+    "segments": 99,
+    "speaker_keys": 4,
     "speaker_seconds": {
-      "spk_0": 1104.0,
-      "spk_2": 407.5,
-      "spk_6": 1284.3,
-      "spk_8": 35.7,
-      "spk_unknown": 11.8
+      "spk_0": 1084.5,
+      "spk_1": 448.0,
+      "spk_2": 1302.4,
+      "spk_unknown": 4.8
     },
-    "speakers_listed": 5,
-    "system_speakers": 4,
+    "speakers_listed": 4,
+    "system_speakers": 3,
     "words_mic": 0,
     "words_system": 7193,
     "words_total": 7193,
