@@ -162,8 +162,9 @@ fn ensure_ort_dylib(sherpa_exe: &Path) -> Result<()> {
                 let name = entry.file_name();
                 if name.to_string_lossy().starts_with("libonnxruntime.so") {
                     return ort::init_from(entry.path().to_string_lossy().as_ref())
-                        .commit()
-                        .map(|_| ())
+                        .map(|builder| {
+                            builder.commit();
+                        })
                         .map_err(|e| e.to_string());
                 }
             }
