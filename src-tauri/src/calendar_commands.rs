@@ -224,23 +224,24 @@ pub async fn connect_calendar(
     }
 }
 
-#[tauri::command]
-pub async fn disconnect_calendar(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    provider: String,
-) -> CmdResult<()> {
-    match provider.as_str() {
-        "google" => build_google(&app, &state)?
-            .disconnect()
-            .await
-            .map_err(|e| e.to_string()),
-        "msgraph" => build_msgraph(&app, &state)?
-            .disconnect()
-            .await
-            .map_err(|e| e.to_string()),
-        other => Err(format!("unknown calendar provider {other}")),
+/// The keychain key holding a provider's OAuth token set.
+fn provider_token_key(provider: &str) -> Option<&'static str> {
+    match provider {
+        "google" => Some(fly_secrets::keys::GOOGLE_OAUTH_TOKEN),
+        "msgraph" => Some(fly_secrets::keys::MS_OAUTH_TOKEN),
+        _ => None,
     }
+}
+
+/// Disconnect = delete the stored token. Deliberately does NOT build the
+/// provider first: disconnecting must always work, even when the OAuth app
+/// config (client id/secret) is missing or broken — requiring it made the
+/// disconnect button a no-op in exactly the situations users need it.
+#[tauri::command]
+pub fn disconnect_calendar(state: State<'_, AppState>, provider: String) -> CmdResult<()> {
+    let key =
+        provider_token_key(&provider).ok_or(format!("unknown calendar provider {provider}"))?;
+    state.secrets.delete(key).map_err(|e| e.to_string())
 }
 
 fn is_connected(state: &AppState, token_key: &str) -> bool {
@@ -407,6 +408,49 @@ pub fn set_calendar_enabled(
     }
     let json = serde_json::to_string(&disabled).unwrap_or_else(|_| "[]".into());
     storage.set_setting(key, &json).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fly_secrets::{MemorySecretStore, SecretStore};
+
+    #[test]
+    fn provider_token_keys_map_and_reject() {
+        assert_eq!(
+            provider_token_key("google"),
+            Some(fly_secrets::keys::GOOGLE_OAUTH_TOKEN)
+        );
+        assert_eq!(
+            provider_token_key("msgraph"),
+            Some(fly_secrets::keys::MS_OAUTH_TOKEN)
+        );
+        assert_eq!(provider_token_key("caldav"), None);
+    }
+
+    #[test]
+    fn auth_errors_classified_for_reconnect() {
+        use fly_calendar::CalendarError;
+        assert!(is_auth_error(&CalendarError::NotConnected));
+        assert!(is_auth_error(&CalendarError::Auth("expired".into())));
+        assert!(!is_auth_error(&CalendarError::Network("dns".into())));
+        assert!(!is_auth_error(&CalendarError::Provider("500".into())));
+    }
+
+    /// Disconnect is a bare token delete — it must work (and be idempotent)
+    /// with no OAuth app config at all.
+    #[test]
+    fn disconnect_deletes_token_without_provider_config() {
+        let secrets = MemorySecretStore::default();
+        secrets
+            .set(fly_secrets::keys::GOOGLE_OAUTH_TOKEN, "{\"tok\":1}")
+            .unwrap();
+        let key = provider_token_key("google").unwrap();
+        secrets.delete(key).unwrap();
+        assert_eq!(secrets.get(key).unwrap(), None);
+        // deleting again (already disconnected) is fine
+        secrets.delete(key).unwrap();
+    }
 }
 
 /// One-click start from a calendar event: note titled after the event,

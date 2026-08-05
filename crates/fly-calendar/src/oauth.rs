@@ -14,7 +14,7 @@ use crate::{CalendarError, Result};
 /// Branded loopback response shown in the browser after a successful connect.
 /// Self-contained (no external assets — this is a one-shot loopback reply):
 /// full document, dark brand card (ink / cream / violet), best-effort auto-close.
-const CONNECTED_PAGE: &str = r##"<!doctype html>
+pub const CONNECTED_PAGE: &str = r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -51,7 +51,7 @@ const CONNECTED_PAGE: &str = r##"<!doctype html>
 </html>"##;
 
 /// Branded loopback response shown when the connect flow fails.
-const FAILED_PAGE: &str = r##"<!doctype html>
+pub const FAILED_PAGE: &str = r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
