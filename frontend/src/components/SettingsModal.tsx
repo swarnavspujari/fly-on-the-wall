@@ -1579,7 +1579,14 @@ export default function SettingsModal({
                 variant="outline"
                 size="sm"
                 disabled={backfillBusy}
-                style={{ color: "#fff", borderColor: "rgba(255,255,255,.3)" }}
+                style={{
+                  // On this always-dark card the outline variant's light-mode
+                  // surface background would put white text on white — force a
+                  // transparent background so the white text works in both themes.
+                  color: "#fff",
+                  borderColor: "rgba(255,255,255,.3)",
+                  background: "transparent",
+                }}
                 onClick={() => void runBackfill()}
               >
                 {backfillBusy ? "Extracting…" : "Extract items from past meetings"}
