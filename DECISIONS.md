@@ -335,3 +335,16 @@ Running log of technical decisions, newest last. Format: date — decision — w
   server stays a thin reader. One write tool only (`set_speaker_label`, the app UI's own
   relabel), and a lifecycle contract enforced by test: exit on stdin EOF, so the server can
   never outlive its client and block an installer (the NSIS taskkill hook stays as backstop).
+- **2026-08-09 — MCP server goes dual-era: stateless 2026-07-28 spec + legacy handshake.**
+  The 2026-07-28 MCP revision removes the `initialize` session handshake in favor of
+  per-request metadata (`_meta["io.modelcontextprotocol/*"]`), a mandatory
+  `server/discover` method, `resultType` result envelopes, `-32022` version negotiation,
+  and `ttlMs`/`cacheScope` caching hints. fly-mcp was already stateless internally (every
+  request answered from storage; no session, no handshake tracking), so the migration is a
+  protocol-surface change only: requests carrying modern `_meta` get full 2026-07-28
+  semantics; `initialize` and metadata-less requests get the pre-2026 byte-identical
+  responses. Dual-era rather than modern-only because installed Claude Desktop versions
+  still open with `initialize`, and the spec explicitly blesses dual-era servers during
+  the 12-month transition window. Tool list + discover results are marked cacheable
+  (1 h, public — static per binary, no user data), sparing clients a `tools/list`
+  round-trip per conversation.
