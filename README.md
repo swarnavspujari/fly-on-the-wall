@@ -511,7 +511,10 @@ screen, secrets) is a trait crate; `src-tauri` is the only place impls are picke
 
 Fly on the Wall ships `flyonthewall-mcp.exe`, a local stdio MCP server over your notes,
 meetings, transcripts, and the structured items extracted from them (nothing leaves the
-machine; the only write it allows is renaming a speaker label). Add it to Claude Desktop's
+machine; the only write it allows is renaming a speaker label). It speaks the stateless
+**2026-07-28 MCP specification** (per-request metadata, `server/discover`, cacheable tool
+lists) and still answers the legacy `initialize` handshake, so both current and older MCP
+clients connect with no configuration change. Add it to Claude Desktop's
 `claude_desktop_config.json` — in the app, **Settings → "Chat with your notes (MCP)"**
 generates the exact snippet for your install location:
 

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // End-to-end smoke for the MCP server over real stdio: spawns the binary
 // against a data dir and calls EVERY tool, asserting each answers sanely.
+// Speaks the modern stateless dialect (spec 2026-07-28: server/discover
+// probe, per-request _meta, resultType) and also checks the legacy
+// initialize handshake still answers (dual-era compat for old clients).
 // The single write (set_speaker_label) is exercised as a no-op: it re-sets
 // a speaker's existing label, so the data dir is byte-identical afterwards.
 //
@@ -18,7 +21,7 @@ const bin =
     ? args[binFlag + 1]
     : path.join("target", "release", "flyonthewall-mcp.exe");
 const dataDir =
-  args.find((a, i) => !a.startsWith("--") && i !== binFlag + 1) ??
+  args.find((a, i) => !a.startsWith("--") && (binFlag < 0 || i !== binFlag + 1)) ??
   path.join(process.env.APPDATA ?? "", "FlyOnTheWall");
 
 if (!existsSync(bin)) {
@@ -46,7 +49,15 @@ lines.on("line", (line) => {
   }
 });
 
-function rpc(method, params) {
+// modern stateless dialect: every request self-describes via _meta
+const PROTOCOL_VERSION = "2026-07-28";
+const META = {
+  "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+  "io.modelcontextprotocol/clientCapabilities": {},
+  "io.modelcontextprotocol/clientInfo": { name: "smoke", version: "0" },
+};
+
+function rpc(method, params, { legacy = false } = {}) {
   const id = nextId++;
   const p = new Promise((resolve, reject) => {
     pending.set(id, resolve);
@@ -54,12 +65,15 @@ function rpc(method, params) {
       if (pending.delete(id)) reject(new Error(`timeout waiting for ${method}`));
     }, 15000);
   });
-  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+  const body = legacy ? params : { ...(params ?? {}), _meta: META };
+  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params: body }) + "\n");
   return p;
 }
 const toolText = async (name, args = {}) => {
   const resp = await rpc("tools/call", { name, arguments: args });
   if (resp.error) throw new Error(`${name}: rpc error ${JSON.stringify(resp.error)}`);
+  if (resp.result?.resultType !== "complete")
+    throw new Error(`${name}: modern result missing resultType=complete`);
   const text = resp.result?.content?.[0]?.text ?? "";
   return { text, isError: resp.result?.isError === true };
 };
@@ -71,19 +85,56 @@ const check = (name, ok, detail) => {
 };
 
 try {
-  const init = await rpc("initialize", {
-    protocolVersion: "2024-11-05",
-    capabilities: {},
-    clientInfo: { name: "smoke", version: "0" },
-  });
+  // the recommended stdio probe: modern clients open with server/discover
+  const discover = await rpc("server/discover", {});
+  const serverInfo =
+    discover.result?._meta?.["io.modelcontextprotocol/serverInfo"];
   check(
+    "server/discover",
+    discover.result?.supportedVersions?.includes(PROTOCOL_VERSION) &&
+      serverInfo?.name === "flyonthewall" &&
+      discover.result?.instructions?.includes("get_context") &&
+      discover.result?.ttlMs >= 0,
+    `v${serverInfo?.version}, versions: ${discover.result?.supportedVersions}`
+  );
+
+  // version negotiation: an unsupported version must get -32022 + supported list
+  const badVer = await rpc(
+    "tools/list",
+    { _meta: { ...META, "io.modelcontextprotocol/protocolVersion": "1900-01-01" } },
+    { legacy: true } // suppress the auto-_meta so ours wins
+  );
+  check(
+    "unsupported-version → -32022",
+    badVer.error?.code === -32022 &&
+      badVer.error?.data?.supported?.includes(PROTOCOL_VERSION)
+  );
+
+  // dual-era: legacy clients still get their initialize handshake
+  const init = await rpc(
     "initialize",
+    {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "smoke", version: "0" },
+    },
+    { legacy: true }
+  );
+  check(
+    "initialize (legacy era)",
     init.result?.serverInfo?.name === "flyonthewall" &&
-      init.result?.instructions?.includes("get_context"),
+      init.result?.instructions?.includes("get_context") &&
+      init.result?.resultType === undefined,
     `v${init.result?.serverInfo?.version}`
   );
 
   const tools = await rpc("tools/list", {});
+  check(
+    "tools/list caching hints",
+    tools.result?.resultType === "complete" &&
+      tools.result?.ttlMs > 0 &&
+      tools.result?.cacheScope === "public"
+  );
   const names = (tools.result?.tools ?? []).map((t) => t.name);
   const expected = [
     "get_context", "whats_changed", "open_items", "query_items", "get_meeting_items",

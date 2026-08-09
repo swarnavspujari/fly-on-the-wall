@@ -6,6 +6,15 @@
 //! only: `set_speaker_label`, mirroring what the app UI already allows.
 //!
 //! Transport: newline-delimited JSON-RPC 2.0 (the MCP stdio transport).
+//!
+//! Dual-era (spec 2026-07-28 "stateless" + legacy handshake): a request
+//! carrying `_meta["io.modelcontextprotocol/protocolVersion"]` is served
+//! under the modern per-request-metadata protocol (`server/discover`,
+//! `resultType`, caching hints, `-32022` version negotiation); an
+//! `initialize` request — or any metadata-less request — is served under
+//! the legacy handshake protocol, byte-identical to what older clients
+//! already parse. The server holds no session state in either era: every
+//! request is answered from storage alone.
 
 pub mod context;
 
@@ -16,7 +25,23 @@ use serde_json::{json, Value};
 
 pub const SERVER_NAME: &str = "flyonthewall";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The modern (stateless) protocol revision this server implements.
+pub const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+/// Echoed to legacy clients that omit a version in `initialize`.
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
+
+const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+
+/// Tool list + discovery results are static for a given binary; let modern
+/// clients cache them for an hour (they contain no user data → public).
+const CACHE_TTL_MS: u64 = 3_600_000;
+
+const INSTRUCTIONS: &str = "Fly on the Wall: the user's local meeting notes, transcripts, and a structured context layer extracted from them.\n\nIntended workflow:\n1. START with get_context(query) for any question about a project, customer, or recurring meeting — it returns a deterministic briefing (participants, meeting timeline, decisions, action items, commitments, open questions, key figures) assembled from stored data. Every claim carries its meeting_id and transcript segment ids.\n2. For targeted facts use query_items (filter by type/owner/status/since), open_items (what's still open), or whats_changed (what's new in a series since a date).\n3. Drill into raw material only to VERIFY or quote: get_transcript / get_transcripts for diarized transcripts, get_note for the user's own notes, search_notes for full-text search.\n4. Speakers appear by label ('You', 'Dana', 'Speaker 1'). If the user tells you who a speaker is, persist it with set_speaker_label — the only write this server allows.\n\nProvenance rule: extracted items are machine-generated. When a claim matters, verify it against the cited segment ids in the transcript before presenting it as fact.";
+
+/// JSON-RPC error: code, message, optional `data`.
+type RpcError = (i32, String, Option<Value>);
 
 pub struct Server {
     storage: Storage,
@@ -32,7 +57,7 @@ impl Server {
         let msg: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
             Err(_) => {
-                return Some(error_response(Value::Null, -32700, "parse error"));
+                return Some(error_response(Value::Null, -32700, "parse error", None));
             }
         };
         let id = msg.get("id").cloned();
@@ -42,18 +67,93 @@ impl Server {
         // notifications get no response
         let id = id?;
 
-        let result = match method {
-            "initialize" => Ok(self.initialize(&params)),
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(tools_list()),
-            "tools/call" => self.tools_call(&params),
-            _ => Err((-32601, format!("method not found: {method}"))),
+        let modern_version = params
+            .get("_meta")
+            .and_then(|m| m.get(META_PROTOCOL_VERSION))
+            .and_then(|v| v.as_str());
+
+        let result = if method == "initialize" {
+            // legacy era: answer the handshake exactly as before
+            Ok(self.initialize(&params))
+        } else if let Some(version) = modern_version {
+            self.handle_modern(version, method, &params)
+        } else if method == "server/discover" {
+            // modern-only method without its required per-request metadata
+            Err((
+                -32602,
+                format!(
+                    "server/discover requires _meta[\"{META_PROTOCOL_VERSION}\"] (spec 2026-07-28)"
+                ),
+                None,
+            ))
+        } else {
+            // legacy era: metadata-less requests, byte-identical to before
+            match method {
+                "ping" => Ok(json!({})),
+                "tools/list" => Ok(tools_list()),
+                "tools/call" => self.tools_call(&params),
+                _ => Err((-32601, format!("method not found: {method}"), None)),
+            }
         };
 
         Some(match result {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
-            Err((code, message)) => error_response(id, code, &message),
+            Err((code, message, data)) => error_response(id, code, &message, data),
         })
+    }
+
+    /// Modern (2026-07-28) dispatch: validate the per-request `_meta`, then
+    /// answer with modern result envelopes (`resultType`, serverInfo,
+    /// caching hints on cacheable results).
+    fn handle_modern(
+        &self,
+        version: &str,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, RpcError> {
+        if version != MODERN_PROTOCOL_VERSION {
+            // UnsupportedProtocolVersionError: the client retries with one of ours
+            return Err((
+                -32022,
+                "Unsupported protocol version".into(),
+                Some(json!({
+                    "supported": [MODERN_PROTOCOL_VERSION],
+                    "requested": version
+                })),
+            ));
+        }
+        if params
+            .get("_meta")
+            .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
+            .is_none()
+        {
+            return Err((
+                -32602,
+                format!("missing required _meta field \"{META_CLIENT_CAPABILITIES}\""),
+                None,
+            ));
+        }
+        let result = match method {
+            "server/discover" => json!({
+                "supportedVersions": [MODERN_PROTOCOL_VERSION],
+                "capabilities": { "tools": {} },
+                "instructions": INSTRUCTIONS,
+                "ttlMs": CACHE_TTL_MS,
+                "cacheScope": "public"
+            }),
+            "ping" => json!({}),
+            "tools/list" => {
+                let mut list = tools_list();
+                let obj = list.as_object_mut().expect("tools_list is an object");
+                // static per binary and free of user data → cacheable
+                obj.insert("ttlMs".into(), json!(CACHE_TTL_MS));
+                obj.insert("cacheScope".into(), json!("public"));
+                list
+            }
+            "tools/call" => self.tools_call(params)?,
+            _ => return Err((-32601, format!("method not found: {method}"), None)),
+        };
+        Ok(modernize(result))
     }
 
     fn initialize(&self, params: &Value) -> Value {
@@ -66,11 +166,11 @@ impl Server {
             "protocolVersion": version,
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-            "instructions": "Fly on the Wall: the user's local meeting notes, transcripts, and a structured context layer extracted from them.\n\nIntended workflow:\n1. START with get_context(query) for any question about a project, customer, or recurring meeting — it returns a deterministic briefing (participants, meeting timeline, decisions, action items, commitments, open questions, key figures) assembled from stored data. Every claim carries its meeting_id and transcript segment ids.\n2. For targeted facts use query_items (filter by type/owner/status/since), open_items (what's still open), or whats_changed (what's new in a series since a date).\n3. Drill into raw material only to VERIFY or quote: get_transcript / get_transcripts for diarized transcripts, get_note for the user's own notes, search_notes for full-text search.\n4. Speakers appear by label ('You', 'Dana', 'Speaker 1'). If the user tells you who a speaker is, persist it with set_speaker_label — the only write this server allows.\n\nProvenance rule: extracted items are machine-generated. When a claim matters, verify it against the cited segment ids in the transcript before presenting it as fact."
+            "instructions": INSTRUCTIONS
         })
     }
 
-    fn tools_call(&self, params: &Value) -> Result<Value, (i32, String)> {
+    fn tools_call(&self, params: &Value) -> Result<Value, RpcError> {
         let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
         let text = match name {
@@ -619,8 +719,23 @@ fn arg_time(args: &Value, key: &str) -> Result<Option<DateTime<Utc>>, String> {
     ))
 }
 
-fn error_response(id: Value, code: i32, message: &str) -> String {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}).to_string()
+fn error_response(id: Value, code: i32, message: &str, data: Option<Value>) -> String {
+    let mut error = json!({"code": code, "message": message});
+    if let Some(data) = data {
+        error["data"] = data;
+    }
+    json!({"jsonrpc": "2.0", "id": id, "error": error}).to_string()
+}
+
+/// Wrap a result for a modern (2026-07-28) client: mark it complete and
+/// self-identify in `_meta` — modern responses carry identity per-message
+/// instead of relying on a handshake.
+fn modernize(mut result: Value) -> Value {
+    let obj = result.as_object_mut().expect("results are objects");
+    obj.entry("resultType").or_insert(json!("complete"));
+    obj.entry("_meta").or_insert(json!({}))[META_SERVER_INFO] =
+        json!({ "name": SERVER_NAME, "version": SERVER_VERSION });
+    result
 }
 
 fn tools_list() -> Value {
@@ -893,6 +1008,118 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("**You:** the roadmap is approved"));
+    }
+
+    /// The modern per-request `_meta` every 2026-07-28 request must carry.
+    fn modern_meta() -> serde_json::Value {
+        json!({
+            META_PROTOCOL_VERSION: MODERN_PROTOCOL_VERSION,
+            META_CLIENT_CAPABILITIES: {},
+            "io.modelcontextprotocol/clientInfo": {"name": "t", "version": "0"}
+        })
+    }
+
+    #[test]
+    fn modern_discover_lists_versions_capabilities_and_identity() {
+        let (_d, server, _n, _m) = server_with_data();
+        let resp = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta": modern_meta()}}),
+        );
+        let r = &resp["result"];
+        assert_eq!(r["resultType"], "complete", "{resp}");
+        assert_eq!(r["supportedVersions"], json!([MODERN_PROTOCOL_VERSION]));
+        assert!(r["capabilities"]["tools"].is_object(), "{resp}");
+        assert!(r["instructions"].as_str().unwrap().contains("get_context"));
+        assert_eq!(r["_meta"][META_SERVER_INFO]["name"], SERVER_NAME);
+        assert!(r["ttlMs"].as_u64().unwrap() > 0);
+        assert_eq!(r["cacheScope"], "public");
+    }
+
+    #[test]
+    fn modern_requests_are_stateless_and_self_describing() {
+        let (_d, server, note_id, _m) = server_with_data();
+        // no discover, no handshake — a lone tools/call must just work
+        let hits = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"search_notes","arguments":{"query":"roadmap"},"_meta": modern_meta()}}),
+        );
+        assert_eq!(hits["result"]["resultType"], "complete", "{hits}");
+        assert_eq!(
+            hits["result"]["_meta"][META_SERVER_INFO]["version"],
+            SERVER_VERSION
+        );
+        assert!(hits["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains(&note_id));
+
+        // tools/list is cacheable under the modern era
+        let tools = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta": modern_meta()}}),
+        );
+        assert_eq!(tools["result"]["resultType"], "complete");
+        assert!(tools["result"]["ttlMs"].as_u64().unwrap() > 0);
+        assert_eq!(tools["result"]["cacheScope"], "public");
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 13);
+    }
+
+    #[test]
+    fn modern_version_negotiation_rejects_with_32022() {
+        let (_d, server, _n, _m) = server_with_data();
+        let resp = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{"_meta":{
+                META_PROTOCOL_VERSION: "1900-01-01",
+                META_CLIENT_CAPABILITIES: {}}}}),
+        );
+        assert_eq!(resp["error"]["code"], -32022, "{resp}");
+        assert_eq!(
+            resp["error"]["data"]["supported"],
+            json!([MODERN_PROTOCOL_VERSION])
+        );
+        assert_eq!(resp["error"]["data"]["requested"], "1900-01-01");
+    }
+
+    #[test]
+    fn modern_missing_required_meta_is_invalid_params() {
+        let (_d, server, _n, _m) = server_with_data();
+        // protocolVersion present but clientCapabilities missing → -32602
+        let resp = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":{"_meta":{
+                META_PROTOCOL_VERSION: MODERN_PROTOCOL_VERSION}}}),
+        );
+        assert_eq!(resp["error"]["code"], -32602, "{resp}");
+
+        // server/discover without any _meta is malformed, not "unknown method"
+        let bare = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":6,"method":"server/discover"}),
+        );
+        assert_eq!(bare["error"]["code"], -32602, "{bare}");
+    }
+
+    #[test]
+    fn legacy_era_responses_stay_unchanged_for_old_clients() {
+        let (_d, server, _n, _m) = server_with_data();
+        // metadata-less requests keep the pre-2026 shape: no resultType,
+        // no _meta — old clients parse these byte-for-byte as before
+        let tools = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":7,"method":"tools/list"}),
+        );
+        assert!(tools["result"].get("resultType").is_none(), "{tools}");
+        assert!(tools["result"].get("ttlMs").is_none(), "{tools}");
+
+        let hit = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"list_folders","arguments":{}}}),
+        );
+        assert!(hit["result"].get("resultType").is_none(), "{hit}");
+        assert!(hit["result"].get("_meta").is_none(), "{hit}");
     }
 
     #[test]
