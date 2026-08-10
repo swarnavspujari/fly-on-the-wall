@@ -811,6 +811,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         : null;
     case "import_transcribe":
       return importTranscribe((args.order as string[]) ?? []);
+    case "pending_backfill_count":
+      return 3;
     default:
       return null;
   }

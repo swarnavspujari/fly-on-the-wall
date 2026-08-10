@@ -357,6 +357,17 @@ pub async fn backfill_meeting_items(state: State<'_, AppState>) -> CmdResult<Bac
     Ok(result)
 }
 
+/// How many transcribed meetings still lack extracted items — drives the
+/// Settings card's backfill button label.
+#[tauri::command]
+pub fn pending_backfill_count(state: State<'_, AppState>) -> CmdResult<usize> {
+    let storage = state.storage.lock().unwrap();
+    Ok(storage
+        .meetings_missing_items(500)
+        .map_err(|e| e.to_string())?
+        .len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

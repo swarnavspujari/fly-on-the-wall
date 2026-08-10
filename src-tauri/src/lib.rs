@@ -218,6 +218,7 @@ pub fn run() {
             llm_commands::test_llm_connection,
             extraction::extract_meeting_items,
             extraction::backfill_meeting_items,
+            extraction::pending_backfill_count,
             ollama::ollama_status,
             ollama::ollama_pull,
             ollama::ollama_delete,

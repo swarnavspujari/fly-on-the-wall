@@ -198,6 +198,8 @@ export default function SettingsModal({
   const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
   const [backfillBusy, setBackfillBusy] = useState(false);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+  // null = count not loaded yet (generic label until it arrives)
+  const [backfillPending, setBackfillPending] = useState<number | null>(null);
 
   // Presentational view mode — Technical reveals model installs, GPU + OAuth details.
   // A deep-link forces Technical so its target (engine row, or the Groq
@@ -551,6 +553,15 @@ export default function SettingsModal({
     }
   };
 
+  // Count of un-extracted meetings behind the backfill button's label; loaded
+  // when Settings opens, refreshed after each run.
+  useEffect(() => {
+    void api
+      .pendingBackfillCount()
+      .then(setBackfillPending)
+      .catch(() => {});
+  }, []);
+
   const runBackfill = async () => {
     setBackfillBusy(true);
     setBackfillMsg(null);
@@ -566,6 +577,10 @@ export default function SettingsModal({
       setBackfillMsg(String(e));
     } finally {
       setBackfillBusy(false);
+      void api
+        .pendingBackfillCount()
+        .then(setBackfillPending)
+        .catch(() => {});
     }
   };
 
@@ -1578,7 +1593,7 @@ export default function SettingsModal({
               <Button
                 variant="outline"
                 size="sm"
-                disabled={backfillBusy}
+                disabled={backfillBusy || backfillPending === 0}
                 style={{
                   // On this always-dark card the outline variant's light-mode
                   // surface background would put white text on white — force a
@@ -1589,7 +1604,13 @@ export default function SettingsModal({
                 }}
                 onClick={() => void runBackfill()}
               >
-                {backfillBusy ? "Extracting…" : "Extract items from past meetings"}
+                {backfillBusy
+                  ? "Extracting…"
+                  : backfillPending === 0
+                    ? "All meetings indexed"
+                    : backfillPending === null
+                      ? "Backfill meetings not indexed"
+                      : `Backfill ${backfillPending} meeting${backfillPending === 1 ? "" : "s"} not indexed`}
               </Button>
               {backfillMsg && (
                 <span style={{ fontSize: 11.5, color: "rgba(255,255,255,.72)" }}>
