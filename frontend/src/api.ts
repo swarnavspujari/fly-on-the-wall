@@ -157,6 +157,7 @@ export const api = {
     invoke<number>("extract_meeting_items", { meetingId }),
   backfillMeetingItems: () =>
     invoke<{ processed: number; extracted: number; failed: number }>("backfill_meeting_items"),
+  pendingBackfillCount: () => invoke<number>("pending_backfill_count"),
 
   // managed Ollama (local AI provider)
   ollamaStatus: () => invoke<OllamaStatus>("ollama_status"),
