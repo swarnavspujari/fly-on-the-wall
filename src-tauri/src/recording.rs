@@ -288,3 +288,40 @@ pub fn update_meeting_started_at(
 pub fn list_mic_devices(state: State<'_, AppState>) -> CmdResult<Vec<fly_audio::AudioDevice>> {
     state.audio.list_mic_devices().map_err(|e| e.to_string())
 }
+
+/// macOS consent probe: a ~1.5 s throwaway system-audio tap, run at launch
+/// (post-consent) so a TCC denial — including the stale-grant case where the
+/// Settings toggle already shows the app as allowed — surfaces BEFORE a
+/// meeting, not five seconds into one. Async + spawn_blocking: it sleeps.
+/// Skipped (Inconclusive) while a recording is active — the live tap's own
+/// silence detection covers that window.
+#[tauri::command]
+pub async fn preflight_system_audio(
+    state: State<'_, AppState>,
+) -> CmdResult<fly_audio::SystemAudioPreflight> {
+    if state.recording.lock().unwrap().is_some() {
+        return Ok(fly_audio::SystemAudioPreflight::Inconclusive);
+    }
+    tauri::async_runtime::spawn_blocking(|| fly_audio::preflight_system_audio(1500))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Open the System Settings pane that owns the system-audio grant ("Screen &
+/// System Audio Recording"). The deep link is the Screen Recording anchor —
+/// macOS 15+/Tahoe routes it to the combined pane.
+#[tauri::command]
+pub async fn open_privacy_settings() -> CmdResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("privacy settings deep link is only available on macOS".into())
+    }
+}

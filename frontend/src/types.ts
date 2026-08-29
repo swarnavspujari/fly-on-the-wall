@@ -101,6 +101,13 @@ export interface RecordingStatus {
   warnings: string[];
 }
 
+/** macOS system-audio consent probe (`preflight_system_audio`). The verdict
+ *  strings mirror fly-audio's `SystemAudioPreflight` serde tags. */
+export interface SystemAudioPreflight {
+  verdict: "ok" | "silent_while_playing" | "inconclusive" | "unsupported" | "error";
+  detail?: string;
+}
+
 export interface Word {
   text: string;
   start_ms: number;

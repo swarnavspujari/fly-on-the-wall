@@ -16,6 +16,7 @@ pub mod mix;
 pub mod null;
 #[cfg(target_os = "linux")]
 mod pulse_loopback;
+pub mod tap_messages;
 pub mod vad;
 #[cfg(target_os = "windows")]
 mod win_volume;
@@ -88,6 +89,69 @@ pub trait CaptureSession: Send {
     /// Surfaced alongside [`AudioCapture::capture_warnings`].
     fn warnings(&self) -> Vec<String> {
         Vec::new()
+    }
+}
+
+/// Outcome of the macOS system-audio consent probe: a short throwaway tap
+/// run BEFORE a meeting so the stale-TCC-grant hazard (signed build denied
+/// while the Settings toggle shows allowed — tap delivers only zeros)
+/// surfaces while there is still time to fix it, not mid-meeting.
+/// `verdict` strings are a UI contract — see the serde test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "verdict", content = "detail", rename_all = "snake_case")]
+pub enum SystemAudioPreflight {
+    /// Real samples captured — the tap is entitled and consented.
+    Ok,
+    /// The output device is rendering yet every sample is digital zero:
+    /// macOS is denying this build system-audio capture.
+    SilentWhilePlaying,
+    /// Nothing was playing (or a recording is active), so silence proves
+    /// nothing either way.
+    Inconclusive,
+    /// No tap support (not macOS, or macOS < 14.2).
+    Unsupported,
+    /// The tap could not even be built.
+    Error(String),
+}
+
+/// Run the consent probe for ~`duration_ms`. Only meaningful on macOS; a
+/// cheap constant everywhere else.
+pub fn preflight_system_audio(duration_ms: u64) -> SystemAudioPreflight {
+    #[cfg(target_os = "macos")]
+    {
+        coreaudio_tap::preflight(duration_ms)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = duration_ms;
+        SystemAudioPreflight::Unsupported
+    }
+}
+
+#[cfg(test)]
+mod preflight_serde_tests {
+    use super::SystemAudioPreflight;
+
+    #[test]
+    fn verdict_tags_are_the_ui_contract() {
+        let json = |v: &SystemAudioPreflight| serde_json::to_string(v).unwrap();
+        assert_eq!(json(&SystemAudioPreflight::Ok), r#"{"verdict":"ok"}"#);
+        assert_eq!(
+            json(&SystemAudioPreflight::SilentWhilePlaying),
+            r#"{"verdict":"silent_while_playing"}"#
+        );
+        assert_eq!(
+            json(&SystemAudioPreflight::Inconclusive),
+            r#"{"verdict":"inconclusive"}"#
+        );
+        assert_eq!(
+            json(&SystemAudioPreflight::Unsupported),
+            r#"{"verdict":"unsupported"}"#
+        );
+        assert_eq!(
+            json(&SystemAudioPreflight::Error("boom".into())),
+            r#"{"verdict":"error","detail":"boom"}"#
+        );
     }
 }
 

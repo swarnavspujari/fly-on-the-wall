@@ -164,14 +164,43 @@ impl TapHealth {
             )
             .unwrap_or(0)
         };
-        (running != 0).then(|| {
-            "System audio is playing but its capture is recording only silence — macOS \
-             hasn't granted this build system-audio recording permission (unsigned dev \
-             builds always record silence; grant it in System Settings → Privacy & \
-             Security → Screen & System Audio Recording). The other participants may be \
-             missing from this recording."
-                .to_string()
-        })
+        (running != 0).then(crate::tap_messages::silence_warning_text)
+    }
+}
+
+/// Consent probe (see [`crate::preflight_system_audio`]): run a throwaway
+/// tap for `duration_ms` and classify what it delivered. Zeros-while-the-
+/// output-device-renders is the only observable signature of a TCC denial —
+/// every tap API returns noErr even when denied.
+pub(crate) fn preflight(duration_ms: u64) -> crate::SystemAudioPreflight {
+    use crate::SystemAudioPreflight as P;
+    if !supported() {
+        return P::Unsupported;
+    }
+    let path = std::env::temp_dir().join(format!("fotw-tap-preflight-{}.wav", std::process::id()));
+    let mut recorder = match TapRecorder::start(path.clone(), Arc::new(Clock::new())) {
+        Ok(r) => r,
+        Err(AudioError::LoopbackUnsupported) => return P::Unsupported,
+        Err(e) => return P::Error(e.to_string()),
+    };
+    std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+    let nonzero = recorder.nonzero.load(Ordering::Relaxed);
+    let running: u32 = unsafe {
+        get_property(
+            recorder.default_output,
+            kAudioDevicePropertyDeviceIsRunningSomewhere,
+        )
+        .unwrap_or(0)
+    };
+    recorder.shutdown();
+    drop(recorder);
+    let _ = std::fs::remove_file(&path);
+    if nonzero > 0 {
+        P::Ok
+    } else if running != 0 {
+        P::SilentWhilePlaying
+    } else {
+        P::Inconclusive
     }
 }
 

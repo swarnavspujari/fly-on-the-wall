@@ -31,6 +31,7 @@ import RecordingBar from "./components/RecordingBar";
 import SettingsModal from "./components/SettingsModal";
 import FirstRunNotice from "./components/FirstRunNotice";
 import UpdateBanner from "./components/UpdateBanner";
+import SystemAudioNotice from "./components/SystemAudioNotice";
 import { useUpdater } from "./updater";
 
 /** Window width (px) under which the sidebars collapse into a menu button. */
@@ -49,6 +50,8 @@ export default function App() {
   // Theme: defaults to "system" and follows the OS (see src/theme.ts).
   const { resolved } = useTheme();
   const [info, setInfo] = useState<AppInfo | null>(null);
+  // macOS launch preflight found system-audio capture TCC-denied (stale grant).
+  const [tapDenied, setTapDenied] = useState(false);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [selection, setSelection] = useState<Selection>({ view: "all" });
   // paint the last-known list instantly; reconciled by the first fetch
@@ -199,6 +202,26 @@ export default function App() {
       .then((v) => setShowFirstRun(v !== "true"))
       .catch(console.error);
   }, [refreshFolders, refreshAsrState]);
+
+  // macOS consent probe: a short throwaway system-audio tap at launch, so a
+  // TCC denial (incl. the stale-grant case where the Settings toggle already
+  // shows the app allowed but the grant belongs to an older signed build)
+  // surfaces before a meeting instead of five seconds into one. Gated on
+  // the recording consent having been accepted — the probe can trigger the
+  // macOS permission prompt, which must not precede the consent notice.
+  useEffect(() => {
+    if (info?.os !== "macos") return;
+    api
+      .getAppSetting("consent.recording_notice_accepted")
+      .then((v) => {
+        if (v !== "true") return;
+        api
+          .preflightSystemAudio()
+          .then((p) => setTapDenied(p.verdict === "silent_while_playing"))
+          .catch(console.error);
+      })
+      .catch(console.error);
+  }, [info]);
 
   // upcoming calendar meetings: on start + every 5 minutes
   useEffect(() => {
@@ -729,6 +752,11 @@ export default function App() {
         noteTitle={recordingNoteTitle}
         screenActive={screenStatus.active}
         screenSource={screenSource}
+        onOpenPrivacySettings={
+          info?.os === "macos"
+            ? () => void api.openPrivacySettings().catch(console.error)
+            : undefined
+        }
         onPause={() => void api.pauseRecording().then(setRecStatus).catch(console.error)}
         onResume={() => void api.resumeRecording().then(setRecStatus).catch(console.error)}
         onStop={() => void stopRecording()}
@@ -852,6 +880,12 @@ export default function App() {
         </div>
       )}
       {!recordingActive && <UpdateBanner updater={updater} />}
+      {tapDenied && !recordingActive && (
+        <SystemAudioNotice
+          onOpenSettings={() => void api.openPrivacySettings().catch(console.error)}
+          onDismiss={() => setTapDenied(false)}
+        />
+      )}
       {showFirstRun && (
         <FirstRunNotice
           onAccept={() => {

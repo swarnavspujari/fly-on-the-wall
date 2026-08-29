@@ -13,6 +13,9 @@ interface Props {
   onResume: () => void;
   onStop: () => void;
   onOpenNote: () => void;
+  /** macOS: open the Screen & System Audio Recording privacy pane. Rendered
+   *  next to warnings that direct the user there. */
+  onOpenPrivacySettings?: () => void;
 }
 
 export function fmtElapsed(ms: number): string {
@@ -37,6 +40,7 @@ export default function RecordingBar({
   onResume,
   onStop,
   onOpenNote,
+  onOpenPrivacySettings,
 }: Props) {
   if (!status.active) return null;
   const paused = status.state === "paused";
@@ -94,7 +98,15 @@ export default function RecordingBar({
               className="flex items-center gap-2 text-[12.5px] font-medium text-brand-cream"
             >
               <span className="h-2 w-2 flex-none rounded-full bg-warning" />
-              {w}
+              <span className="min-w-0 flex-1">{w}</span>
+              {onOpenPrivacySettings && w.includes("Screen & System Audio Recording") && (
+                <button
+                  className="flex-none cursor-pointer rounded-md border border-brand-cream/40 px-2 py-[2px] text-[11.5px] font-semibold text-brand-cream hover:bg-brand-cream/10"
+                  onClick={onOpenPrivacySettings}
+                >
+                  Open Settings
+                </button>
+              )}
             </p>
           ))}
         </div>

@@ -47,3 +47,4 @@ libpulse-simple-binding = "2"
 
 [dev-dependencies]
 tempfile = "3"
+serde_json.workspace = true

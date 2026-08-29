@@ -192,6 +192,8 @@ pub fn run() {
             recording::get_meetings_for_note,
             recording::update_meeting_started_at,
             recording::list_mic_devices,
+            recording::preflight_system_audio,
+            recording::open_privacy_settings,
             live::live_status,
             asr_commands::transcribe_meeting,
             asr_commands::get_transcript,

@@ -27,6 +27,7 @@ import type {
   ReDiarizeOutcome,
   SearchHit,
   SpeakerUndoState,
+  SystemAudioPreflight,
   Template,
   Transcript,
   UpcomingMeetings,
@@ -182,6 +183,12 @@ export const api = {
     invoke<RecordingStatus>("start_meeting_from_event", { title, attendees }),
 
   listMicDevices: () => invoke<AudioDevice[]>("list_mic_devices"),
+  /** macOS: short throwaway tap probing whether system-audio capture is
+   *  actually permitted (a stale TCC grant shows as allowed but records
+   *  silence). Cheap constant elsewhere. */
+  preflightSystemAudio: () => invoke<SystemAudioPreflight>("preflight_system_audio"),
+  /** macOS: open System Settings → Privacy → Screen & System Audio Recording. */
+  openPrivacySettings: () => invoke<void>("open_privacy_settings"),
 
   // screen recording & import
   screenStatus: () => invoke<ScreenStatus>("screen_status"),

@@ -16,6 +16,9 @@
                                      "Transcribe recording" box + notices)
      fotwMockEngineMissing = "1"   → whisper-cli reports not installed
      fotwMockEngineUnmanaged = "1" → no managed engine artifact (manual UI)
+     fotwMockTapDenied = "1"       → app_info reports macOS + the system-audio
+                                     preflight reports a TCC denial (shows the
+                                     SystemAudioNotice card)
 
    QA hook: fotwMockEmit(event, payload) fires a mock backend event at the
    app's listeners (pipeline:progress, model:progress, …) from the console.
@@ -542,9 +545,16 @@ function recordingStatus() {
       elapsed_ms: 154_000,
       meeting_id: "m1",
       note_id: "n1",
-      warnings: [
-        "System output looks muted — the other side may record as silence. Unmute to capture them.",
-      ],
+      warnings:
+        // + fotwMockTapDenied → the macOS tap-silence warning, which carries
+        // the RecordingBar's inline "Open Settings" action.
+        localStorage.getItem("fotwMockTapDenied") === "1"
+          ? [
+              "System audio is playing but its capture is recording only silence — grant it in System Settings → Privacy & Security → Screen & System Audio Recording.",
+            ]
+          : [
+              "System output looks muted — the other side may record as silence. Unmute to capture them.",
+            ],
     };
   }
   return {
@@ -592,7 +602,12 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return {
         version: "2.0.4",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
-        os: "windows",
+        // fotwMockTapDenied demos the macOS-only SystemAudioNotice, which is
+        // gated on app_info.os — so the flag flips the reported OS too.
+        os:
+          typeof localStorage !== "undefined" && localStorage.getItem("fotwMockTapDenied") === "1"
+            ? "macos"
+            : "windows",
       };
     case "list_folders":
       return folders;
@@ -711,6 +726,14 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       // dev-mock has no embedding index; the hybrid pass degrades to the
       // same grouped-FTS shape (one hit per note, best snippet first)
       return searchHits(String(args.query ?? "")).slice(0, 1);
+    case "preflight_system_audio":
+      // fotwMockTapDenied = "1" → macOS stale-TCC-grant notice shows
+      return typeof localStorage !== "undefined" &&
+        localStorage.getItem("fotwMockTapDenied") === "1"
+        ? { verdict: "silent_while_playing" }
+        : { verdict: "inconclusive" };
+    case "open_privacy_settings":
+      return null;
     case "recording_status":
       return recordingStatus();
     case "screen_status":
