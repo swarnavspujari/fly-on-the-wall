@@ -128,6 +128,21 @@ pub fn preflight_system_audio(duration_ms: u64) -> SystemAudioPreflight {
     }
 }
 
+/// Platform audio capture. One impl per OS; selected in src-tauri at
+/// composition time.
+pub trait AudioCapture: Send + Sync {
+    fn list_mic_devices(&self) -> Result<Vec<AudioDevice>>;
+    /// Whether this backend can capture system output audio at all.
+    fn supports_system_loopback(&self) -> bool;
+    fn start(&self, cfg: CaptureConfig) -> Result<Box<dyn CaptureSession>>;
+    /// Human-readable conditions that will silently degrade a capture (e.g.
+    /// the system output is muted, so loopback records silence). Cheap —
+    /// polled while recording so a mid-meeting mute surfaces immediately.
+    fn capture_warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod preflight_serde_tests {
     use super::SystemAudioPreflight;
@@ -152,20 +167,5 @@ mod preflight_serde_tests {
             json(&SystemAudioPreflight::Error("boom".into())),
             r#"{"verdict":"error","detail":"boom"}"#
         );
-    }
-}
-
-/// Platform audio capture. One impl per OS; selected in src-tauri at
-/// composition time.
-pub trait AudioCapture: Send + Sync {
-    fn list_mic_devices(&self) -> Result<Vec<AudioDevice>>;
-    /// Whether this backend can capture system output audio at all.
-    fn supports_system_loopback(&self) -> bool;
-    fn start(&self, cfg: CaptureConfig) -> Result<Box<dyn CaptureSession>>;
-    /// Human-readable conditions that will silently degrade a capture (e.g.
-    /// the system output is muted, so loopback records silence). Cheap —
-    /// polled while recording so a mid-meeting mute surfaces immediately.
-    fn capture_warnings(&self) -> Vec<String> {
-        Vec::new()
     }
 }
