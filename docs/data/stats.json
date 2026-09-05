@@ -1,16 +1,16 @@
 {
-  "updated": "2026-09-04T11:26:48.566Z",
-  "totalDownloads": 184,
-  "estimatedInstalls": 39,
+  "updated": "2026-09-05T10:42:48.900Z",
+  "totalDownloads": 185,
+  "estimatedInstalls": 40,
   "perPlatform": {
-    "windows": 93,
+    "windows": 94,
     "macos": 40,
     "linux": 51
   },
   "updateChecks": 221,
   "latestRelease": {
     "tag": "v2.1.0",
-    "downloads": 16
+    "downloads": 17
   },
   "note": "totalDownloads = installer downloads across all releases (includes auto-updater re-downloads); estimatedInstalls = per-flavor max across releases, a conservative unique-install floor."
 }
