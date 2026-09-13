@@ -308,6 +308,51 @@ impl Transcript {
         }
         out
     }
+
+    /// Render as WebVTT: one cue per segment (cue id = segment id) with a
+    /// `<v Label>` voice tag. Text is escaped for the cue payload. A cue
+    /// whose end does not follow its start is nudged 1 ms so the file
+    /// stays valid for strict parsers.
+    pub fn to_vtt(&self) -> String {
+        let mut out = String::from("WEBVTT
+
+");
+        for seg in &self.segments {
+            let end_ms = seg.end_ms.max(seg.start_ms + 1);
+            out.push_str(&format!(
+                "{}
+{} --> {}
+<v {}>{}
+
+",
+                seg.id,
+                vtt_timestamp(seg.start_ms),
+                vtt_timestamp(end_ms),
+                self.label_for(&seg.speaker_key),
+                vtt_escape(seg.text.trim())
+            ));
+        }
+        out
+    }
+}
+
+/// `HH:MM:SS.mmm` — WebVTT's long timestamp form (hours are optional in the
+/// spec but every parser accepts them, and meetings do run past an hour).
+fn vtt_timestamp(ms: u64) -> String {
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        ms / 3_600_000,
+        (ms / 60_000) % 60,
+        (ms / 1000) % 60,
+        ms % 1000
+    )
+}
+
+/// Escape the three characters WebVTT reserves inside cue text.
+fn vtt_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Raw diarization output: who spoke when, no words.
@@ -427,6 +472,60 @@ mod tests {
         assert!(!json.contains(r#""email":null"#));
         let back: Vec<Attendee> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, full);
+    }
+
+    fn vtt_fixture() -> Transcript {
+        Transcript {
+            meeting_id: "m1".into(),
+            language: None,
+            engine: "whisper.cpp".into(),
+            segments: vec![
+                TranscriptSegment {
+                    id: "seg-1".into(),
+                    speaker_key: "mic".into(),
+                    start_ms: 1500,
+                    end_ms: 62_250,
+                    text: " Budget <b>&</b> scope ".into(),
+                    words: vec![],
+                },
+                TranscriptSegment {
+                    id: "seg-2".into(),
+                    speaker_key: "spk_0".into(),
+                    start_ms: 3_600_000,
+                    end_ms: 3_600_000,
+                    text: "ok".into(),
+                    words: vec![],
+                },
+            ],
+            speakers: vec![
+                Speaker {
+                    key: "mic".into(),
+                    label: "You".into(),
+                },
+                Speaker {
+                    key: "spk_0".into(),
+                    label: "Dana".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn to_vtt_renders_cues_with_voice_tags_and_escapes() {
+        let vtt = vtt_fixture().to_vtt();
+        assert!(vtt.starts_with("WEBVTT
+
+"), "{vtt}");
+        assert!(vtt.contains("seg-1
+00:00:01.500 --> 00:01:02.250
+<v You>Budget &lt;b&gt;&amp;&lt;/b&gt; scope
+
+"), "{vtt}");
+        // a zero-length cue is invalid WebVTT: end is nudged 1 ms past start
+        assert!(vtt.contains("seg-2
+01:00:00.000 --> 01:00:00.001
+<v Dana>ok
+"), "{vtt}");
     }
 
     #[test]
