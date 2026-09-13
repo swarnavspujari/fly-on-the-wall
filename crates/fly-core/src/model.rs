@@ -314,9 +314,11 @@ impl Transcript {
     /// whose end does not follow its start is nudged 1 ms so the file
     /// stays valid for strict parsers.
     pub fn to_vtt(&self) -> String {
-        let mut out = String::from("WEBVTT
+        let mut out = String::from(
+            "WEBVTT
 
-");
+",
+        );
         for seg in &self.segments {
             let end_ms = seg.end_ms.max(seg.start_ms + 1);
             out.push_str(&format!(
@@ -513,19 +515,34 @@ mod tests {
     #[test]
     fn to_vtt_renders_cues_with_voice_tags_and_escapes() {
         let vtt = vtt_fixture().to_vtt();
-        assert!(vtt.starts_with("WEBVTT
+        assert!(
+            vtt.starts_with(
+                "WEBVTT
 
-"), "{vtt}");
-        assert!(vtt.contains("seg-1
+"
+            ),
+            "{vtt}"
+        );
+        assert!(
+            vtt.contains(
+                "seg-1
 00:00:01.500 --> 00:01:02.250
 <v You>Budget &lt;b&gt;&amp;&lt;/b&gt; scope
 
-"), "{vtt}");
+"
+            ),
+            "{vtt}"
+        );
         // a zero-length cue is invalid WebVTT: end is nudged 1 ms past start
-        assert!(vtt.contains("seg-2
+        assert!(
+            vtt.contains(
+                "seg-2
 01:00:00.000 --> 01:00:00.001
 <v Dana>ok
-"), "{vtt}");
+"
+            ),
+            "{vtt}"
+        );
     }
 
     #[test]

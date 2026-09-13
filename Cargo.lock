@@ -1384,7 +1384,9 @@ name = "fly-capture-screen"
 version = "2.1.0"
 dependencies = [
  "fly-core",
+ "parking_lot",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "windows 0.62.2",

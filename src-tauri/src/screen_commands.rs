@@ -111,9 +111,9 @@ pub async fn start_screen_recording(
     let rel_path = format!("attachments/{note_id}/{file_name}");
     let out_path = state.data_dir.join(&rel_path);
 
-    let recorder = fly_capture_screen::ffmpeg::FfmpegScreenRecorder::new(ffmpeg);
-    // start() deliberately watches the child for ~600 ms (doomed captures
-    // fail fast) — run it off the async runtime like stop() does.
+    let recorder = build_recorder(ffmpeg);
+    // start() deliberately watches for proof of life (doomed captures fail
+    // fast) — run it off the async runtime like stop() does.
     let session = tauri::async_runtime::spawn_blocking(move || recorder.start(target, &out_path))
         .await
         .map_err(|e| e.to_string())?
@@ -130,6 +130,25 @@ pub async fn start_screen_recording(
         note_id: Some(note_id),
         elapsed_ms: 0,
     })
+}
+
+/// The recorder the app records with. Windows: Windows Graphics Capture
+/// first (records GPU-composited windows — Zoom, Teams, Chrome — that
+/// gdigrab turns black), ffmpeg only if WGC is unsupported or refuses the
+/// target. Elsewhere: ffmpeg.
+fn build_recorder(ffmpeg: std::path::PathBuf) -> Box<dyn ScreenRecorder> {
+    let ffmpeg_recorder = fly_capture_screen::ffmpeg::FfmpegScreenRecorder::new(ffmpeg);
+    #[cfg(windows)]
+    {
+        Box::new(fly_capture_screen::FallbackScreenRecorder {
+            primary: Box::new(fly_capture_screen::wgc::WgcScreenRecorder),
+            secondary: Box::new(ffmpeg_recorder),
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Box::new(ffmpeg_recorder)
+    }
 }
 
 /// Poster frame for a video attachment: a `.jpg` next to the file
@@ -362,7 +381,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("capture.mp4");
-        let recorder = fly_capture_screen::ffmpeg::FfmpegScreenRecorder::new(ffmpeg);
+        // The same recorder the command builds (WGC → ffmpeg fallback).
+        let recorder = super::build_recorder(ffmpeg);
         let session = recorder
             .start(CaptureTarget::Window { title: resolved }, &out)
             .expect("capture must start against a resolved live window");

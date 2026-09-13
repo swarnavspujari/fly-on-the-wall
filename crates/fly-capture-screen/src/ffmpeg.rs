@@ -179,6 +179,14 @@ impl ScreenRecorder for FfmpegScreenRecorder {
             // cap width at 1920 and force even dimensions for yuv420p
             "-vf",
             "scale='trunc(min(1920,iw)/2)*2':-2",
+            // a keyframe every ~3 s (x264's default of 250 frames is 25 s
+            // at 10 fps — every seek stalled that long) and the MP4 index
+            // at the front so playback can seek before the file is fully
+            // read
+            "-g",
+            "30",
+            "-movflags",
+            "+faststart",
             "-y",
         ])
         .arg(out_path)
