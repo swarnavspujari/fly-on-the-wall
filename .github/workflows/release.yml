@@ -105,8 +105,12 @@ jobs:
         shell: bash
         run: |
           rm -f package-lock.json frontend/package-lock.json
+          # npm 10.9.x on current Node 22 runners crashes resolving
+          # frontend/ ("reading 'edgesOut'"); npm 11 resolves it fine.
+          npm install -g npm@11 --no-audit --no-fund
+          npm --version
           npm install --no-audit --no-fund
-          npm --prefix frontend install --no-audit --no-fund
+          (cd frontend && npm install --no-audit --no-fund)
 
       - name: Install JS dependencies
         if: runner.os == 'Windows'

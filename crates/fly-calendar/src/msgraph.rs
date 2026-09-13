@@ -9,7 +9,9 @@ use fly_secrets::SecretStore;
 use crate::google::OpenUrl;
 use crate::links::detect_meeting_link;
 use crate::oauth::{self, OAuthConfig, TokenSet};
-use crate::{CalendarError, CalendarEvent, CalendarInfo, CalendarProvider, Result};
+use crate::{
+    CalendarAttendee, CalendarError, CalendarEvent, CalendarInfo, CalendarProvider, Result,
+};
 
 pub struct MsGraphProvider {
     pub client_id: String,
@@ -77,6 +79,7 @@ impl MsGraphProvider {
         calendar_id: Option<&str>,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
+        self_addresses: &[String],
     ) -> Result<Vec<CalendarEvent>> {
         let base = match calendar_id {
             Some(id) => format!(
@@ -91,8 +94,56 @@ impl MsGraphProvider {
             urlencoding::encode(&to.to_rfc3339()),
         );
         let text = graph_get(client, &url, token).await?;
-        parse_graph_events(&text)
+        parse_graph_events(&text, self_addresses)
     }
+
+    /// The signed-in account's addresses (`mail` + `userPrincipalName`,
+    /// lowercased) so `is_self` can be set on Graph attendees — Graph has no
+    /// per-attendee `self` flag. A failure yields an empty list (logged), so
+    /// the user may appear as an attendee rather than the fetch failing.
+    async fn fetch_self_addresses(&self, client: &reqwest::Client, token: &str) -> Vec<String> {
+        let url = "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName";
+        match graph_get(client, url, token).await {
+            Ok(text) => parse_graph_self_addresses(&text),
+            Err(e) => {
+                tracing::warn!("graph /me lookup failed (attendee self-detection off): {e}");
+                Vec::new()
+            }
+        }
+    }
+}
+
+fn parse_graph_self_addresses(text: &str) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+    ["mail", "userPrincipalName"]
+        .iter()
+        .filter_map(|k| v.get(k).and_then(|s| s.as_str()))
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// One `attendees[]` (or the `organizer`) entry. Graph reports the reply in
+/// `status.response`; `is_self` comes from comparing against `/me`.
+fn parse_graph_attendee(
+    a: &serde_json::Value,
+    self_addresses: &[String],
+) -> Option<CalendarAttendee> {
+    let email = a.pointer("/emailAddress/address")?.as_str()?.trim();
+    if email.is_empty() {
+        return None;
+    }
+    Some(CalendarAttendee {
+        email: email.to_string(),
+        name: a
+            .pointer("/emailAddress/name")
+            .and_then(|n| n.as_str())
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string),
+        is_self: self_addresses.iter().any(|s| s == &email.to_lowercase()),
+        declined: a.pointer("/status/response").and_then(|s| s.as_str()) == Some("declined"),
+    })
 }
 
 /// Authenticated Graph GET (UTC times requested via the `Prefer` header, which
@@ -167,6 +218,7 @@ impl CalendarProvider for MsGraphProvider {
         let client = reqwest::Client::new();
 
         let mut events = Vec::new();
+        let me = self.fetch_self_addresses(&client, &token).await;
         match self.fetch_calendars(&client, &token).await {
             Ok(list) => {
                 // Fan out across enabled calendars; one failing calendar must
@@ -176,7 +228,7 @@ impl CalendarProvider for MsGraphProvider {
                         continue;
                     }
                     match self
-                        .fetch_events(&client, &token, Some(&cal.id), from, to)
+                        .fetch_events(&client, &token, Some(&cal.id), from, to, &me)
                         .await
                     {
                         Ok(mut ev) => events.append(&mut ev),
@@ -189,7 +241,9 @@ impl CalendarProvider for MsGraphProvider {
             Err(e) => {
                 // Enumeration failed — fall back to the default calendar view.
                 tracing::warn!("graph calendars list failed, using default view: {e}");
-                let mut ev = self.fetch_events(&client, &token, None, from, to).await?;
+                let mut ev = self
+                    .fetch_events(&client, &token, None, from, to, &me)
+                    .await?;
                 events.append(&mut ev);
             }
         }
@@ -221,7 +275,7 @@ pub fn parse_graph_calendar_list(json: &str) -> Result<Vec<CalendarInfo>> {
     Ok(out)
 }
 
-pub fn parse_graph_events(json: &str) -> Result<Vec<CalendarEvent>> {
+pub fn parse_graph_events(json: &str, self_addresses: &[String]) -> Result<Vec<CalendarEvent>> {
     let v: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| CalendarError::Provider(format!("bad events JSON: {e}")))?;
     let mut events = Vec::new();
@@ -237,16 +291,29 @@ pub fn parse_graph_events(json: &str) -> Result<Vec<CalendarEvent>> {
         let (Some(start), Some(end)) = (parse_time("start"), parse_time("end")) else {
             continue;
         };
-        let attendees = item
+        // Graph lists the organizer separately from `attendees`; fold them in
+        // (de-duped by address) so an externally organized meeting still names
+        // its host.
+        let mut attendees: Vec<CalendarAttendee> = item
             .get("attendees")
             .and_then(|a| a.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|a| a.pointer("/emailAddress/address").and_then(|e| e.as_str()))
-                    .map(str::to_string)
+                    .filter_map(|a| parse_graph_attendee(a, self_addresses))
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(org) = item
+            .get("organizer")
+            .and_then(|o| parse_graph_attendee(o, self_addresses))
+        {
+            if !attendees
+                .iter()
+                .any(|a| a.email.eq_ignore_ascii_case(&org.email))
+            {
+                attendees.insert(0, org);
+            }
+        }
         let join_url = item
             .pointer("/onlineMeeting/joinUrl")
             .and_then(|u| u.as_str())
@@ -297,6 +364,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn attendees_carry_name_self_declined_and_organizer() {
+        let json = r#"{"value": [{
+            "id": "AAA=",
+            "subject": "Standup",
+            "start": {"dateTime": "2026-07-01T09:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-07-01T09:15:00.0000000", "timeZone": "UTC"},
+            "organizer": {"emailAddress": {"address": "host@x.com", "name": "Host Person"}},
+            "attendees": [
+                {"emailAddress": {"address": "Me@X.com", "name": "Me"}, "status": {"response": "accepted"}},
+                {"emailAddress": {"address": "dana@x.com", "name": "Dana Osei"}, "status": {"response": "declined"}},
+                {"emailAddress": {"address": "host@x.com", "name": "Host Person"}, "status": {"response": "organizer"}}
+            ]
+        }]}"#;
+        let events = parse_graph_events(json, &["me@x.com".to_string()]).unwrap();
+        let a = &events[0].attendees;
+        // organizer already listed → not duplicated
+        assert_eq!(a.len(), 3, "{a:?}");
+        assert!(a[0].is_self);
+        assert_eq!(a[1].name.as_deref(), Some("Dana Osei"));
+        assert!(a[1].declined);
+        assert_eq!(a[2].email, "host@x.com");
+
+        let json = r#"{"value": [{
+            "id": "BBB=",
+            "subject": "External",
+            "start": {"dateTime": "2026-07-01T09:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-07-01T09:15:00.0000000", "timeZone": "UTC"},
+            "organizer": {"emailAddress": {"address": "host@y.com", "name": "Host"}},
+            "attendees": [{"emailAddress": {"address": "me@x.com"}}]
+        }]}"#;
+        let events = parse_graph_events(json, &[]).unwrap();
+        let a = &events[0].attendees;
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].email, "host@y.com"); // organizer folded in first
+        assert!(!a[1].is_self); // no /me data → nobody is self
+        assert_eq!(
+            parse_graph_self_addresses(r#"{"mail":"A@x.com","userPrincipalName":"a@x.com"}"#),
+            vec!["a@x.com", "a@x.com"]
+        );
+    }
+
+    #[test]
     fn parses_graph_calendar_view() {
         let json = r#"{"value": [{
             "id": "AAA=",
@@ -306,10 +415,11 @@ mod tests {
             "attendees": [{"emailAddress": {"address": "team@x.com"}}],
             "onlineMeeting": {"joinUrl": "https://teams.microsoft.com/l/xyz"}
         }]}"#;
-        let events = parse_graph_events(json).unwrap();
+        let events = parse_graph_events(json, &[]).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].title, "Standup");
-        assert_eq!(events[0].attendees, vec!["team@x.com"]);
+        assert_eq!(events[0].attendees.len(), 1);
+        assert_eq!(events[0].attendees[0].email, "team@x.com");
         assert!(events[0].join_url.as_deref().unwrap().contains("teams"));
         assert_eq!(events[0].start.to_rfc3339(), "2026-07-01T09:00:00+00:00");
     }
@@ -330,7 +440,7 @@ mod tests {
             "end": {"dateTime": "2026-07-01T10:30:00.0000000", "timeZone": "UTC"},
             "location": {"displayName": "Room 2"}
         }]}"#;
-        let events = parse_graph_events(json).unwrap();
+        let events = parse_graph_events(json, &[]).unwrap();
         assert_eq!(
             events[0].join_url.as_deref(),
             Some("https://acme.zoom.us/j/99988877766?pwd=Tk5aQ2Rs")

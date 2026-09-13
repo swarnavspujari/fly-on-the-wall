@@ -15,6 +15,29 @@
 /// window capture is Windows-only today (see `grab_args`).
 #[cfg(windows)]
 pub fn list_windows() -> Vec<String> {
+    let mut titles: Vec<String> = enumerate_windows().into_iter().map(|(_, t)| t).collect();
+    // Duplicate titles (two Notepads) are indistinguishable to gdigrab's
+    // FindWindow anyway — presenting one entry per title is honest, and it
+    // keeps the picker's per-title React keys unique.
+    let mut seen = std::collections::HashSet::new();
+    titles.retain(|t| seen.insert(t.clone()));
+    titles
+}
+
+/// The window handle behind an exact title from [`list_windows`] (the
+/// first in z-order), for capture APIs that take an HWND rather than a
+/// title. `None` when no such window is open right now.
+#[cfg(windows)]
+pub fn find_window_hwnd(title: &str) -> Option<isize> {
+    enumerate_windows()
+        .into_iter()
+        .find(|(_, t)| t == title)
+        .map(|(hwnd, _)| hwnd)
+}
+
+/// `(hwnd, title)` for every capturable top-level window, front-to-back.
+#[cfg(windows)]
+fn enumerate_windows() -> Vec<(isize, String)> {
     use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
@@ -27,7 +50,7 @@ pub fn list_windows() -> Vec<String> {
 
     unsafe extern "system" fn on_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
         unsafe {
-            let titles = &mut *(lparam.0 as *mut Vec<String>);
+            let titles = &mut *(lparam.0 as *mut Vec<(isize, String)>);
             if !IsWindowVisible(hwnd).as_bool() {
                 return CONTINUE;
             }
@@ -53,24 +76,22 @@ pub fn list_windows() -> Vec<String> {
             let mut buf = [0u16; 512];
             let len = GetWindowTextW(hwnd, &mut buf);
             if len > 0 {
-                titles.push(String::from_utf16_lossy(&buf[..len as usize]));
+                titles.push((
+                    hwnd.0 as isize,
+                    String::from_utf16_lossy(&buf[..len as usize]),
+                ));
             }
             CONTINUE
         }
     }
 
-    let mut titles: Vec<String> = Vec::new();
+    let mut titles: Vec<(isize, String)> = Vec::new();
     unsafe {
         let _ = EnumWindows(
             Some(on_window),
-            LPARAM(&mut titles as *mut Vec<String> as isize),
+            LPARAM(&mut titles as *mut Vec<(isize, String)> as isize),
         );
     }
-    // Duplicate titles (two Notepads) are indistinguishable to gdigrab's
-    // FindWindow anyway — presenting one entry per title is honest, and it
-    // keeps the picker's per-title React keys unique.
-    let mut seen = std::collections::HashSet::new();
-    titles.retain(|t| seen.insert(t.clone()));
     titles
 }
 
@@ -167,5 +188,28 @@ mod tests {
     fn list_windows_returns_clean_titles() {
         let ws = list_windows();
         assert!(ws.iter().all(|t| !t.trim().is_empty()));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod hwnd_tests {
+    use super::*;
+
+    /// Every title the picker offers must resolve to a handle, and a title
+    /// nobody has must not.
+    #[test]
+    fn listed_titles_resolve_to_handles() {
+        let titles = list_windows();
+        if titles.is_empty() {
+            eprintln!("SKIP: no windows on this desktop");
+            return;
+        }
+        for t in titles.iter().take(5) {
+            assert!(find_window_hwnd(t).is_some(), "no hwnd for {t:?}");
+        }
+        assert_eq!(
+            find_window_hwnd("fotw-window-that-cannot-exist-4f9c1b"),
+            None
+        );
     }
 }

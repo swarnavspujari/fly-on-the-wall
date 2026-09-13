@@ -172,6 +172,7 @@ pub fn run() {
             commands::cancel_transcription,
             commands::attach_file,
             commands::export_note,
+            commands::export_transcript_vtt,
             commands::copy_note_markdown,
             commands::remove_attachment,
             commands::open_attachment,

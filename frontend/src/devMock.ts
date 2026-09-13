@@ -521,7 +521,12 @@ function upcoming() {
         title: "Acme — renewal review",
         start: ago(5),
         end: new Date(Date.now() + 25 * 60_000).toISOString(),
-        attendees: ["Dana Osei", "Marc Reyes"],
+        attendees: [
+          { email: "you@example.com", name: "You", is_self: true, declined: false },
+          { email: "dana@acme.com", name: "Dana Osei", is_self: false, declined: false },
+          { email: "marc@acme.com", name: "Marc Reyes", is_self: false, declined: false },
+          { email: "sam@acme.com", name: "Sam Declined", is_self: false, declined: true },
+        ],
         join_url: "https://meet.google.com/abc",
       },
       {
@@ -530,7 +535,7 @@ function upcoming() {
         title: "Design weekly",
         start: new Date(Date.now() + 150 * 60_000).toISOString(),
         end: new Date(Date.now() + 180 * 60_000).toISOString(),
-        attendees: ["Priya N."],
+        attendees: [{ email: "priya@acme.com", name: "Priya N.", is_self: false, declined: false }],
         join_url: null,
       },
     ],
@@ -734,6 +739,22 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         : { verdict: "inconclusive" };
     case "open_privacy_settings":
       return null;
+    case "start_recording":
+    case "start_meeting_from_event": {
+      // Mirror the backend's seeding: the signed-in user and decliners are
+      // skipped, names fall back to the address, list stays unconfirmed.
+      const seed = (cmd === "start_recording" ? args.seed : args) as {
+        attendees?: { email: string; name?: string; is_self: boolean; declined: boolean }[];
+      } | null;
+      if (seed?.attendees) {
+        mockAttendees = seed.attendees
+          .filter((a) => !a.is_self && !a.declined)
+          .map((a) => ({ name: a.name?.trim() || a.email, email: a.email }));
+        mockAttendeesConfirmed = false;
+      }
+      if (typeof localStorage !== "undefined") localStorage.setItem("fotwMockRecording", "1");
+      return recordingStatus();
+    }
     case "recording_status":
       return recordingStatus();
     case "screen_status":
@@ -824,6 +845,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       ];
     case "export_note":
       return "C:\\Users\\you\\Desktop\\note.md";
+    case "export_transcript_vtt":
+      return "C:\\Users\\you\\Desktop\\transcript.vtt";
     case "ensure_video_thumbnail":
       return `${String(args.relPath ?? "")}.jpg`;
     case "import_stage":

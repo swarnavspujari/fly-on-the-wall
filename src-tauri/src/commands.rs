@@ -347,6 +347,60 @@ pub async fn export_note(
     Ok(Some(dest.display().to_string()))
 }
 
+/// Save-as copy of a meeting's transcript as WebVTT, rendered fresh from the
+/// stored transcript (the polished variant when `cleaned` and it exists,
+/// else the raw one). Returns the chosen path, or None if the user cancelled.
+#[tauri::command]
+pub async fn export_transcript_vtt(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+    cleaned: bool,
+) -> CmdResult<Option<String>> {
+    let (suggested, body) = {
+        let storage = state.storage.lock().unwrap();
+        let meeting = storage.get_meeting(&meeting_id).map_err(err_str)?;
+        let transcript = if cleaned {
+            storage
+                .get_cleaned_transcript(&meeting_id)
+                .map_err(err_str)?
+        } else {
+            None
+        };
+        let transcript = match transcript {
+            Some(t) => Some(t),
+            None => storage.get_transcript(&meeting_id).map_err(err_str)?,
+        };
+        let Some(transcript) = transcript else {
+            return Err("this meeting has no transcript yet".into());
+        };
+        let safe: String = meeting
+            .title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || " -_.".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        (format!("{}.vtt", safe.trim()), transcript.to_vtt())
+    };
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_file_name(&suggested)
+        .add_filter("WebVTT", &["vtt"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let dest = picked.into_path().map_err(err_str)?;
+    std::fs::write(&dest, body).map_err(err_str)?;
+    Ok(Some(dest.display().to_string()))
+}
+
 /// Copy the note to the clipboard as plain markdown (enhanced doc when it
 /// exists, else the scratchpad) — built fresh from the note, not read from
 /// the mirror, so the copy can never be stale. The write happens natively

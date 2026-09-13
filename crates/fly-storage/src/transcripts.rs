@@ -104,9 +104,10 @@ impl Storage {
                 cleaned.meeting_id
             )));
         }
-        let (md, json_path) = self.transcript_mirror_paths(&cleaned.meeting_id, ".cleaned");
-        std::fs::write(md, cleaned.to_markdown())?;
-        std::fs::write(json_path, serde_json::to_string_pretty(cleaned)?)?;
+        let paths = self.transcript_mirror_paths(&cleaned.meeting_id, ".cleaned");
+        std::fs::write(paths.md, cleaned.to_markdown())?;
+        std::fs::write(paths.json, serde_json::to_string_pretty(cleaned)?)?;
+        std::fs::write(paths.vtt, cleaned.to_vtt())?;
         Ok(())
     }
 
@@ -119,9 +120,10 @@ impl Storage {
             "UPDATE transcripts SET cleaned_json = NULL WHERE meeting_id = ?1",
             [meeting_id],
         )?;
-        let (md, json) = self.transcript_mirror_paths(meeting_id, ".cleaned");
-        let _ = std::fs::remove_file(md);
-        let _ = std::fs::remove_file(json);
+        let paths = self.transcript_mirror_paths(meeting_id, ".cleaned");
+        let _ = std::fs::remove_file(paths.md);
+        let _ = std::fs::remove_file(paths.json);
+        let _ = std::fs::remove_file(paths.vtt);
         Ok(())
     }
 
@@ -280,19 +282,20 @@ impl Storage {
         )?;
         self.sync_transcript_chunks(t)?;
 
-        let (md, json) = self.transcript_mirror_paths(&t.meeting_id, "");
-        std::fs::write(md, t.to_markdown())?;
-        std::fs::write(json, serde_json::to_string_pretty(t)?)?;
+        let paths = self.transcript_mirror_paths(&t.meeting_id, "");
+        std::fs::write(paths.md, t.to_markdown())?;
+        std::fs::write(paths.json, serde_json::to_string_pretty(t)?)?;
+        std::fs::write(paths.vtt, t.to_vtt())?;
         Ok(())
     }
 
-    /// Resolve the on-disk `(markdown, json)` mirror paths for a transcript
+    /// Resolve the on-disk `(markdown, json, vtt)` mirror paths for a transcript
     /// variant. Mirrors live next to the recording; a meeting without a
     /// resolvable folder (no recording attached, folder gone) falls back to
     /// the legacy top-level `transcripts/` dir. `variant` is `""` for the raw
     /// transcript or `".cleaned"` for the polished one — so raw and polished
     /// sit side by side (`transcript.md` / `transcript.cleaned.md`).
-    fn transcript_mirror_paths(&self, meeting_id: &str, variant: &str) -> (PathBuf, PathBuf) {
+    fn transcript_mirror_paths(&self, meeting_id: &str, variant: &str) -> MirrorPaths {
         let meeting_dir = self
             .get_meeting(meeting_id)
             .ok()
@@ -300,21 +303,31 @@ impl Storage {
             .and_then(|r| crate::meetings::recording_dir_rel(&r))
             .map(|rel| self.data_dir.join(rel))
             .filter(|d| d.is_dir());
-        match meeting_dir {
-            Some(dir) => (
-                dir.join(format!("transcript{variant}.md")),
-                dir.join(format!("transcript{variant}.json")),
+        let (dir, stem) = match meeting_dir {
+            Some(dir) => (dir, format!("transcript{variant}")),
+            None => (
+                self.data_dir.join("transcripts"),
+                format!("{meeting_id}{variant}"),
             ),
-            None => {
-                let dir = self.data_dir.join("transcripts");
-                (
-                    dir.join(format!("{meeting_id}{variant}.md")),
-                    dir.join(format!("{meeting_id}{variant}.json")),
-                )
-            }
+        };
+        MirrorPaths {
+            md: dir.join(format!("{stem}.md")),
+            json: dir.join(format!("{stem}.json")),
+            vtt: dir.join(format!("{stem}.vtt")),
         }
     }
 }
+
+/// On-disk mirrors of one transcript variant: human-readable markdown, the
+/// full JSON, and a WebVTT file with per-segment timing for players and
+/// captioning tools.
+struct MirrorPaths {
+    md: PathBuf,
+    json: PathBuf,
+    vtt: PathBuf,
+}
+
+impl Storage {}
 
 #[cfg(test)]
 mod tests {
@@ -367,6 +380,20 @@ mod tests {
             .join("transcripts")
             .join(format!("{}.json", meeting.id))
             .exists());
+        let vtt = std::fs::read_to_string(
+            dir.path()
+                .join("transcripts")
+                .join(format!("{}.vtt", meeting.id)),
+        )
+        .unwrap();
+        assert!(
+            vtt.starts_with(
+                "WEBVTT
+"
+            ),
+            "{vtt}"
+        );
+        assert!(vtt.contains("00:00:00.000 --> 00:00:01.500"), "{vtt}");
 
         // transcript content is searchable and resolves to the note
         let hits = s.search("budget", 10).unwrap();

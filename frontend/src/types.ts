@@ -300,14 +300,29 @@ export interface AskMessage {
   content: string;
 }
 
+export interface CalendarAttendee {
+  email: string;
+  name?: string;
+  /** The signed-in user — never listed as a separate attendee. */
+  is_self: boolean;
+  declined: boolean;
+}
+
 export interface CalendarEvent {
   id: string;
   provider: "google" | "msgraph";
   title: string;
   start: string;
   end: string;
-  attendees: string[];
+  attendees: CalendarAttendee[];
   join_url: string | null;
+}
+
+/** Calendar context handed to `start_recording` so a plain Record press
+ *  still names the note after the meeting and prefills its attendees. */
+export interface MeetingSeed {
+  title: string | null;
+  attendees: CalendarAttendee[];
 }
 
 /** Upcoming events + which connected providers need an interactive reconnect. */

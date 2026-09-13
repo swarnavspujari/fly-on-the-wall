@@ -216,9 +216,8 @@ pub fn encode_vector(v: &[f32]) -> Vec<u8> {
 }
 
 fn decode_vector(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect()
+    let (chunks, _tail) = blob.as_chunks::<4>();
+    chunks.iter().map(|b| f32::from_le_bytes(*b)).collect()
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {

@@ -1,9 +1,13 @@
 //! fly-capture-screen: the `ScreenRecorder` trait.
 //!
-//! Windows impl (ffmpeg sidecar, gdigrab/ddagrab) lands in M7. macOS
-//! (ScreenCaptureKit) is future work — see docs/PORTING.md.
+//! Windows records through Windows Graphics Capture (`wgc`, in-process
+//! H.264) with the ffmpeg sidecar (`ffmpeg`, gdigrab) as the fallback;
+//! Linux uses ffmpeg x11grab. macOS (ScreenCaptureKit) is future work —
+//! see docs/PORTING.md.
 
 pub mod ffmpeg;
+#[cfg(windows)]
+pub mod wgc;
 pub mod window_list;
 
 use std::path::{Path, PathBuf};
@@ -47,6 +51,32 @@ pub trait ScreenSession: Send {
 pub trait ScreenRecorder: Send + Sync {
     fn is_available(&self) -> bool;
     fn start(&self, target: CaptureTarget, out_path: &Path) -> Result<Box<dyn ScreenSession>>;
+}
+
+/// Try `primary`, fall back to `secondary` when it is unavailable or fails
+/// to start. The fallback is logged so a black recording from the
+/// secondary path can be traced to why the primary one was skipped.
+pub struct FallbackScreenRecorder {
+    pub primary: Box<dyn ScreenRecorder>,
+    pub secondary: Box<dyn ScreenRecorder>,
+}
+
+impl ScreenRecorder for FallbackScreenRecorder {
+    fn is_available(&self) -> bool {
+        self.primary.is_available() || self.secondary.is_available()
+    }
+
+    fn start(&self, target: CaptureTarget, out_path: &Path) -> Result<Box<dyn ScreenSession>> {
+        if self.primary.is_available() {
+            match self.primary.start(target.clone(), out_path) {
+                Ok(session) => return Ok(session),
+                Err(e) => tracing::warn!("primary screen recorder failed, falling back: {e}"),
+            }
+        } else {
+            tracing::warn!("primary screen recorder unavailable on this system, falling back");
+        }
+        self.secondary.start(target, out_path)
+    }
 }
 
 /// No-op recorder for platforms without an impl yet.

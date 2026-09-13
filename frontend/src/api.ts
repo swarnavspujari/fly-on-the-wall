@@ -3,6 +3,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CalendarAttendee,
+  MeetingSeed,
   AppInfo,
   AskMessage,
   Attendee,
@@ -61,6 +63,8 @@ export const api = {
 
   // attachments & files
   attachFile: (noteId: string) => invoke<Note | null>("attach_file", { noteId }),
+  exportTranscriptVtt: (meetingId: string, cleaned: boolean) =>
+    invoke<string | null>("export_transcript_vtt", { meetingId, cleaned }),
   exportNote: (noteId: string) => invoke<string | null>("export_note", { noteId }),
   // Copies the note to the clipboard as plain markdown (native-side write;
   // returns the markdown that was copied).
@@ -87,7 +91,8 @@ export const api = {
 
   // recording
   recordingStatus: () => invoke<RecordingStatus>("recording_status"),
-  startRecording: (noteId: string | null) => invoke<RecordingStatus>("start_recording", { noteId }),
+  startRecording: (noteId: string | null, seed: MeetingSeed | null = null) =>
+    invoke<RecordingStatus>("start_recording", { noteId, seed }),
   pauseRecording: () => invoke<RecordingStatus>("pause_recording"),
   resumeRecording: () => invoke<RecordingStatus>("resume_recording"),
   stopRecording: () => invoke<Meeting>("stop_recording"),
@@ -179,7 +184,7 @@ export const api = {
   setCalendarEnabled: (provider: string, calendarId: string, enabled: boolean) =>
     invoke<void>("set_calendar_enabled", { provider, calendarId, enabled }),
   upcomingMeetings: () => invoke<UpcomingMeetings>("upcoming_meetings"),
-  startMeetingFromEvent: (title: string, attendees: string[]) =>
+  startMeetingFromEvent: (title: string, attendees: CalendarAttendee[]) =>
     invoke<RecordingStatus>("start_meeting_from_event", { title, attendees }),
 
   listMicDevices: () => invoke<AudioDevice[]>("list_mic_devices"),
