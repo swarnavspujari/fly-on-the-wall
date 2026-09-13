@@ -154,6 +154,12 @@ export default function Sidebar({
   const tree = useMemo(() => buildTree(folders), [folders]);
   // clock for the LIVE badge, refreshed each minute (render must stay pure)
   const [now, setNow] = useState(0);
+  // Up next lists video meetings only; link-less events still arrive so a
+  // plain Record press can match them (see App.startRecording).
+  const visibleUpcoming = useMemo(
+    () => upcoming.filter((ev) => ev.join_url != null && ev.join_url !== ""),
+    [upcoming],
+  );
   useEffect(() => {
     setNow(Date.now());
     const t = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -377,13 +383,13 @@ export default function Sidebar({
             </Button>
           </div>
         ))}
-        {upcoming.length === 0
+        {visibleUpcoming.length === 0
           ? calendarNeedsReconnect.length === 0 && (
               <div className="px-2.5 py-1.5 text-[12.5px] text-text-3">
                 Nothing scheduled for today.
               </div>
             )
-          : upcoming.map((ev) => {
+          : visibleUpcoming.map((ev) => {
               const live =
                 now > 0 && new Date(ev.start).getTime() <= now && now <= new Date(ev.end).getTime();
               return (

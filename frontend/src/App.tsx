@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { PanelLeft, X } from "lucide-react";
 import { api } from "./api";
+import { pickInProgressEvent, seedFromEvent } from "./calendarMatch";
 import { WHISPER_ENGINE_ID } from "./types";
 import type {
   AppInfo,
@@ -519,7 +520,11 @@ export default function App() {
 
   const startRecording = async () => {
     try {
-      const status = await api.startRecording(openNote?.id ?? null);
+      // A plain Record press during a calendar meeting still names the note
+      // after it and prefills attendees — the Up next button is optional.
+      const live = pickInProgressEvent(upcoming, Date.now());
+      const seed = live ? seedFromEvent(live, openNote == null) : null;
+      const status = await api.startRecording(openNote?.id ?? null, seed);
       setRecStatus(status);
       if (!openNote && status.note_id) {
         await refreshNotes();

@@ -33,9 +33,24 @@ pub struct CalendarEvent {
     pub title: String,
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
-    pub attendees: Vec<String>,
+    pub attendees: Vec<CalendarAttendee>,
     /// Meeting link (Meet/Teams/Zoom/GoToWebinar URL) when present.
     pub join_url: Option<String>,
+}
+
+/// One invitee as the provider reports it. `name` is the display name when
+/// the provider has one (Google `displayName`, Graph `emailAddress.name`);
+/// `is_self` marks the signed-in user so the app never lists them as a
+/// separate attendee; `declined` lets the app skip people who said no.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CalendarAttendee {
+    pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub is_self: bool,
+    #[serde(default)]
+    pub declined: bool,
 }
 
 /// One of a user's calendars, as listed by a provider. Provider-agnostic; the
@@ -49,11 +64,12 @@ pub struct CalendarInfo {
     pub primary: bool,
 }
 
-/// Combine events from every provider and calendar into the final "Up next"
-/// list: drop events with no join link, de-dupe by (provider, id) in case the
-/// same event surfaces through overlapping calendars, then sort by start time.
+/// Combine events from every provider and calendar into the final upcoming
+/// list: de-dupe by (provider, id) in case the same event surfaces through
+/// overlapping calendars, then sort by start time. Link-less events are kept:
+/// the sidebar hides them from "Up next", but a plain Record press still
+/// matches them to seed the meeting's title and attendees.
 pub fn merge_upcoming(mut events: Vec<CalendarEvent>) -> Vec<CalendarEvent> {
-    events.retain(|e| e.join_url.as_deref().is_some_and(|u| !u.is_empty()));
     let mut seen = std::collections::HashSet::new();
     events.retain(|e| seen.insert((e.provider.clone(), e.id.clone())));
     events.sort_by_key(|e| e.start);
@@ -100,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_drops_linkless_events_and_sorts_by_start() {
+    fn merge_keeps_linkless_events_and_sorts_by_start() {
         let merged = merge_upcoming(vec![
             ev(
                 "google",
@@ -108,17 +124,17 @@ mod tests {
                 "2026-07-01T10:00:00Z",
                 Some("https://zoom.us/j/2"),
             ),
-            ev("google", "a", "2026-07-01T09:00:00Z", None), // no link → dropped
+            ev("google", "a", "2026-07-01T09:00:00Z", None), // no link → kept
             ev(
                 "msgraph",
                 "c",
                 "2026-07-01T08:00:00Z",
                 Some("https://teams.microsoft.com/l/meetup-join/x"),
             ),
-            ev("google", "d", "2026-07-01T11:00:00Z", Some("")), // empty link → dropped
+            ev("google", "d", "2026-07-01T11:00:00Z", Some("")), // empty link → kept
         ]);
         let ids: Vec<_> = merged.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, vec!["c", "b"]); // sorted by start, linkless gone
+        assert_eq!(ids, vec!["c", "a", "b", "d"]); // sorted by start, nothing dropped
     }
 
     #[test]

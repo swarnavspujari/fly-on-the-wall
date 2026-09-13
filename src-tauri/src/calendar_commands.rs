@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chrono::{Duration, Local, TimeZone, Utc};
 use fly_calendar::google::GoogleCalendarProvider;
 use fly_calendar::msgraph::MsGraphProvider;
-use fly_calendar::{CalendarEvent, CalendarProvider};
+use fly_calendar::{CalendarAttendee, CalendarEvent, CalendarProvider};
 use fly_secrets::SecretStore;
 use fly_storage::Storage;
 use serde::{Deserialize, Serialize};
@@ -281,9 +281,9 @@ fn is_auth_error(e: &fly_calendar::CalendarError) -> bool {
 /// Events for the rest of the current local day across every enabled calendar
 /// of every connected provider. The lower bound is now − 30 min (so in-progress
 /// meetings still show); the upper bound is local midnight tonight, so at 8 PM
-/// local we look ~4 h ahead to midnight and never into tomorrow. Events with no
-/// join link are filtered out here (server-side, before the sort); the result
-/// is de-duped and sorted by start.
+/// local we look ~4 h ahead to midnight and never into tomorrow. The result is
+/// de-duped and sorted by start; link-less events are included (the sidebar
+/// hides them from "Up next", but a plain Record press still matches them).
 #[tauri::command]
 pub async fn upcoming_meetings(
     app: tauri::AppHandle,
@@ -323,9 +323,14 @@ pub async fn upcoming_meetings(
         }
     }
 
-    // Drop link-less events, de-dupe, sort by start.
+    let events = fly_calendar::merge_upcoming(events);
+    tracing::info!(
+        count = events.len(),
+        with_attendees = events.iter().filter(|e| !e.attendees.is_empty()).count(),
+        "upcoming calendar events fetched"
+    );
     Ok(UpcomingMeetings {
-        events: fly_calendar::merge_upcoming(events),
+        events,
         needs_reconnect,
     })
 }
@@ -460,7 +465,8 @@ pub fn start_meeting_from_event(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     title: String,
-    attendees: Vec<String>,
+    attendees: Vec<CalendarAttendee>,
 ) -> CmdResult<RecordingStatus> {
-    recording::start_recording_impl(&app, &state, None, Some(title), &attendees)
+    let attendees = recording::seed_attendees(&attendees);
+    recording::start_recording_impl(&app, &state, None, Some(title), attendees)
 }

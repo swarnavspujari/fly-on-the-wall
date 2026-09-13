@@ -2,8 +2,9 @@
 //! meeting row and its note.
 
 use fly_audio::{CaptureConfig, CaptureSession, CaptureState};
+use fly_calendar::CalendarAttendee;
 use fly_core::{Meeting, RecordingRef};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::state::AppState;
@@ -76,8 +77,49 @@ pub fn start_recording(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     note_id: Option<String>,
+    seed: Option<MeetingSeed>,
 ) -> CmdResult<RecordingStatus> {
-    start_recording_impl(&app, &state, note_id, None, &[])
+    let (title, attendees) = match seed {
+        // Recording into an existing note keeps its title; only the
+        // attendee list is seeded.
+        Some(seed) => (
+            if note_id.is_none() { seed.title } else { None },
+            seed_attendees(&seed.attendees),
+        ),
+        None => (None, Vec::new()),
+    };
+    start_recording_impl(&app, &state, note_id, title, attendees)
+}
+
+/// What the frontend knows about the calendar event a recording belongs to:
+/// the in-progress event it matched when Record was pressed, or the event the
+/// user picked in "Up next".
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeetingSeed {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub attendees: Vec<CalendarAttendee>,
+}
+
+/// Calendar invitees → meeting attendees: the signed-in user is never listed
+/// (they are "You"), people who declined are skipped, and the display name
+/// falls back to the address when the provider has none. The result stays
+/// unconfirmed — rosters are a poor speaker-count signal (see `Meeting`).
+pub fn seed_attendees(list: &[CalendarAttendee]) -> Vec<fly_core::Attendee> {
+    list.iter()
+        .filter(|a| !a.is_self && !a.declined)
+        .map(|a| fly_core::Attendee {
+            name: a
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .unwrap_or(&a.email)
+                .to_string(),
+            email: Some(a.email.clone()),
+        })
+        .collect()
 }
 
 /// Shared start path — also used by the calendar one-click start, which
@@ -87,7 +129,7 @@ pub fn start_recording_impl(
     state: &AppState,
     note_id: Option<String>,
     title: Option<String>,
-    attendees: &[String],
+    attendees: Vec<fly_core::Attendee>,
 ) -> CmdResult<RecordingStatus> {
     let mut recording = state.recording.lock().unwrap();
     if recording.is_some() {
@@ -107,12 +149,13 @@ pub fn start_recording_impl(
                     .map_err(|e| e.to_string())?
             }
         };
-        // Calendar attendees arrive as raw emails; the struct form carries
-        // them as name = email until the user renames them in the editor.
-        let attendees: Vec<fly_core::Attendee> = attendees
-            .iter()
-            .map(|s| fly_core::Attendee::from_legacy(s))
-            .collect();
+        if !attendees.is_empty() {
+            tracing::info!(
+                note_title = %note.title,
+                count = attendees.len(),
+                "seeding meeting attendees from calendar event"
+            );
+        }
         let meeting = storage
             .create_meeting(&note.title, &note.id, &attendees)
             .map_err(|e| e.to_string())?;
@@ -323,5 +366,34 @@ pub async fn open_privacy_settings() -> CmdResult<()> {
     #[cfg(not(target_os = "macos"))]
     {
         Err("privacy settings deep link is only available on macOS".into())
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    fn att(email: &str, name: Option<&str>, is_self: bool, declined: bool) -> CalendarAttendee {
+        CalendarAttendee {
+            email: email.into(),
+            name: name.map(str::to_string),
+            is_self,
+            declined,
+        }
+    }
+
+    #[test]
+    fn seed_skips_self_and_declined_and_falls_back_to_email() {
+        let out = seed_attendees(&[
+            att("me@x.com", Some("Me"), true, false),
+            att("dana@x.com", Some("Dana Osei"), false, false),
+            att("nope@x.com", Some("Nope"), false, true),
+            att("raj@x.com", Some("  "), false, false),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].name, "Dana Osei");
+        assert_eq!(out[0].email.as_deref(), Some("dana@x.com"));
+        assert_eq!(out[1].name, "raj@x.com");
+        assert_eq!(out[1].email.as_deref(), Some("raj@x.com"));
     }
 }

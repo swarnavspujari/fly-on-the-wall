@@ -7,7 +7,9 @@ use fly_secrets::SecretStore;
 
 use crate::links::detect_meeting_link;
 use crate::oauth::{self, OAuthConfig, TokenSet};
-use crate::{CalendarError, CalendarEvent, CalendarInfo, CalendarProvider, Result};
+use crate::{
+    CalendarAttendee, CalendarError, CalendarEvent, CalendarInfo, CalendarProvider, Result,
+};
 
 pub type OpenUrl = Arc<dyn Fn(String) + Send + Sync>;
 
@@ -241,12 +243,7 @@ pub fn parse_google_events(json: &str) -> Result<Vec<CalendarEvent>> {
         let attendees = item
             .get("attendees")
             .and_then(|a| a.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|a| a.get("email").and_then(|e| e.as_str()))
-                    .map(str::to_string)
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(parse_google_attendee).collect())
             .unwrap_or_default();
         let join_url = item
             .get("hangoutLink")
@@ -292,9 +289,54 @@ pub fn parse_google_events(json: &str) -> Result<Vec<CalendarEvent>> {
     Ok(events)
 }
 
+/// One `attendees[]` entry. Google marks the signed-in account with
+/// `self: true` and carries the reply in `responseStatus`.
+fn parse_google_attendee(a: &serde_json::Value) -> Option<CalendarAttendee> {
+    let email = a.get("email")?.as_str()?.trim();
+    if email.is_empty() {
+        return None;
+    }
+    Some(CalendarAttendee {
+        email: email.to_string(),
+        name: a
+            .get("displayName")
+            .and_then(|n| n.as_str())
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string),
+        is_self: a.get("self").and_then(|s| s.as_bool()).unwrap_or(false),
+        declined: a.get("responseStatus").and_then(|s| s.as_str()) == Some("declined"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attendees_carry_name_self_and_declined() {
+        let json = r#"{"items": [{
+            "id": "evt1",
+            "summary": "Budget sync",
+            "start": {"dateTime": "2026-07-01T15:00:00Z"},
+            "end": {"dateTime": "2026-07-01T15:30:00Z"},
+            "attendees": [
+                {"email": "me@x.com", "displayName": "Me", "self": true, "responseStatus": "accepted"},
+                {"email": "dana@x.com", "displayName": "Dana Osei", "responseStatus": "accepted"},
+                {"email": "nope@x.com", "responseStatus": "declined"},
+                {"email": "  "}
+            ]
+        }]}"#;
+        let events = parse_google_events(json).unwrap();
+        let a = &events[0].attendees;
+        assert_eq!(a.len(), 3, "{a:?}");
+        assert!(a[0].is_self && !a[0].declined);
+        assert_eq!(a[1].name.as_deref(), Some("Dana Osei"));
+        assert_eq!(a[1].email, "dana@x.com");
+        assert!(!a[1].is_self);
+        assert!(a[2].declined);
+        assert_eq!(a[2].name, None);
+    }
 
     #[test]
     fn parses_events_with_attendees_and_meet_link() {
