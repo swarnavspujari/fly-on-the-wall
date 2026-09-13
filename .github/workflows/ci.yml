@@ -95,11 +95,13 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          # npm 10.9.x (bundled with Node 22 runners since 2026-09) crashes
+          # resolving frontend/ with "Cannot read properties of null
+          # (reading 'edgesOut')"; npm 11 resolves the same package.json fine.
+          npm install -g npm@11 --no-audit --no-fund
+          npm --version
           rm -f package-lock.json frontend/package-lock.json
           npm install --no-audit --no-fund
-          # `npm --prefix frontend install` trips "Cannot read properties of
-          # null (reading 'edgesOut')" on the npm bundled with current
-          # Node 22 runners (it walks up into the root package); cd instead.
           (cd frontend && npm install --no-audit --no-fund)
 
       - name: Install JS dependencies
