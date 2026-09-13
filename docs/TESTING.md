@@ -75,6 +75,13 @@ release"). `main` stays green.
       from Settings → "Chat with your notes (MCP)" into `claude_desktop_config.json`
 - [ ] Screen recording (full/window/region) records, finalizes on Stop, and appears as an
       attachment on the note; ffmpeg downloads on first use with progress (M7)
+- [ ] Windows: recording a GPU-composited window (Zoom, Teams, Chrome, Claude desktop) is NOT
+      black, plays inline, and scrubs without stalling (Windows Graphics Capture backend;
+      `cargo test -p fly-capture-screen wgc_records -- --ignored --nocapture` is the proof)
+- [ ] Transcript panel "Export .vtt" saves a WebVTT with `<v Speaker>` cues; the meeting
+      folder also carries `transcript.vtt` (and `transcript.cleaned.vtt` after polish)
+- [ ] With a calendar connected, pressing the plain Record button during a meeting names the
+      note after the event and prefills attendees by display name (self + declined skipped)
 - [ ] Importing an audio file (wav) AND a video file (mp4) each yield a diarized transcript on
       a new note; non-wav goes through ffmpeg conversion (M8)
 - [ ] First-run consent notice appears once; recording indicator stays visible while recording
