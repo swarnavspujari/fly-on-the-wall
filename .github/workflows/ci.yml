@@ -97,7 +97,10 @@ jobs:
         run: |
           rm -f package-lock.json frontend/package-lock.json
           npm install --no-audit --no-fund
-          npm --prefix frontend install --no-audit --no-fund
+          # `npm --prefix frontend install` trips "Cannot read properties of
+          # null (reading 'edgesOut')" on the npm bundled with current
+          # Node 22 runners (it walks up into the root package); cd instead.
+          (cd frontend && npm install --no-audit --no-fund)
 
       - name: Install JS dependencies
         if: runner.os == 'Windows'
