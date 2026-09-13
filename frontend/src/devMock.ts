@@ -739,6 +739,22 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         : { verdict: "inconclusive" };
     case "open_privacy_settings":
       return null;
+    case "start_recording":
+    case "start_meeting_from_event": {
+      // Mirror the backend's seeding: the signed-in user and decliners are
+      // skipped, names fall back to the address, list stays unconfirmed.
+      const seed = (cmd === "start_recording" ? args.seed : args) as {
+        attendees?: { email: string; name?: string; is_self: boolean; declined: boolean }[];
+      } | null;
+      if (seed?.attendees) {
+        mockAttendees = seed.attendees
+          .filter((a) => !a.is_self && !a.declined)
+          .map((a) => ({ name: a.name?.trim() || a.email, email: a.email }));
+        mockAttendeesConfirmed = false;
+      }
+      if (typeof localStorage !== "undefined") localStorage.setItem("fotwMockRecording", "1");
+      return recordingStatus();
+    }
     case "recording_status":
       return recordingStatus();
     case "screen_status":
