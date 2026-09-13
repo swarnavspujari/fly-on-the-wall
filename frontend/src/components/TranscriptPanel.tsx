@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Meeting, ModelProgress, Transcript } from "../types";
-import { ChevronDown, Plus, RefreshCw } from "lucide-react";
+import { ChevronDown, FileDown, Plus, RefreshCw } from "lucide-react";
+import { api } from "../api";
 import { fmtElapsed } from "./RecordingBar";
 import { Avatar, Button, ProgressBar, SectionLabel, speakerColor } from "./ui";
 import { briefError, selectPipelineNotice } from "../pipelineNotice";
@@ -376,6 +377,23 @@ export default function TranscriptPanel({
   // Cleaned-by-default when the polish pass has run; "Raw" shows the exact
   // ASR output. Edits apply to both variants (same segment ids).
   const [showRaw, setShowRaw] = useState(false);
+  // Save-as of the variant on screen as WebVTT (native dialog; feedback inline).
+  const [vttState, setVttState] = useState<"idle" | "saved" | "failed">("idle");
+  const vttTimer = useRef<number | null>(null);
+  const exportVtt = async () => {
+    let next: "saved" | "failed";
+    try {
+      const path = await api.exportTranscriptVtt(meeting.id, cleaned != null && !showRaw);
+      if (path == null) return; // cancelled — no feedback
+      next = "saved";
+    } catch (e) {
+      console.error("export vtt failed", e);
+      next = "failed";
+    }
+    setVttState(next);
+    if (vttTimer.current !== null) window.clearTimeout(vttTimer.current);
+    vttTimer.current = window.setTimeout(() => setVttState("idle"), 1800);
+  };
 
   // Zoom-in: scroll the first highlighted source segment into view.
   useEffect(() => {
@@ -577,6 +595,15 @@ export default function TranscriptPanel({
               ))}
             </div>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            title="Save this transcript as a WebVTT subtitle file (timestamps + speakers)"
+            startIcon={<FileDown size={13} strokeWidth={1.75} />}
+            onClick={() => void exportVtt()}
+          >
+            {vttState === "saved" ? "Saved" : vttState === "failed" ? "Failed" : "Export .vtt"}
+          </Button>
           <Button
             variant="outline"
             size="sm"
