@@ -344,9 +344,10 @@ fn take_chunk(path: &Path, consumed: u64) -> Option<(Vec<f32>, u32, u64)> {
     let take = new.min(MAX_CHUNK_SECS * rate as u64);
     let from = 44 + (consumed as usize) * 2;
     let to = from + (take as usize) * 2;
-    let samples: Vec<f32> = bytes[from..to]
-        .chunks_exact(2)
-        .map(|p| i16::from_le_bytes([p[0], p[1]]) as f32 / i16::MAX as f32)
+    let (pairs, _tail) = bytes[from..to].as_chunks::<2>();
+    let samples: Vec<f32> = pairs
+        .iter()
+        .map(|p| i16::from_le_bytes(*p) as f32 / i16::MAX as f32)
         .collect();
     Some((samples, rate, consumed))
 }
