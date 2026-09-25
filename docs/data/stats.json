@@ -1,5 +1,5 @@
 {
-  "updated": "2026-09-24T11:56:14.585Z",
+  "updated": "2026-09-25T11:58:09.679Z",
   "totalDownloads": 202,
   "estimatedInstalls": 45,
   "perPlatform": {
@@ -7,7 +7,7 @@
     "macos": 40,
     "linux": 53
   },
-  "updateChecks": 274,
+  "updateChecks": 283,
   "latestRelease": {
     "tag": "v2.2.0",
     "downloads": 11
