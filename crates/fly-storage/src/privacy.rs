@@ -20,6 +20,7 @@
 //! by literal in several crates, and privacy state has its own read/write
 //! commands anyway.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -74,6 +75,31 @@ pub struct AudioPurge {
     /// next sweep because the meeting is only stamped when nothing failed.
     pub failed: Vec<String>,
 }
+
+/// CTE prefix defining the effective keep-local sets in SQL, so bulk readers
+/// can filter before `LIMIT` instead of checking row by row:
+///
+/// * `local_folders(id, depth)` — folders flagged local-only plus every
+///   descendant (same depth cap as the ancestor walk in
+///   `folder_chain_keep_local`, so a corrupt cycle terminates);
+/// * `local_notes(id)` — notes filed in one of those folders, or with any
+///   meeting flagged keep-local (exactly [`Storage::note_keep_local`]).
+///
+/// A meeting is hidden from AI tools when its note is in `local_notes`
+/// (a superset of [`Storage::meeting_keep_local`]).
+pub(crate) const KEEP_LOCAL_CTE: &str = "WITH RECURSIVE
+     local_folders(id, depth) AS (
+         SELECT id, 0 FROM folders WHERE keep_local = 1
+         UNION
+         SELECT f.id, lf.depth + 1
+           FROM folders f JOIN local_folders lf ON f.parent_id = lf.id
+          WHERE lf.depth < 64
+     ),
+     local_notes(id) AS (
+         SELECT n.id FROM notes n WHERE n.folder_id IN (SELECT id FROM local_folders)
+         UNION
+         SELECT m.note_id FROM meetings m WHERE m.keep_local = 1
+     ) ";
 
 fn is_media_file(path: &Path) -> bool {
     path.extension()
@@ -237,6 +263,35 @@ impl Storage {
             .prepare("SELECT id FROM folders WHERE keep_local = 1 ORDER BY id")?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    fn keep_local_set(&self, select: &str) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare(&format!("{KEEP_LOCAL_CTE}{select}"))?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Folders that are effectively local-only: flagged themselves or under
+    /// a flagged ancestor.
+    pub fn keep_local_folder_ids(&self) -> Result<HashSet<String>> {
+        self.keep_local_set("SELECT DISTINCT id FROM local_folders")
+    }
+
+    /// Every note for which [`Storage::note_keep_local`] is true, in one
+    /// query. Errors propagate — callers must treat them as "hide all".
+    pub fn keep_local_note_ids(&self) -> Result<HashSet<String>> {
+        self.keep_local_set("SELECT id FROM local_notes")
+    }
+
+    /// Every meeting for which [`Storage::meeting_keep_local`] is true (its
+    /// own flag, or its note's folder chain), in one query.
+    pub fn keep_local_meeting_ids(&self) -> Result<HashSet<String>> {
+        self.keep_local_set(
+            "SELECT m.id FROM meetings m
+              WHERE m.keep_local = 1
+                 OR m.note_id IN (SELECT n.id FROM notes n
+                                   WHERE n.folder_id IN (SELECT id FROM local_folders))",
+        )
     }
 
     // ---- delete all my data -------------------------------------------
@@ -472,6 +527,60 @@ mod tests {
         assert_eq!(s.local_only_folders().unwrap(), vec![parent.id.clone()]);
         s.set_folder_keep_local(&parent.id, false).unwrap();
         assert!(!s.meeting_keep_local(&m.id));
+    }
+
+    #[test]
+    fn keep_local_id_sets_match_per_row_checks() {
+        let (_d, s) = test_storage();
+        let legal = s.create_folder("Legal", None).unwrap();
+        let cases = s.create_folder("Cases", Some(&legal.id)).unwrap();
+        let deep = s.create_folder("Deep", Some(&cases.id)).unwrap();
+        let open = s.create_folder("Open", None).unwrap();
+        s.set_folder_keep_local(&legal.id, true).unwrap();
+
+        let mut notes = Vec::new();
+        let mut meetings = Vec::new();
+        for (title, folder) in [
+            ("in-deep", Some(deep.id.as_str())),
+            ("in-open", Some(open.id.as_str())),
+            ("flagged", None),
+            ("plain", None),
+            ("no-meeting-in-cases", Some(cases.id.as_str())),
+        ] {
+            let n = s.create_note(title, folder).unwrap();
+            if title != "no-meeting-in-cases" {
+                meetings.push(s.create_meeting(title, &n.id, &[]).unwrap().id);
+            }
+            notes.push(n.id);
+        }
+        s.set_note_keep_local(&notes[2], true).unwrap();
+
+        let note_set = s.keep_local_note_ids().unwrap();
+        for n in &notes {
+            assert_eq!(note_set.contains(n), s.note_keep_local(n), "note {n}");
+        }
+        assert_eq!(note_set.len(), 3);
+        let meeting_set = s.keep_local_meeting_ids().unwrap();
+        for m in &meetings {
+            assert_eq!(
+                meeting_set.contains(m),
+                s.meeting_keep_local(m),
+                "meeting {m}"
+            );
+        }
+        assert_eq!(meeting_set.len(), 2);
+        let folders = s.keep_local_folder_ids().unwrap();
+        assert!(folders.contains(&legal.id) && folders.contains(&cases.id));
+        assert!(folders.contains(&deep.id) && !folders.contains(&open.id));
+
+        // a (corrupt) parent cycle still terminates
+        s.conn
+            .execute(
+                "UPDATE folders SET parent_id = ?1 WHERE id = ?2",
+                (&deep.id, &legal.id),
+            )
+            .unwrap();
+        assert_eq!(s.keep_local_folder_ids().unwrap().len(), 3);
     }
 
     #[test]
