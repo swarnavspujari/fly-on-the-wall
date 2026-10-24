@@ -326,7 +326,7 @@ impl ScreenSession for WgcSession {
             }
             None => {}
         }
-        tracing::info!(frames, path = %self.out_path.display(), "screen capture finalized");
+        tracing::info!(frames, file = %self.out_path.file_name().unwrap_or_default().to_string_lossy(), "screen capture finalized");
         Ok(self.out_path.clone())
     }
 

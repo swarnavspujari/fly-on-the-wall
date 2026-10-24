@@ -553,7 +553,10 @@ fn build_recorder(
             let clock = clock.clone();
             let err_path = path.clone();
             let err_fn = move |e: cpal::Error| {
-                tracing::error!("stream error on {}: {e}", err_path.display())
+                tracing::error!(
+                    file = %err_path.file_name().unwrap_or_default().to_string_lossy(),
+                    "audio stream error: {e}"
+                )
             };
             device
                 .build_input_stream(

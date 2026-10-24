@@ -267,12 +267,12 @@ async fn token_request(token_url: &str, form: &[(&str, String)]) -> Result<Token
         .form(form)
         .send()
         .await
-        .map_err(|e| CalendarError::Network(e.to_string()))?;
+        .map_err(|e| CalendarError::Network(e.without_url().to_string()))?;
     let status = resp.status();
     let text = resp
         .text()
         .await
-        .map_err(|e| CalendarError::Network(e.to_string()))?;
+        .map_err(|e| CalendarError::Network(e.without_url().to_string()))?;
     if !status.is_success() {
         return Err(CalendarError::Auth(format!(
             "token endpoint returned {status}: {}",

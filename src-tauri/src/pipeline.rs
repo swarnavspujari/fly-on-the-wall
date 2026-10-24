@@ -661,7 +661,7 @@ pub async fn run_with(
     // the checkpoint and overwrites the intermediates.)
     for f in &intermediates {
         if let Err(e) = std::fs::remove_file(f) {
-            tracing::warn!(path = %f.display(), error = %e, "could not remove 16k intermediate");
+            tracing::warn!(file = %f.file_name().unwrap_or_default().to_string_lossy(), error = %e, "could not remove 16k intermediate");
         }
         let _ = std::fs::remove_file(fly_asr::checkpoint::checkpoint_path_for(f));
     }
@@ -808,7 +808,7 @@ async fn re_diarize_inner(
             .await
             .map_err(|e| e.to_string());
         if let Err(e) = std::fs::remove_file(&track_16k) {
-            tracing::warn!(path = %track_16k.display(), error = %e, "could not remove 16k intermediate");
+            tracing::warn!(file = %track_16k.file_name().unwrap_or_default().to_string_lossy(), error = %e, "could not remove 16k intermediate");
         }
         let turns = fly_diarize::drop_dust_clusters(diarized?);
 
@@ -1291,13 +1291,12 @@ fn restore_parked_recording(data_dir: &Path, rec: &fly_core::RecordingRef) -> bo
     match std::fs::rename(&parked, &expected) {
         Ok(()) => {
             tracing::info!(
-                dir = %rel,
                 "restored meeting folder from recordings/_unlinked (was parked by a raced migration)"
             );
             true
         }
         Err(e) => {
-            tracing::warn!(dir = %rel, error = %e, "could not restore parked meeting folder");
+            tracing::warn!(error = %e, "could not restore parked meeting folder");
             false
         }
     }
@@ -1312,7 +1311,7 @@ fn guard_loops(raw: RawTranscript, channel: &str) -> RawTranscript {
     for run in &runs {
         tracing::warn!(
             channel,
-            phrase = %run.phrase,
+            phrase_words = run.phrase.split_whitespace().count(),
             reps = run.reps,
             start_ms = run.start_ms,
             end_ms = run.end_ms,

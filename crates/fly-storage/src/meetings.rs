@@ -118,13 +118,13 @@ impl Storage {
         self.checkpoint_after_delete();
         if let Some(rel) = rec_dir {
             let Some(dir) = contained_recordings_dir(&self.data_dir, &rel) else {
-                tracing::warn!(dir = %rel, "refusing to delete a folder outside recordings/");
+                tracing::warn!(meeting_id = %id, "refusing to delete a folder outside recordings/");
                 return Ok(());
             };
             // best-effort: a locked file only strands the folder, never the delete
             if let Err(e) = std::fs::remove_dir_all(&dir) {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(dir = %rel, error = %e, "could not remove recordings folder");
+                    tracing::warn!(meeting_id = %id, error = %e, "could not remove recordings folder");
                 }
             }
         }
