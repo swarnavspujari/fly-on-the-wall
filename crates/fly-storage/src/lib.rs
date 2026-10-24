@@ -26,6 +26,7 @@ mod meetings;
 mod migrations;
 pub mod naming;
 mod notes;
+pub mod privacy;
 mod recovery;
 pub mod safe_path;
 mod search;
@@ -38,6 +39,7 @@ pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::{contained_recordings_dir, recording_dir_rel};
 pub use notes::NoteSummary;
+pub use privacy::{AudioPurge, MeetingPrivacy, AUDIO_RETENTION_SETTING, RETENTION_CHOICES};
 pub use recovery::{
     HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR, RECORDING_MANIFEST,
 };
@@ -116,6 +118,7 @@ const EXPECTED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("parent_id", "TEXT REFERENCES folders(id) ON DELETE CASCADE"),
             ("created_at", "TEXT NOT NULL DEFAULT ''"),
+            ("keep_local", "INTEGER NOT NULL DEFAULT 0"),
         ],
     ),
     (
@@ -142,6 +145,10 @@ const EXPECTED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("started_at", "TEXT NOT NULL DEFAULT ''"),
             ("ended_at", "TEXT"),
             ("recording_json", "TEXT"),
+            // Privacy controls (keep-local, consent helper, retention).
+            ("keep_local", "INTEGER NOT NULL DEFAULT 0"),
+            ("participants_notified", "INTEGER NOT NULL DEFAULT 0"),
+            ("audio_deleted_at", "TEXT"),
         ],
     ),
     (
@@ -346,7 +353,10 @@ impl Storage {
                 id         TEXT PRIMARY KEY,
                 name       TEXT NOT NULL,
                 parent_id  TEXT REFERENCES folders(id) ON DELETE CASCADE,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                -- 1 = notes filed here (or in a sub-folder) never go to a
+                -- cloud processor (see privacy.rs)
+                keep_local INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS notes (
@@ -374,7 +384,13 @@ impl Storage {
                 attendees_confirmed INTEGER NOT NULL DEFAULT 0,
                 started_at     TEXT NOT NULL,
                 ended_at       TEXT,
-                recording_json TEXT
+                recording_json TEXT,
+                -- privacy controls (see privacy.rs): never send to a cloud
+                -- processor; user recorded that participants were told;
+                -- when retention deleted the audio (transcript/notes kept)
+                keep_local            INTEGER NOT NULL DEFAULT 0,
+                participants_notified INTEGER NOT NULL DEFAULT 0,
+                audio_deleted_at      TEXT
             );
 
             CREATE TABLE IF NOT EXISTS transcripts (

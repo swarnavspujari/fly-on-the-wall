@@ -78,8 +78,6 @@ The second pass followed staff-engineer and SOC 2 (Security, Confidentiality and
 | Windows Authenticode signing (Azure Artifact Signing via OIDC) | Needs a signing account | Repo owner + code |
 | Live check of the Claude 5.5 changes (structured outputs, effort, fallback) and an `llm_bench` run | No API key available in this environment. Unit tests pin the exact request shapes, and every new feature degrades to the old request on a 400. | Run once with a key |
 | Rebase manifest paths during self-heal (the write side of finding 7) | Deletes are guarded; writes of `manifest.json`/`note.json` still follow manifest paths | Code |
-| Per-meeting "keep local" flag; retention setting (auto-delete audio after N days) | Product features | Code |
-| Per-recording consent prompt for two-party-consent jurisdictions | Product feature | Code |
 | zip 9 upgrade (RUSTSEC-2026-0367/8/9), quick-xml (build-time only) | Needs upstream / semver-major work | Code |
 | whisper.cpp ≥1.9.5 at the next sidecar rebuild; periodic ffmpeg refresh | Sidecar rebuild | Code |
 | Written policies (access control, change management, vendor management with DPAs for Anthropic/Groq/OpenAI/NVIDIA/Google/Microsoft, risk assessment) | SOC 2 is an organisational audit; code can't satisfy these | Owner |

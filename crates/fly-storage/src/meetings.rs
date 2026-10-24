@@ -69,6 +69,8 @@ impl Storage {
             "UPDATE notes SET meeting_id = ?1 WHERE id = ?2",
             (&meeting.id, note_id),
         )?;
+        // re-recording into a "keep local" note stays local
+        self.inherit_keep_local(&meeting.id, note_id)?;
         Ok(meeting)
     }
 

@@ -13,7 +13,7 @@ use fly_llm::{ChatMessage, ChatRequest, LLMProvider, ThinkingMode};
 use serde::Deserialize;
 use tauri::State;
 
-use crate::llm_commands::{build_provider, ensure_provider_ready};
+use crate::llm_commands::{build_provider, ensure_provider_ready, DataScope};
 use crate::state::AppState;
 
 type CmdResult<T> = Result<T, String>;
@@ -270,7 +270,7 @@ pub async fn extract_items(
 /// falls back to the raw one. Re-runnable: replaces the meeting's items.
 pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<usize, String> {
     ensure_provider_ready(state).await?;
-    let provider = build_provider(state)?;
+    let provider = build_provider(state, DataScope::Meeting(meeting_id))?;
     let (meeting, transcript) = {
         let storage = state.storage.lock().unwrap();
         let meeting = storage.get_meeting(meeting_id).map_err(|e| e.to_string())?;
