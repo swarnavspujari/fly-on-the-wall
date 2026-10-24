@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { ShieldAlert, X } from "lucide-react";
 import { api } from "../api";
 import {
   ENCRYPTION_BANNER_DISMISSED_KEY,
+  RESTART_REQUIRED_EVENT,
   WIPE_CONFIRMATION,
   canConfirmWipe,
   encryptionBannerText,
@@ -12,8 +12,9 @@ import {
   retentionOptions,
   retentionWarning,
   showEncryptionBanner,
+  type RestartRequiredDetail,
 } from "../privacy";
-import type { DiskEncryption, PrivacySettings, WipeReport } from "../types";
+import type { DiskEncryption, PrivacySettings } from "../types";
 import { Button, Card, Checkbox, Input, SectionLabel, Select } from "./ui";
 
 /** Settings → Privacy: disk-encryption notice, audio retention, and the
@@ -36,7 +37,6 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
   const [wipeModels, setWipeModels] = useState(false);
   const [wipeBusy, setWipeBusy] = useState(false);
   const [wipeError, setWipeError] = useState<string | null>(null);
-  const [wipeDone, setWipeDone] = useState<WipeReport | null>(null);
 
   useEffect(() => {
     void api
@@ -60,7 +60,7 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
     setRetentionMsg(null);
     try {
       const r = await api.setAudioRetention(days);
-      setSettings((s) => (s ? { ...s, audio_retention_days: days } : s));
+      setSettings((s) => (s ? { ...s, audio_retention_days: days, retention_held: null } : s));
       setRetentionMsg(
         r.meetings > 0
           ? `Deleted audio from ${r.meetings} meeting${r.meetings === 1 ? "" : "s"} (${formatBytes(r.bytes_removed)} freed).`
@@ -107,12 +107,13 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
       } catch {
         /* storage may be unavailable */
       }
-      setWipeDone(report);
-      // Nothing stuck → restart straight away; otherwise let the user read
-      // the leftovers first (the restart still finishes the job).
-      if (report.failed.length === 0 && report.secrets_failed.length === 0) {
-        window.setTimeout(() => void relaunch(), 1500);
-      }
+      // From here the app must restart before anything else happens: the
+      // App-level RestartRequired screen takes over (outlives this modal).
+      window.dispatchEvent(
+        new CustomEvent<RestartRequiredDetail>(RESTART_REQUIRED_EVENT, {
+          detail: { report, includeModels: wipeModels },
+        }),
+      );
     } catch (e) {
       setWipeError(String(e));
     } finally {
@@ -161,13 +162,23 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
       {settings?.last_wipe && (
         <div className="flex items-start gap-2.5 rounded-xl border border-line bg-surface-2 px-3.5 py-3 text-[12.5px] leading-[1.5] text-text-2">
           <span className="min-w-0 flex-1">
-            The last “Delete all my data” couldn't remove {settings.last_wipe.failed.length} item
-            {settings.last_wipe.failed.length === 1 ? "" : "s"} (another program had them open):{" "}
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
-              {settings.last_wipe.failed.slice(0, 5).join(", ")}
-              {settings.last_wipe.failed.length > 5 ? "…" : ""}
-            </span>
-            . Delete them from the data folder by hand.
+            {settings.last_wipe.notes.map((n) => (
+              <span key={n} className="block">
+                {n}
+              </span>
+            ))}
+            {settings.last_wipe.failed.length > 0 && (
+              <>
+                The last “Delete all my data” couldn't remove {settings.last_wipe.failed.length}{" "}
+                item
+                {settings.last_wipe.failed.length === 1 ? "" : "s"} (another program had them open):{" "}
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                  {settings.last_wipe.failed.slice(0, 5).join(", ")}
+                  {settings.last_wipe.failed.length > 5 ? "…" : ""}
+                </span>
+                . Delete them from the data folder by hand.
+              </>
+            )}
           </span>
           <button
             title="Dismiss"
@@ -221,6 +232,22 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
           </div>
         </Card>
       )}
+      {settings?.retention_held != null && settings.audio_retention_days != null && !pending && (
+        <Card tone="muted" pad="sm">
+          <p className="text-text" style={{ margin: "0 0 8px", fontSize: 12.5, lineHeight: 1.5 }}>
+            Retention is paused: {settings.retention_held} meetings would lose their audio at once,
+            which can mean the clock changed. If that's expected, confirm to delete it.
+          </p>
+          <Button
+            variant="contrast"
+            size="sm"
+            disabled={retentionBusy}
+            onClick={() => void applyRetention(settings.audio_retention_days)}
+          >
+            {retentionBusy ? "Deleting…" : "Delete audio"}
+          </Button>
+        </Card>
+      )}
       {retentionMsg && (
         <p className="text-text-2" style={{ margin: 0, fontSize: 12 }}>
           {retentionMsg}
@@ -245,7 +272,7 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
               computer, plus saved API keys and calendar sign-ins. Then the app restarts.
             </p>
           </div>
-          {!wipeOpen && !wipeDone && (
+          {!wipeOpen && (
             <Button
               variant="outline"
               size="sm"
@@ -260,7 +287,7 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
           )}
         </div>
 
-        {wipeOpen && !wipeDone && (
+        {wipeOpen && (
           <div className="space-y-2.5" style={{ marginTop: 12 }}>
             <Checkbox
               checked={wipeAck}
@@ -299,39 +326,6 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
                 Cancel
               </Button>
             </div>
-          </div>
-        )}
-
-        {wipeDone && (
-          <div className="space-y-2" style={{ marginTop: 12 }}>
-            {wipeDone.failed.length === 0 && wipeDone.secrets_failed.length === 0 ? (
-              <p className="text-text-2" style={{ margin: 0, fontSize: 12.5 }}>
-                Deleted. Restarting to finish…
-              </p>
-            ) : (
-              <>
-                <p className="text-text" style={{ margin: 0, fontSize: 12.5, lineHeight: 1.5 }}>
-                  Most data is deleted. Some items are in use and will be removed when the app
-                  restarts
-                  {wipeDone.secrets_failed.length > 0
-                    ? `; these keychain entries couldn't be removed: ${wipeDone.secrets_failed.join(", ")}`
-                    : ""}
-                  .
-                </p>
-                {wipeDone.failed.length > 0 && (
-                  <p
-                    className="text-text-3"
-                    style={{ margin: 0, fontFamily: "var(--font-mono)", fontSize: 11 }}
-                  >
-                    {wipeDone.failed.slice(0, 8).join(", ")}
-                    {wipeDone.failed.length > 8 ? "…" : ""}
-                  </p>
-                )}
-                <Button variant="record" size="sm" onClick={() => void relaunch()}>
-                  Restart now
-                </Button>
-              </>
-            )}
           </div>
         )}
       </div>

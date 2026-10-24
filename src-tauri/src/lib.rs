@@ -32,10 +32,11 @@ pub fn run() {
     // stdout-only logging here and surfaces via the startup dialog below
     // (AppState::init repeats the same idempotent preparation).
     let data_dir = state::prepared_data_dir();
-    // "Delete all my data" finishes here, on the launch after it was asked
-    // for: before logging or the database open any file in the data dir.
+    // Take the per-data-dir instance lock and finish a pending "Delete all
+    // my data" (only once the instance that asked for it has exited) —
+    // before logging or the database open any file in the data dir.
     if let Ok(dir) = data_dir.as_deref() {
-        privacy::run_pending_wipe(dir);
+        privacy::startup(dir);
     }
     logging::init(data_dir.as_deref().ok());
 

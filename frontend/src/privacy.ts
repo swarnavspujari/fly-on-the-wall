@@ -2,7 +2,7 @@
 // Keep-local chip, the recording-notice helper). Kept free of React and IPC
 // so vitest covers them directly.
 
-import type { DiskEncryption, MeetingPrivacy } from "./types";
+import type { DiskEncryption, MeetingPrivacy, WipeReport } from "./types";
 
 /** Settings key remembering that the disk-encryption banner was dismissed. */
 export const ENCRYPTION_BANNER_DISMISSED_KEY = "ui.privacy.disk_encryption_banner_dismissed";
@@ -107,3 +107,28 @@ export function keepLocalTitle(p: MeetingPrivacy | null): string {
   }
   return "Keep local: never send this note's audio, transcript or notes to a cloud service (cloud AI providers or Groq).";
 }
+
+/** Window event carrying a finished "Delete all my data" to the App-level
+ *  RestartRequired screen (it must outlive the Settings modal). */
+export const RESTART_REQUIRED_EVENT = "fotw:restart-required";
+
+export interface RestartRequiredDetail {
+  report: WipeReport;
+  includeModels: boolean;
+}
+
+/** How the in-app half of the wipe went, which decides what the
+ *  restart-required screen offers:
+ *  - "clean": everything erased → restart on its own;
+ *  - "db-open": the database is held open elsewhere (MCP client) → its old
+ *    contents may survive; ask the user to quit those apps and try again;
+ *  - "leftovers": some files/keychain entries are stuck → list them, restart
+ *    finishes the files. */
+export function wipeOutcome(r: WipeReport): "clean" | "db-open" | "leftovers" {
+  if (!r.db_erased || !r.db_checkpointed) return "db-open";
+  if (r.failed.length > 0 || r.secrets_failed.length > 0) return "leftovers";
+  return "clean";
+}
+
+export const RESTART_FAILED_TEXT =
+  "Fly on the Wall couldn't restart itself. Quit it (and make sure it's closed) and open it again to finish deleting.";

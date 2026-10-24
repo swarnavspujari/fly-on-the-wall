@@ -918,6 +918,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return {
         audio_retention_days: mockRetentionDays,
         retention_choices: [7, 30, 90, 365],
+        retention_held: mockFlag("fotwMockRetentionHeld") === "1" ? 6 : null,
         last_wipe: null,
       };
     case "preview_audio_retention":
@@ -929,12 +930,22 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         files_removed: mockRetentionDays && mockRetentionDays <= 30 ? 9 : 0,
         bytes_removed: mockRetentionDays && mockRetentionDays <= 30 ? 812_000_000 : 0,
         meetings_failed: 0,
+        held: null,
       };
     case "dismiss_wipe_report":
       return null;
     case "delete_all_data":
       if (args.confirmation !== "delete everything") throw new Error("confirmation mismatch");
-      return { removed: 42, failed: [], secrets_failed: [], restart_required: true };
+      return {
+        removed: 42,
+        failed: [],
+        secrets_failed: [],
+        restart_required: true,
+        db_erased: true,
+        // fotwMockWipeDbBusy = "1" → an MCP client holds the database open
+        db_checkpointed: mockFlag("fotwMockWipeDbBusy") !== "1",
+        notes: [],
+      };
     case "disk_encryption_status": {
       const s = mockFlag("fotwMockEncryption");
       return {

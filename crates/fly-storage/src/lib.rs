@@ -39,7 +39,9 @@ pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::{contained_recordings_dir, recording_dir_rel};
 pub use notes::NoteSummary;
-pub use privacy::{AudioPurge, MeetingPrivacy, AUDIO_RETENTION_SETTING, RETENTION_CHOICES};
+pub use privacy::{
+    AudioPurge, EraseOutcome, MeetingPrivacy, AUDIO_RETENTION_SETTING, RETENTION_CHOICES,
+};
 pub use recovery::{
     HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR, RECORDING_MANIFEST,
 };

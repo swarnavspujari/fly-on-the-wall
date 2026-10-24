@@ -101,6 +101,35 @@ pub(crate) const KEEP_LOCAL_CTE: &str = "WITH RECURSIVE
          SELECT m.note_id FROM meetings m WHERE m.keep_local = 1
      ) ";
 
+/// Chunk filter (alias `c`, after [`KEEP_LOCAL_CTE`]): the chunk's owner is
+/// not keep-local. Transcript chunks are owned by meeting id.
+const SHAREABLE_CHUNK: &str = "NOT (
+        (c.owner_kind = 'note' AND c.owner_id IN (SELECT id FROM local_notes))
+     OR (c.owner_kind = 'transcript' AND c.owner_id IN (
+            SELECT m.id FROM meetings m WHERE m.note_id IN (SELECT id FROM local_notes))))";
+
+/// Newest modification time among the media files directly in `dir`.
+fn newest_media_mtime(dir: &Path) -> Option<DateTime<Utc>> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| is_media_file(&e.path()))
+        .filter_map(|e| std::fs::symlink_metadata(e.path()).ok())
+        .filter(|m| m.file_type().is_file())
+        .filter_map(|m| m.modified().ok())
+        .map(DateTime::<Utc>::from)
+        .max()
+}
+
+/// What erasing the database in place achieved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EraseOutcome {
+    /// The WAL was checkpointed and truncated: the erased pages reached the
+    /// main file and the old ones are gone from the log. False when another
+    /// process (an MCP client) kept a read transaction open throughout.
+    pub checkpointed: bool,
+}
+
 fn is_media_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -271,6 +300,42 @@ impl Storage {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// The embedding work queue minus keep-local owners — used when the
+    /// embedding server isn't on this machine (a remote Ollama), so
+    /// keep-local notes and transcripts never leave the device to be indexed.
+    pub fn pending_embedding_chunks_shareable(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::PendingChunk>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{KEEP_LOCAL_CTE}SELECT c.id, c.title, c.text FROM embedding_chunks c
+              WHERE (c.embedding IS NULL OR c.model IS NOT ?1) AND {SHAREABLE_CHUNK}
+              ORDER BY c.id LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map((model, limit as i64), |r| {
+            Ok(crate::PendingChunk {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                text: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Backlog matching [`Storage::pending_embedding_chunks_shareable`].
+    pub fn embedding_backlog_shareable(&self, model: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            &format!(
+                "{KEEP_LOCAL_CTE}SELECT COUNT(*) FROM embedding_chunks c
+                  WHERE (c.embedding IS NULL OR c.model IS NOT ?1) AND {SHAREABLE_CHUNK}"
+            ),
+            [model],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
     /// Folders that are effectively local-only: flagged themselves or under
     /// a flagged ancestor.
     pub fn keep_local_folder_ids(&self) -> Result<HashSet<String>> {
@@ -301,7 +366,21 @@ impl Storage {
     /// text doesn't linger in free pages or the log. Used by "Delete all my
     /// data" before the file itself is removed at restart — if the file
     /// stays locked (another process holding it), it's at least empty.
-    pub fn erase_all_content(&self) -> Result<()> {
+    ///
+    /// Errors (e.g. the DB stays locked past the busy timeout) propagate; a
+    /// checkpoint that another process keeps blocking is retried for a few
+    /// seconds and then reported as `checkpointed: false` — in WAL mode the
+    /// old content is still on disk in that case, so callers must not claim
+    /// success.
+    pub fn erase_all_content(&self) -> Result<EraseOutcome> {
+        self.erase_all_content_with(10, std::time::Duration::from_millis(500))
+    }
+
+    pub(crate) fn erase_all_content_with(
+        &self,
+        checkpoint_attempts: u32,
+        backoff: std::time::Duration,
+    ) -> Result<EraseOutcome> {
         let tables: Vec<(String, String)> = {
             let mut stmt = self.conn.prepare(
                 "SELECT name, COALESCE(sql, '') FROM sqlite_master
@@ -331,10 +410,34 @@ impl Storage {
         }
         tx.commit()?;
         self.conn.execute_batch("VACUUM;")?;
-        let _ = self
-            .conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
-        Ok(())
+        // wal_checkpoint returns (busy, log frames, checkpointed frames);
+        // busy = 1 means a reader blocked it. A TRUNCATE checkpoint also
+        // waits in the busy handler, so cap that wait to the backoff while
+        // retrying (restored to rusqlite's 5 s default afterwards).
+        self.conn.busy_timeout(backoff)?;
+        let outcome = self.checkpoint_truncate(checkpoint_attempts, backoff);
+        self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(EraseOutcome {
+            checkpointed: outcome,
+        })
+    }
+
+    fn checkpoint_truncate(&self, checkpoint_attempts: u32, backoff: std::time::Duration) -> bool {
+        for attempt in 1..=checkpoint_attempts.max(1) {
+            let busy: Result<i64> = self
+                .conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
+                .map_err(Into::into);
+            match busy {
+                Ok(0) => return true,
+                Ok(_) => tracing::warn!(attempt, "erase: WAL checkpoint blocked by a reader"),
+                Err(e) => tracing::warn!(attempt, error = %e, "erase: WAL checkpoint failed"),
+            }
+            if attempt < checkpoint_attempts {
+                std::thread::sleep(backoff);
+            }
+        }
+        false
     }
 
     // ---- retention ----------------------------------------------------
@@ -364,27 +467,59 @@ impl Storage {
     /// Finished meetings that still have audio and started before `cutoff`.
     /// Meetings with a queued or running transcription are skipped — their
     /// audio is about to be read.
+    ///
+    /// Age is judged twice, and both must be past `cutoff`: the meeting's
+    /// `ended_at`, and the newest modification time of its media files on
+    /// disk. The dates are user-editable (the date editor shifts both
+    /// started_at and ended_at), so the file times keep a backdated meeting
+    /// from losing audio it recorded today.
     pub fn retention_candidates(&self, cutoff: DateTime<Utc>) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.started_at FROM meetings m
-              WHERE m.recording_json IS NOT NULL
-                AND m.ended_at IS NOT NULL
-                AND m.audio_deleted_at IS NULL
-                AND NOT EXISTS (
-                    SELECT 1 FROM transcription_jobs j
-                     WHERE j.meeting_id = m.id AND j.status IN ('queued', 'running'))",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let rows: Vec<(String, String, Option<String>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT m.id, m.ended_at, m.recording_json FROM meetings m
+                  WHERE m.recording_json IS NOT NULL
+                    AND m.ended_at IS NOT NULL
+                    AND m.audio_deleted_at IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM transcription_jobs j
+                         WHERE j.meeting_id = m.id AND j.status IN ('queued', 'running'))",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         let mut out = Vec::new();
-        for row in rows {
-            let (id, started) = row?;
+        for (id, ended, recording_json) in rows {
             // Parse rather than compare strings: offsets vary between rows.
             // An unparseable date never qualifies (parse_ts falls back to now).
-            if parse_ts(started) < cutoff {
+            if parse_ts(ended) >= cutoff {
+                continue;
+            }
+            let rec: Option<fly_core::RecordingRef> =
+                recording_json.and_then(|j| serde_json::from_str(&j).ok());
+            let newest = rec
+                .as_ref()
+                .and_then(recording_dir_rel)
+                .and_then(|rel| contained_recordings_dir(&self.data_dir, &rel))
+                .and_then(|dir| newest_media_mtime(&dir));
+            // No media left on disk → nothing to delete, but still stamp it
+            // (delete_meeting_audio no-ops the files) so it stops qualifying.
+            if newest.is_none_or(|t| t < cutoff) {
                 out.push(id);
             }
         }
         Ok(out)
+    }
+
+    /// Meetings that still hold audio (retention not yet applied) — the
+    /// denominator of the sweep's "too much at once" guard.
+    pub fn meetings_with_audio(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM meetings
+              WHERE recording_json IS NOT NULL AND audio_deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
     }
 
     /// Delete the media files of one meeting's recordings folder, keeping
@@ -480,7 +615,22 @@ mod tests {
         )
         .unwrap();
         backdate(s, &m.id, days_ago);
+        age_media(&rec_dir, days_ago);
         m.id
+    }
+
+    /// Set the media files' modification time `days_ago` days back (the
+    /// on-disk age retention also requires).
+    fn age_media(dir: &std::path::Path, days_ago: i64) {
+        let when = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(days_ago.max(0) as u64 * 86_400);
+        for f in ["recording.mic.wav", "recording.playback.wav", "source.mp4"] {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.join(f))
+                .unwrap();
+            file.set_modified(when).unwrap();
+        }
     }
 
     /// Move a meeting's start date without the folder rename that
@@ -488,7 +638,9 @@ mod tests {
     fn backdate(s: &crate::Storage, id: &str, days_ago: i64) {
         s.conn
             .execute(
-                "UPDATE meetings SET started_at = ?1 WHERE id = ?2",
+                "UPDATE meetings SET started_at = ?1,
+                        ended_at = CASE WHEN ended_at IS NULL THEN NULL ELSE ?1 END
+                  WHERE id = ?2",
                 ((Utc::now() - Duration::days(days_ago)).to_rfc3339(), id),
             )
             .unwrap();
@@ -637,6 +789,68 @@ mod tests {
         assert!(s.retention_candidates(cutoff).unwrap().is_empty());
     }
 
+    /// Backdating a meeting in the date editor must not make audio recorded
+    /// today eligible: the files' own age is checked too.
+    #[test]
+    fn backdated_meeting_with_fresh_audio_is_not_a_candidate() {
+        let (dir, s) = test_storage();
+        let id = recorded_meeting(&s, dir.path(), "edited", 1);
+        backdate(&s, &id, 400); // started_at AND ended_at a year+ back
+        let cutoff = Utc::now() - Duration::days(30);
+        assert!(s.retention_candidates(cutoff).unwrap().is_empty());
+        age_media(&dir.path().join("recordings/edited"), 400);
+        assert_eq!(s.retention_candidates(cutoff).unwrap(), vec![id]);
+        assert_eq!(s.meetings_with_audio().unwrap(), 1);
+    }
+
+    /// A reader holding a snapshot (an MCP client) blocks the WAL
+    /// checkpoint: erase must say so instead of claiming success.
+    #[test]
+    fn erase_reports_a_blocked_checkpoint() {
+        let (dir, s) = test_storage();
+        s.create_note("secret", None).unwrap();
+        let reader = rusqlite::Connection::open(dir.path().join("flyonthewall.db")).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM notes;")
+            .unwrap();
+        let out = s
+            .erase_all_content_with(2, std::time::Duration::from_millis(1))
+            .unwrap();
+        assert!(!out.checkpointed, "a live reader must block the truncate");
+        reader.execute_batch("COMMIT;").unwrap();
+        drop(reader);
+        assert!(s.erase_all_content().unwrap().checkpointed);
+    }
+
+    /// Keep-local notes/transcripts stay out of the queue that a remote
+    /// embedding server would see; everything else is still indexed.
+    #[test]
+    fn shareable_embedding_queue_skips_keep_local_owners() {
+        let (_d, s) = test_storage();
+        let open = s.create_note("open", None).unwrap();
+        let private = s.create_note("private", None).unwrap();
+        let m = s.create_meeting("private", &private.id, &[]).unwrap();
+        s.set_note_keep_local(&private.id, true).unwrap();
+        s.conn.execute("DELETE FROM embedding_chunks", []).unwrap();
+        for (kind, owner) in [
+            ("note", open.id.as_str()),
+            ("note", private.id.as_str()),
+            ("transcript", m.id.as_str()),
+        ] {
+            s.conn
+                .execute(
+                    "INSERT INTO embedding_chunks (owner_kind, owner_id, chunk_index, title, text)
+                     VALUES (?1, ?2, 0, 't', 'x')",
+                    (kind, owner),
+                )
+                .unwrap();
+        }
+        assert_eq!(s.embedding_backlog("m").unwrap(), 3);
+        assert_eq!(s.embedding_backlog_shareable("m").unwrap(), 1);
+        let pending = s.pending_embedding_chunks_shareable("m", 10).unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+
     #[test]
     fn delete_audio_keeps_transcripts_and_notes() {
         let (dir, s) = test_storage();
@@ -687,7 +901,7 @@ mod tests {
         s.set_setting("llm.provider", "anthropic").unwrap();
         s.create_folder("Clients", None).unwrap();
 
-        s.erase_all_content().unwrap();
+        assert!(s.erase_all_content().unwrap().checkpointed);
 
         assert!(s.get_meeting(&id).is_err());
         assert!(s.list_folders().unwrap().is_empty());
