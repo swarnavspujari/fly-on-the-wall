@@ -9,7 +9,12 @@
 
 use std::path::{Component, Path, PathBuf};
 
-fn is_plain_name(name: &str) -> bool {
+/// One path component that is a plain name on both Windows and Unix: not
+/// empty / `.` / `..`, no leading space, no trailing dot or space, no
+/// separators, `:` (drive / alternate stream), `<>"|?*` or control chars,
+/// and not a reserved device name (`NUL`, `com1.txt`, …). Also used by the
+/// app's archive extractor to vet zip entry names.
+pub fn is_plain_name(name: &str) -> bool {
     const RESERVED: &[&str] = &[
         "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
         "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",

@@ -426,8 +426,17 @@ pub fn best_installed_asr_model(
 /// opens them, and a multi-GB model orphan must not sit on disk forever.
 /// Age-gated: a LIVE download writes continuously, so its mtime stays fresh;
 /// anything untouched for `max_age` is safely dead. Called off the startup
-/// path (lib.rs).
+/// path (lib.rs). Also retries pruning superseded tool installs (a prune
+/// that failed because an old binary was still running), skipped while an
+/// install holds the install lock.
 pub fn sweep_stale_downloads(data_dir: &Path, max_age: std::time::Duration) {
+    if let Ok(_guard) = INSTALL_LOCK.try_lock() {
+        for a in TOOLS {
+            if installed_path(data_dir, a).is_some() {
+                prune_superseded(data_dir, a);
+            }
+        }
+    }
     let Ok(entries) = std::fs::read_dir(data_dir) else {
         return;
     };
@@ -735,11 +744,7 @@ pub async fn ensure_with(
                 stage: "extracting".into(),
                 error: None,
             });
-            tokio::fs::create_dir_all(&dest)
-                .await
-                .map_err(|e| e.to_string())?;
-            extract_archive(&tmp, &dest, a.url, extract_cap(a.bytes.max(downloaded))).await?;
-            let _ = tokio::fs::remove_file(&tmp).await;
+            install_archive(&tmp, data_dir, a, extract_cap(a.bytes.max(downloaded))).await?;
         }
     }
 
@@ -759,6 +764,174 @@ pub async fn ensure_with(
         error: None,
     });
     Ok(probe)
+}
+
+/// Serializes archive installs within the process. Extraction goes through a
+/// fixed `<dest>.partial` staging dir, and two tasks (live captions + a
+/// post-meeting transcribe on a fresh machine) can race to install the same
+/// engine; holding this while staging/promoting means the loser simply finds
+/// the winner's install. Downloads happen before it, so a slow download never
+/// blocks anyone. Installs are seconds long, so one global lock is enough.
+static INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Install a downloaded, SHA-verified archive for `a`, all or nothing:
+/// extract into `<dest>.partial` (a stale one from a crash is removed
+/// first), then move its top-level entries into `dest` — the entry holding
+/// the probe file last, so the probe never exists before everything it
+/// needs. A failed extraction leaves `dest` untouched and removes the
+/// staging dir. The downloaded archive is always deleted. Afterwards,
+/// superseded installs of the same tool are pruned (best effort).
+async fn install_archive(
+    archive: &Path,
+    data_dir: &Path,
+    a: &Artifact,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let _guard = INSTALL_LOCK.lock().await;
+    let result = async {
+        if installed_path(data_dir, a).is_some() {
+            return Ok(()); // another task installed it while we downloaded
+        }
+        let dest = data_dir.join(a.dest_rel);
+        let staging = staging_dir(&dest);
+        remove_path(&staging)
+            .map_err(|e| format!("extraction failed: cannot clear staging dir: {e}"))?;
+        std::fs::create_dir_all(&staging).map_err(|e| format!("extraction failed: {e}"))?;
+        if let Err(e) = extract_archive(archive, &staging, a.url, max_bytes).await {
+            let _ = remove_path(&staging);
+            return Err(e);
+        }
+        let probe_entry = Path::new(a.probe_rel)
+            .strip_prefix(a.dest_rel)
+            .ok()
+            .and_then(|p| p.components().next())
+            .map(|c| c.as_os_str().to_os_string());
+        let promoted = tokio::task::spawn_blocking({
+            let (staging, dest) = (staging.clone(), dest.clone());
+            move || promote_staging(&staging, &dest, probe_entry.as_deref())
+        })
+        .await
+        .map_err(|e| format!("install task failed: {e}"))?;
+        if let Err(e) = promoted {
+            let _ = remove_path(&staging);
+            return Err(format!("install failed: {e}"));
+        }
+        Ok(())
+    }
+    .await;
+    let _ = tokio::fs::remove_file(archive).await;
+    if result.is_ok() && installed_path(data_dir, a).is_some() {
+        prune_superseded(data_dir, a);
+    }
+    result
+}
+
+/// `<dest>.partial`, next to `dest`.
+fn staging_dir(dest: &Path) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".partial");
+    dest.with_file_name(name)
+}
+
+/// Remove a file, directory tree or link at `p` without following links
+/// (`remove_dir_all` doesn't traverse symlinks/junctions). Missing is fine.
+fn remove_path(p: &Path) -> std::io::Result<()> {
+    let meta = match std::fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if meta.file_type().is_symlink() {
+        // A directory symlink/junction on Windows needs remove_dir.
+        std::fs::remove_file(p).or_else(|_| std::fs::remove_dir(p))
+    } else if meta.is_dir() {
+        std::fs::remove_dir_all(p)
+    } else {
+        std::fs::remove_file(p)
+    }
+}
+
+/// Move every top-level entry of `staging` into `dest` (replacing same-name
+/// entries — that's the repair path for a broken earlier install), the
+/// `last` entry (the one containing the probe) after all others, then drop
+/// the empty staging dir.
+fn promote_staging(
+    staging: &Path,
+    dest: &Path,
+    last: Option<&std::ffi::OsStr>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    let mut names = std::fs::read_dir(staging)?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    names.sort_by_key(|n| Some(n.as_os_str()) == last);
+    for name in names {
+        let to = dest.join(&name);
+        remove_path(&to)?;
+        std::fs::rename(staging.join(&name), &to)?;
+    }
+    std::fs::remove_dir(staging)
+}
+
+/// Tools whose installs live in a versioned subdirectory of `bin/<tool>/`
+/// (the whisper engines' `v1.9.5`, ffmpeg's / sherpa's archive root dir), so
+/// every other entry there is a superseded or legacy install. Ollama is
+/// absent on purpose: its archive root IS `bin/ollama`.
+const PRUNABLE_TOOLS: &[&str] = &["whisper-bin", "whisper-bin-vulkan", "ffmpeg", "sherpa-bin"];
+
+/// `(bin/<tool>, <current entry>)` for a prunable artifact, from its probe
+/// path `bin/<tool>/<current entry>/...`.
+fn prune_plan(a: &Artifact) -> Option<(PathBuf, &'static str)> {
+    if !PRUNABLE_TOOLS.contains(&a.id) {
+        return None;
+    }
+    let parts: Vec<&'static str> = a.probe_rel.split('/').collect();
+    match parts.as_slice() {
+        ["bin", tool, keep, _, ..] => Some((Path::new("bin").join(tool), *keep)),
+        _ => None,
+    }
+}
+
+/// Delete everything in `bin/<tool>/` except the current install of `a`:
+/// older version dirs (whose binaries may carry fixed CVEs, e.g. whisper.cpp
+/// v1.9.1's CVE-2026-110810), the pre-versioning `Release/` layout, stale
+/// `.partial` staging dirs. Strictly inside the data dir's `bin/`: bails if
+/// `bin` or `bin/<tool>` is itself a link, and removes links found inside
+/// without following them. Best effort — a file in use (Windows) just logs
+/// a warning and is retried at the next startup sweep.
+fn prune_superseded(data_dir: &Path, a: &Artifact) {
+    let Some((root_rel, keep)) = prune_plan(a) else {
+        return;
+    };
+    let real_dir = |p: &Path| {
+        std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+    };
+    let root = data_dir.join(&root_rel);
+    if !real_dir(&data_dir.join("bin")) || !real_dir(&root) || !root.join(keep).is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == keep {
+            continue;
+        }
+        match remove_path(&entry.path()) {
+            Ok(()) => tracing::info!(
+                artifact = a.id,
+                entry = %name.to_string_lossy(),
+                "removed superseded tool install"
+            ),
+            Err(e) => tracing::warn!(
+                artifact = a.id,
+                entry = %name.to_string_lossy(),
+                error = %e,
+                "could not remove superseded tool install"
+            ),
+        }
+    }
 }
 
 /// Upper bound on what one archive may extract to: `EXTRACT_MAX_RATIO` × its
@@ -892,12 +1065,15 @@ fn safe_zip_path(raw: &str) -> Option<PathBuf> {
         .strip_suffix('/')
         .or_else(|| raw.strip_suffix('\\'))
         .unwrap_or(raw);
-    if trimmed.is_empty() || trimmed.contains([':', '\0']) {
+    if trimmed.is_empty() {
         return None;
     }
     let mut out = PathBuf::new();
     for part in trimmed.split(['/', '\\']) {
-        if part.is_empty() || part == "." || part == ".." {
+        // Same per-component rules as data-dir paths from IPC/manifests:
+        // also rejects reserved device names, trailing dots/spaces,
+        // `<>:"|?*` and control characters.
+        if !fly_storage::safe_path::is_plain_name(part) {
             return None;
         }
         out.push(part);
@@ -905,12 +1081,26 @@ fn safe_zip_path(raw: &str) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Tar extraction with the same byte cap. Path safety is the `tar` crate's
-/// `unpack_in` (it skips absolute and `..` entries); directories are applied
-/// last, like `Archive::unpack`, so a read-only directory can't block the
-/// files inside it. Symlinks are allowed here: the pinned sherpa/ollama
-/// tarballs use them for versioned shared libraries, and `unpack_in` refuses
-/// to write through a link that points outside `dest`.
+/// A tar symlink target we allow: relative and descending only — plain-name
+/// components, no `..`, no root/drive. Such a link can only point at its own
+/// directory's contents, so no chain of them can lead outside the
+/// destination. Every link in the pinned archives (sherpa / ollama / ffmpeg
+/// versioned shared libraries) is a bare same-directory file name.
+fn safe_link_target(target: &Path) -> bool {
+    target
+        .to_str()
+        .is_some_and(|t| !t.is_empty() && t.split('/').all(fly_storage::safe_path::is_plain_name))
+}
+
+/// Tar extraction with the same byte cap. Entry paths are vetted by the
+/// `tar` crate's `unpack_in` (tar 0.4.46: `..` entries and writes through a
+/// link leading outside `dest` are refused; absolute paths are re-rooted
+/// inside `dest`); an entry it refuses fails the whole extraction instead of
+/// being silently skipped. Hard links are rejected outright (none of the pinned archives
+/// has one); symlinks must pass [`safe_link_target`] — the pinned
+/// sherpa/ollama/ffmpeg tarballs need them for versioned shared libraries.
+/// Directories are applied last, like `Archive::unpack`, so a read-only
+/// directory can't block the files inside it.
 fn extract_tar<R: std::io::Read>(reader: R, dest: &Path, max_bytes: u64) -> Result<(), String> {
     let fail = |e: &dyn std::fmt::Display| format!("extraction failed: {e}");
     std::fs::create_dir_all(dest).map_err(|e| fail(&e))?;
@@ -924,14 +1114,38 @@ fn extract_tar<R: std::io::Read>(reader: R, dest: &Path, max_bytes: u64) -> Resu
         if declared > max_bytes {
             return Err(too_large(max_bytes));
         }
-        if entry.header().entry_type().is_dir() {
-            dirs.push(entry);
-        } else {
-            entry.unpack_in(&dest).map_err(|e| fail(&e))?;
+        let name = entry
+            .path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "<unreadable name>".into());
+        let kind = entry.header().entry_type();
+        if kind.is_hard_link() {
+            return Err(format!(
+                "extraction failed: hard link entry rejected: {name}"
+            ));
+        }
+        if kind.is_symlink() {
+            let target = entry.link_name().map_err(|e| fail(&e))?;
+            if !target.as_deref().is_some_and(safe_link_target) {
+                return Err(format!(
+                    "extraction failed: symlink entry escapes the archive: {name}"
+                ));
+            }
+        }
+        if kind.is_dir() {
+            dirs.push((name, entry));
+        } else if !entry.unpack_in(&dest).map_err(|e| fail(&e))? {
+            return Err(format!(
+                "extraction failed: unsafe entry path rejected: {name}"
+            ));
         }
     }
-    for mut dir in dirs {
-        dir.unpack_in(&dest).map_err(|e| fail(&e))?;
+    for (name, mut dir) in dirs {
+        if !dir.unpack_in(&dest).map_err(|e| fail(&e))? {
+            return Err(format!(
+                "extraction failed: unsafe entry path rejected: {name}"
+            ));
+        }
     }
     Ok(())
 }
@@ -1210,9 +1424,316 @@ mod tests {
             "a/b/..",
             "file.txt:ads",
             "a\0b",
+            // fly_storage::safe_path rules: device names, trailing dot/space,
+            // wildcard/redirect chars, control chars.
+            "NUL",
+            "Release/con",
+            "Release/COM1.dll",
+            "Release/lpt9.txt",
+            "Release/x.",
+            "Release/x ",
+            "Release/ x",
+            "Release/a<b",
+            "Release/a>b",
+            "Release/a|b",
+            "Release/a?b",
+            "Release/a*b",
+            "Release/a\"b",
+            "Release/a\u{1}b",
         ] {
             assert_eq!(safe_zip_path(bad), None, "{bad:?} must be rejected");
         }
+    }
+
+    // ---- tar link entries ----
+
+    /// A tar holding one link entry `name` → `target` of `kind`.
+    fn tar_with_link(kind: tar::EntryType, name: &str, target: &str) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(kind);
+        h.set_size(0);
+        h.set_mode(0o777);
+        b.append_link(&mut h, name, target).unwrap();
+        let mut enc = xz2::write::XzEncoder::new(Vec::new(), 6);
+        enc.write_all(&b.into_inner().unwrap()).unwrap();
+        enc.finish().unwrap()
+    }
+
+    #[tokio::test]
+    async fn tar_rejects_hard_links() {
+        for target in ["../../outside.txt", "/etc/passwd", "inner/ok.txt"] {
+            let bytes = tar_with_link(tar::EntryType::Link, "inner/link", target);
+            let (tmp, dest, res) =
+                try_extract(bytes, "https://example.com/a.tar.xz", EXTRACT_MIN_CAP).await;
+            let err = res.expect_err(target);
+            assert!(err.contains("hard link entry rejected"), "{target}: {err}");
+            assert!(std::fs::symlink_metadata(dest.join("inner/link")).is_err());
+            drop(tmp);
+        }
+    }
+
+    #[tokio::test]
+    async fn tar_rejects_symlinks_escaping_the_destination() {
+        for target in [
+            "../../outside.txt",
+            "..",
+            "/etc/passwd",
+            "sub/../../x",
+            "C:/Windows/System32",
+            "\\\\server\\share",
+        ] {
+            let bytes = tar_with_link(tar::EntryType::Symlink, "inner/link", target);
+            let (_tmp, dest, res) =
+                try_extract(bytes, "https://example.com/a.tar.xz", EXTRACT_MIN_CAP).await;
+            let err = res.expect_err(target);
+            assert!(err.contains("symlink entry escapes"), "{target:?}: {err}");
+            assert!(std::fs::symlink_metadata(dest.join("inner/link")).is_err());
+        }
+    }
+
+    #[test]
+    fn safe_link_targets_are_descending_plain_names() {
+        for ok in [
+            "libonnxruntime.1.17.1.dylib",
+            "libavutil.so.60.26.103",
+            "sub/lib.so",
+        ] {
+            assert!(safe_link_target(Path::new(ok)), "{ok}");
+        }
+        for bad in [
+            "", "..", "../x", "a/../b", "/abs", "./x", "a//b", "C:x", "NUL",
+        ] {
+            assert!(!safe_link_target(Path::new(bad)), "{bad:?}");
+        }
+    }
+
+    /// The real archives' shape — a versioned library plus a same-directory
+    /// symlink to it — still extracts (creating symlinks needs no privilege
+    /// on Unix, unlike Windows).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tar_accepts_same_directory_library_symlinks() {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(5);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, "pkg/lib/libx.so.1.2", &b"probe"[..])
+            .unwrap();
+        let mut l = tar::Header::new_gnu();
+        l.set_entry_type(tar::EntryType::Symlink);
+        l.set_size(0);
+        b.append_link(&mut l, "pkg/lib/libx.so", "libx.so.1.2")
+            .unwrap();
+        let mut enc = xz2::write::XzEncoder::new(Vec::new(), 6);
+        enc.write_all(&b.into_inner().unwrap()).unwrap();
+        let (_t, dest, res) = try_extract(
+            enc.finish().unwrap(),
+            "https://example.com/a.tar.xz",
+            EXTRACT_MIN_CAP,
+        )
+        .await;
+        res.unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("pkg/lib/libx.so")).unwrap(),
+            b"probe"
+        );
+    }
+
+    // ---- staged install + pruning ----
+
+    /// A Windows-whisper-shaped artifact at a fake version, for exercising
+    /// install/prune without the network.
+    const FAKE_ENGINE: Artifact = Artifact {
+        id: "whisper-bin",
+        display: "test engine",
+        url: "https://example.com/whisper-bin-x64.zip",
+        sha256: "",
+        bytes: 0,
+        kind: ArtifactKind::Archive,
+        dest_rel: "bin/whisper/v9.9.9",
+        probe_rel: "bin/whisper/v9.9.9/Release/whisper-cli.exe",
+    };
+
+    fn put(path: &Path, data: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn staging_dir_sits_next_to_dest() {
+        let d = Path::new("data").join("bin/whisper/v1.9.5");
+        assert_eq!(
+            staging_dir(&d),
+            Path::new("data").join("bin/whisper/v1.9.5.partial")
+        );
+    }
+
+    /// The broken-install bug: an archive whose probe extracts before a bad
+    /// entry used to leave the probe on disk, so the half-install looked
+    /// complete forever. Now nothing lands in dest, the staging dir is gone
+    /// and the downloaded archive is deleted.
+    #[tokio::test]
+    async fn failed_extraction_leaves_no_partial_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        let archive = data.join("whisper-bin.download.1.0");
+        std::fs::write(
+            &archive,
+            zip_with(&[
+                ("Release/whisper-cli.exe", b"exe"),
+                ("Release/../../evil.dll", b"x"),
+            ]),
+        )
+        .unwrap();
+        let err = install_archive(&archive, data, &FAKE_ENGINE, EXTRACT_MIN_CAP)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unsafe entry path"), "{err}");
+        assert!(
+            installed_path(data, &FAKE_ENGINE).is_none(),
+            "probe must not exist"
+        );
+        assert!(!data.join("bin/whisper/v9.9.9").exists());
+        assert!(!data.join("bin/whisper/v9.9.9.partial").exists());
+        assert!(!archive.exists(), "temp archive must be removed on failure");
+    }
+
+    #[tokio::test]
+    async fn install_clears_stale_staging_and_repairs_broken_dest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        // A crash leftover in staging, and a broken earlier install whose
+        // Release/ lacks the probe but has a stale file.
+        put(
+            &data.join("bin/whisper/v9.9.9.partial/Release/junk.dll"),
+            b"j",
+        );
+        put(&data.join("bin/whisper/v9.9.9/Release/stale.dll"), b"s");
+        let archive = data.join("whisper-bin.download.1.1");
+        std::fs::write(
+            &archive,
+            zip_with(&[
+                ("Release/ggml.dll", b"dll"),
+                ("Release/whisper-cli.exe", b"exe"),
+            ]),
+        )
+        .unwrap();
+        install_archive(&archive, data, &FAKE_ENGINE, EXTRACT_MIN_CAP)
+            .await
+            .unwrap();
+        let rel = data.join("bin/whisper/v9.9.9/Release");
+        assert_eq!(std::fs::read(rel.join("whisper-cli.exe")).unwrap(), b"exe");
+        assert_eq!(std::fs::read(rel.join("ggml.dll")).unwrap(), b"dll");
+        assert!(!rel.join("stale.dll").exists(), "broken install replaced");
+        assert!(
+            !rel.join("junk.dll").exists(),
+            "stale staging not merged in"
+        );
+        assert!(!data.join("bin/whisper/v9.9.9.partial").exists());
+        assert!(!archive.exists());
+    }
+
+    #[tokio::test]
+    async fn install_prunes_superseded_and_legacy_engine_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        put(
+            &data.join("bin/whisper/Release/whisper-cli.exe"),
+            b"v1.9.1 legacy",
+        );
+        put(
+            &data.join("bin/whisper/v1.9.5/Release/whisper-cli.exe"),
+            b"older",
+        );
+        put(&data.join("bin/whisper/stray.txt"), b"x");
+        put(
+            &data.join("bin/whisper-vulkan/Release/whisper-cli.exe"),
+            b"other tool",
+        );
+        put(&data.join("bin/sherpa/keep/me"), b"other tool");
+        let archive = data.join("whisper-bin.download.1.2");
+        std::fs::write(&archive, zip_with(&[("Release/whisper-cli.exe", b"new")])).unwrap();
+        install_archive(&archive, data, &FAKE_ENGINE, EXTRACT_MIN_CAP)
+            .await
+            .unwrap();
+        let left: Vec<String> = std::fs::read_dir(data.join("bin/whisper"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["v9.9.9"], "only the current version remains");
+        // Other tools' dirs are not this artifact's to prune.
+        assert!(data
+            .join("bin/whisper-vulkan/Release/whisper-cli.exe")
+            .exists());
+        assert!(data.join("bin/sherpa/keep/me").exists());
+    }
+
+    #[test]
+    fn prune_plans_only_versioned_tool_layouts() {
+        let (root, keep) = prune_plan(&FAKE_ENGINE).unwrap();
+        assert_eq!((root, keep), (Path::new("bin").join("whisper"), "v9.9.9"));
+        // Ollama's archive root IS bin/ollama — pruning would delete lib/.
+        let ollama = Artifact {
+            id: "ollama-bin",
+            probe_rel: "bin/ollama/ollama.exe",
+            dest_rel: "bin/ollama",
+            ..FAKE_ENGINE
+        };
+        assert!(prune_plan(&ollama).is_none());
+        // A prunable id with too shallow a probe is refused too.
+        let shallow = Artifact {
+            probe_rel: "bin/whisper/whisper-cli",
+            ..FAKE_ENGINE
+        };
+        assert!(prune_plan(&shallow).is_none());
+        // Every real tool pin that is prunable has a versioned layout.
+        for a in TOOLS.iter().filter(|a| PRUNABLE_TOOLS.contains(&a.id)) {
+            assert!(prune_plan(a).is_some(), "{}", a.id);
+        }
+    }
+
+    #[test]
+    fn prune_does_nothing_without_the_current_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        put(
+            &data.join("bin/whisper/Release/whisper-cli.exe"),
+            b"only copy",
+        );
+        prune_superseded(data, &FAKE_ENGINE);
+        assert!(data.join("bin/whisper/Release/whisper-cli.exe").exists());
+    }
+
+    /// Links inside bin/<tool> are removed as links — their targets survive —
+    /// and a linked bin/<tool> itself is never walked.
+    #[cfg(unix)]
+    #[test]
+    fn prune_never_follows_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let outside = tmp.path().join("outside");
+        put(&outside.join("precious.txt"), b"keep");
+        put(
+            &data.join("bin/whisper/v9.9.9/Release/whisper-cli.exe"),
+            b"exe",
+        );
+        std::os::unix::fs::symlink(&outside, data.join("bin/whisper/old")).unwrap();
+        prune_superseded(&data, &FAKE_ENGINE);
+        assert!(std::fs::symlink_metadata(data.join("bin/whisper/old")).is_err());
+        assert!(
+            outside.join("precious.txt").exists(),
+            "link target untouched"
+        );
+
+        // bin/<tool> as a link to somewhere else: not pruned at all.
+        let data2 = tmp.path().join("data2");
+        put(&outside.join("v9.9.9/Release/whisper-cli.exe"), b"exe");
+        std::fs::create_dir_all(data2.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&outside, data2.join("bin/whisper")).unwrap();
+        prune_superseded(&data2, &FAKE_ENGINE);
+        assert!(outside.join("precious.txt").exists());
     }
 
     /// Network E2E: every tool archive pinned for THIS OS (except the 1.5 GB
