@@ -136,6 +136,8 @@ pub struct ProviderSettings {
     pub model: String,
 }
 
+// See fly-diarize: async-trait output trips Rust 1.99 clippy::double_must_use.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait LLMProvider: Send + Sync {
     /// Stable id: "openai", "anthropic", "nim", "ollama".

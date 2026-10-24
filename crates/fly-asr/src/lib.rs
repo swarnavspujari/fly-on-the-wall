@@ -227,6 +227,8 @@ pub type TranscribeProgressFn<'a> = &'a (dyn Fn(TranscribeProgress) + Send + Syn
 /// batches are already persisted.
 pub type CancelFn<'a> = &'a (dyn Fn() -> bool + Send + Sync);
 
+// See fly-diarize: async-trait output trips Rust 1.99 clippy::double_must_use.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait TranscriptionEngine: Send + Sync {
     /// Stable id: "whisper.cpp", "parakeet", "groq".
