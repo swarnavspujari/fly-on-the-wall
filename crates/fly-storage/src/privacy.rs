@@ -419,7 +419,7 @@ impl Storage {
                             purge.bytes_removed += meta.len();
                         }
                         Err(e) => {
-                            tracing::warn!(meeting_id, file = %path.display(), error = %e,
+                            tracing::warn!(meeting_id, file = %path.file_name().unwrap_or_default().to_string_lossy(), error = %e,
                                 "retention: could not delete audio file");
                             purge.failed.push(
                                 path.file_name()

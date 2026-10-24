@@ -385,7 +385,7 @@ fn remove_best_effort(root: &Path, path: &Path, report: &mut WipeReport) {
         match std::fs::remove_file(path) {
             Ok(()) => report.removed += 1,
             Err(e) => {
-                tracing::warn!(file = %path.display(), error = %e, "wipe: could not delete");
+                tracing::warn!(file = %path.file_name().unwrap_or_default().to_string_lossy(), error = %e, "wipe: could not delete");
                 report.fail(root, path);
             }
         }
