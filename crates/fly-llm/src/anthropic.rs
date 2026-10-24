@@ -97,6 +97,10 @@ pub struct AnthropicProvider {
     pub api_key: String,
     pub model: String,
     pub base_url: String,
+    /// Retry a 400 without the optional feature it names (see
+    /// `relax_after_400`). On in the app; live tests turn it off so a
+    /// rejected request shape fails loudly instead of degrading silently.
+    pub relax_on_400: bool,
 }
 
 impl AnthropicProvider {
@@ -105,6 +109,7 @@ impl AnthropicProvider {
             api_key,
             model,
             base_url: "https://api.anthropic.com".into(),
+            relax_on_400: true,
         }
     }
 
@@ -373,7 +378,7 @@ impl LLMProvider for AnthropicProvider {
 
         let (mut status, mut text) = self.post(&body).await?;
         for _ in 0..4 {
-            if status.as_u16() != 400 || !relax_after_400(&mut body, &text) {
+            if !self.relax_on_400 || status.as_u16() != 400 || !relax_after_400(&mut body, &text) {
                 break;
             }
             (status, text) = self.post(&body).await?;
