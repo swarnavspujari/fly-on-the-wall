@@ -38,32 +38,44 @@ pub struct Artifact {
 /// whisper.cpp and ffmpeg publish no macOS binaries (and whisper.cpp none for
 /// Linux either) — macOS gets a self-built whisper engine hosted on this
 /// repo (below); elsewhere `ensure_tool` falls back to the tool on PATH.
+///
+/// Engine `dest_rel`s carry the version (`bin/whisper/v1.9.5`): an install is
+/// recognized purely by its probe file existing, so an unversioned path would
+/// leave every existing install on the old engine forever. Bumping the
+/// version dir makes the next transcribe fetch the new build; the old one is
+/// simply no longer referenced.
 #[cfg(target_os = "windows")]
 const TOOLS: &[Artifact] = &[
     Artifact {
         id: "whisper-bin",
-        display: "whisper.cpp CLI (CPU, v1.9.1)",
-        url: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip",
-        sha256: "7d8be46ecd31828e1eb7a2ecdd0d6b314feafd82163038ab6092594b0a063539",
-        bytes: 7_982_101,
+        // v1.9.5 (d1be6fd) fixes CVE-2026-110810. Upstream attaches the
+        // Windows binaries to the `b5454` release of that same commit (the
+        // v1.9.5 release itself has no assets); digest = GitHub asset digest,
+        // re-hashed locally 2026-10-23.
+        display: "whisper.cpp CLI (CPU, v1.9.5)",
+        url: "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+        sha256: "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb",
+        bytes: 8_928_640,
         kind: ArtifactKind::Archive,
-        dest_rel: "bin/whisper",
-        probe_rel: "bin/whisper/Release/whisper-cli.exe",
+        dest_rel: "bin/whisper/v1.9.5",
+        probe_rel: "bin/whisper/v1.9.5/Release/whisper-cli.exe",
     },
     // Upstream publishes no Vulkan Windows binary (only CPU/BLAS/CUDA-only),
-    // so this is whisper.cpp v1.9.1 (f049fff) built with -DGGML_VULKAN=1 and
+    // so this is whisper.cpp v1.9.5 (d1be6fd) built with GGML_VULKAN by
+    // .github/workflows/build-whisper-sidecar.yml (run 40054818817) and
     // hosted as a tools release on this repo — one cross-vendor GPU build for
     // NVIDIA/AMD/Intel. Selection is gated by a per-machine benchmark
     // (gpu.rs); the CPU entry above stays the default and is never touched.
+    // Pin re-hashed locally from the hosted asset 2026-10-23.
     Artifact {
         id: "whisper-bin-vulkan",
-        display: "whisper.cpp CLI (Vulkan GPU, v1.9.1)",
-        url: "https://github.com/swarnavspujari/fly-on-the-wall/releases/download/tools-whisper-vulkan-v1.9.1/whisper-bin-x64-vulkan-v1.9.1.zip",
-        sha256: "9dbd3ab65394a26784d79ae495de36311925f1f489a6e0e905841b6076799973",
-        bytes: 23_632_146,
+        display: "whisper.cpp CLI (Vulkan GPU, v1.9.5)",
+        url: "https://github.com/swarnavspujari/fly-on-the-wall/releases/download/tools-whisper-vulkan-v1.9.5/whisper-bin-x64-vulkan-v1.9.5.zip",
+        sha256: "15b9797efe64cf69a8cdd2089f2116e9fa83165f732b9baacd65c56496ba1a1c",
+        bytes: 17_360_733,
         kind: ArtifactKind::Archive,
-        dest_rel: "bin/whisper-vulkan",
-        probe_rel: "bin/whisper-vulkan/Release/whisper-cli.exe",
+        dest_rel: "bin/whisper-vulkan/v1.9.5",
+        probe_rel: "bin/whisper-vulkan/v1.9.5/Release/whisper-cli.exe",
     },
     Artifact {
         id: "sherpa-bin",
@@ -77,13 +89,16 @@ const TOOLS: &[Artifact] = &[
     },
     Artifact {
         id: "ffmpeg",
+        // BtbN keeps month-end autobuilds long-term (dailies are pruned after
+        // ~2 weeks), so pins always use a month-end tag. Digest = GitHub
+        // asset digest, re-hashed locally 2026-10-23.
         display: "ffmpeg (n8.1, screen capture + media import)",
-        url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-gpl-shared-8.1.zip",
-        sha256: "ec51253085a831b517e68cb7a1e46d13fcc8324f5e61ac0b3fd73c56af41ca21",
-        bytes: 79_279_847,
+        url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-win64-gpl-shared-8.1.zip",
+        sha256: "dfe81c3aa0a546ee81980b1b824486dd0fe0a1d452f00cb55135379a74be7bcf",
+        bytes: 90_079_410,
         kind: ArtifactKind::Archive,
         dest_rel: "bin/ffmpeg",
-        probe_rel: "bin/ffmpeg/ffmpeg-n8.1.2-21-gce3c09c101-win64-gpl-shared-8.1/bin/ffmpeg.exe",
+        probe_rel: "bin/ffmpeg/ffmpeg-n8.1.3-9-g29e619e767-win64-gpl-shared-8.1/bin/ffmpeg.exe",
     },
     // Local LLM runtime for the "ollama" provider (Enhance / Ask / polish).
     // Strictly opt-in from Settings — 1.5 GB (bundles CUDA runners); the app
@@ -117,12 +132,12 @@ const TOOLS: &[Artifact] = &[
     Artifact {
         id: "ffmpeg",
         display: "ffmpeg (n8.1, screen capture + media import)",
-        url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-linux64-gpl-shared-8.1.tar.xz",
-        sha256: "23f5d4c8e6fdc24fbbfcbbb8e83a727154f1ef70830b108ac7fd131856777405",
-        bytes: 62_123_996,
+        url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-linux64-gpl-shared-8.1.tar.xz",
+        sha256: "76649c19a7a4615b367251ba4a8adc643f65831278a00e7a0c38398f7f06484b",
+        bytes: 71_911_604,
         kind: ArtifactKind::Archive,
         dest_rel: "bin/ffmpeg",
-        probe_rel: "bin/ffmpeg/ffmpeg-n8.1.2-21-gce3c09c101-linux64-gpl-shared-8.1/bin/ffmpeg",
+        probe_rel: "bin/ffmpeg/ffmpeg-n8.1.3-9-g29e619e767-linux64-gpl-shared-8.1/bin/ffmpeg",
     },
 ];
 
@@ -136,17 +151,18 @@ const TOOLS: &[Artifact] = &[
     // Windows, instead of requiring a `whisper-cli` on PATH (e.g. `brew
     // install whisper-cpp`). While no managed copy is installed yet, a
     // brew/PATH build still wins (resolution: installed → PATH → download).
-    // Pin verified 2026-07-16 by hashing the hosted asset independently of
-    // the workflow's summary; fat header confirmed x86_64 + arm64 slices.
+    // v1.9.5 (d1be6fd), workflow run 40054818817. Pin verified 2026-10-23 by
+    // hashing the hosted asset independently of the workflow's summary; the
+    // build asserted both x86_64 + arm64 slices (lipo).
     Artifact {
         id: "whisper-bin",
-        display: "whisper.cpp CLI (macOS universal, v1.9.1)",
-        url: "https://github.com/swarnavspujari/fly-on-the-wall/releases/download/tools-whisper-v1.9.1/whisper-bin-macos-universal2-v1.9.1.tar.bz2",
-        sha256: "f9a4bcae555dd3d14f0a8795aad63b8a7a006d59f705bca94e83ef2215805070",
-        bytes: 2_388_157,
+        display: "whisper.cpp CLI (macOS universal, v1.9.5)",
+        url: "https://github.com/swarnavspujari/fly-on-the-wall/releases/download/tools-whisper-v1.9.5/whisper-bin-macos-universal2-v1.9.5.tar.bz2",
+        sha256: "b5d4fc49705683c61034650d18b9ec2688a28dab73eb3f959d3e24af5abfa012",
+        bytes: 3_141_122,
         kind: ArtifactKind::Archive,
-        dest_rel: "bin/whisper",
-        probe_rel: "bin/whisper/whisper-cli",
+        dest_rel: "bin/whisper/v1.9.5",
+        probe_rel: "bin/whisper/v1.9.5/whisper-cli",
     },
     // v1.13.x macOS builds bundle an onnxruntime compiled against SDK 15.5
     // whose CoreML EP hard-references MLComputePlan (macOS 14.4+): dyld
@@ -722,7 +738,7 @@ pub async fn ensure_with(
             tokio::fs::create_dir_all(&dest)
                 .await
                 .map_err(|e| e.to_string())?;
-            extract_archive(&tmp, &dest, a.url).await?;
+            extract_archive(&tmp, &dest, a.url, extract_cap(a.bytes.max(downloaded))).await?;
             let _ = tokio::fs::remove_file(&tmp).await;
         }
     }
@@ -745,12 +761,36 @@ pub async fn ensure_with(
     Ok(probe)
 }
 
+/// Upper bound on what one archive may extract to: `EXTRACT_MAX_RATIO` × its
+/// pinned download size, but never below `EXTRACT_MIN_CAP`. Every pinned
+/// archive today expands well under 5× (the Vulkan whisper zip is ~3.3×), so
+/// this only trips on a decompression bomb. Inputs are SHA-256-verified
+/// before extraction; the cap is defense in depth.
+const EXTRACT_MAX_RATIO: u64 = 10;
+const EXTRACT_MIN_CAP: u64 = 1 << 30; // 1 GiB
+
+fn extract_cap(archive_bytes: u64) -> u64 {
+    archive_bytes
+        .saturating_mul(EXTRACT_MAX_RATIO)
+        .max(EXTRACT_MIN_CAP)
+}
+
+fn too_large(max_bytes: u64) -> String {
+    format!("extraction failed: archive expands past the {max_bytes}-byte limit")
+}
+
 /// Extract zip/tar.bz2/tar.xz fully in-process — no external tools. Windows'
 /// bundled bsdtar delegates bzip2 to an external binary most machines lack,
 /// so shelling out breaks .tar.bz2 artifacts on clean installs. The format
 /// comes from `src_name` (the artifact URL) because the downloaded temp file
 /// carries a `{id}.download.{pid}.{n}` name, not the archive's extension.
-async fn extract_archive(archive: &Path, dest: &Path, src_name: &str) -> Result<(), String> {
+/// At most `max_bytes` of file data is written (see [`extract_cap`]).
+async fn extract_archive(
+    archive: &Path,
+    dest: &Path,
+    src_name: &str,
+    max_bytes: u64,
+) -> Result<(), String> {
     let archive = archive.to_path_buf();
     let dest = dest.to_path_buf();
     let name = src_name.to_ascii_lowercase();
@@ -759,21 +799,13 @@ async fn extract_archive(archive: &Path, dest: &Path, src_name: &str) -> Result<
             .map_err(|e| format!("extraction failed: cannot open archive: {e}"))?;
         let reader = std::io::BufReader::new(file);
         if name.ends_with(".zip") {
-            zip::ZipArchive::new(reader)
-                .and_then(|mut z| z.extract(&dest))
-                .map_err(|e| format!("extraction failed: {e}"))
+            extract_zip(reader, &dest, max_bytes)
         } else if name.ends_with(".tar.bz2") {
-            tar::Archive::new(bzip2::read::BzDecoder::new(reader))
-                .unpack(&dest)
-                .map_err(|e| format!("extraction failed: {e}"))
+            extract_tar(bzip2::read::BzDecoder::new(reader), &dest, max_bytes)
         } else if name.ends_with(".tgz") || name.ends_with(".tar.gz") {
-            tar::Archive::new(flate2::read::GzDecoder::new(reader))
-                .unpack(&dest)
-                .map_err(|e| format!("extraction failed: {e}"))
+            extract_tar(flate2::read::GzDecoder::new(reader), &dest, max_bytes)
         } else if name.ends_with(".tar.xz") {
-            tar::Archive::new(xz2::read::XzDecoder::new(reader))
-                .unpack(&dest)
-                .map_err(|e| format!("extraction failed: {e}"))
+            extract_tar(xz2::read::XzDecoder::new(reader), &dest, max_bytes)
         } else {
             Err(format!(
                 "extraction failed: unsupported archive format: {name}"
@@ -782,6 +814,126 @@ async fn extract_archive(archive: &Path, dest: &Path, src_name: &str) -> Result<
     })
     .await
     .map_err(|e| format!("extraction task failed: {e}"))?
+}
+
+/// Zip extraction done entry by entry instead of `ZipArchive::extract`, so
+/// the rules are ours and can't drift with the crate:
+/// - every entry path must be plain relative components — absolute paths,
+///   drive prefixes and any `..` / `.` are rejected (not just ones that
+///   escape `dest`);
+/// - symlink entries are rejected;
+/// - files are created with default permissions; on Unix the only mode bit
+///   honored is "executable" (→ 0o755), so setuid/world-writable bits in an
+///   archive never reach disk;
+/// - total bytes actually written are capped at `max_bytes` (the header's
+///   declared sizes are not trusted).
+fn extract_zip<R: std::io::Read + std::io::Seek>(
+    reader: R,
+    dest: &Path,
+    max_bytes: u64,
+) -> Result<(), String> {
+    use std::io::Read;
+    let fail = |e: &dyn std::fmt::Display| format!("extraction failed: {e}");
+    let mut zip = zip::ZipArchive::new(reader).map_err(|e| fail(&e))?;
+    let mut written: u64 = 0;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| fail(&e))?;
+        let raw = entry
+            .name()
+            .map(|n| n.into_owned())
+            .unwrap_or_else(|_| format!("<entry {i}>"));
+        if entry.is_symlink() {
+            return Err(format!("extraction failed: symlink entry rejected: {raw}"));
+        }
+        let rel = entry
+            .name()
+            .ok()
+            .and_then(|n| safe_zip_path(&n))
+            // Belt and braces: the crate's own check must agree too.
+            .filter(|_| entry.enclosed_name().is_some())
+            .ok_or_else(|| format!("extraction failed: unsafe entry path rejected: {raw}"))?;
+        let out = dest.join(&rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out).map_err(|e| fail(&e))?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| fail(&e))?;
+        }
+        let mut file = std::fs::File::create(&out).map_err(|e| fail(&e))?;
+        let budget = max_bytes - written;
+        // Read one byte past the budget so an over-limit entry is detected
+        // rather than silently truncated.
+        let n = std::io::copy(&mut (&mut entry).take(budget.saturating_add(1)), &mut file)
+            .map_err(|e| fail(&e))?;
+        if n > budget {
+            drop(file);
+            let _ = std::fs::remove_file(&out);
+            return Err(too_large(max_bytes));
+        }
+        written += n;
+        #[cfg(unix)]
+        if entry.unix_mode().is_some_and(|m| m & 0o111 != 0) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| fail(&e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate a zip entry's RAW name (not a crate-simplified one — zip 9's
+/// `enclosed_name` rewrites `a/../b` to `b` and strips a leading `/` rather
+/// than rejecting them). Accepts only `/`- or `\`-separated plain names:
+/// no leading separator, no drive/stream colon, no empty, `.` or `..`
+/// component. A single trailing separator (directory entry) is allowed.
+fn safe_zip_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw
+        .strip_suffix('/')
+        .or_else(|| raw.strip_suffix('\\'))
+        .unwrap_or(raw);
+    if trimmed.is_empty() || trimmed.contains([':', '\0']) {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for part in trimmed.split(['/', '\\']) {
+        if part.is_empty() || part == "." || part == ".." {
+            return None;
+        }
+        out.push(part);
+    }
+    Some(out)
+}
+
+/// Tar extraction with the same byte cap. Path safety is the `tar` crate's
+/// `unpack_in` (it skips absolute and `..` entries); directories are applied
+/// last, like `Archive::unpack`, so a read-only directory can't block the
+/// files inside it. Symlinks are allowed here: the pinned sherpa/ollama
+/// tarballs use them for versioned shared libraries, and `unpack_in` refuses
+/// to write through a link that points outside `dest`.
+fn extract_tar<R: std::io::Read>(reader: R, dest: &Path, max_bytes: u64) -> Result<(), String> {
+    let fail = |e: &dyn std::fmt::Display| format!("extraction failed: {e}");
+    std::fs::create_dir_all(dest).map_err(|e| fail(&e))?;
+    let dest = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
+    let mut archive = tar::Archive::new(reader);
+    let mut declared: u64 = 0;
+    let mut dirs = Vec::new();
+    for entry in archive.entries().map_err(|e| fail(&e))? {
+        let mut entry = entry.map_err(|e| fail(&e))?;
+        declared = declared.saturating_add(entry.size());
+        if declared > max_bytes {
+            return Err(too_large(max_bytes));
+        }
+        if entry.header().entry_type().is_dir() {
+            dirs.push(entry);
+        } else {
+            entry.unpack_in(&dest).map_err(|e| fail(&e))?;
+        }
+    }
+    for mut dir in dirs {
+        dir.unpack_in(&dest).map_err(|e| fail(&e))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -811,7 +963,9 @@ mod tests {
         std::fs::write(&archive, bytes).unwrap();
         let dest = tmp.path().join("out");
         std::fs::create_dir_all(&dest).unwrap();
-        extract_archive(&archive, &dest, src_name).await.unwrap();
+        extract_archive(&archive, &dest, src_name, EXTRACT_MIN_CAP)
+            .await
+            .unwrap();
         let probe = dest.join(probe);
         assert!(probe.is_file(), "missing probe file {}", probe.display());
         assert_eq!(std::fs::read(&probe).unwrap(), b"probe");
@@ -873,10 +1027,221 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let archive = tmp.path().join("fixture.download");
         std::fs::write(&archive, b"junk").unwrap();
-        let err = extract_archive(&archive, tmp.path(), "https://example.com/model.7z")
-            .await
-            .unwrap_err();
+        let err = extract_archive(
+            &archive,
+            tmp.path(),
+            "https://example.com/model.7z",
+            EXTRACT_MIN_CAP,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("unsupported archive format"), "{err}");
+    }
+
+    /// Build a zip in memory; `entries` are (name, data).
+    fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in entries {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(data).unwrap();
+        }
+        zw.finish().unwrap().into_inner()
+    }
+
+    /// Extract `bytes` as `src_name` into a fresh dest; returns (tempdir,
+    /// dest, result) so callers can inspect what did or didn't land.
+    async fn try_extract(
+        bytes: Vec<u8>,
+        src_name: &str,
+        max_bytes: u64,
+    ) -> (tempfile::TempDir, PathBuf, Result<(), String>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("fixture.download");
+        std::fs::write(&archive, bytes).unwrap();
+        let dest = tmp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let res = extract_archive(&archive, &dest, src_name, max_bytes).await;
+        (tmp, dest, res)
+    }
+
+    #[tokio::test]
+    async fn zip_rejects_parent_dir_entries() {
+        for name in ["../evil.txt", "inner/../../evil.txt", "inner/../ok.txt"] {
+            let (tmp, _dest, res) = try_extract(
+                zip_with(&[(name, b"x")]),
+                "https://example.com/a.zip",
+                EXTRACT_MIN_CAP,
+            )
+            .await;
+            let err = res.expect_err(name);
+            assert!(err.contains("unsafe entry path"), "{name}: {err}");
+            assert!(!tmp.path().join("evil.txt").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn zip_rejects_absolute_entries() {
+        for name in ["/abs.txt", "C:/abs.txt", "\\\\server\\share\\abs.txt"] {
+            let (_tmp, _dest, res) = try_extract(
+                zip_with(&[(name, b"x")]),
+                "https://example.com/a.zip",
+                EXTRACT_MIN_CAP,
+            )
+            .await;
+            let err = res.expect_err(name);
+            assert!(err.contains("unsafe entry path"), "{name}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn zip_rejects_symlink_entries() {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zw.add_symlink(
+            "link",
+            "/etc/passwd",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        let (_tmp, dest, res) = try_extract(
+            zw.finish().unwrap().into_inner(),
+            "https://example.com/a.zip",
+            EXTRACT_MIN_CAP,
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(err.contains("symlink entry rejected"), "{err}");
+        assert!(std::fs::symlink_metadata(dest.join("link")).is_err());
+    }
+
+    #[tokio::test]
+    async fn zip_enforces_extracted_size_cap() {
+        let big = vec![0u8; 64 * 1024]; // compresses to almost nothing
+        let bytes = zip_with(&[("a.bin", &big[..]), ("b.bin", &big[..])]);
+        // Fits exactly…
+        let (_t, dest, res) =
+            try_extract(bytes.clone(), "https://example.com/a.zip", 128 * 1024).await;
+        res.unwrap();
+        assert_eq!(
+            std::fs::metadata(dest.join("b.bin")).unwrap().len(),
+            64 * 1024
+        );
+        // …one byte less and the second entry trips the cap.
+        let (_t, dest, res) = try_extract(bytes, "https://example.com/a.zip", 128 * 1024 - 1).await;
+        let err = res.unwrap_err();
+        assert!(err.contains("limit"), "{err}");
+        assert!(
+            !dest.join("b.bin").exists(),
+            "over-limit file must not be left behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn tar_enforces_extracted_size_cap() {
+        let mut enc = xz2::write::XzEncoder::new(Vec::new(), 6);
+        enc.write_all(&tar_bytes()).unwrap(); // one 5-byte file
+        let bytes = enc.finish().unwrap();
+        let (_t, _d, res) = try_extract(bytes.clone(), "https://example.com/a.tar.xz", 5).await;
+        res.unwrap();
+        let (_t, _d, res) = try_extract(bytes, "https://example.com/a.tar.xz", 4).await;
+        assert!(res.unwrap_err().contains("limit"));
+    }
+
+    /// Only the executable bit survives from an archive's Unix mode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn zip_applies_only_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let base = zip::write::SimpleFileOptions::default();
+        zw.start_file("tool", base.unix_permissions(0o4777))
+            .unwrap();
+        zw.write_all(b"#!/bin/sh\n").unwrap();
+        zw.start_file("data.txt", base.unix_permissions(0o666))
+            .unwrap();
+        zw.write_all(b"d").unwrap();
+        let (_t, dest, res) = try_extract(
+            zw.finish().unwrap().into_inner(),
+            "https://example.com/a.zip",
+            EXTRACT_MIN_CAP,
+        )
+        .await;
+        res.unwrap();
+        let mode = |p: &str| {
+            std::fs::metadata(dest.join(p))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        assert_eq!(mode("tool"), 0o755);
+        assert_eq!(
+            // Group-write may come from the process umask; the archive's
+            // 0o666 must not add world-write or any special bit.
+            mode("data.txt") & 0o7002,
+            0,
+            "no setuid/setgid/sticky or world-write bits"
+        );
+    }
+
+    #[test]
+    fn safe_zip_path_accepts_only_plain_relative_names() {
+        assert_eq!(
+            safe_zip_path("Release/whisper-cli.exe"),
+            Some(PathBuf::from("Release").join("whisper-cli.exe"))
+        );
+        assert_eq!(safe_zip_path("Release/"), Some(PathBuf::from("Release")));
+        assert_eq!(
+            safe_zip_path("Release\\ggml.dll"),
+            Some(PathBuf::from("Release").join("ggml.dll"))
+        );
+        for bad in [
+            "",
+            "/",
+            "/abs",
+            "\\abs",
+            "C:/x",
+            "C:x",
+            "a/../b",
+            "../a",
+            "a/./b",
+            "a//b",
+            "a/b/..",
+            "file.txt:ads",
+            "a\0b",
+        ] {
+            assert_eq!(safe_zip_path(bad), None, "{bad:?} must be rejected");
+        }
+    }
+
+    /// Network E2E: every tool archive pinned for THIS OS (except the 1.5 GB
+    /// Ollama runtime) downloads, matches its SHA-256 pin and extracts to its
+    /// probe through the app's own `ensure_with` path. Run after bumping pins:
+    ///   cargo test -p fly-app --lib pinned_tool_archives -- --ignored
+    #[tokio::test]
+    #[ignore = "downloads every pinned tool archive (~150 MB on Windows); run with --ignored"]
+    async fn pinned_tool_archives_download_verify_and_extract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let noop = |_p: ModelProgress| {};
+        let archives = TOOLS
+            .iter()
+            .filter(|a| a.kind == ArtifactKind::Archive && a.id != "ollama-bin");
+        for a in archives {
+            let probe = ensure_with(&noop, tmp.path(), a.id, DownloadEffort::Full)
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e}", a.id));
+            assert_eq!(probe, tmp.path().join(a.probe_rel), "{}", a.id);
+            assert!(probe.is_file(), "{}: probe missing", a.id);
+            eprintln!("ok: {} ({})", a.id, a.url);
+        }
+    }
+
+    #[test]
+    fn extract_cap_scales_with_archive_size() {
+        assert_eq!(extract_cap(1), EXTRACT_MIN_CAP);
+        assert_eq!(extract_cap(1_502_730_186), 15_027_301_860);
+        assert_eq!(extract_cap(u64::MAX), u64::MAX);
     }
 
     /// Concurrent downloads of the same artifact must never share a temp
