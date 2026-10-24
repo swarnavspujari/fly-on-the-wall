@@ -373,7 +373,7 @@ pub fn stage_emitter<R: tauri::Runtime>(
     }
 }
 
-fn recording_active(state: &AppState) -> bool {
+pub(crate) fn recording_active(state: &AppState) -> bool {
     state.recording.lock().unwrap().is_some() || state.screen.lock().unwrap().is_some()
 }
 

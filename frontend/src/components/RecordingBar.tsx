@@ -1,6 +1,9 @@
-import { Square } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, Copy, Megaphone, Square, X } from "lucide-react";
+import { api } from "../api";
+import { recordingNoticeText } from "../privacy";
 import type { RecordingStatus } from "../types";
-import { Button, RecordingIndicator } from "./ui";
+import { Button, Checkbox, RecordingIndicator } from "./ui";
 
 interface Props {
   status: RecordingStatus;
@@ -28,6 +31,48 @@ export function fmtElapsed(ms: number): string {
     : `${m}:${String(sec).padStart(2, "0")}`;
 }
 
+/** State behind the non-blocking "Let participants know" helper: open at the
+ *  start of each recording, collapsible, never gating the capture itself. */
+function useConsentHelper(meetingId: string | null, noteTitle: string | null) {
+  const [open, setOpen] = useState(true);
+  const [notified, setNotified] = useState(false);
+  const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
+
+  useEffect(() => {
+    setOpen(true);
+    setNotified(false);
+    setCopied("idle");
+    if (!meetingId) return;
+    let live = true;
+    api
+      .getMeetingPrivacy(meetingId)
+      .then((p) => {
+        if (!live) return;
+        setNotified(p.participants_notified);
+        if (p.participants_notified) setOpen(false);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [meetingId]);
+
+  const copy = () => {
+    api
+      .copyRecordingNotice(recordingNoticeText(noteTitle))
+      .then(() => setCopied("copied"))
+      .catch(() => setCopied("failed"))
+      .finally(() => window.setTimeout(() => setCopied("idle"), 1800));
+  };
+  const markNotified = (value: boolean) => {
+    if (!meetingId) return;
+    setNotified(value);
+    api.setParticipantsNotified(meetingId, value).catch(() => setNotified(!value));
+    if (value) setOpen(false);
+  };
+  return { open, setOpen, notified, copied, copy, markNotified };
+}
+
 /** Always-visible recording bar (spec §9): while a capture is live this bar is
  *  pinned above everything on every view, on a violet-soft ground, with the
  *  unmissable "system output muted" warning strip on ink beneath it. */
@@ -42,6 +87,7 @@ export default function RecordingBar({
   onOpenNote,
   onOpenPrivacySettings,
 }: Props) {
+  const consent = useConsentHelper(status.active ? status.meeting_id : null, noteTitle);
   if (!status.active) return null;
   const paused = status.state === "paused";
 
@@ -71,6 +117,26 @@ export default function RecordingBar({
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
+          {status.meeting_id &&
+            !consent.open &&
+            (consent.notified ? (
+              <button
+                className="inline-flex cursor-pointer items-center gap-1 text-[12px] font-medium text-primary-soft-text"
+                title="You noted that participants were told about the recording"
+                onClick={() => consent.setOpen(true)}
+              >
+                <Check size={13} strokeWidth={2} /> Participants notified
+              </button>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                startIcon={<Megaphone size={13} strokeWidth={1.75} />}
+                onClick={() => consent.setOpen(true)}
+              >
+                Let participants know
+              </Button>
+            ))}
           {paused ? (
             <Button variant="outline" size="sm" onClick={onResume}>
               Resume
@@ -90,6 +156,55 @@ export default function RecordingBar({
           </Button>
         </div>
       </div>
+      {status.meeting_id && consent.open && (
+        <div
+          role="region"
+          aria-label="Let participants know"
+          className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line bg-surface px-4 py-1.5"
+        >
+          <Megaphone
+            size={14}
+            strokeWidth={1.75}
+            className="flex-none"
+            style={{ color: "var(--primary-text)" }}
+          />
+          <span className="min-w-0 flex-1 text-[12.5px] text-text-2">
+            Let participants know they're being recorded. Some places require everyone's consent.
+          </span>
+          <Button
+            variant="soft"
+            size="xs"
+            startIcon={
+              consent.copied === "copied" ? (
+                <Check size={13} strokeWidth={2} />
+              ) : (
+                <Copy size={13} strokeWidth={1.75} />
+              )
+            }
+            title={recordingNoticeText(noteTitle)}
+            onClick={consent.copy}
+          >
+            {consent.copied === "copied"
+              ? "Copied — paste it in the meeting chat"
+              : consent.copied === "failed"
+                ? "Couldn't copy"
+                : "Copy recording notice"}
+          </Button>
+          <Checkbox
+            checked={consent.notified}
+            onChange={(e) => consent.markNotified(e.target.checked)}
+            label={<span className="text-[12.5px]">Participants notified</span>}
+          />
+          <button
+            title="Hide"
+            aria-label="Hide the participants notice"
+            className="flex-none cursor-pointer rounded p-0.5 text-text-3 hover:text-text"
+            onClick={() => consent.setOpen(false)}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+      )}
       {status.warnings.length > 0 && (
         <div className="bg-brand-ink px-4 py-1.5">
           {status.warnings.map((w) => (

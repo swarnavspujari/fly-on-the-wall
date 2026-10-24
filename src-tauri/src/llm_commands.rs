@@ -97,8 +97,57 @@ pub async fn ensure_provider_ready(state: &AppState) -> Result<(), String> {
     }
 }
 
-/// Build the active provider from settings + keychain.
-pub fn build_provider(state: &AppState) -> Result<Box<dyn LLMProvider>, String> {
+/// Which meeting data a provider is being built for — decides whether the
+/// per-meeting / per-folder "Keep local" control applies.
+#[derive(Debug, Clone, Copy)]
+pub enum DataScope<'a> {
+    /// No meeting content (Settings → Test connection).
+    NoMeetingData,
+    /// A note's content (Enhance, Ask): keep-local if any of its meetings or
+    /// its folder says so.
+    Note(&'a str),
+    /// One meeting's transcript (Polish, Extraction).
+    Meeting(&'a str),
+}
+
+/// Error text when keep-local data meets a cloud provider: names the reason
+/// and both ways forward (local Ollama keeps working).
+pub fn keep_local_refusal(provider: &str) -> String {
+    format!(
+        "this note is set to \"Keep local\", so it isn't sent to {provider}. Switch the AI \
+         provider to Ollama (runs on this device) in Settings, or turn off Keep local for this note"
+    )
+}
+
+/// Cloud-processing policy, pure so it's testable without an app: a local
+/// provider always passes; a cloud provider must not see keep-local data and
+/// needs the user's recorded consent.
+pub fn check_cloud_policy(
+    provider: &str,
+    is_local: bool,
+    consented: bool,
+    keep_local: bool,
+) -> Result<(), String> {
+    if is_local {
+        return Ok(());
+    }
+    if keep_local {
+        return Err(keep_local_refusal(provider));
+    }
+    if !consented {
+        return Err(format!(
+            "confirm that meeting content may be sent to {provider}: open Settings → AI provider \
+             and select it again"
+        ));
+    }
+    Ok(())
+}
+
+/// Build the active provider from settings + keychain, for the data in `scope`.
+pub fn build_provider(
+    state: &AppState,
+    scope: DataScope<'_>,
+) -> Result<Box<dyn LLMProvider>, String> {
     let storage = state.storage.lock().unwrap();
     let get = |k: &str| {
         storage
@@ -128,12 +177,14 @@ pub fn build_provider(state: &AppState) -> Result<Box<dyn LLMProvider>, String> 
         .iter()
         .any(|(id, _, local)| *id == provider && *local);
     let consented = get(&format!("consent.cloud_llm.{provider}")).as_deref() == Some("true");
-    if !is_local && !consented {
-        return Err(format!(
-            "confirm that meeting content may be sent to {provider}: open Settings → AI provider \
-             and select it again"
-        ));
-    }
+    // Per-meeting / per-folder "Keep local" (fly-storage privacy.rs):
+    // enforced here, the one place every LLM task gets its provider.
+    let keep_local = match scope {
+        DataScope::NoMeetingData => false,
+        DataScope::Note(id) => storage.note_keep_local(id),
+        DataScope::Meeting(id) => storage.meeting_keep_local(id),
+    };
+    check_cloud_policy(&provider, is_local, consented, keep_local)?;
     drop(storage);
 
     let key = |name: &'static str| -> Result<String, String> {
@@ -188,7 +239,7 @@ pub async fn enhance_note(
     template_id: String,
 ) -> CmdResult<Note> {
     ensure_provider_ready(&state).await?;
-    let provider = build_provider(&state)?;
+    let provider = build_provider(&state, DataScope::Note(&note_id))?;
     let profile = profile_for(provider.model());
     let (prompt, template) = {
         let storage = state.storage.lock().unwrap();
@@ -327,7 +378,7 @@ pub async fn polish_transcript(
 /// transcription scheduler chains it after every successful pipeline run.
 pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResult, String> {
     ensure_provider_ready(state).await?;
-    let provider = build_provider(state)?;
+    let provider = build_provider(state, DataScope::Meeting(meeting_id))?;
     let raw = {
         let storage = state.storage.lock().unwrap();
         storage
@@ -477,7 +528,7 @@ pub async fn ask_meeting(
     history: Vec<AskMessage>,
 ) -> CmdResult<String> {
     ensure_provider_ready(&state).await?;
-    let provider = build_provider(&state)?;
+    let provider = build_provider(&state, DataScope::Note(&note_id))?;
     let profile = profile_for(provider.model());
     let system = {
         let storage = state.storage.lock().unwrap();
@@ -712,7 +763,7 @@ pub fn set_llm_settings(state: State<'_, AppState>, update: LlmSettingsUpdate) -
 #[tauri::command]
 pub async fn test_llm_connection(state: State<'_, AppState>) -> CmdResult<String> {
     ensure_provider_ready(&state).await?;
-    let provider = build_provider(&state)?;
+    let provider = build_provider(&state, DataScope::NoMeetingData)?;
     let id = provider.id();
     provider
         .test_connection()
@@ -723,7 +774,24 @@ pub async fn test_llm_connection(state: State<'_, AppState>) -> CmdResult<String
 
 #[cfg(test)]
 mod security_tests {
-    use super::validate_base_url;
+    use super::{check_cloud_policy, validate_base_url};
+
+    #[test]
+    fn keep_local_refuses_cloud_providers_but_not_ollama() {
+        // local provider: fine with or without keep-local / consent
+        assert!(check_cloud_policy("ollama", true, false, true).is_ok());
+        assert!(check_cloud_policy("ollama", true, false, false).is_ok());
+        // cloud + keep-local: refused even with consent, and says why
+        let err = check_cloud_policy("anthropic", false, true, true).unwrap_err();
+        assert!(
+            err.contains("Keep local") && err.contains("anthropic"),
+            "{err}"
+        );
+        assert!(err.contains("Ollama"), "must name the local way forward");
+        // cloud without keep-local still needs recorded consent
+        assert!(check_cloud_policy("openai", false, false, false).is_err());
+        assert!(check_cloud_policy("openai", false, true, false).is_ok());
+    }
 
     #[test]
     fn keyed_providers_need_https_except_loopback() {

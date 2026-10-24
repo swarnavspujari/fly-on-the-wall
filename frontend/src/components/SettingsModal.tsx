@@ -25,6 +25,7 @@ import {
   Select,
 } from "./ui";
 import { useTheme } from "../theme";
+import PrivacySection from "./PrivacySection";
 import type { Updater } from "../updater";
 
 interface Props {
@@ -1686,6 +1687,9 @@ export default function SettingsModal({
             </div>
           </Card>
         </section>
+
+        {/* Privacy — encryption notice, audio retention, delete all my data */}
+        <PrivacySection recordingActive={recordingActive} />
 
         {/* Diagnostics (Technical) — where the rolling log files live */}
         {technical && (

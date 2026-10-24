@@ -13,6 +13,7 @@ import type {
   CalendarStatus,
   CalendarToggle,
   CaptureTarget,
+  DiskEncryption,
   ImportStaged,
   ScreenStatus,
   AsrSettings,
@@ -21,18 +22,22 @@ import type {
   LlmSettings,
   LlmSettingsUpdate,
   Meeting,
+  MeetingPrivacy,
   Note,
   NoteSummary,
   OllamaStatus,
   PolishResult,
+  PrivacySettings,
   RecordingStatus,
   ReDiarizeOutcome,
   SearchHit,
   SpeakerUndoState,
+  SweepReport,
   SystemAudioPreflight,
   Template,
   Transcript,
   UpcomingMeetings,
+  WipeReport,
 } from "./types";
 
 export const api = {
@@ -209,4 +214,27 @@ export const api = {
     invoke<ImportStaged>("import_transcribe", { meetingId, order }),
   // Stop a queued/running transcription; finished batches stay checkpointed.
   cancelTranscription: (meetingId: string) => invoke<void>("cancel_transcription", { meetingId }),
+
+  // privacy controls
+  getMeetingPrivacy: (meetingId: string) =>
+    invoke<MeetingPrivacy>("get_meeting_privacy", { meetingId }),
+  /** "Keep local" for every meeting of a note: the backend then refuses cloud
+   *  AI providers and Groq transcription for it. */
+  setNoteKeepLocal: (noteId: string, keepLocal: boolean) =>
+    invoke<void>("set_note_keep_local", { noteId, keepLocal }),
+  setFolderKeepLocal: (folderId: string, keepLocal: boolean) =>
+    invoke<void>("set_folder_keep_local", { folderId, keepLocal }),
+  listLocalOnlyFolders: () => invoke<string[]>("list_local_only_folders"),
+  setParticipantsNotified: (meetingId: string, notified: boolean) =>
+    invoke<void>("set_participants_notified", { meetingId, notified }),
+  copyRecordingNotice: (text: string) => invoke<void>("copy_recording_notice", { text }),
+  getPrivacySettings: () => invoke<PrivacySettings>("get_privacy_settings"),
+  /** How many meetings would lose their audio right now under `days`. */
+  previewAudioRetention: (days: number) => invoke<number>("preview_audio_retention", { days }),
+  /** Set retention (null = never delete) and sweep immediately. */
+  setAudioRetention: (days: number | null) => invoke<SweepReport>("set_audio_retention", { days }),
+  dismissWipeReport: () => invoke<void>("dismiss_wipe_report"),
+  deleteAllData: (includeModels: boolean, confirmation: string) =>
+    invoke<WipeReport>("delete_all_data", { includeModels, confirmation }),
+  diskEncryptionStatus: () => invoke<DiskEncryption>("disk_encryption_status"),
 };

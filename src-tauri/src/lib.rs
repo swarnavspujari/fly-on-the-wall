@@ -17,6 +17,7 @@ pub mod models;
 mod nav_guard;
 pub mod ollama;
 pub mod pipeline;
+pub mod privacy;
 pub mod recording;
 pub mod scheduler;
 mod screen_commands;
@@ -31,6 +32,11 @@ pub fn run() {
     // stdout-only logging here and surfaces via the startup dialog below
     // (AppState::init repeats the same idempotent preparation).
     let data_dir = state::prepared_data_dir();
+    // "Delete all my data" finishes here, on the launch after it was asked
+    // for: before logging or the database open any file in the data dir.
+    if let Ok(dir) = data_dir.as_deref() {
+        privacy::run_pending_wipe(dir);
+    }
     logging::init(data_dir.as_deref().ok());
 
     let mut builder = tauri::Builder::default();
@@ -105,7 +111,9 @@ pub fn run() {
                 let storage = app_state.storage.lock().unwrap();
                 llm_commands::migrate_anthropic_model(&storage);
                 llm_commands::grandfather_cloud_consent(&storage);
+                privacy::record_pending_wipe(&storage);
             }
+            privacy::spawn_disk_encryption_check(app_state.data_dir.clone());
             app.manage(app_state);
             // Warm the hardware cache off the startup path: detection shells
             // out to nvidia-smi and must never sit in front of first paint.
@@ -165,6 +173,8 @@ pub fn run() {
             // embeds pending chunks through Ollama in the background. Fully
             // best-effort — without Ollama, search stays FTS-only.
             embeddings::spawn(app.handle().clone());
+            // Audio retention: shortly after startup, then daily.
+            privacy::spawn_retention(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -256,6 +266,18 @@ pub fn run() {
             import_commands::import_stage,
             import_commands::import_state,
             import_commands::import_transcribe,
+            privacy::get_meeting_privacy,
+            privacy::set_note_keep_local,
+            privacy::set_folder_keep_local,
+            privacy::list_local_only_folders,
+            privacy::set_participants_notified,
+            privacy::copy_recording_notice,
+            privacy::get_privacy_settings,
+            privacy::preview_audio_retention,
+            privacy::set_audio_retention,
+            privacy::dismiss_wipe_report,
+            privacy::delete_all_data,
+            privacy::disk_encryption_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fly on the Wall")
