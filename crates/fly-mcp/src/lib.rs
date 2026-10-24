@@ -56,122 +56,198 @@ impl Server {
 
     /// Handle one JSON-RPC message; `None` = notification (no response).
     pub fn handle_message(&self, raw: &str) -> Option<String> {
-        let msg: Value = match serde_json::from_str(raw) {
-            Ok(v) => v,
-            Err(_) => {
-                return Some(error_response(Value::Null, -32700, "parse error", None));
-            }
-        };
-        let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = msg.get("params").cloned().unwrap_or(Value::Null);
-
-        // notifications get no response
-        let id = id?;
-
-        let modern_version = params
-            .get("_meta")
-            .and_then(|m| m.get(META_PROTOCOL_VERSION))
-            .and_then(|v| v.as_str());
-
-        let result = if method == "initialize" {
-            // legacy era: answer the handshake exactly as before
-            Ok(self.initialize(&params))
-        } else if let Some(version) = modern_version {
-            self.handle_modern(version, method, &params)
-        } else if method == "server/discover" {
-            // modern-only method without its required per-request metadata
-            Err((
-                -32602,
-                format!(
-                    "server/discover requires _meta[\"{META_PROTOCOL_VERSION}\"] (spec 2026-07-28)"
-                ),
-                None,
-            ))
-        } else {
-            // legacy era: metadata-less requests, byte-identical to before
-            match method {
-                "ping" => Ok(json!({})),
-                "tools/list" => Ok(tools_list()),
-                "tools/call" => self.tools_call(&params),
-                _ => Err((-32601, format!("method not found: {method}"), None)),
-            }
-        };
-
-        Some(match result {
-            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
-            Err((code, message, data)) => error_response(id, code, &message, data),
-        })
+        dispatch(raw, &|params| self.tools_call(params))
     }
+}
 
-    /// Modern (2026-07-28) dispatch: validate the per-request `_meta`, then
-    /// answer with modern result envelopes (`resultType`, serverInfo,
-    /// caching hints on cacheable results).
-    fn handle_modern(
-        &self,
-        version: &str,
-        method: &str,
-        params: &Value,
-    ) -> Result<Value, RpcError> {
-        if version != MODERN_PROTOCOL_VERSION {
-            // UnsupportedProtocolVersionError: the client retries with one of ours
-            return Err((
-                -32022,
-                "Unsupported protocol version".into(),
-                Some(json!({
-                    "supported": [MODERN_PROTOCOL_VERSION],
-                    "requested": version
-                })),
-            ));
+/// `tools/call` handler plugged into [`dispatch`].
+type ToolsCall<'a> = dyn Fn(&Value) -> Result<Value, RpcError> + 'a;
+
+/// JSON-RPC framing and both protocol eras. Only `tools/call` needs the
+/// database, so it is the one pluggable step: [`Server`] answers with real
+/// tools, [`LazyServer`] with an "open the app" error while the database
+/// can't be opened.
+fn dispatch(raw: &str, tools_call: &ToolsCall) -> Option<String> {
+    let msg: Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => {
+            return Some(error_response(Value::Null, -32700, "parse error", None));
         }
-        if params
-            .get("_meta")
-            .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
-            .is_none()
-        {
-            return Err((
-                -32602,
-                format!("missing required _meta field \"{META_CLIENT_CAPABILITIES}\""),
-                None,
-            ));
+    };
+    let id = msg.get("id").cloned();
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+
+    // notifications get no response
+    let id = id?;
+
+    let modern_version = params
+        .get("_meta")
+        .and_then(|m| m.get(META_PROTOCOL_VERSION))
+        .and_then(|v| v.as_str());
+
+    let result = if method == "initialize" {
+        // legacy era: answer the handshake exactly as before
+        Ok(initialize(&params))
+    } else if let Some(version) = modern_version {
+        handle_modern(version, method, &params, tools_call)
+    } else if method == "server/discover" {
+        // modern-only method without its required per-request metadata
+        Err((
+            -32602,
+            format!(
+                "server/discover requires _meta[\"{META_PROTOCOL_VERSION}\"] (spec 2026-07-28)"
+            ),
+            None,
+        ))
+    } else {
+        // legacy era: metadata-less requests, byte-identical to before
+        match method {
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(tools_list()),
+            "tools/call" => tools_call(&params),
+            _ => Err((-32601, format!("method not found: {method}"), None)),
         }
-        let result = match method {
-            "server/discover" => json!({
-                "supportedVersions": [MODERN_PROTOCOL_VERSION],
-                "capabilities": { "tools": {} },
-                "instructions": INSTRUCTIONS,
-                "ttlMs": CACHE_TTL_MS,
-                "cacheScope": "public"
-            }),
-            "ping" => json!({}),
-            "tools/list" => {
-                let mut list = tools_list();
-                let obj = list.as_object_mut().expect("tools_list is an object");
-                // static per binary and free of user data → cacheable
-                obj.insert("ttlMs".into(), json!(CACHE_TTL_MS));
-                obj.insert("cacheScope".into(), json!("public"));
-                list
-            }
-            "tools/call" => self.tools_call(params)?,
-            _ => return Err((-32601, format!("method not found: {method}"), None)),
-        };
-        Ok(modernize(result))
+    };
+
+    Some(match result {
+        Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+        Err((code, message, data)) => error_response(id, code, &message, data),
+    })
+}
+
+/// Modern (2026-07-28) dispatch: validate the per-request `_meta`, then
+/// answer with modern result envelopes (`resultType`, serverInfo,
+/// caching hints on cacheable results).
+fn handle_modern(
+    version: &str,
+    method: &str,
+    params: &Value,
+    tools_call: &ToolsCall,
+) -> Result<Value, RpcError> {
+    if version != MODERN_PROTOCOL_VERSION {
+        // UnsupportedProtocolVersionError: the client retries with one of ours
+        return Err((
+            -32022,
+            "Unsupported protocol version".into(),
+            Some(json!({
+                "supported": [MODERN_PROTOCOL_VERSION],
+                "requested": version
+            })),
+        ));
     }
-
-    fn initialize(&self, params: &Value) -> Value {
-        // echo the client's protocol version when given (we speak the basics)
-        let version = params
-            .get("protocolVersion")
-            .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_PROTOCOL_VERSION);
-        json!({
-            "protocolVersion": version,
+    if params
+        .get("_meta")
+        .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
+        .is_none()
+    {
+        return Err((
+            -32602,
+            format!("missing required _meta field \"{META_CLIENT_CAPABILITIES}\""),
+            None,
+        ));
+    }
+    let result = match method {
+        "server/discover" => json!({
+            "supportedVersions": [MODERN_PROTOCOL_VERSION],
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-            "instructions": INSTRUCTIONS
-        })
+            "instructions": INSTRUCTIONS,
+            "ttlMs": CACHE_TTL_MS,
+            "cacheScope": "public"
+        }),
+        "ping" => json!({}),
+        "tools/list" => {
+            let mut list = tools_list();
+            let obj = list.as_object_mut().expect("tools_list is an object");
+            // static per binary and free of user data → cacheable
+            obj.insert("ttlMs".into(), json!(CACHE_TTL_MS));
+            obj.insert("cacheScope".into(), json!("public"));
+            list
+        }
+        "tools/call" => tools_call(params)?,
+        _ => return Err((-32601, format!("method not found: {method}"), None)),
+    };
+    Ok(modernize(result))
+}
+
+fn initialize(params: &Value) -> Value {
+    // echo the client's protocol version when given (we speak the basics)
+    let version = params
+        .get("protocolVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or(DEFAULT_PROTOCOL_VERSION);
+    json!({
+        "protocolVersion": version,
+        "capabilities": { "tools": {} },
+        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+        "instructions": INSTRUCTIONS
+    })
+}
+
+/// Shown for every tool call while the database can't be opened.
+pub const DB_UNAVAILABLE_MESSAGE: &str =
+    "Open Fly on the Wall once to finish updating its database, then retry.";
+
+/// The stdio server as `main` runs it: opens the app's database lazily and
+/// keeps serving when that fails (the app hasn't been opened since an
+/// update, or the database is newer than this binary). The handshake and
+/// tool list still work, every tool call returns [`DB_UNAVAILABLE_MESSAGE`]
+/// with the reason, and the open is retried on each message so the server
+/// recovers without the client restarting it.
+pub struct LazyServer {
+    data_dir: std::path::PathBuf,
+    server: std::cell::RefCell<Option<Server>>,
+}
+
+impl LazyServer {
+    /// Try the open once up front; failures are reported, not fatal.
+    pub fn new(data_dir: std::path::PathBuf) -> Self {
+        let lazy = Self {
+            data_dir,
+            server: std::cell::RefCell::new(None),
+        };
+        if let Err(e) = lazy.ensure_open() {
+            // stderr only: stdout is the protocol channel
+            eprintln!("flyonthewall-mcp: database unavailable, serving errors until it opens: {e}");
+        }
+        lazy
     }
 
+    pub fn is_open(&self) -> bool {
+        self.server.borrow().is_some()
+    }
+
+    fn ensure_open(&self) -> Result<(), StorageError> {
+        if self.is_open() {
+            return Ok(());
+        }
+        // The app owns the schema: never migrate or seed here. Only a first
+        // run, before the app ever created a database, uses the full open so
+        // Claude Desktop still gets a working (empty) server.
+        let storage = match Storage::open_existing(&self.data_dir) {
+            Err(StorageError::NotFound(_)) => Storage::open(&self.data_dir)?,
+            other => other?,
+        };
+        *self.server.borrow_mut() = Some(Server::new(storage));
+        Ok(())
+    }
+
+    pub fn handle_message(&self, raw: &str) -> Option<String> {
+        let unavailable = self.ensure_open().err();
+        if let Some(server) = self.server.borrow().as_ref() {
+            return server.handle_message(raw);
+        }
+        let reason = unavailable.map(|e| e.to_string()).unwrap_or_default();
+        dispatch(raw, &|_params| {
+            Ok(json!({
+                "content": [{"type": "text", "text": format!("{DB_UNAVAILABLE_MESSAGE} ({reason})")}],
+                "isError": true
+            }))
+        })
+    }
+}
+
+impl Server {
     fn tools_call(&self, params: &Value) -> Result<Value, RpcError> {
         let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -218,23 +294,42 @@ impl Server {
         };
         // Keep-local hits are dropped; keep paging (bounded) so a page isn't
         // left short just because hidden notes ranked high. The cursor is
-        // the raw rank offset, so later pages stay consistent.
+        // the raw rank offset of the next row NOT yet consumed (hidden or
+        // not), so later pages neither skip nor repeat rows, and at most
+        // `limit` hits are returned.
         let mut hits = Vec::new();
+        let mut next_offset = offset;
         let mut more = false;
-        for _ in 0..SEARCH_REFILL_PAGES {
+        'pages: for _ in 0..SEARCH_REFILL_PAGES {
+            filter.offset = next_offset;
             let page = self
                 .storage
                 .search_filtered(query, &filter)
                 .map_err(|e| e.to_string())?;
-            more = page.len() >= limit;
-            hits.extend(page.into_iter().filter(|h| !hidden.contains(&h.note_id)));
-            filter.offset += limit;
-            if hits.len() >= limit || !more {
+            let full = page.len() >= limit;
+            more = full;
+            let rows = page.len();
+            for (i, h) in page.into_iter().enumerate() {
+                next_offset += 1;
+                if !hidden.contains(&h.note_id) {
+                    hits.push(h);
+                    if hits.len() >= limit {
+                        more = full || i + 1 < rows;
+                        break 'pages;
+                    }
+                }
+            }
+            if !full {
                 break;
             }
         }
-        let next_offset = filter.offset;
         if hits.is_empty() {
+            if more {
+                return Ok(format!(
+                    "No shareable matches for \"{query}\" in this window.\n\
+                     More may exist — pass cursor: \"{next_offset}\" to continue.\n"
+                ));
+            }
             return Ok(format!("No matches for \"{query}\"."));
         }
         let n = hits.len();
@@ -268,25 +363,31 @@ impl Server {
         if folders.is_empty() {
             return Ok("No folders yet.".into());
         }
+        // Keep-local folders (the set already includes their descendants)
+        // are omitted entirely — name, id and place in the hierarchy. A
+        // visible folder never points at a hidden parent.
         let local = self
             .storage
             .keep_local_folder_ids()
             .map_err(keep_local_lookup_error)?;
+        let visible: Vec<_> = folders
+            .into_iter()
+            .filter(|f| !local.contains(&f.id))
+            .collect();
+        if visible.is_empty() {
+            return Ok("No folders yet.".into());
+        }
         let mut out = String::from("Folders:\n");
-        for f in folders {
+        for f in visible {
             out.push_str(&format!(
-                "- {} (id: {}{}){}\n",
+                "- {} (id: {}{})\n",
                 f.name,
                 f.id,
                 f.parent_id
                     .as_deref()
+                    .filter(|p| !local.contains(*p))
                     .map(|p| format!(", parent: {p}"))
                     .unwrap_or_default(),
-                if local.contains(&f.id) {
-                    " — Keep local: its notes aren't shared with AI tools"
-                } else {
-                    ""
-                }
             ));
         }
         Ok(out)
@@ -548,6 +649,12 @@ impl Server {
             }
         }
         if notes.is_empty() {
+            if let (true, Some((ts, id))) = (more, cursor) {
+                return Ok(format!(
+                    "No shareable notes in this window.\n\
+                     More may exist — pass cursor: \"{ts}|{id}\" to continue.\n"
+                ));
+            }
             return Ok("No notes match.".into());
         }
         let mut out = String::from("Recent notes:\n");
@@ -1956,15 +2063,147 @@ mod tests {
             assert_no_leak(&f, &recent);
         }
 
+        // keep-local folders (and inherited descendants) are not listed at all
         let folders = tool_text(&f.server, "list_folders", json!({}));
-        let marked = |name: &str| {
-            folders
-                .lines()
-                .find(|l| l.starts_with(&format!("- {name} ")))
-                .unwrap_or_else(|| panic!("{name} missing: {folders}"))
-                .contains("Keep local")
+        assert!(
+            !folders.contains("Legal") && !folders.contains("Cases"),
+            "{folders}"
+        );
+    }
+
+    /// A database the server can't open (here: not a SQLite file — the same
+    /// path a too-old or too-new schema takes) must not kill the server:
+    /// the handshake and tool list still answer, tool calls explain what to
+    /// do, and the next call after the app fixes the database just works.
+    #[test]
+    fn lazy_server_serves_errors_until_the_database_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("flyonthewall.db");
+        std::fs::write(&db, b"definitely not sqlite, just garbage bytes here").unwrap();
+        let lazy = LazyServer::new(dir.path().to_path_buf());
+        assert!(!lazy.is_open());
+
+        let call = |msg: serde_json::Value| -> serde_json::Value {
+            serde_json::from_str(&lazy.handle_message(&msg.to_string()).unwrap()).unwrap()
         };
-        assert!(marked("Legal") && marked("Cases"), "inherited: {folders}");
+        let init = call(
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+        );
+        assert_eq!(init["result"]["serverInfo"]["name"], SERVER_NAME);
+        let tools = call(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
+        assert!(tools["result"]["tools"].as_array().unwrap().len() > 5);
+        assert!(lazy
+            .handle_message(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            .is_none());
+        let search = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_notes","arguments":{"query":"x"}}});
+        let resp = call(search.clone());
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with(DB_UNAVAILABLE_MESSAGE), "{text}");
+
+        // the app opens and repairs its database; no client restart needed
+        std::fs::remove_file(&db).unwrap();
+        drop(Storage::open(dir.path()).unwrap());
+        let resp = call(search);
+        assert_ne!(resp["result"]["isError"], true, "{resp}");
+        assert!(lazy.is_open());
+    }
+
+    #[test]
+    fn list_folders_never_reveals_a_local_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let work = storage.create_folder("Work", None).unwrap();
+        let clients = storage.create_folder("Clients", Some(&work.id)).unwrap();
+        let legal = storage.create_folder("Legal", None).unwrap();
+        let cases = storage.create_folder("Cases", Some(&legal.id)).unwrap();
+        storage.set_folder_keep_local(&legal.id, true).unwrap();
+        let server = Server::new(storage);
+        let text = tool_text(&server, "list_folders", json!({}));
+        assert!(text.contains(&format!(
+            "- Clients (id: {}, parent: {})",
+            clients.id, work.id
+        )));
+        assert!(
+            text.contains(&format!("- Work (id: {})", work.id)),
+            "{text}"
+        );
+        for leak in ["Legal", "Cases", legal.id.as_str(), cases.id.as_str()] {
+            assert!(!text.contains(leak), "{leak} leaked: {text}");
+        }
+    }
+
+    /// 25 keep-local notes all newer than / ranking with one shared note:
+    /// with limit 1 the refill window (10 pages) can be all hidden. Every
+    /// reply must then still offer a cursor, never more than `limit` hits,
+    /// and following cursors must reach the shared note.
+    #[test]
+    fn hidden_only_windows_still_return_a_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let shared = storage.create_note("zeta shared", None).unwrap();
+        storage
+            .update_note_scratchpad(&shared.id, "zeta topic")
+            .unwrap();
+        let legal = storage.create_folder("Legal", None).unwrap();
+        storage.set_folder_keep_local(&legal.id, true).unwrap();
+        for i in 0..25 {
+            let n = storage
+                .create_note(&format!("zeta hidden {i}"), Some(&legal.id))
+                .unwrap();
+            storage.update_note_scratchpad(&n.id, "zeta topic").unwrap();
+        }
+        let server = Server::new(storage);
+        let cursor_of = |text: &str| {
+            text.split("pass cursor: \"")
+                .nth(1)
+                .map(|rest| rest.split('"').next().unwrap().to_string())
+        };
+        for (tool, base) in [
+            ("search_notes", json!({"query": "zeta", "limit": 1})),
+            ("list_recent", json!({"limit": 1})),
+        ] {
+            let mut args = base.clone();
+            let mut found = false;
+            for _ in 0..10 {
+                let text = tool_text(&server, tool, args.clone());
+                assert!(!text.contains("hidden"), "{tool} leaked: {text}");
+                assert!(
+                    text.matches("note_id: ").count() <= 1,
+                    "{tool} returned more than limit: {text}"
+                );
+                if text.contains(&shared.id) {
+                    found = true;
+                    break;
+                }
+                let next = cursor_of(&text)
+                    .unwrap_or_else(|| panic!("{tool}: no cursor while rows remain: {text}"));
+                args["cursor"] = json!(next);
+            }
+            assert!(found, "{tool}: shared note never reached");
+        }
+    }
+
+    #[test]
+    fn search_returns_at_most_limit_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let legal = storage.create_folder("Legal", None).unwrap();
+        storage.set_folder_keep_local(&legal.id, true).unwrap();
+        // interleave hidden and shared so a refill page overshoots
+        for i in 0..12 {
+            let folder = (i % 2 == 0).then_some(legal.id.as_str());
+            let n = storage.create_note(&format!("omega {i}"), folder).unwrap();
+            storage.update_note_scratchpad(&n.id, "omega").unwrap();
+        }
+        let server = Server::new(storage);
+        let text = tool_text(
+            &server,
+            "search_notes",
+            json!({"query": "omega", "limit": 4}),
+        );
+        assert_eq!(text.matches("note_id: ").count(), 4, "{text}");
+        assert!(text.contains("pass cursor"), "{text}");
     }
 
     #[test]

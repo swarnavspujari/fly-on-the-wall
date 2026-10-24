@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, Write};
 
-use fly_mcp::Server;
+use fly_mcp::LazyServer;
 
 fn main() -> anyhow::Result<()> {
     let mut data_dir = dirs::data_dir()
@@ -18,15 +18,9 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // The app owns the schema: open its database without migrating or
-    // seeding (both would race the app's own startup). Only a first run,
-    // before the app has ever created a database, falls back to the full
-    // open so Claude Desktop still gets a working (empty) server.
-    let storage = match fly_storage::Storage::open_existing(&data_dir) {
-        Err(fly_storage::StorageError::NotFound(_)) => fly_storage::Storage::open(&data_dir)?,
-        other => other?,
-    };
-    let server = Server::new(storage);
+    // Opens the app's database without migrating or seeding, and keeps
+    // serving (with a clear error per tool call) while it can't be opened.
+    let server = LazyServer::new(data_dir.clone());
     // logs must go to stderr — stdout is the protocol channel
     eprintln!(
         "flyonthewall-mcp v{} serving {}",
