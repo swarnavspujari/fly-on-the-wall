@@ -56,13 +56,22 @@ fn link_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()
     Ok(())
 }
 
+/// Installed-file path of a registry artifact (relative to the data dir) —
+/// the same probe path the app checks, so a version bump in models.rs can't
+/// leave these tests looking in a stale location.
+fn probe(id: &str) -> &'static str {
+    fly_app_lib::models::artifact(id)
+        .unwrap_or_else(|| panic!("no {id} artifact on this OS"))
+        .probe_rel
+}
+
 #[test]
 #[ignore = "needs whisper/sherpa artifacts in %APPDATA%/FlyOnTheWall; run with --ignored"]
 fn transcription_defers_to_recording_then_completes() {
     let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
     let needed = [
-        "bin/whisper/Release/whisper-cli.exe",
-        "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe",
+        probe("whisper-bin"),
+        probe("sherpa-bin"),
         "models/diarize/sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
         "models/diarize/campplus.onnx",
         "models/asr/ggml-small-q5_1.bin",

@@ -1,0 +1,48 @@
+# cargo-deny configuration — run by the `security-audit` job in
+# .github/workflows/ci.yml as `cargo deny check advisories bans sources`.
+# Locally: `cargo install cargo-deny --locked` then the same command.
+
+[graph]
+# Check the dependency graph for every target we ship on.
+targets = [
+  "x86_64-pc-windows-msvc",
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+]
+all-features = true
+
+[advisories]
+# Vulnerabilities (and yanked crates) fail the build. Unmaintained notices
+# only fail for crates in our own workspace — transitive "unmaintained"
+# advisories (mostly deep in the Tauri/GTK tree) are not actionable here.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = [
+  # quick-xml — reached only through the build-time plist / bundler path
+  # (Info.plist generation), never with untrusted input at runtime; no fix
+  # until the upstream Tauri bundler/plist chain moves to a patched quick-xml.
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml via build-time plist only; awaiting upstream bump" },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml via build-time plist only; awaiting upstream bump" },
+  # zip 4.x — our own extraction (models.rs::extract_archive) is on zip 9,
+  # where these are fixed. The only remaining zip 4 is tauri-plugin-updater's
+  # private copy (Windows only; 2.14.0 is the newest 2.x and still requires
+  # ^4), which extracts nothing but update archives whose minisign signature
+  # has already been verified against the pubkey in tauri.conf.json. Drop
+  # these once the updater moves to a fixed zip.
+  { id = "RUSTSEC-2026-0367", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
+  { id = "RUSTSEC-2026-0368", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
+  { id = "RUSTSEC-2026-0369", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
+]
+
+[bans]
+# Duplicate versions are common in the Tauri tree; surface them, don't fail.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Every crate must come from crates.io — no unknown registries or git deps.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

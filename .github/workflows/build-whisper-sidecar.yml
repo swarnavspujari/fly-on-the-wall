@@ -1,29 +1,50 @@
-name: Build whisper sidecar (macOS)
+name: Build whisper sidecars (macOS + Windows Vulkan)
 
-# Builds the managed macOS whisper.cpp engine (static, universal x86_64+arm64,
-# Metal embedded) via scripts/build-whisper-sidecar.sh, prints the Artifact
-# pin (url / sha256 / bytes) for src-tauri/src/models.rs, and — only when the
-# `create_release` input is set — uploads the tarball as an asset on a
-# `tools-whisper-v1.9.1` release of THIS repo (same hosting pattern as the
-# Windows Vulkan build's `tools-whisper-vulkan-v1.9.1`). Manual-only: this is
-# a maintainer tool, not part of CI.
+# Builds the managed whisper.cpp engines this repo hosts itself, via
+# scripts/build-whisper-sidecar.sh, at the version pinned there
+# (WHISPER_TAG / WHISPER_COMMIT — the single source of truth):
+#   - macOS:  static, universal x86_64+arm64, Metal embedded
+#             → release `tools-whisper-<tag>`
+#   - Windows: Vulkan GPU build (upstream publishes no Windows Vulkan binary)
+#             → release `tools-whisper-vulkan-<tag>`
+# Each job prints the Artifact pin (url / sha256 / bytes) for
+# src-tauri/src/models.rs. Releases are only created when the
+# `create_release` input is set; otherwise the archives are run artifacts.
+# The Windows CPU engine is NOT built here — it is upstream's own release
+# asset of the same commit. Manual-only: a maintainer tool, not part of CI.
+#
+# Tool releases MUST stay prerelease: a non-prerelease release hijacks
+# /releases/latest and the Tauri updater 404s on latest.json for every user.
+# Their `tools-*` tags never collide with the app's `vX.Y.Z` tags.
 on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: "Create/update the tools-whisper-v1.9.1 release and attach the tarball (otherwise the tarball is only a run artifact)"
+        description: "Create the tools-whisper(-vulkan)-<tag> prereleases and attach the archives (otherwise they are only run artifacts)"
         type: boolean
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  macos:
     name: Build & pin (macOS universal)
     runs-on: macos-latest
+    permissions:
+      contents: write # only used by "Attach to tools release" (create_release input)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Read pinned whisper.cpp tag
+        id: pin
+        shell: bash
+        run: |
+          TAG=$(sed -n 's/^WHISPER_TAG="\(v[0-9.]*\)"$/\1/p' scripts/build-whisper-sidecar.sh)
+          [[ -n "$TAG" ]] || { echo "could not read WHISPER_TAG from the build script" >&2; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       # git + cmake + Xcode CLTs are preinstalled on GitHub's macOS runners.
       - name: Build whisper-cli (static universal, Metal embedded)
@@ -37,7 +58,7 @@ jobs:
           SHA=$(shasum -a 256 "${ASSET[0]}" | awk '{print $1}')
           BYTES=$(wc -c < "${ASSET[0]}" | tr -d ' ')
           {
-            echo "### Artifact pin for src-tauri/src/models.rs"
+            echo "### Artifact pin for src-tauri/src/models.rs (macOS)"
             echo '```'
             echo "asset:  $(basename "${ASSET[0]}")"
             echo "sha256: ${SHA}"
@@ -46,7 +67,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload tarball as run artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: whisper-bin-macos-universal2
           path: dist/whisper-bin-macos-universal2-*.tar.bz2
@@ -54,19 +75,110 @@ jobs:
 
       - name: Attach to tools release
         if: inputs.create_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          tag_name: tools-whisper-v1.9.1
-          name: "tools: whisper.cpp v1.9.1 (macOS engine)"
+          tag_name: tools-whisper-${{ steps.pin.outputs.tag }}
+          name: "tools: whisper.cpp ${{ steps.pin.outputs.tag }} (macOS engine)"
           body: |
             Managed macOS whisper.cpp engine for Fly on the Wall — static,
             universal (x86_64 + arm64), Metal embedded, built from the pinned
-            v1.9.1 commit by the build-whisper-sidecar workflow. Downloaded on
-            first transcribe and verified against the SHA-256 pin in
-            `src-tauri/src/models.rs`. Not a user-facing app release.
+            ${{ steps.pin.outputs.tag }} commit by the build-whisper-sidecar
+            workflow. Downloaded on first transcribe and verified against the
+            SHA-256 pin in `src-tauri/src/models.rs`. Not a user-facing app
+            release.
           draft: false
           # Must stay prerelease: a non-prerelease tools release hijacks
           # /releases/latest and breaks the Tauri updater's latest.json fetch.
           prerelease: true
+          make_latest: false
           files: dist/whisper-bin-macos-universal2-*.tar.bz2
+          fail_on_unmatched_files: true
+
+  windows-vulkan:
+    name: Build & pin (Windows x64 Vulkan)
+    runs-on: windows-2022
+    permissions:
+      contents: write # only used by "Attach to tools release" (create_release input)
+    env:
+      # LunarG Vulkan SDK used for the build (same version as the v1.9.1
+      # build). The installer is checked against this SHA-256, which matches
+      # LunarG's published digest (sdk.lunarg.com/sdk/sha/...).
+      VULKAN_VERSION: "1.4.350.0"
+      VULKAN_SDK_SHA256: "855b27ba05d2d8119c5114c5d4ff870ca38f2c632b11e1bb9923b9b7e6ecfe7b"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Read pinned whisper.cpp tag
+        id: pin
+        shell: bash
+        run: |
+          TAG=$(sed -n 's/^WHISPER_TAG="\(v[0-9.]*\)"$/\1/p' scripts/build-whisper-sidecar.sh)
+          [[ -n "$TAG" ]] || { echo "could not read WHISPER_TAG from the build script" >&2; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install Vulkan SDK (SHA-256 verified)
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "vulkansdk.exe"
+          curl.exe -fsSL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          $sha = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLower()
+          if ($sha -ne $env:VULKAN_SDK_SHA256) { throw "Vulkan SDK installer SHA-256 mismatch: $sha" }
+          # Start-Process -Wait: `&` doesn't wait for a GUI-subsystem installer.
+          $p = Start-Process -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK install failed ($($p.ExitCode))" }
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          if (-not (Test-Path "$sdk\Bin\glslc.exe")) { throw "glslc.exe missing under $sdk" }
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=$sdk"
+          Add-Content $env:GITHUB_PATH "$sdk\Bin"
+
+      # MSVC (Visual Studio 2022), cmake, git, python and Git Bash are
+      # preinstalled on windows-2022 runners.
+      - name: Build whisper-cli (Vulkan, shared, all CPU variants)
+        shell: bash
+        run: bash scripts/build-whisper-sidecar.sh windows-vulkan
+
+      - name: Emit Artifact pin to the job summary
+        shell: bash
+        run: |
+          ASSET=(dist/whisper-bin-x64-vulkan-*.zip)
+          SHA=$(sha256sum "${ASSET[0]}" | awk '{print $1}')
+          BYTES=$(wc -c < "${ASSET[0]}" | tr -d ' ')
+          {
+            echo "### Artifact pin for src-tauri/src/models.rs (Windows Vulkan)"
+            echo '```'
+            echo "asset:  $(basename "${ASSET[0]}")"
+            echo "sha256: ${SHA}"
+            echo "bytes:  ${BYTES}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload zip as run artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: whisper-bin-x64-vulkan
+          path: dist/whisper-bin-x64-vulkan-*.zip
+          if-no-files-found: error
+
+      - name: Attach to tools release
+        if: inputs.create_release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: tools-whisper-vulkan-${{ steps.pin.outputs.tag }}
+          name: "tools: whisper.cpp ${{ steps.pin.outputs.tag }} (Windows Vulkan engine)"
+          body: |
+            whisper.cpp ${{ steps.pin.outputs.tag }} (pinned upstream commit)
+            built with GGML_VULKAN (MSVC + Vulkan SDK ${{ env.VULKAN_VERSION }})
+            for Windows x64 by the build-whisper-sidecar workflow — the
+            cross-vendor GPU engine used by Fly on the Wall's optional GPU
+            transcription (models.rs id `whisper-bin-vulkan`). Verified against
+            the SHA-256 pin in `src-tauri/src/models.rs` on download. Not a
+            user-facing app release.
+          draft: false
+          # Must stay prerelease: a non-prerelease tools release hijacks
+          # /releases/latest and breaks the Tauri updater's latest.json fetch.
+          prerelease: true
+          make_latest: false
+          files: dist/whisper-bin-x64-vulkan-*.zip
           fail_on_unmatched_files: true

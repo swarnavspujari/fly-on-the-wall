@@ -98,7 +98,7 @@ impl AppState {
 /// Pre-rebrand identifiers, kept only so the one-time migration below can find
 /// a user's existing data dir and secrets.
 const LEGACY_DATA_DIR: &str = "Looma";
-const LEGACY_KEYCHAIN_SERVICE: &str = "com.looma.notetaker";
+pub(crate) const LEGACY_KEYCHAIN_SERVICE: &str = "com.looma.notetaker";
 /// Current data-dir name under the OS data directory.
 const DATA_DIR: &str = "FlyOnTheWall";
 

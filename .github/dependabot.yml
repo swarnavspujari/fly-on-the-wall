@@ -1,0 +1,37 @@
+version: 2
+
+# Keeps the SHA-pinned actions and the lockfile-pinned npm / cargo trees
+# current. Minor + patch bumps are grouped into one PR per ecosystem per week;
+# majors still arrive as individual PRs so they get individual review.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      npm-root-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    groups:
+      npm-frontend-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]

@@ -109,8 +109,12 @@ pub(crate) fn reset_staged_started(state: &AppState, meeting_id: &str) {
 pub(crate) fn purge_staged_import(state: &AppState, meeting_id: &str) {
     if let Ok(Some(staged)) = load_staged(state, meeting_id) {
         if let Some(rel) = staged.files.iter().find_map(|f| f.rel_path.clone()) {
-            if let Some(dir) = state.data_dir.join(rel).parent() {
-                let _ = std::fs::remove_dir_all(dir);
+            // Only ever the staged-copies folder under recordings/: the
+            // manifest lives in a settings row, so don't trust it blindly.
+            if let Some((dir, _)) = rel.rsplit_once('/') {
+                if let Some(dir) = fly_storage::contained_recordings_dir(&state.data_dir, dir) {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
             }
         }
     }
@@ -155,6 +159,8 @@ pub async fn import_stage(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<Option<ImportStaged>> {
+    // "Delete all my data" refuses to run while files are being imported
+    let _busy = crate::privacy::ImportGuard::enter();
     let exts: Vec<&str> = AUDIO_EXTS.iter().chain(VIDEO_EXTS).copied().collect();
     let Some(picked) = app
         .dialog()
@@ -313,6 +319,7 @@ pub async fn import_transcribe(
     meeting_id: String,
     order: Vec<String>,
 ) -> CmdResult<ImportStaged> {
+    let _busy = crate::privacy::ImportGuard::enter();
     let Some(staged) = load_staged(&state, &meeting_id)? else {
         return Err("no staged import for this meeting".into());
     };
@@ -419,7 +426,7 @@ pub async fn import_transcribe(
         for f in files.iter().filter(|f| f.kind == "video") {
             if let Some(rel) = &f.rel_path {
                 if let Err(e) = storage.add_attachment_in_place(&staged.note_id, rel) {
-                    tracing::warn!(error = %e, rel, "attaching imported video failed");
+                    tracing::warn!(error = %e, note_id = %staged.note_id, "attaching imported video failed");
                 }
             }
         }

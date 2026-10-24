@@ -143,6 +143,12 @@ pub fn sidecar_threads() -> usize {
     (n / 2).clamp(2, 8)
 }
 
+/// Whether this meeting may be transcribed by the cloud (Groq): only when
+/// the user turned cloud ASR on AND the meeting isn't marked "Keep local".
+pub fn cloud_asr_allowed(use_groq: bool, tier: &str, keep_local: bool) -> bool {
+    (use_groq || tier == "cloud") && !keep_local
+}
+
 pub async fn run_with(
     state: &AppState,
     on_stage: StageSink<'_>,
@@ -161,14 +167,30 @@ pub async fn run_with(
     // not kill this fresh one; requests arriving from here on stick.
     state.cancel_requests.lock().unwrap().remove(meeting_id);
 
-    let (recording, hint, data_dir) = {
+    let (recording, hint, data_dir, keep_local) = {
         let storage = state.storage.lock().unwrap();
         let meeting = storage.get_meeting(meeting_id).map_err(|e| e.to_string())?;
         let hint = speaker_hint(&meeting);
         let recording = meeting
             .recording
             .ok_or("meeting has no recording to transcribe")?;
-        (recording, hint, state.data_dir.clone())
+        let privacy = storage
+            .get_meeting_privacy(meeting_id)
+            .map_err(|e| e.to_string())?;
+        if privacy.audio_deleted_at.is_some() {
+            // Same permanent-failure marker as missing files: retrying can't
+            // bring deleted audio back.
+            return Err(format!(
+                "{ERR_NO_RECORDING_FILES} — the audio was deleted by your retention setting \
+                 (the transcript and notes were kept), so this meeting can't be re-transcribed."
+            ));
+        }
+        (
+            recording,
+            hint,
+            state.data_dir.clone(),
+            privacy.effective_keep_local(),
+        )
     };
 
     let abs = |rel: &Option<String>| -> Option<PathBuf> {
@@ -249,7 +271,24 @@ pub async fn run_with(
     // Cloud ASR only with a stored key. A Groq toggle left on with no key
     // (e.g. the key never survived a settings change) must not sink the
     // pipeline — fall back to fully-local transcription, visibly.
-    let groq_key = if use_groq || tier == "cloud" {
+    let groq_key = if !cloud_asr_allowed(use_groq, &tier, keep_local) {
+        if use_groq || tier == "cloud" {
+            // "Keep local" (per meeting or folder) overrides the Groq
+            // setting: audio never leaves the device for this meeting.
+            tracing::info!(
+                meeting_id,
+                "keep-local meeting — Groq skipped, using local ASR"
+            );
+            emit_stage(
+                state,
+                on_stage,
+                meeting_id,
+                "ensuring-models",
+                Some("Keep local is on for this note — transcribing on this device".into()),
+            );
+        }
+        None
+    } else {
         let key = state
             .secrets
             .get(fly_secrets::keys::GROQ_API_KEY)
@@ -268,8 +307,6 @@ pub async fn run_with(
             );
         }
         key
-    } else {
-        None
     };
     // The GPU speed test cuts its sample from whichever recording exists
     // (same pick order as the pipeline's inputs below).
@@ -661,7 +698,7 @@ pub async fn run_with(
     // the checkpoint and overwrites the intermediates.)
     for f in &intermediates {
         if let Err(e) = std::fs::remove_file(f) {
-            tracing::warn!(path = %f.display(), error = %e, "could not remove 16k intermediate");
+            tracing::warn!(file = %f.file_name().unwrap_or_default().to_string_lossy(), error = %e, "could not remove 16k intermediate");
         }
         let _ = std::fs::remove_file(fly_asr::checkpoint::checkpoint_path_for(f));
     }
@@ -808,7 +845,7 @@ async fn re_diarize_inner(
             .await
             .map_err(|e| e.to_string());
         if let Err(e) = std::fs::remove_file(&track_16k) {
-            tracing::warn!(path = %track_16k.display(), error = %e, "could not remove 16k intermediate");
+            tracing::warn!(file = %track_16k.file_name().unwrap_or_default().to_string_lossy(), error = %e, "could not remove 16k intermediate");
         }
         let turns = fly_diarize::drop_dust_clusters(diarized?);
 
@@ -1291,13 +1328,12 @@ fn restore_parked_recording(data_dir: &Path, rec: &fly_core::RecordingRef) -> bo
     match std::fs::rename(&parked, &expected) {
         Ok(()) => {
             tracing::info!(
-                dir = %rel,
                 "restored meeting folder from recordings/_unlinked (was parked by a raced migration)"
             );
             true
         }
         Err(e) => {
-            tracing::warn!(dir = %rel, error = %e, "could not restore parked meeting folder");
+            tracing::warn!(error = %e, "could not restore parked meeting folder");
             false
         }
     }
@@ -1312,7 +1348,7 @@ fn guard_loops(raw: RawTranscript, channel: &str) -> RawTranscript {
     for run in &runs {
         tracing::warn!(
             channel,
-            phrase = %run.phrase,
+            phrase_words = run.phrase.split_whitespace().count(),
             reps = run.reps,
             start_ms = run.start_ms,
             end_ms = run.end_ms,
@@ -1366,6 +1402,17 @@ mod tests {
             text: String::new(),
             words: vec![],
         }
+    }
+
+    /// "Keep local" beats the Groq toggle and the cloud tier; without it the
+    /// user's ASR choice stands.
+    #[test]
+    fn keep_local_meetings_never_use_cloud_asr() {
+        assert!(super::cloud_asr_allowed(true, "balanced", false));
+        assert!(super::cloud_asr_allowed(false, "cloud", false));
+        assert!(!super::cloud_asr_allowed(true, "balanced", true));
+        assert!(!super::cloud_asr_allowed(false, "cloud", true));
+        assert!(!super::cloud_asr_allowed(false, "balanced", false));
     }
 
     /// A meeting folder wrongly parked under `recordings/_unlinked/` (raced

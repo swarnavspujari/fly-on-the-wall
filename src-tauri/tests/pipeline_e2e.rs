@@ -72,13 +72,22 @@ fn link_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()
     Ok(())
 }
 
+/// Installed-file path of a registry artifact (relative to the data dir) —
+/// the same probe path the app checks, so a version bump in models.rs can't
+/// leave these tests looking in a stale location.
+fn probe(id: &str) -> &'static str {
+    fly_app_lib::models::artifact(id)
+        .unwrap_or_else(|| panic!("no {id} artifact on this OS"))
+        .probe_rel
+}
+
 #[test]
 #[ignore = "needs whisper/sherpa artifacts in %APPDATA%/FlyOnTheWall; run with --ignored"]
 fn golden_fixture_transcribes_and_diarizes() {
     let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
     let needed = [
-        "bin/whisper/Release/whisper-cli.exe",
-        "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe",
+        probe("whisper-bin"),
+        probe("sherpa-bin"),
         "models/diarize/sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
         "models/diarize/campplus.onnx",
         "models/asr/ggml-small-q5_1.bin",
@@ -98,9 +107,8 @@ fn golden_fixture_transcribes_and_diarizes() {
     // gate.
     let gpu = std::env::var("FLYONTHEWALL_E2E_GPU").is_ok_and(|v| !v.is_empty() && v != "0");
     if gpu
-        && !real_data
-            .join("bin/whisper-vulkan/Release/whisper-cli.exe")
-            .exists()
+        && fly_app_lib::models::artifact("whisper-bin-vulkan")
+            .is_none_or(|a| !real_data.join(a.probe_rel).exists())
     {
         eprintln!("SKIP: FLYONTHEWALL_E2E_GPU set but whisper-bin-vulkan is not installed");
         return;
@@ -271,8 +279,8 @@ fn golden_fixture_transcribes_and_diarizes() {
 fn gpu_failure_falls_back_to_cpu() {
     let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
     let needed = [
-        "bin/whisper/Release/whisper-cli.exe",
-        "bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe",
+        probe("whisper-bin"),
+        probe("sherpa-bin"),
         "models/diarize/sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
         "models/diarize/campplus.onnx",
         "models/asr/ggml-small-q5_1.bin",
@@ -298,12 +306,9 @@ fn gpu_failure_falls_back_to_cpu() {
     .unwrap();
     // Plant a "Vulkan build" whose exe can't run: the registry probe exists,
     // so gpu::plan resolves it, and the launch fails at transcribe time.
-    std::fs::create_dir_all(data_dir.join("bin/whisper-vulkan/Release")).unwrap();
-    std::fs::write(
-        data_dir.join("bin/whisper-vulkan/Release/whisper-cli.exe"),
-        b"not an executable",
-    )
-    .unwrap();
+    let fake_gpu_exe = data_dir.join(probe("whisper-bin-vulkan"));
+    std::fs::create_dir_all(fake_gpu_exe.parent().unwrap()).unwrap();
+    std::fs::write(&fake_gpu_exe, b"not an executable").unwrap();
 
     let state = AppState::init_with(
         data_dir.clone(),

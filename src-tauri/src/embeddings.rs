@@ -165,12 +165,20 @@ pub fn spawn(app: tauri::AppHandle) {
 
         loop {
             let state = app.state::<AppState>();
-            let backlog = state
-                .storage
-                .lock()
-                .unwrap()
-                .embedding_backlog(EMBED_MODEL)
-                .unwrap_or(0);
+            // An Ollama on another machine must never receive keep-local
+            // notes or transcripts: index only the shareable queue then.
+            // (Backlog only decides whether to wake up; the batch below
+            // re-derives the filter from the URL it actually sends to.)
+            let remote = !crate::llm_commands::is_loopback_url(&ollama::root_url(&state));
+            let backlog = {
+                let storage = state.storage.lock().unwrap();
+                if remote {
+                    storage.embedding_backlog_shareable(EMBED_MODEL)
+                } else {
+                    storage.embedding_backlog(EMBED_MODEL)
+                }
+                .unwrap_or(0)
+            };
             if backlog == 0 {
                 let _ = tokio::time::timeout(IDLE_POLL, state.embed_notify.notified()).await;
                 continue;
@@ -185,12 +193,18 @@ pub fn spawn(app: tauri::AppHandle) {
                 }
             };
 
-            let batch = state
-                .storage
-                .lock()
-                .unwrap()
-                .pending_embedding_chunks(EMBED_MODEL, BATCH_SIZE)
-                .unwrap_or_default();
+            // Decide the filter from the SAME url the batch is sent to: the
+            // setting may have changed since the backlog check above.
+            let send_remote = !crate::llm_commands::is_loopback_url(&root);
+            let batch = {
+                let storage = state.storage.lock().unwrap();
+                if send_remote {
+                    storage.pending_embedding_chunks_shareable(EMBED_MODEL, BATCH_SIZE)
+                } else {
+                    storage.pending_embedding_chunks(EMBED_MODEL, BATCH_SIZE)
+                }
+                .unwrap_or_default()
+            };
             if batch.is_empty() {
                 continue;
             }

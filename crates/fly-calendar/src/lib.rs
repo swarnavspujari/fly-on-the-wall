@@ -76,6 +76,8 @@ pub fn merge_upcoming(mut events: Vec<CalendarEvent>) -> Vec<CalendarEvent> {
     events
 }
 
+// See fly-diarize: async-trait output trips Rust 1.99 clippy::double_must_use.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait CalendarProvider: Send + Sync {
     /// Stable id: "google", "msgraph".

@@ -51,6 +51,17 @@ pub struct TaskMaxTokens {
     pub ask: Option<u32>,
 }
 
+/// Per-task reasoning-effort hints (`"low"` | `"medium"` | `"high"`). `None`
+/// leaves the model's default. Only providers with an effort control (current
+/// Anthropic models) use it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TaskEffort {
+    pub enhance: Option<&'static str>,
+    pub polish: Option<&'static str>,
+    pub extract: Option<&'static str>,
+    pub ask: Option<&'static str>,
+}
+
 /// Prompt adjustments for one model family. Deliberately minimal — four
 /// knobs, no templating. If a model needs more than this, the shared prompt
 /// probably needs fixing for everyone instead.
@@ -82,6 +93,8 @@ pub struct PromptProfile {
     /// array (judge 1.00/5) — never enable this without a measured run
     /// (docs/BENCHMARKS.md §10).
     pub constrained_enhance: bool,
+    /// Per-task effort hints (see `TaskEffort`).
+    pub effort: TaskEffort,
 }
 
 impl PromptProfile {
@@ -115,6 +128,12 @@ pub const DEFAULT_PROFILE: PromptProfile = PromptProfile {
     disable_thinking: false,
     constrained_json: false,
     constrained_enhance: false,
+    effort: TaskEffort {
+        enhance: None,
+        polish: None,
+        extract: None,
+        ask: None,
+    },
 };
 
 /// The registry: `(model base name, profile)`. Keys match the model string
@@ -158,19 +177,65 @@ const PROFILES: &[(&str, PromptProfile)] = &[
     // measurably helps cloud quality); the budget makes room for both.
     // Polish/Extraction already ship ThinkingMode::Disabled and are fine at
     // their defaults; Ask output is prose, where truncation degrades softly.
-    (
-        "claude-sonnet-5",
-        PromptProfile {
-            max_tokens: TaskMaxTokens {
-                enhance: Some(16_384),
-                polish: None,
-                extract: None,
-                ask: None,
-            },
-            ..DEFAULT_PROFILE
-        },
-    ),
+    ("claude-sonnet-5", CLAUDE_THINKING_BUDGET_PROFILE),
+    // The 5.5 generation (the current default and its fast alternative) also
+    // thinks by default with thinking counted against max_tokens, so they
+    // carry the same Enhance budget. Unmeasured beyond that — prompts stay
+    // byte-identical.
+    ("claude-sonnet-5-5", CLAUDE_SONNET_5_5_PROFILE),
+    ("claude-haiku-5-5", CLAUDE_HAIKU_5_5_PROFILE),
 ];
+
+/// Claude 5.5 generation, per Anthropic's Sonnet/Haiku 5.5 guidance (2026-10):
+/// thinking counts against max_tokens, so Enhance gets room for both; Ask
+/// (chat) runs at low effort with a budget that can't be eaten by thinking;
+/// Polish/Extraction get server-side structured outputs (schema-guaranteed
+/// JSON; the provider falls back to free-form if a schema is rejected).
+/// Enhance stays free-form: constraining it needs a measured bench run first
+/// (see `constrained_enhance`). Unmeasured on the bench — revisit with
+/// llm_bench when a key is available.
+const CLAUDE_5_5_MAX_TOKENS: TaskMaxTokens = TaskMaxTokens {
+    enhance: Some(32_000),
+    polish: None,
+    extract: Some(16_000),
+    ask: Some(8_192),
+};
+
+const CLAUDE_SONNET_5_5_PROFILE: PromptProfile = PromptProfile {
+    max_tokens: CLAUDE_5_5_MAX_TOKENS,
+    constrained_json: true,
+    effort: TaskEffort {
+        enhance: Some("medium"),
+        // between_tools (thinking off) accepts effort up to `high`.
+        polish: Some("high"),
+        extract: Some("low"),
+        ask: Some("low"),
+    },
+    ..DEFAULT_PROFILE
+};
+
+const CLAUDE_HAIKU_5_5_PROFILE: PromptProfile = PromptProfile {
+    max_tokens: CLAUDE_5_5_MAX_TOKENS,
+    constrained_json: true,
+    effort: TaskEffort {
+        enhance: Some("medium"),
+        polish: Some("low"),
+        extract: Some("low"),
+        ask: Some("low"),
+    },
+    ..DEFAULT_PROFILE
+};
+
+/// Bigger Enhance budget only, for Anthropic models that think by default.
+const CLAUDE_THINKING_BUDGET_PROFILE: PromptProfile = PromptProfile {
+    max_tokens: TaskMaxTokens {
+        enhance: Some(16_384),
+        polish: None,
+        extract: None,
+        ask: None,
+    },
+    ..DEFAULT_PROFILE
+};
 
 /// Look up the profile for a resolved model string (`"llama3.1:latest"`,
 /// `"claude-sonnet-5"`). Unknown models get `DEFAULT_PROFILE`.
@@ -214,6 +279,8 @@ mod tests {
         // Other Anthropic models are NOT matched.
         assert_eq!(profile_for("claude-sonnet-4-6"), &DEFAULT_PROFILE);
         assert_eq!(profile_for("claude-opus-4-8"), &DEFAULT_PROFILE);
+        // The 5.5 generation has its own profiles (below).
+        assert_ne!(profile_for("claude-sonnet-5-5"), p);
     }
 
     #[test]
@@ -275,5 +342,35 @@ mod tests {
             p.apply_preamble("SYSTEM".into()),
             "Answer directly.\n\nSYSTEM"
         );
+    }
+
+    /// Claude 5.5: thinking stays on (adaptive) for Enhance/Ask, effort is set
+    /// per task, budgets leave room for thinking, and the extraction-shaped
+    /// JSON tasks get structured outputs. Enhance stays unconstrained.
+    #[test]
+    fn claude_5_5_profiles_follow_the_5_5_guidance() {
+        for m in ["claude-sonnet-5-5", "claude-haiku-5-5"] {
+            let p = profile_for(m);
+            assert!(!p.disable_thinking, "{m}");
+            assert!(p.constrained_json, "{m}");
+            assert!(!p.constrained_enhance, "{m}");
+            assert_eq!(p.max_tokens.enhance, Some(32_000), "{m}");
+            assert_eq!(p.max_tokens.ask, Some(8_192), "{m}");
+            assert_eq!(p.effort.ask, Some("low"), "{m}");
+            assert_eq!(p.effort.enhance, Some("medium"), "{m}");
+            assert_eq!(p.system_preamble, None, "{m}");
+        }
+        assert_eq!(profile_for("claude-sonnet-5-5").effort.polish, Some("high"));
+        assert_eq!(profile_for("claude-haiku-5-5").effort.polish, Some("low"));
+        // Every effort value is one the API accepts with thinking off too.
+        for m in ["claude-sonnet-5-5", "claude-haiku-5-5"] {
+            let e = profile_for(m).effort;
+            for v in [e.enhance, e.polish, e.extract, e.ask]
+                .into_iter()
+                .flatten()
+            {
+                assert!(matches!(v, "low" | "medium" | "high"), "{m}: {v}");
+            }
+        }
     }
 }

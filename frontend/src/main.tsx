@@ -7,6 +7,10 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
+import { installLinkGuard } from "./safeContent";
+
+// Links anywhere in the app open in the system browser, never in this window.
+installLinkGuard();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

@@ -17,17 +17,68 @@ name: Release
 # job then merges all four into latest.json, which installed apps poll via
 # .../releases/latest/download/latest.json. (Linux deb installs are apt's job;
 # only the AppImage self-updates.)
+#
+# Supply-chain hardening: the frontend's npm dependency tree is installed and
+# executed ONLY in the secret-free `frontend` job; the signing legs receive the
+# built frontend/dist as an artifact, install just the root package (the Tauri
+# CLI) with --ignore-scripts, and run `tauri build` with beforeBuildCommand
+# removed (.github/tauri/skip-before-build.conf.json), so no npm-script code
+# runs next to the updater key or Apple credentials.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+# Never run two releases for the same tag at once (and never cancel one
+# mid-upload — a half-published release strands the updater).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  # Platform-independent Vite output, built once with NO secrets in scope.
+  frontend:
+    name: Frontend build (no secrets)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies (lockfile-exact, no install scripts)
+        run: npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck & build frontend
+        run: npm --prefix frontend run build
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     name: Bundle (${{ matrix.name }})
+    needs: frontend
     runs-on: ${{ matrix.os }}
+    # Gate the secret-bearing legs behind the `release` environment: configure
+    # required reviewers on it and move the signing secrets into it (repo
+    # Settings → Environments) so only approved runs can read them.
+    environment: release
+    permissions:
+      contents: write # softprops/action-gh-release creates the release + uploads assets
     strategy:
       fail-fast: false
       matrix:
@@ -79,7 +130,9 @@ jobs:
             updaterAsset: "*-linux-x64.AppImage"
             updaterSig: target/release/bundle/appimage/*.AppImage.sig
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
@@ -89,38 +142,32 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libpulse-dev \
             libssl-dev libxdo-dev
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            frontend/package-lock.json
+          # No dependency cache in the secret-bearing job: a cache restored
+          # from another run is unverified code sitting next to the signing
+          # keys (and tag builds rarely hit a cache anyway).
 
-      # The lockfiles were generated on Windows and npm's optional-deps bug
-      # (npm/cli#4828) leaves other platforms' native bindings out of them —
-      # even npm install trusts the broken tree. Resolve fresh on this OS.
-      - name: Install JS dependencies (fresh resolve — npm/cli#4828)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          rm -f package-lock.json frontend/package-lock.json
-          # npm 10.9.x on current Node 22 runners crashes resolving
-          # frontend/ ("reading 'edgesOut'"); npm 11 resolves it fine.
-          npm install -g npm@11 --no-audit --no-fund
-          npm --version
-          npm install --no-audit --no-fund
-          (cd frontend && npm install --no-audit --no-fund)
+      # Root package only (= @tauri-apps/cli + its per-platform binary, all
+      # recorded in the lockfile). The frontend tree is never installed on a
+      # signing runner — its output arrives prebuilt from the `frontend` job.
+      - name: Install Tauri CLI (lockfile-exact, no install scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Install JS dependencies
-        if: runner.os == 'Windows'
-        run: |
-          npm ci
-          npm --prefix frontend ci
+      - name: Download frontend dist
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: frontend-dist
+          path: frontend/dist
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      # Deliberately no Swatinem/rust-cache here: a restored target/ holds
+      # compiled build scripts and proc-macros that would run with the
+      # signing secrets present. A clean compile is slower but trustworthy.
 
       # Fail in seconds, not after a 20-minute compile: every leg signs updater
       # artifacts now, and a tag that disagrees with the app version would
@@ -180,9 +227,16 @@ jobs:
           security delete-keychain "$kc"
           rm -f "$p12"
 
-      # tauri build runs beforeBuildCommand (frontend build + prepare-sidecars).
-      # buildArgs layers in createUpdaterArtifacts on every leg, which signs
-      # the updater artifact into a detached .sig using the env vars below.
+      # The second half of tauri.conf.json's beforeBuildCommand, run here
+      # with no secrets in env (the frontend half ran in the `frontend` job).
+      - name: Stage sidecar binaries
+        run: npm run prepare-sidecars
+
+      # beforeBuildCommand is removed via the skip-before-build overlay (a
+      # JSON merge-patch null), so this secret-bearing step runs no npm
+      # scripts — only the Tauri CLI and cargo. buildArgs layers in
+      # createUpdaterArtifacts on every leg, which signs the updater artifact
+      # into a detached .sig using the env vars below.
       - name: Build installers
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -205,7 +259,7 @@ jobs:
           FOTW_GOOGLE_CLIENT_ID: ${{ secrets.FOTW_GOOGLE_CLIENT_ID }}
           FOTW_GOOGLE_CLIENT_SECRET: ${{ secrets.FOTW_GOOGLE_CLIENT_SECRET }}
           FOTW_MS_CLIENT_ID: ${{ secrets.FOTW_MS_CLIENT_ID }}
-        run: npx tauri build ${{ matrix.buildArgs }}
+        run: npx --no-install tauri build ${{ matrix.buildArgs }} --config .github/tauri/skip-before-build.conf.json
 
       - name: Rename artifacts with target suffix
         shell: bash
@@ -253,14 +307,14 @@ jobs:
           cat "updater-fragment/${{ matrix.name }}.json"
 
       - name: Upload updater fragment
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: updater-fragment-${{ matrix.name }}
           path: updater-fragment/*.json
           retention-days: 1
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: false
           generate_release_notes: true
@@ -276,9 +330,11 @@ jobs:
     name: Publish updater manifest
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # uploads latest.json to the release
     steps:
       - name: Download updater fragments
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: updater-fragment-*
           merge-multiple: true
@@ -302,8 +358,104 @@ jobs:
           cat latest.json
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: false
           files: latest.json
           fail_on_unmatched_files: true
+
+  # CycloneDX SBOMs for both dependency trees, generated from the lockfiles
+  # with NO secrets in scope (the generators are pinned to exact versions).
+  sbom:
+    name: Generate SBOMs (no secrets)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: npm SBOMs (lockfile-only)
+        shell: bash
+        run: |
+          mkdir -p sbom
+          # --ignore-npm-errors: `npm ls --package-lock-only` reports the
+          # bundled deps of the never-installed *-wasm32-wasi optional
+          # bindings as "missing"; the SBOM still covers the full lockfile.
+          npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --package-lock-only --ignore-npm-errors \
+            --output-file "$PWD/sbom/fly-on-the-wall-${GITHUB_REF_NAME}-npm-frontend.cdx.json" frontend/package.json
+          npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --package-lock-only --ignore-npm-errors \
+            --output-file "$PWD/sbom/fly-on-the-wall-${GITHUB_REF_NAME}-npm-tooling.cdx.json" package.json
+
+      # cargo-cyclonedx reads `cargo metadata` (no compile, no build scripts)
+      # and writes one <crate>.cdx.json per workspace member; collect them
+      # into a single release asset name per crate.
+      - name: Rust SBOMs (Cargo.lock)
+        shell: bash
+        run: |
+          cargo install cargo-cyclonedx --locked --version 0.5.9
+          cargo cyclonedx --format json
+          while IFS= read -r f; do
+            cp "$f" "sbom/fly-on-the-wall-${GITHUB_REF_NAME}-cargo-$(basename "$f")"
+          done < <(git ls-files --others --exclude-standard -- '*.cdx.json' ':!sbom/')
+          ls -la sbom/
+          ls sbom/*-cargo-*.cdx.json > /dev/null
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # Attach the SBOMs and publish signed SLSA build-provenance attestations
+  # (verify with `gh attestation verify <file> -R <owner>/<repo>`) over every
+  # served release asset — installers, updater bundles, latest.json — plus
+  # the SBOMs. Runs after the manifest job, so it is skipped (like latest.json)
+  # if any bundle leg failed; re-running the failed leg re-triggers it.
+  attest:
+    name: Attach SBOMs + attest provenance
+    needs: [updater-manifest, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attaches the SBOMs to the release
+      id-token: write # Sigstore OIDC for the attestation signature
+      attestations: write # stores the attestations on the repo
+    steps:
+      - name: Download SBOMs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sbom
+          path: sbom
+
+      - name: Attach SBOMs to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          draft: false
+          files: sbom/*.cdx.json
+          fail_on_unmatched_files: true
+
+      # Attest the bytes users actually download: pull every asset back from
+      # the published release (installers, .app.tar.gz, latest.json, SBOMs).
+      - name: Download published release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir release-assets
+          ls -la release-assets/
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-assets/*

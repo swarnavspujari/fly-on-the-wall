@@ -14,8 +14,10 @@ mod live;
 pub mod llm_commands;
 pub mod logging;
 pub mod models;
+mod nav_guard;
 pub mod ollama;
 pub mod pipeline;
+pub mod privacy;
 pub mod recording;
 pub mod scheduler;
 mod screen_commands;
@@ -30,6 +32,12 @@ pub fn run() {
     // stdout-only logging here and surfaces via the startup dialog below
     // (AppState::init repeats the same idempotent preparation).
     let data_dir = state::prepared_data_dir();
+    // Take the per-data-dir instance lock and finish a pending "Delete all
+    // my data" (only once the instance that asked for it has exited) —
+    // before logging or the database open any file in the data dir.
+    if let Ok(dir) = data_dir.as_deref() {
+        privacy::startup(dir);
+    }
     logging::init(data_dir.as_deref().ok());
 
     let mut builder = tauri::Builder::default();
@@ -54,6 +62,8 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // The app window only ever shows the app; links open in the browser.
+        .plugin(nav_guard::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // Updater + relaunch only exist on desktop targets.
@@ -87,11 +97,24 @@ pub fn run() {
                     std::process::exit(1);
                 }
             };
-            // Let the webview stream recordings from the data dir so the editor's
-            // audio player can embed & scrub them (asset protocol).
-            let _ = app
-                .asset_protocol_scope()
-                .allow_directory(&app_state.data_dir, true);
+            // Let the webview stream recordings and attachments (audio player,
+            // video thumbnails) over the asset protocol — those two folders
+            // only. The database, logs and settings stay unreadable from the
+            // webview even if a script ever ran there.
+            for sub in ["recordings", "attachments"] {
+                let dir = app_state.data_dir.join(sub);
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = app.asset_protocol_scope().allow_directory(&dir, true);
+            }
+            // Saved Claude Sonnet/Haiku picks from older releases → their 5.5
+            // successors (a settings-row rewrite; Opus/Fable picks untouched).
+            {
+                let storage = app_state.storage.lock().unwrap();
+                llm_commands::migrate_anthropic_model(&storage);
+                llm_commands::grandfather_cloud_consent(&storage);
+                privacy::record_pending_wipe(&storage);
+            }
+            privacy::spawn_disk_encryption_check(app_state.data_dir.clone());
             app.manage(app_state);
             // Warm the hardware cache off the startup path: detection shells
             // out to nvidia-smi and must never sit in front of first paint.
@@ -151,6 +174,8 @@ pub fn run() {
             // embeds pending chunks through Ollama in the background. Fully
             // best-effort — without Ollama, search stays FTS-only.
             embeddings::spawn(app.handle().clone());
+            // Audio retention: shortly after startup, then daily.
+            privacy::spawn_retention(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -176,6 +201,7 @@ pub fn run() {
             commands::copy_note_markdown,
             commands::remove_attachment,
             commands::open_attachment,
+            commands::open_external_url,
             commands::reveal_attachment,
             commands::reveal_data_dir,
             commands::reveal_logs_dir,
@@ -241,6 +267,18 @@ pub fn run() {
             import_commands::import_stage,
             import_commands::import_state,
             import_commands::import_transcribe,
+            privacy::get_meeting_privacy,
+            privacy::set_note_keep_local,
+            privacy::set_folder_keep_local,
+            privacy::list_local_only_folders,
+            privacy::set_participants_notified,
+            privacy::copy_recording_notice,
+            privacy::get_privacy_settings,
+            privacy::preview_audio_retention,
+            privacy::set_audio_retention,
+            privacy::dismiss_wipe_report,
+            privacy::delete_all_data,
+            privacy::disk_encryption_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fly on the Wall")

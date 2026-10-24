@@ -121,6 +121,11 @@ pub struct ChatRequest {
     /// impossible); ignored by other providers. `None` = free-form text.
     #[serde(default)]
     pub format: Option<serde_json::Value>,
+    /// Reasoning effort hint (`"low"` | `"medium"` | `"high"`), set per task
+    /// from the model's prompt profile. Honored by Anthropic models that
+    /// support `output_config.effort`; ignored elsewhere. `None` = model default.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// Per-provider connection settings, editable in the app's Settings screen.
@@ -131,6 +136,8 @@ pub struct ProviderSettings {
     pub model: String,
 }
 
+// See fly-diarize: async-trait output trips Rust 1.99 clippy::double_must_use.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait LLMProvider: Send + Sync {
     /// Stable id: "openai", "anthropic", "nim", "ollama".

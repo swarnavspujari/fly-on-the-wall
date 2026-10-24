@@ -33,6 +33,7 @@ import SettingsModal from "./components/SettingsModal";
 import FirstRunNotice from "./components/FirstRunNotice";
 import UpdateBanner from "./components/UpdateBanner";
 import SystemAudioNotice from "./components/SystemAudioNotice";
+import RestartRequired from "./components/RestartRequired";
 import { useUpdater } from "./updater";
 
 /** Window width (px) under which the sidebars collapse into a menu button. */
@@ -885,6 +886,8 @@ export default function App() {
         </div>
       )}
       {!recordingActive && <UpdateBanner updater={updater} />}
+      {/* after "Delete all my data": blocks the app until it restarts */}
+      <RestartRequired />
       {tapDenied && !recordingActive && (
         <SystemAudioNotice
           onOpenSettings={() => void api.openPrivacySettings().catch(console.error)}

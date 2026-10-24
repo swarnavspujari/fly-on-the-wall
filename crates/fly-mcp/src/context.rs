@@ -146,9 +146,16 @@ pub fn build_briefing(
     since: Option<DateTime<Utc>>,
     query: &str,
 ) -> Result<String, String> {
+    // Defense in depth: callers already build series without keep-local
+    // meetings, but a briefing goes to an external AI client, so re-check
+    // here (fail closed on a lookup error).
+    let hidden = storage
+        .keep_local_note_ids()
+        .map_err(|e| format!("couldn't check Keep local settings, so nothing was returned: {e}"))?;
     let mut meetings: Vec<&Meeting> = series_list
         .iter()
         .flat_map(|s| s.meetings.iter())
+        .filter(|m| !hidden.contains(&m.note_id))
         .filter(|m| since.map(|s| m.started_at >= s).unwrap_or(true))
         .collect();
     meetings.sort_by_key(|m| m.started_at);
@@ -234,6 +241,7 @@ pub fn build_briefing(
         .query_items(&ItemFilter {
             meeting_ids: Some(meeting_ids),
             limit: 500,
+            exclude_keep_local: true,
             ..Default::default()
         })
         .map_err(|e| e.to_string())?;

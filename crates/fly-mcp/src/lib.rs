@@ -20,7 +20,9 @@ pub mod context;
 
 use chrono::{DateTime, Utc};
 use fly_core::ItemKind;
-use fly_storage::{ItemFilter, SearchFilter, Storage};
+use std::collections::HashSet;
+
+use fly_storage::{ItemFilter, SearchFilter, Storage, StorageError};
 use serde_json::{json, Value};
 
 pub const SERVER_NAME: &str = "flyonthewall";
@@ -54,122 +56,198 @@ impl Server {
 
     /// Handle one JSON-RPC message; `None` = notification (no response).
     pub fn handle_message(&self, raw: &str) -> Option<String> {
-        let msg: Value = match serde_json::from_str(raw) {
-            Ok(v) => v,
-            Err(_) => {
-                return Some(error_response(Value::Null, -32700, "parse error", None));
-            }
-        };
-        let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = msg.get("params").cloned().unwrap_or(Value::Null);
-
-        // notifications get no response
-        let id = id?;
-
-        let modern_version = params
-            .get("_meta")
-            .and_then(|m| m.get(META_PROTOCOL_VERSION))
-            .and_then(|v| v.as_str());
-
-        let result = if method == "initialize" {
-            // legacy era: answer the handshake exactly as before
-            Ok(self.initialize(&params))
-        } else if let Some(version) = modern_version {
-            self.handle_modern(version, method, &params)
-        } else if method == "server/discover" {
-            // modern-only method without its required per-request metadata
-            Err((
-                -32602,
-                format!(
-                    "server/discover requires _meta[\"{META_PROTOCOL_VERSION}\"] (spec 2026-07-28)"
-                ),
-                None,
-            ))
-        } else {
-            // legacy era: metadata-less requests, byte-identical to before
-            match method {
-                "ping" => Ok(json!({})),
-                "tools/list" => Ok(tools_list()),
-                "tools/call" => self.tools_call(&params),
-                _ => Err((-32601, format!("method not found: {method}"), None)),
-            }
-        };
-
-        Some(match result {
-            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
-            Err((code, message, data)) => error_response(id, code, &message, data),
-        })
+        dispatch(raw, &|params| self.tools_call(params))
     }
+}
 
-    /// Modern (2026-07-28) dispatch: validate the per-request `_meta`, then
-    /// answer with modern result envelopes (`resultType`, serverInfo,
-    /// caching hints on cacheable results).
-    fn handle_modern(
-        &self,
-        version: &str,
-        method: &str,
-        params: &Value,
-    ) -> Result<Value, RpcError> {
-        if version != MODERN_PROTOCOL_VERSION {
-            // UnsupportedProtocolVersionError: the client retries with one of ours
-            return Err((
-                -32022,
-                "Unsupported protocol version".into(),
-                Some(json!({
-                    "supported": [MODERN_PROTOCOL_VERSION],
-                    "requested": version
-                })),
-            ));
+/// `tools/call` handler plugged into [`dispatch`].
+type ToolsCall<'a> = dyn Fn(&Value) -> Result<Value, RpcError> + 'a;
+
+/// JSON-RPC framing and both protocol eras. Only `tools/call` needs the
+/// database, so it is the one pluggable step: [`Server`] answers with real
+/// tools, [`LazyServer`] with an "open the app" error while the database
+/// can't be opened.
+fn dispatch(raw: &str, tools_call: &ToolsCall) -> Option<String> {
+    let msg: Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => {
+            return Some(error_response(Value::Null, -32700, "parse error", None));
         }
-        if params
-            .get("_meta")
-            .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
-            .is_none()
-        {
-            return Err((
-                -32602,
-                format!("missing required _meta field \"{META_CLIENT_CAPABILITIES}\""),
-                None,
-            ));
+    };
+    let id = msg.get("id").cloned();
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+
+    // notifications get no response
+    let id = id?;
+
+    let modern_version = params
+        .get("_meta")
+        .and_then(|m| m.get(META_PROTOCOL_VERSION))
+        .and_then(|v| v.as_str());
+
+    let result = if method == "initialize" {
+        // legacy era: answer the handshake exactly as before
+        Ok(initialize(&params))
+    } else if let Some(version) = modern_version {
+        handle_modern(version, method, &params, tools_call)
+    } else if method == "server/discover" {
+        // modern-only method without its required per-request metadata
+        Err((
+            -32602,
+            format!(
+                "server/discover requires _meta[\"{META_PROTOCOL_VERSION}\"] (spec 2026-07-28)"
+            ),
+            None,
+        ))
+    } else {
+        // legacy era: metadata-less requests, byte-identical to before
+        match method {
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(tools_list()),
+            "tools/call" => tools_call(&params),
+            _ => Err((-32601, format!("method not found: {method}"), None)),
         }
-        let result = match method {
-            "server/discover" => json!({
-                "supportedVersions": [MODERN_PROTOCOL_VERSION],
-                "capabilities": { "tools": {} },
-                "instructions": INSTRUCTIONS,
-                "ttlMs": CACHE_TTL_MS,
-                "cacheScope": "public"
-            }),
-            "ping" => json!({}),
-            "tools/list" => {
-                let mut list = tools_list();
-                let obj = list.as_object_mut().expect("tools_list is an object");
-                // static per binary and free of user data → cacheable
-                obj.insert("ttlMs".into(), json!(CACHE_TTL_MS));
-                obj.insert("cacheScope".into(), json!("public"));
-                list
-            }
-            "tools/call" => self.tools_call(params)?,
-            _ => return Err((-32601, format!("method not found: {method}"), None)),
-        };
-        Ok(modernize(result))
+    };
+
+    Some(match result {
+        Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+        Err((code, message, data)) => error_response(id, code, &message, data),
+    })
+}
+
+/// Modern (2026-07-28) dispatch: validate the per-request `_meta`, then
+/// answer with modern result envelopes (`resultType`, serverInfo,
+/// caching hints on cacheable results).
+fn handle_modern(
+    version: &str,
+    method: &str,
+    params: &Value,
+    tools_call: &ToolsCall,
+) -> Result<Value, RpcError> {
+    if version != MODERN_PROTOCOL_VERSION {
+        // UnsupportedProtocolVersionError: the client retries with one of ours
+        return Err((
+            -32022,
+            "Unsupported protocol version".into(),
+            Some(json!({
+                "supported": [MODERN_PROTOCOL_VERSION],
+                "requested": version
+            })),
+        ));
     }
-
-    fn initialize(&self, params: &Value) -> Value {
-        // echo the client's protocol version when given (we speak the basics)
-        let version = params
-            .get("protocolVersion")
-            .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_PROTOCOL_VERSION);
-        json!({
-            "protocolVersion": version,
+    if params
+        .get("_meta")
+        .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
+        .is_none()
+    {
+        return Err((
+            -32602,
+            format!("missing required _meta field \"{META_CLIENT_CAPABILITIES}\""),
+            None,
+        ));
+    }
+    let result = match method {
+        "server/discover" => json!({
+            "supportedVersions": [MODERN_PROTOCOL_VERSION],
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-            "instructions": INSTRUCTIONS
-        })
+            "instructions": INSTRUCTIONS,
+            "ttlMs": CACHE_TTL_MS,
+            "cacheScope": "public"
+        }),
+        "ping" => json!({}),
+        "tools/list" => {
+            let mut list = tools_list();
+            let obj = list.as_object_mut().expect("tools_list is an object");
+            // static per binary and free of user data → cacheable
+            obj.insert("ttlMs".into(), json!(CACHE_TTL_MS));
+            obj.insert("cacheScope".into(), json!("public"));
+            list
+        }
+        "tools/call" => tools_call(params)?,
+        _ => return Err((-32601, format!("method not found: {method}"), None)),
+    };
+    Ok(modernize(result))
+}
+
+fn initialize(params: &Value) -> Value {
+    // echo the client's protocol version when given (we speak the basics)
+    let version = params
+        .get("protocolVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or(DEFAULT_PROTOCOL_VERSION);
+    json!({
+        "protocolVersion": version,
+        "capabilities": { "tools": {} },
+        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+        "instructions": INSTRUCTIONS
+    })
+}
+
+/// Shown for every tool call while the database can't be opened.
+pub const DB_UNAVAILABLE_MESSAGE: &str =
+    "Open Fly on the Wall once to finish updating its database, then retry.";
+
+/// The stdio server as `main` runs it: opens the app's database lazily and
+/// keeps serving when that fails (the app hasn't been opened since an
+/// update, or the database is newer than this binary). The handshake and
+/// tool list still work, every tool call returns [`DB_UNAVAILABLE_MESSAGE`]
+/// with the reason, and the open is retried on each message so the server
+/// recovers without the client restarting it.
+pub struct LazyServer {
+    data_dir: std::path::PathBuf,
+    server: std::cell::RefCell<Option<Server>>,
+}
+
+impl LazyServer {
+    /// Try the open once up front; failures are reported, not fatal.
+    pub fn new(data_dir: std::path::PathBuf) -> Self {
+        let lazy = Self {
+            data_dir,
+            server: std::cell::RefCell::new(None),
+        };
+        if let Err(e) = lazy.ensure_open() {
+            // stderr only: stdout is the protocol channel
+            eprintln!("flyonthewall-mcp: database unavailable, serving errors until it opens: {e}");
+        }
+        lazy
     }
 
+    pub fn is_open(&self) -> bool {
+        self.server.borrow().is_some()
+    }
+
+    fn ensure_open(&self) -> Result<(), StorageError> {
+        if self.is_open() {
+            return Ok(());
+        }
+        // The app owns the schema: never migrate or seed here. Only a first
+        // run, before the app ever created a database, uses the full open so
+        // Claude Desktop still gets a working (empty) server.
+        let storage = match Storage::open_existing(&self.data_dir) {
+            Err(StorageError::NotFound(_)) => Storage::open(&self.data_dir)?,
+            other => other?,
+        };
+        *self.server.borrow_mut() = Some(Server::new(storage));
+        Ok(())
+    }
+
+    pub fn handle_message(&self, raw: &str) -> Option<String> {
+        let unavailable = self.ensure_open().err();
+        if let Some(server) = self.server.borrow().as_ref() {
+            return server.handle_message(raw);
+        }
+        let reason = unavailable.map(|e| e.to_string()).unwrap_or_default();
+        dispatch(raw, &|_params| {
+            Ok(json!({
+                "content": [{"type": "text", "text": format!("{DB_UNAVAILABLE_MESSAGE} ({reason})")}],
+                "isError": true
+            }))
+        })
+    }
+}
+
+impl Server {
     fn tools_call(&self, params: &Value) -> Result<Value, RpcError> {
         let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -190,7 +268,7 @@ impl Server {
             other => Err(format!("unknown tool: {other}")),
         };
         match text {
-            Ok(text) => Ok(json!({"content": [{"type": "text", "text": text}]})),
+            Ok(text) => Ok(json!({"content": [{"type": "text", "text": cap_result(text)}]})),
             Err(message) => Ok(json!({
                 "content": [{"type": "text", "text": message}],
                 "isError": true
@@ -199,29 +277,62 @@ impl Server {
     }
 
     fn tool_search(&self, args: &Value) -> Result<String, String> {
-        let query = args
-            .get("query")
-            .and_then(|q| q.as_str())
-            .ok_or("missing required argument: query")?;
+        let query = arg_query(args, "query")?;
         let limit = arg_limit(args, 20);
-        let offset = args
+        // Cursor = "<note offset>:<transcript offset>" (a bare number from
+        // older replies applies to both). The two rankings page separately.
+        let (note_off, transcript_off) = args
             .get("cursor")
             .and_then(|c| c.as_str())
-            .and_then(|c| c.parse::<usize>().ok())
-            .unwrap_or(0);
-        let hits = self
-            .storage
-            .search_filtered(
-                query,
-                &SearchFilter {
-                    folder_id: arg_str(args, "folder_id"),
-                    since: arg_time(args, "since")?,
-                    until: arg_time(args, "until")?,
-                    limit,
-                    offset,
-                },
-            )
-            .map_err(|e| e.to_string())?;
+            .and_then(|c| match c.split_once(':') {
+                Some((n, t)) => Some((n.parse().ok()?, t.parse().ok()?)),
+                None => c.parse().ok().map(|n| (n, n)),
+            })
+            .unwrap_or((0usize, 0usize));
+        let base = SearchFilter {
+            folder_id: arg_str(args, "folder_id"),
+            since: arg_time(args, "since")?,
+            until: arg_time(args, "until")?,
+            limit,
+            offset: 0,
+            // Keep-local rows are excluded inside SQL: they never fill a page,
+            // shift a cursor or make an empty page look different.
+            exclude_keep_local: true,
+        };
+        let search = |offset: usize| {
+            self.storage
+                .search_split(
+                    query,
+                    &SearchFilter {
+                        offset,
+                        ..base.clone()
+                    },
+                )
+                .map_err(|e| e.to_string())
+        };
+        let (notes, same_offset_transcripts) = search(note_off)?;
+        let transcripts = if transcript_off == note_off {
+            same_offset_transcripts
+        } else {
+            search(transcript_off)?.1
+        };
+        // Notes first, then transcripts, at most `limit` in total; each
+        // list's cursor advances only past the rows actually returned.
+        let take_notes = notes.len().min(limit);
+        let take_transcripts = transcripts.len().min(limit - take_notes);
+        let more = notes.len() >= limit
+            || transcripts.len() > take_transcripts
+            || transcripts.len() >= limit;
+        let next = format!(
+            "{}:{}",
+            note_off + take_notes,
+            transcript_off + take_transcripts
+        );
+        let hits: Vec<_> = notes
+            .into_iter()
+            .take(take_notes)
+            .chain(transcripts.into_iter().take(take_transcripts))
+            .collect();
         if hits.is_empty() {
             return Ok(format!("No matches for \"{query}\"."));
         }
@@ -243,10 +354,9 @@ impl Server {
                     .unwrap_or_default()
             ));
         }
-        if n >= limit {
+        if more {
             out.push_str(&format!(
-                "\nMore may exist — pass cursor: \"{}\" to continue.\n",
-                offset + limit
+                "\nMore may exist — pass cursor: \"{next}\" to continue.\n"
             ));
         }
         Ok(out)
@@ -257,19 +367,84 @@ impl Server {
         if folders.is_empty() {
             return Ok("No folders yet.".into());
         }
+        // Keep-local folders (the set already includes their descendants)
+        // are omitted entirely — name, id and place in the hierarchy. A
+        // visible folder never points at a hidden parent.
+        let local = self
+            .storage
+            .keep_local_folder_ids()
+            .map_err(keep_local_lookup_error)?;
+        let visible: Vec<_> = folders
+            .into_iter()
+            .filter(|f| !local.contains(&f.id))
+            .collect();
+        if visible.is_empty() {
+            return Ok("No folders yet.".into());
+        }
         let mut out = String::from("Folders:\n");
-        for f in folders {
+        for f in visible {
             out.push_str(&format!(
                 "- {} (id: {}{})\n",
                 f.name,
                 f.id,
                 f.parent_id
                     .as_deref()
+                    .filter(|p| !local.contains(*p))
                     .map(|p| format!(", parent: {p}"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
             ));
         }
         Ok(out)
+    }
+
+    // ---- keep-local enforcement ----
+    //
+    // Everything this server returns goes to the MCP client's (cloud) model,
+    // so meetings/notes marked "Keep local" — directly or through a
+    // local-only folder — must never appear in a result. A meeting counts as
+    // keep-local when its note does (own flag, a sibling meeting's flag, or
+    // the folder chain). Lookup errors fail closed.
+
+    /// Notes hidden from AI tools (one query; see `keep_local_note_ids`).
+    fn hidden_notes(&self) -> Result<HashSet<String>, String> {
+        self.storage
+            .keep_local_note_ids()
+            .map_err(keep_local_lookup_error)
+    }
+
+    fn guard_note(&self, note_id: &str) -> Result<(), String> {
+        if self.storage.note_keep_local(note_id) {
+            return Err(KEEP_LOCAL_NOTE_MESSAGE.into());
+        }
+        Ok(())
+    }
+
+    /// Refuse a by-id meeting lookup when the meeting is keep-local. An
+    /// unknown id passes (the tool then reports "not found" as before)
+    /// unless orphaned content exists under it — its privacy can't be
+    /// determined, so it is refused rather than shared.
+    fn guard_meeting(&self, meeting_id: &str) -> Result<(), String> {
+        match self.storage.get_meeting(meeting_id) {
+            Ok(m) => {
+                if self.storage.meeting_keep_local(meeting_id)
+                    || self.storage.note_keep_local(&m.note_id)
+                {
+                    Err(KEEP_LOCAL_MEETING_MESSAGE.into())
+                } else {
+                    Ok(())
+                }
+            }
+            Err(StorageError::NotFound(_)) => {
+                let orphan = !matches!(self.storage.get_transcript(meeting_id), Ok(None))
+                    || !matches!(self.storage.has_meeting_items(meeting_id), Ok(false));
+                if orphan {
+                    Err(format!("meeting {meeting_id} not found"))
+                } else {
+                    Ok(())
+                }
+            }
+            Err(e) => Err(keep_local_lookup_error(e)),
+        }
     }
 
     fn tool_get_note(&self, args: &Value) -> Result<String, String> {
@@ -277,6 +452,7 @@ impl Server {
             .get("note_id")
             .and_then(|q| q.as_str())
             .ok_or("missing required argument: note_id")?;
+        self.guard_note(id)?;
         let note = self.storage.get_note(id).map_err(|e| e.to_string())?;
         let mut out = note.to_markdown(false);
         out.push_str(&format!(
@@ -301,6 +477,7 @@ impl Server {
     /// `[seg_id] [mm:ss] **Label:** text` lines. Prefers the polished
     /// variant when the app has produced one (same segment ids as raw).
     fn render_transcript(&self, meeting_id: &str, with_ids: bool) -> Result<String, String> {
+        self.guard_meeting(meeting_id)?;
         let raw = self
             .storage
             .get_transcript(meeting_id)
@@ -389,12 +566,28 @@ impl Server {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let mut out = String::new();
+        let mut skipped: Vec<&str> = Vec::new();
         for id in &ids {
-            match self.render_transcript(id, with_ids) {
-                Ok(t) => out.push_str(&t),
-                Err(e) => out.push_str(&format!("# meeting {id}\n({e})\n")),
+            let part = match self.render_transcript(id, with_ids) {
+                Ok(t) => t,
+                Err(e) => format!("# meeting {id}\n({e})\n"),
+            };
+            // Whole transcripts only: stop before the reply outgrows the
+            // result cap and say which ids to fetch next.
+            if !out.is_empty() && out.len() + part.len() > MAX_RESULT_BYTES - 4_096 {
+                skipped.push(id);
+                continue;
             }
+            out.push_str(&part);
             out.push_str("\n---\n\n");
+        }
+        if !skipped.is_empty() {
+            out.push_str(&format!(
+                "[{} transcript(s) omitted to keep this reply under {} bytes — fetch them in another call: {}]\n",
+                skipped.len(),
+                MAX_RESULT_BYTES,
+                skipped.join(", ")
+            ));
         }
         Ok(out)
     }
@@ -404,6 +597,7 @@ impl Server {
             .get("meeting_id")
             .and_then(|q| q.as_str())
             .ok_or("missing required argument: meeting_id")?;
+        self.guard_meeting(id)?;
         let m = self.storage.get_meeting(id).map_err(|e| e.to_string())?;
         Ok(format!(
             "Meeting: {}\nmeeting_id: {}\nnote_id: {}\nstarted: {}\nended: {}\nattendees: {}\nrecording: {}\ntranscript: {}\n",
@@ -428,15 +622,13 @@ impl Server {
             .and_then(|c| c.as_str())
             .and_then(|c| c.split_once('|'))
             .map(|(ts, id)| (ts.to_string(), id.to_string()));
+        let folder_id = arg_str(args, "folder_id");
+        let (since, until) = (arg_time(args, "since")?, arg_time(args, "until")?);
+        // Keep-local notes are excluded inside SQL, so they never fill a page
+        // and the cursor (the last row returned) is always a shareable note.
         let notes = self
             .storage
-            .list_notes_filtered(
-                limit,
-                arg_str(args, "folder_id").as_deref(),
-                arg_time(args, "since")?,
-                arg_time(args, "until")?,
-                before,
-            )
+            .list_notes_filtered(limit, folder_id.as_deref(), since, until, before, true)
             .map_err(|e| e.to_string())?;
         if notes.is_empty() {
             return Ok("No notes match.".into());
@@ -455,7 +647,7 @@ impl Server {
             ));
         }
         if notes.len() >= limit {
-            let last = notes.last().unwrap();
+            let last = notes.last().expect("non-empty");
             out.push_str(&format!(
                 "\nMore may exist — pass cursor: \"{}|{}\" to continue.\n",
                 last.updated_at.to_rfc3339(),
@@ -497,6 +689,7 @@ impl Server {
             .get("meeting_id")
             .and_then(|q| q.as_str())
             .ok_or("missing required argument: meeting_id")?;
+        self.guard_meeting(id)?;
         let items = self
             .storage
             .get_meeting_items(id)
@@ -530,6 +723,7 @@ impl Server {
                 since: arg_time(args, "since")?,
                 meeting_ids: None,
                 limit: arg_limit(args, 50),
+                exclude_keep_local: true,
             })
             .map_err(|e| e.to_string())?;
         if items.is_empty() {
@@ -553,22 +747,31 @@ impl Server {
             .storage
             .list_meetings(None, 2000)
             .map_err(|e| e.to_string())?;
-        Ok(context::detect_series(meetings))
+        // keep-local meetings never join a series: their titles would leak
+        // through series keys and timelines
+        let hidden = self.hidden_notes()?;
+        Ok(context::detect_series(
+            meetings
+                .into_iter()
+                .filter(|m| !hidden.contains(&m.note_id))
+                .collect(),
+        ))
     }
 
     fn tool_get_context(&self, args: &Value) -> Result<String, String> {
-        let query = args
-            .get("query")
-            .and_then(|q| q.as_str())
-            .ok_or("missing required argument: query")?;
+        let query = arg_query(args, "query")?;
         let since = arg_time(args, "since")?;
         let series = self.all_series()?;
         let mut matched = context::series_matching(&series, query);
         if matched.is_empty() {
             // fall back to full-text: meetings whose transcript/note matches
             let hits = self.storage.search(query, 20).map_err(|e| e.to_string())?;
-            let meeting_ids: std::collections::HashSet<String> =
-                hits.iter().filter_map(|h| h.meeting_id.clone()).collect();
+            let hidden = self.hidden_notes()?;
+            let meeting_ids: HashSet<String> = hits
+                .iter()
+                .filter(|h| !hidden.contains(&h.note_id))
+                .filter_map(|h| h.meeting_id.clone())
+                .collect();
             matched = series
                 .iter()
                 .filter(|s| s.meetings.iter().any(|m| meeting_ids.contains(&m.id)))
@@ -619,6 +822,7 @@ impl Server {
             .query_items(&ItemFilter {
                 meeting_ids,
                 limit: 200,
+                exclude_keep_local: true,
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
@@ -650,12 +854,36 @@ impl Server {
             .get("speaker_key")
             .and_then(|q| q.as_str())
             .ok_or("missing required argument: speaker_key")?;
-        let label = args
-            .get("label")
-            .and_then(|q| q.as_str())
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .ok_or("missing required argument: label")?;
+        let label = clean_speaker_label(
+            args.get("label")
+                .and_then(|q| q.as_str())
+                .ok_or("missing required argument: label")?,
+        )?;
+        let label = label.as_str();
+        self.guard_meeting(meeting_id)?;
+        // Only rename speakers that exist: the app UI can't invent new keys,
+        // so neither can an AI client.
+        let transcript = self
+            .storage
+            .get_transcript(meeting_id)
+            .map_err(|e| e.to_string())?
+            .ok_or(format!("no transcript for meeting {meeting_id}"))?;
+        let known = transcript.speakers.iter().any(|s| s.key == speaker_key)
+            || transcript
+                .segments
+                .iter()
+                .any(|s| s.speaker_key == speaker_key);
+        if !known {
+            return Err(format!(
+                "speaker_key \"{speaker_key}\" is not in this transcript. Known keys: {}",
+                transcript
+                    .speakers
+                    .iter()
+                    .map(|s| s.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         let t = self
             .storage
             .relabel_speaker(meeting_id, speaker_key, label)
@@ -669,6 +897,86 @@ impl Server {
                 .join(", ")
         ))
     }
+}
+
+/// Returned for a by-id lookup of a keep-local meeting. Deliberately says
+/// nothing about the meeting (no title, date or attendees).
+pub const KEEP_LOCAL_MEETING_MESSAGE: &str =
+    "This meeting is marked Keep local and isn't shared with AI tools.";
+/// Same, for a note.
+pub const KEEP_LOCAL_NOTE_MESSAGE: &str =
+    "This note is marked Keep local and isn't shared with AI tools.";
+/// A failed keep-local lookup refuses the whole result (fail closed).
+fn keep_local_lookup_error(e: StorageError) -> String {
+    format!("couldn't check Keep local settings, so nothing was returned: {e}")
+}
+
+/// Longest speaker label `set_speaker_label` accepts, in characters.
+pub const MAX_SPEAKER_LABEL_CHARS: usize = 100;
+
+/// Longest free-text query (`search_notes`, `get_context`) accepted.
+pub const MAX_QUERY_CHARS: usize = 1_000;
+
+/// Upper bound on one tool result's text. Larger results are cut at a char
+/// boundary with a note telling the client how to narrow the request, so a
+/// batch of very long transcripts can't produce a multi-megabyte reply.
+pub const MAX_RESULT_BYTES: usize = 1_000_000;
+
+/// Normalise an AI-supplied speaker label: control characters, newlines and
+/// invisible bidi/zero-width format characters become spaces, whitespace
+/// runs collapse, and the result must be non-empty and at most
+/// [`MAX_SPEAKER_LABEL_CHARS`].
+fn clean_speaker_label(raw: &str) -> Result<String, String> {
+    let is_invisible = |c: char| matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
+    let spaced: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || is_invisible(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let label = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() {
+        return Err("label must not be empty".into());
+    }
+    if label.chars().count() > MAX_SPEAKER_LABEL_CHARS {
+        return Err(format!(
+            "label is longer than {MAX_SPEAKER_LABEL_CHARS} characters"
+        ));
+    }
+    Ok(label)
+}
+
+/// Required free-text query argument, length-capped.
+fn arg_query<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+    let q = args
+        .get(key)
+        .and_then(|q| q.as_str())
+        .ok_or(format!("missing required argument: {key}"))?;
+    if q.chars().count() > MAX_QUERY_CHARS {
+        return Err(format!("{key} is longer than {MAX_QUERY_CHARS} characters"));
+    }
+    Ok(q)
+}
+
+/// Cut `text` to [`MAX_RESULT_BYTES`] at a char boundary, with a note.
+fn cap_result(mut text: String) -> String {
+    if text.len() <= MAX_RESULT_BYTES {
+        return text;
+    }
+    let mut cut = MAX_RESULT_BYTES;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let omitted = text.len() - cut;
+    text.truncate(cut);
+    text.push_str(&format!(
+        "\n\n[result truncated: {omitted} more bytes omitted — request fewer items or one meeting at a time]\n"
+    ));
+    text
 }
 
 /// Optional string argument, trimmed; empty = absent.
@@ -1371,6 +1679,112 @@ mod tests {
         );
     }
 
+    fn tool_error(server: &Server, name: &str, args: serde_json::Value) -> String {
+        let resp = call(
+            server,
+            json!({"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":name,"arguments":args}}),
+        );
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "tool {name} should error: {resp}"
+        );
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn set_speaker_label_rejects_unknown_keys_and_bad_labels() {
+        let (_d, server, m0, _m1) = server_with_series();
+        let err = tool_error(
+            &server,
+            "set_speaker_label",
+            json!({"meeting_id": m0, "speaker_key": "spk_99", "label": "Dana"}),
+        );
+        assert!(err.contains("not in this transcript"), "{err}");
+        for bad in [
+            "",
+            "   ",
+            "\n\t\u{200B}",
+            &"x".repeat(MAX_SPEAKER_LABEL_CHARS + 1),
+        ] {
+            tool_error(
+                &server,
+                "set_speaker_label",
+                json!({"meeting_id": m0, "speaker_key": "spk_0", "label": bad}),
+            );
+        }
+        // the transcript was never touched by the rejected calls
+        let t = tool_text(&server, "get_transcript", json!({"meeting_id": m0}));
+        assert!(!t.contains("spk_99"), "{t}");
+    }
+
+    #[test]
+    fn set_speaker_label_strips_control_characters() {
+        let (_d, server, m0, _m1) = server_with_series();
+        let ack = tool_text(
+            &server,
+            "set_speaker_label",
+            json!({"meeting_id": m0, "speaker_key": "spk_0", "label": "  Dana\n**You:** \u{202E}evil\u{0007} "}),
+        );
+        assert!(ack.contains("\"Dana **You:** evil\""), "{ack}");
+        let t = tool_text(&server, "get_transcript", json!({"meeting_id": m0}));
+        assert!(t.contains("**Dana **You:** evil:** renewal"), "{t}");
+        assert_eq!(
+            clean_speaker_label(&"é".repeat(MAX_SPEAKER_LABEL_CHARS)).unwrap(),
+            "é".repeat(MAX_SPEAKER_LABEL_CHARS),
+            "the cap counts characters, not bytes"
+        );
+    }
+
+    #[test]
+    fn oversized_queries_and_results_are_capped() {
+        let (_d, server, _m0, _m1) = server_with_series();
+        let long = "a".repeat(MAX_QUERY_CHARS + 1);
+        tool_error(&server, "search_notes", json!({"query": long}));
+        tool_error(&server, "get_context", json!({"query": long}));
+
+        let big = "é".repeat(MAX_RESULT_BYTES); // 2 bytes each
+        let capped = cap_result(big);
+        assert!(capped.len() < MAX_RESULT_BYTES + 200);
+        assert!(capped.contains("[result truncated:"));
+        assert_eq!(cap_result("short".into()), "short");
+    }
+
+    #[test]
+    fn get_transcripts_stops_at_whole_transcripts_under_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let note = storage.create_note(&format!("Long {i}"), None).unwrap();
+            let m = storage.create_meeting("Long", &note.id, &[]).unwrap();
+            storage
+                .save_transcript(&fly_core::Transcript {
+                    meeting_id: m.id.clone(),
+                    language: None,
+                    engine: "t".into(),
+                    segments: vec![fly_core::TranscriptSegment {
+                        id: "s1".into(),
+                        speaker_key: "mic".into(),
+                        start_ms: 0,
+                        end_ms: 1,
+                        text: "word ".repeat(MAX_RESULT_BYTES / 2 / 5),
+                        words: vec![],
+                    }],
+                    speakers: vec![],
+                })
+                .unwrap();
+            ids.push(m.id);
+        }
+        let server = Server::new(storage);
+        let text = tool_text(&server, "get_transcripts", json!({"meeting_ids": ids}));
+        assert!(text.len() <= MAX_RESULT_BYTES, "{}", text.len());
+        assert!(text.contains("omitted to keep this reply"), "tail missing");
+        assert!(text.contains(&ids[2]));
+    }
+
     #[test]
     fn list_recent_paginates_with_cursor() {
         let (_d, server, _m0, _m1) = server_with_series();
@@ -1392,5 +1806,444 @@ mod tests {
         // two different notes across the pages
         let title_of = |s: &str| s.lines().nth(1).unwrap_or("").to_string();
         assert_ne!(title_of(&page1), title_of(&page2));
+    }
+
+    /// Three "Acme renewal" meetings in one series: one shared, one with
+    /// the meeting's own Keep-local flag, one filed under a sub-folder of a
+    /// local-only folder. Everything private carries the word "secretword".
+    struct KeepLocalFixture {
+        _dir: tempfile::TempDir,
+        server: Server,
+        visible_note: String,
+        visible_meeting: String,
+        /// (note_id, meeting_id) — flagged directly, filed in a local folder
+        hidden: [(String, String); 2],
+    }
+
+    fn server_with_keep_local() -> KeepLocalFixture {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let legal = storage.create_folder("Legal", None).unwrap();
+        let cases = storage.create_folder("Cases", Some(&legal.id)).unwrap();
+        storage.set_folder_keep_local(&legal.id, true).unwrap();
+        let mut made = Vec::new();
+        for (i, (title, folder, word)) in [
+            ("Acme renewal 2026-06-01", None, "shared"),
+            ("Acme renewal 2026-06-08", None, "secretword"),
+            (
+                "Acme renewal 2026-06-15",
+                Some(cases.id.as_str()),
+                "secretword",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let note = storage.create_note(title, folder).unwrap();
+            storage
+                .update_note_scratchpad(&note.id, &format!("renewal notes {word} body"))
+                .unwrap();
+            let meeting = storage
+                .create_meeting(
+                    title,
+                    &note.id,
+                    &[fly_core::Attendee::from_legacy("dana@acme.com")],
+                )
+                .unwrap();
+            storage
+                .save_transcript(&fly_core::Transcript {
+                    meeting_id: meeting.id.clone(),
+                    language: Some("en".into()),
+                    engine: "whisper.cpp".into(),
+                    segments: vec![fly_core::TranscriptSegment {
+                        id: format!("s{i}"),
+                        speaker_key: "spk_0".into(),
+                        start_ms: 0,
+                        end_ms: 1000,
+                        text: format!("renewal discussion {word}"),
+                        words: vec![],
+                    }],
+                    speakers: vec![fly_core::Speaker {
+                        key: "spk_0".into(),
+                        label: "Speaker 1".into(),
+                    }],
+                })
+                .unwrap();
+            let item = |kind: ItemKind, text: String, status: Option<&str>| fly_core::MeetingItem {
+                id: fly_core::new_id(),
+                meeting_id: meeting.id.clone(),
+                kind,
+                text,
+                owner: Some("Dana".into()),
+                status: status.map(String::from),
+                speaker_key: Some("spk_0".into()),
+                segment_ids: vec![format!("s{i}")],
+                created_at: chrono::Utc::now(),
+                extracted_by: "mock".into(),
+            };
+            storage
+                .replace_meeting_items(
+                    &meeting.id,
+                    &[
+                        item(ItemKind::Decision, format!("decision {word} {i}"), None),
+                        item(
+                            ItemKind::ActionItem,
+                            format!("action {word} {i}"),
+                            Some("open"),
+                        ),
+                    ],
+                )
+                .unwrap();
+            made.push((note.id, meeting.id));
+        }
+        storage.set_note_keep_local(&made[1].0, true).unwrap();
+        let (visible_note, visible_meeting) = made.remove(0);
+        let h1 = made.remove(0);
+        let h2 = made.remove(0);
+        KeepLocalFixture {
+            _dir: dir,
+            server: Server::new(storage),
+            visible_note,
+            visible_meeting,
+            hidden: [h1, h2],
+        }
+    }
+
+    fn assert_no_leak(f: &KeepLocalFixture, text: &str) {
+        assert!(
+            !text.contains("secretword"),
+            "keep-local content leaked: {text}"
+        );
+        for (note, meeting) in &f.hidden {
+            assert!(
+                !text.contains(note.as_str()),
+                "hidden note id leaked: {text}"
+            );
+            assert!(
+                !text.contains(meeting.as_str()),
+                "hidden meeting id leaked: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn keep_local_direct_lookups_are_refused() {
+        let f = server_with_keep_local();
+        for (note, meeting) in &f.hidden {
+            for (tool, args) in [
+                ("get_meeting", json!({"meeting_id": meeting})),
+                ("get_transcript", json!({"meeting_id": meeting})),
+                ("get_meeting_items", json!({"meeting_id": meeting})),
+                (
+                    "set_speaker_label",
+                    json!({"meeting_id": meeting, "speaker_key": "spk_0", "label": "Dana"}),
+                ),
+            ] {
+                let err = tool_error(&f.server, tool, args);
+                assert_eq!(err, KEEP_LOCAL_MEETING_MESSAGE, "{tool}");
+            }
+            let err = tool_error(&f.server, "get_note", json!({"note_id": note}));
+            assert_eq!(err, KEEP_LOCAL_NOTE_MESSAGE);
+        }
+        // the refused write really didn't happen
+        let t = f
+            .server
+            .storage
+            .get_transcript(&f.hidden[0].1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.speakers[0].label, "Speaker 1");
+
+        // the shared meeting still works through the same tools
+        let ok = tool_text(
+            &f.server,
+            "get_transcript",
+            json!({"meeting_id": f.visible_meeting}),
+        );
+        assert!(ok.contains("renewal discussion shared"), "{ok}");
+        tool_text(&f.server, "get_note", json!({"note_id": f.visible_note}));
+        tool_text(
+            &f.server,
+            "get_meeting",
+            json!({"meeting_id": f.visible_meeting}),
+        );
+
+        // batch: shared transcript rendered, hidden ones refused in place
+        let batch = tool_text(
+            &f.server,
+            "get_transcripts",
+            json!({"meeting_ids": [f.visible_meeting, f.hidden[0].1, f.hidden[1].1]}),
+        );
+        assert!(batch.contains("renewal discussion shared"), "{batch}");
+        assert!(!batch.contains("secretword"), "{batch}");
+        assert_eq!(
+            batch.matches(KEEP_LOCAL_MEETING_MESSAGE).count(),
+            2,
+            "{batch}"
+        );
+    }
+
+    #[test]
+    fn keep_local_is_excluded_from_briefings_items_search_and_lists() {
+        let f = server_with_keep_local();
+
+        let ctx = tool_text(&f.server, "get_context", json!({"query": "acme renewal"}));
+        assert!(ctx.contains("1 meeting(s)"), "{ctx}");
+        assert!(ctx.contains(&f.visible_meeting), "{ctx}");
+        assert!(ctx.contains("decision shared 0"), "{ctx}");
+        assert_no_leak(&f, &ctx);
+        // full-text fallback can't route to a hidden meeting either
+        let fallback = tool_text(&f.server, "get_context", json!({"query": "secretword"}));
+        // (the query itself is echoed back, so check for the miss + no ids)
+        assert!(fallback.starts_with("No meetings matched"), "{fallback}");
+        assert_no_leak(&f, &fallback.replace("\"secretword\"", ""));
+
+        let changed = tool_text(
+            &f.server,
+            "whats_changed",
+            json!({"series": "acme renewal", "since": "2020-01-01"}),
+        );
+        assert!(changed.contains("1 meeting(s)"), "{changed}");
+        assert_no_leak(&f, &changed);
+
+        for scope in [json!({}), json!({"scope": "acme renewal"})] {
+            let open = tool_text(&f.server, "open_items", scope);
+            assert!(open.contains("action shared 0"), "{open}");
+            assert_no_leak(&f, &open);
+        }
+        for args in [json!({}), json!({"type": "decision"}), json!({"limit": 1})] {
+            let items = tool_text(&f.server, "query_items", args);
+            assert!(items.contains("shared 0"), "{items}");
+            assert_no_leak(&f, &items);
+        }
+
+        let miss = tool_text(&f.server, "search_notes", json!({"query": "secretword"}));
+        assert!(miss.contains("No matches"), "{miss}");
+        // hidden hits rank alongside the shared one; a 1-hit page still
+        // refills to the shared note
+        for limit in [1, 20] {
+            let hits = tool_text(
+                &f.server,
+                "search_notes",
+                json!({"query": "renewal", "limit": limit}),
+            );
+            assert!(hits.contains(&f.visible_note), "{hits}");
+            assert_no_leak(&f, &hits);
+        }
+
+        for limit in [1, 10] {
+            let recent = tool_text(&f.server, "list_recent", json!({"limit": limit}));
+            assert!(recent.contains(&f.visible_note), "{recent}");
+            assert_no_leak(&f, &recent);
+        }
+
+        // keep-local folders (and inherited descendants) are not listed at all
+        let folders = tool_text(&f.server, "list_folders", json!({}));
+        assert!(
+            !folders.contains("Legal") && !folders.contains("Cases"),
+            "{folders}"
+        );
+    }
+
+    /// A database the server can't open (here: not a SQLite file — the same
+    /// path a too-old or too-new schema takes) must not kill the server:
+    /// the handshake and tool list still answer, tool calls explain what to
+    /// do, and the next call after the app fixes the database just works.
+    #[test]
+    fn lazy_server_serves_errors_until_the_database_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("flyonthewall.db");
+        std::fs::write(&db, b"definitely not sqlite, just garbage bytes here").unwrap();
+        let lazy = LazyServer::new(dir.path().to_path_buf());
+        assert!(!lazy.is_open());
+
+        let call = |msg: serde_json::Value| -> serde_json::Value {
+            serde_json::from_str(&lazy.handle_message(&msg.to_string()).unwrap()).unwrap()
+        };
+        let init = call(
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+        );
+        assert_eq!(init["result"]["serverInfo"]["name"], SERVER_NAME);
+        let tools = call(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
+        assert!(tools["result"]["tools"].as_array().unwrap().len() > 5);
+        assert!(lazy
+            .handle_message(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            .is_none());
+        let search = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_notes","arguments":{"query":"x"}}});
+        let resp = call(search.clone());
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with(DB_UNAVAILABLE_MESSAGE), "{text}");
+
+        // the app opens and repairs its database; no client restart needed
+        std::fs::remove_file(&db).unwrap();
+        drop(Storage::open(dir.path()).unwrap());
+        let resp = call(search);
+        assert_ne!(resp["result"]["isError"], true, "{resp}");
+        assert!(lazy.is_open());
+    }
+
+    #[test]
+    fn list_folders_never_reveals_a_local_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let work = storage.create_folder("Work", None).unwrap();
+        let clients = storage.create_folder("Clients", Some(&work.id)).unwrap();
+        let legal = storage.create_folder("Legal", None).unwrap();
+        let cases = storage.create_folder("Cases", Some(&legal.id)).unwrap();
+        storage.set_folder_keep_local(&legal.id, true).unwrap();
+        let server = Server::new(storage);
+        let text = tool_text(&server, "list_folders", json!({}));
+        assert!(text.contains(&format!(
+            "- Clients (id: {}, parent: {})",
+            clients.id, work.id
+        )));
+        assert!(
+            text.contains(&format!("- Work (id: {})", work.id)),
+            "{text}"
+        );
+        for leak in ["Legal", "Cases", legal.id.as_str(), cases.id.as_str()] {
+            assert!(!text.contains(leak), "{leak} leaked: {text}");
+        }
+    }
+
+    /// 25 keep-local notes all newer than / ranking with one shared note.
+    /// Hidden rows are excluded in SQL, so the shared note comes straight
+    /// back, never more than `limit` hits, and no cursor names a hidden row.
+    #[test]
+    fn hidden_rows_never_shape_pages_or_cursors() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let shared = storage.create_note("zeta shared", None).unwrap();
+        storage
+            .update_note_scratchpad(&shared.id, "zeta topic")
+            .unwrap();
+        let legal = storage.create_folder("Legal", None).unwrap();
+        storage.set_folder_keep_local(&legal.id, true).unwrap();
+        let mut hidden_ids = Vec::new();
+        for i in 0..25 {
+            let n = storage
+                .create_note(&format!("zeta hidden {i}"), Some(&legal.id))
+                .unwrap();
+            storage
+                .update_note_scratchpad(&n.id, "zeta topic onlyhidden")
+                .unwrap();
+            hidden_ids.push(n.id);
+        }
+        let server = Server::new(storage);
+        let no_hidden = |text: &str| {
+            assert!(!text.contains("hidden"), "leaked: {text}");
+            for id in &hidden_ids {
+                assert!(!text.contains(id.as_str()), "hidden id leaked: {text}");
+            }
+        };
+        for (tool, args) in [
+            ("search_notes", json!({"query": "zeta", "limit": 1})),
+            ("list_recent", json!({"limit": 1})),
+        ] {
+            let text = tool_text(&server, tool, args);
+            no_hidden(&text);
+            assert!(text.contains(&shared.id), "{tool}: {text}");
+            assert_eq!(text.matches("note_id: ").count(), 1, "{tool}: {text}");
+        }
+        // A query only hidden notes match reads exactly like one nothing
+        // matches: no cursor, no count, nothing to probe with.
+        let only_hidden = tool_text(&server, "search_notes", json!({"query": "onlyhidden"}));
+        let nothing = tool_text(&server, "search_notes", json!({"query": "nosuchword"}));
+        assert_eq!(
+            only_hidden.replace("onlyhidden", "Q"),
+            nothing.replace("nosuchword", "Q")
+        );
+    }
+
+    /// At most `limit` hits per page, and following the cursor visits every
+    /// shareable note and transcript exactly once.
+    #[test]
+    fn search_pages_are_capped_and_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let legal = storage.create_folder("Legal", None).unwrap();
+        storage.set_folder_keep_local(&legal.id, true).unwrap();
+        let mut want = std::collections::BTreeSet::new();
+        for i in 0..12 {
+            let folder = (i % 2 == 0).then_some(legal.id.as_str());
+            let n = storage.create_note(&format!("omega {i}"), folder).unwrap();
+            storage.update_note_scratchpad(&n.id, "omega").unwrap();
+            let m = storage.create_meeting("omega", &n.id, &[]).unwrap();
+            storage
+                .save_transcript(&fly_core::Transcript {
+                    meeting_id: m.id.clone(),
+                    language: None,
+                    engine: "t".into(),
+                    segments: vec![fly_core::TranscriptSegment {
+                        id: "s1".into(),
+                        speaker_key: "mic".into(),
+                        start_ms: 0,
+                        end_ms: 1,
+                        text: "omega".into(),
+                        words: vec![],
+                    }],
+                    speakers: vec![],
+                })
+                .unwrap();
+            if folder.is_none() {
+                want.insert(format!("note:{}", n.id));
+                want.insert(format!("transcript:{}", m.id));
+            }
+        }
+        let server = Server::new(storage);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut args = json!({"query": "omega", "limit": 4});
+        for _ in 0..10 {
+            let text = tool_text(&server, "search_notes", args.clone());
+            let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("- [")).collect();
+            assert!(lines.len() <= 4, "{text}");
+            for l in lines {
+                let key = if l.starts_with("- [note]") {
+                    let id = l
+                        .split("note_id: ")
+                        .nth(1)
+                        .unwrap()
+                        .split(')')
+                        .next()
+                        .unwrap();
+                    format!("note:{id}")
+                } else {
+                    let id = l
+                        .split("meeting_id: ")
+                        .nth(1)
+                        .unwrap()
+                        .split(')')
+                        .next()
+                        .unwrap();
+                    format!("transcript:{id}")
+                };
+                assert!(seen.insert(key.clone()), "repeated {key}: {text}");
+            }
+            match text.split("pass cursor: \"").nth(1) {
+                Some(rest) => args["cursor"] = json!(rest.split('"').next().unwrap()),
+                None => break,
+            }
+        }
+        assert_eq!(seen, want);
+    }
+
+    #[test]
+    fn orphaned_content_of_unknown_privacy_is_not_shared() {
+        let f = server_with_keep_local();
+        // transcript rows have no FK: simulate one left behind by a deleted
+        // meeting — without its meeting row, keep-local can't be determined
+        f.server
+            .storage
+            .save_transcript(&fly_core::Transcript {
+                meeting_id: "ghost".into(),
+                language: None,
+                engine: "t".into(),
+                segments: vec![],
+                speakers: vec![],
+            })
+            .unwrap();
+        let err = tool_error(&f.server, "get_transcript", json!({"meeting_id": "ghost"}));
+        assert!(err.contains("not found"), "{err}");
     }
 }
