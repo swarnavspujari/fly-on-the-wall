@@ -167,6 +167,8 @@ pub fn spawn(app: tauri::AppHandle) {
             let state = app.state::<AppState>();
             // An Ollama on another machine must never receive keep-local
             // notes or transcripts: index only the shareable queue then.
+            // (Backlog only decides whether to wake up; the batch below
+            // re-derives the filter from the URL it actually sends to.)
             let remote = !crate::llm_commands::is_loopback_url(&ollama::root_url(&state));
             let backlog = {
                 let storage = state.storage.lock().unwrap();
@@ -191,9 +193,12 @@ pub fn spawn(app: tauri::AppHandle) {
                 }
             };
 
+            // Decide the filter from the SAME url the batch is sent to: the
+            // setting may have changed since the backlog check above.
+            let send_remote = !crate::llm_commands::is_loopback_url(&root);
             let batch = {
                 let storage = state.storage.lock().unwrap();
-                if remote {
+                if send_remote {
                     storage.pending_embedding_chunks_shareable(EMBED_MODEL, BATCH_SIZE)
                 } else {
                     storage.pending_embedding_chunks(EMBED_MODEL, BATCH_SIZE)
