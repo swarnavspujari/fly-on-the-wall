@@ -155,12 +155,12 @@ async fn graph_get(client: &reqwest::Client, url: &str, token: &str) -> Result<S
         .header("Prefer", "outlook.timezone=\"UTC\"")
         .send()
         .await
-        .map_err(|e| CalendarError::Network(e.to_string()))?;
+        .map_err(|e| CalendarError::Network(e.without_url().to_string()))?;
     let status = resp.status();
     let text = resp
         .text()
         .await
-        .map_err(|e| CalendarError::Network(e.to_string()))?;
+        .map_err(|e| CalendarError::Network(e.without_url().to_string()))?;
     if status.as_u16() == 401 {
         return Err(CalendarError::NotConnected);
     }

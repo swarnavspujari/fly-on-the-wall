@@ -423,7 +423,7 @@ pub async fn import_transcribe(
         for f in files.iter().filter(|f| f.kind == "video") {
             if let Some(rel) = &f.rel_path {
                 if let Err(e) = storage.add_attachment_in_place(&staged.note_id, rel) {
-                    tracing::warn!(error = %e, rel, "attaching imported video failed");
+                    tracing::warn!(error = %e, note_id = %staged.note_id, "attaching imported video failed");
                 }
             }
         }

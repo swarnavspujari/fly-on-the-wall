@@ -92,6 +92,75 @@ impl OpenRetry {
     };
 }
 
+/// Tables every current-schema database has (checked by
+/// [`Storage::open_existing`]; created by `create_baseline`).
+const REQUIRED_TABLES: &[&str] = &[
+    "folders",
+    "notes",
+    "meetings",
+    "transcripts",
+    "templates",
+    "settings",
+    "transcription_jobs",
+    "meeting_items",
+    "notes_fts",
+    "transcripts_fts",
+    "embedding_chunks",
+];
+
+/// Columns added after a table's first release, per table. Repaired by
+/// `repair_missing_columns`; required by [`Storage::open_existing`].
+const EXPECTED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "folders",
+        &[
+            ("parent_id", "TEXT REFERENCES folders(id) ON DELETE CASCADE"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ],
+    ),
+    (
+        "notes",
+        &[
+            (
+                "folder_id",
+                "TEXT REFERENCES folders(id) ON DELETE SET NULL",
+            ),
+            ("meeting_id", "TEXT"),
+            ("scratchpad", "TEXT NOT NULL DEFAULT ''"),
+            ("blocks_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("attachments_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+            ("disk_path", "TEXT"),
+        ],
+    ),
+    (
+        "meetings",
+        &[
+            ("attendees_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("attendees_confirmed", "INTEGER NOT NULL DEFAULT 0"),
+            ("started_at", "TEXT NOT NULL DEFAULT ''"),
+            ("ended_at", "TEXT"),
+            ("recording_json", "TEXT"),
+        ],
+    ),
+    (
+        "templates",
+        &[
+            ("system_prompt", "TEXT NOT NULL DEFAULT ''"),
+            ("structure_hint", "TEXT NOT NULL DEFAULT ''"),
+            ("built_in", "INTEGER NOT NULL DEFAULT 0"),
+        ],
+    ),
+    // Added with the transcript-polish feature (cleaned_json) and the
+    // attendee editor's re-diarize undo (speaker_undo_json); older DBs
+    // get them via ALTER so the columns exist before first write.
+    (
+        "transcripts",
+        &[("cleaned_json", "TEXT"), ("speaker_undo_json", "TEXT")],
+    ),
+];
+
 pub struct Storage {
     conn: Connection,
     data_dir: PathBuf,
@@ -131,6 +200,93 @@ impl Storage {
     /// path (e.g. the startup error dialog) is reached only after retrying.
     pub fn open_with_retry(data_dir: &Path, retry: OpenRetry) -> Result<Self> {
         Self::retry_open(retry, || Self::open(data_dir))
+    }
+
+    /// Open an index the app has ALREADY created, for secondary processes
+    /// (the MCP server) that run alongside the app. Unlike [`open`](Self::open)
+    /// this never creates directories or the database, never migrates,
+    /// repairs columns or seeds templates — the app owns every schema write,
+    /// and doing them concurrently from a second process is how two writers
+    /// end up fighting over the same file. Waits up to
+    /// [`EXISTING_BUSY_TIMEOUT`](Self::EXISTING_BUSY_TIMEOUT) on a locked
+    /// database, and fails with a clear message when the schema isn't
+    /// exactly the one this build expects (older: open the app to upgrade
+    /// it; newer: this binary is out of date).
+    pub fn open_existing(data_dir: &Path) -> Result<Self> {
+        use rusqlite::OpenFlags;
+        let db = data_dir.join(Self::DB_FILE);
+        if !db.is_file() {
+            return Err(StorageError::NotFound(
+                "no Fly on the Wall database yet — open the app once to create it".into(),
+            ));
+        }
+        let conn = Connection::open_with_flags(
+            &db,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(Self::EXISTING_BUSY_TIMEOUT)?;
+        // Per-connection settings only. journal_mode is persistent in the
+        // file (the app set WAL) and changing it needs an exclusive lock.
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "secure_delete", "ON")?;
+        Self::check_schema(&conn)?;
+        Ok(Self {
+            conn,
+            data_dir: data_dir.to_path_buf(),
+        })
+    }
+
+    /// How long [`open_existing`](Self::open_existing) connections wait for
+    /// the app's write lock before reporting "database is locked".
+    pub const EXISTING_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Read-only check that the schema is exactly what this build expects.
+    fn check_schema(conn: &Connection) -> Result<()> {
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version < Self::SCHEMA_VERSION {
+            return Err(StorageError::Invalid(format!(
+                "database schema v{version} is older than v{} — open the Fly on the Wall app once to upgrade it",
+                Self::SCHEMA_VERSION
+            )));
+        }
+        if version > Self::SCHEMA_VERSION {
+            return Err(StorageError::Invalid(format!(
+                "database schema v{version} is newer than this build supports (v{}) — update Fly on the Wall",
+                Self::SCHEMA_VERSION
+            )));
+        }
+        // Columns can be added without a version bump (repair_missing_columns),
+        // so a same-version file from an older build may still lack some.
+        for table in REQUIRED_TABLES {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1)",
+                [table],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(Self::needs_upgrade(table));
+            }
+        }
+        for (table, cols) in EXPECTED_COLUMNS {
+            let existing = Self::table_columns(conn, table)?;
+            if cols.iter().any(|(name, _)| !existing.contains(*name)) {
+                return Err(Self::needs_upgrade(table));
+            }
+        }
+        Ok(())
+    }
+
+    fn needs_upgrade(table: &str) -> StorageError {
+        StorageError::Invalid(format!(
+            "database is missing parts of the current schema ({table}) — open the Fly on the Wall app once to upgrade it"
+        ))
+    }
+
+    fn table_columns(conn: &Connection, table: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<std::result::Result<_, _>>()?)
     }
 
     /// Retry core, generic over the open closure so a test can drive the
@@ -318,61 +474,8 @@ impl Storage {
     /// baseline schema and `ALTER TABLE ADD COLUMN` whatever is missing —
     /// idempotent, and safe for every DB regardless of the build that made it.
     fn repair_missing_columns(conn: &Connection) -> Result<()> {
-        const EXPECTED: &[(&str, &[(&str, &str)])] = &[
-            (
-                "folders",
-                &[
-                    ("parent_id", "TEXT REFERENCES folders(id) ON DELETE CASCADE"),
-                    ("created_at", "TEXT NOT NULL DEFAULT ''"),
-                ],
-            ),
-            (
-                "notes",
-                &[
-                    (
-                        "folder_id",
-                        "TEXT REFERENCES folders(id) ON DELETE SET NULL",
-                    ),
-                    ("meeting_id", "TEXT"),
-                    ("scratchpad", "TEXT NOT NULL DEFAULT ''"),
-                    ("blocks_json", "TEXT NOT NULL DEFAULT '[]'"),
-                    ("attachments_json", "TEXT NOT NULL DEFAULT '[]'"),
-                    ("created_at", "TEXT NOT NULL DEFAULT ''"),
-                    ("updated_at", "TEXT NOT NULL DEFAULT ''"),
-                    ("disk_path", "TEXT"),
-                ],
-            ),
-            (
-                "meetings",
-                &[
-                    ("attendees_json", "TEXT NOT NULL DEFAULT '[]'"),
-                    ("attendees_confirmed", "INTEGER NOT NULL DEFAULT 0"),
-                    ("started_at", "TEXT NOT NULL DEFAULT ''"),
-                    ("ended_at", "TEXT"),
-                    ("recording_json", "TEXT"),
-                ],
-            ),
-            (
-                "templates",
-                &[
-                    ("system_prompt", "TEXT NOT NULL DEFAULT ''"),
-                    ("structure_hint", "TEXT NOT NULL DEFAULT ''"),
-                    ("built_in", "INTEGER NOT NULL DEFAULT 0"),
-                ],
-            ),
-            // Added with the transcript-polish feature (cleaned_json) and the
-            // attendee editor's re-diarize undo (speaker_undo_json); older DBs
-            // get them via ALTER so the columns exist before first write.
-            (
-                "transcripts",
-                &[("cleaned_json", "TEXT"), ("speaker_undo_json", "TEXT")],
-            ),
-        ];
-        for (table, cols) in EXPECTED {
-            let existing: std::collections::HashSet<String> = conn
-                .prepare(&format!("PRAGMA table_info({table})"))?
-                .query_map([], |r| r.get::<_, String>(1))?
-                .collect::<std::result::Result<_, _>>()?;
+        for (table, cols) in EXPECTED_COLUMNS {
+            let existing = Self::table_columns(conn, table)?;
             for (name, decl) in *cols {
                 if !existing.contains(*name) {
                     conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {decl}"))?;
@@ -393,6 +496,71 @@ pub(crate) fn test_storage() -> (tempfile::TempDir, Storage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user_version(dir: &Path) -> i64 {
+        Connection::open(dir.join(Storage::DB_FILE))
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn open_existing_refuses_a_missing_database_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = Storage::open_existing(dir.path()).err().unwrap();
+        assert!(err.to_string().contains("open the app once"), "{err}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn open_existing_never_migrates_or_seeds() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Storage::open(dir.path()).unwrap());
+        {
+            let c = Connection::open(dir.path().join(Storage::DB_FILE)).unwrap();
+            c.execute("DELETE FROM templates", []).unwrap();
+        }
+        let s = Storage::open_existing(dir.path()).unwrap();
+        let templates: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM templates", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(templates, 0, "open_existing must not seed templates");
+        let busy: i64 = s
+            .conn
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy, 5000);
+        // ordinary reads and the one MCP write work
+        assert!(s.list_notes_filtered(10, None, None, None, None).is_ok());
+    }
+
+    #[test]
+    fn open_existing_rejects_other_schema_versions_without_touching_them() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Storage::open(dir.path()).unwrap());
+        for (v, want) in [(1, "older"), (Storage::SCHEMA_VERSION + 1, "newer")] {
+            Connection::open(dir.path().join(Storage::DB_FILE))
+                .unwrap()
+                .pragma_update(None, "user_version", v)
+                .unwrap();
+            let err = Storage::open_existing(dir.path()).err().unwrap();
+            assert!(err.to_string().contains(want), "{err}");
+            assert_eq!(user_version(dir.path()), v, "version must be left as is");
+        }
+    }
+
+    #[test]
+    fn open_existing_rejects_a_database_missing_current_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Storage::open(dir.path()).unwrap());
+        Connection::open(dir.path().join(Storage::DB_FILE))
+            .unwrap()
+            .execute_batch("ALTER TABLE transcripts DROP COLUMN speaker_undo_json")
+            .unwrap();
+        let err = Storage::open_existing(dir.path()).err().unwrap();
+        assert!(err.to_string().contains("transcripts"), "{err}");
+    }
 
     #[test]
     fn open_creates_schema_and_dirs() {

@@ -190,7 +190,7 @@ impl Server {
             other => Err(format!("unknown tool: {other}")),
         };
         match text {
-            Ok(text) => Ok(json!({"content": [{"type": "text", "text": text}]})),
+            Ok(text) => Ok(json!({"content": [{"type": "text", "text": cap_result(text)}]})),
             Err(message) => Ok(json!({
                 "content": [{"type": "text", "text": message}],
                 "isError": true
@@ -199,10 +199,7 @@ impl Server {
     }
 
     fn tool_search(&self, args: &Value) -> Result<String, String> {
-        let query = args
-            .get("query")
-            .and_then(|q| q.as_str())
-            .ok_or("missing required argument: query")?;
+        let query = arg_query(args, "query")?;
         let limit = arg_limit(args, 20);
         let offset = args
             .get("cursor")
@@ -389,12 +386,28 @@ impl Server {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let mut out = String::new();
+        let mut skipped: Vec<&str> = Vec::new();
         for id in &ids {
-            match self.render_transcript(id, with_ids) {
-                Ok(t) => out.push_str(&t),
-                Err(e) => out.push_str(&format!("# meeting {id}\n({e})\n")),
+            let part = match self.render_transcript(id, with_ids) {
+                Ok(t) => t,
+                Err(e) => format!("# meeting {id}\n({e})\n"),
+            };
+            // Whole transcripts only: stop before the reply outgrows the
+            // result cap and say which ids to fetch next.
+            if !out.is_empty() && out.len() + part.len() > MAX_RESULT_BYTES - 4_096 {
+                skipped.push(id);
+                continue;
             }
+            out.push_str(&part);
             out.push_str("\n---\n\n");
+        }
+        if !skipped.is_empty() {
+            out.push_str(&format!(
+                "[{} transcript(s) omitted to keep this reply under {} bytes — fetch them in another call: {}]\n",
+                skipped.len(),
+                MAX_RESULT_BYTES,
+                skipped.join(", ")
+            ));
         }
         Ok(out)
     }
@@ -557,10 +570,7 @@ impl Server {
     }
 
     fn tool_get_context(&self, args: &Value) -> Result<String, String> {
-        let query = args
-            .get("query")
-            .and_then(|q| q.as_str())
-            .ok_or("missing required argument: query")?;
+        let query = arg_query(args, "query")?;
         let since = arg_time(args, "since")?;
         let series = self.all_series()?;
         let mut matched = context::series_matching(&series, query);
@@ -650,12 +660,35 @@ impl Server {
             .get("speaker_key")
             .and_then(|q| q.as_str())
             .ok_or("missing required argument: speaker_key")?;
-        let label = args
-            .get("label")
-            .and_then(|q| q.as_str())
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .ok_or("missing required argument: label")?;
+        let label = clean_speaker_label(
+            args.get("label")
+                .and_then(|q| q.as_str())
+                .ok_or("missing required argument: label")?,
+        )?;
+        let label = label.as_str();
+        // Only rename speakers that exist: the app UI can't invent new keys,
+        // so neither can an AI client.
+        let transcript = self
+            .storage
+            .get_transcript(meeting_id)
+            .map_err(|e| e.to_string())?
+            .ok_or(format!("no transcript for meeting {meeting_id}"))?;
+        let known = transcript.speakers.iter().any(|s| s.key == speaker_key)
+            || transcript
+                .segments
+                .iter()
+                .any(|s| s.speaker_key == speaker_key);
+        if !known {
+            return Err(format!(
+                "speaker_key \"{speaker_key}\" is not in this transcript. Known keys: {}",
+                transcript
+                    .speakers
+                    .iter()
+                    .map(|s| s.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         let t = self
             .storage
             .relabel_speaker(meeting_id, speaker_key, label)
@@ -669,6 +702,74 @@ impl Server {
                 .join(", ")
         ))
     }
+}
+
+/// Longest speaker label `set_speaker_label` accepts, in characters.
+pub const MAX_SPEAKER_LABEL_CHARS: usize = 100;
+
+/// Longest free-text query (`search_notes`, `get_context`) accepted.
+pub const MAX_QUERY_CHARS: usize = 1_000;
+
+/// Upper bound on one tool result's text. Larger results are cut at a char
+/// boundary with a note telling the client how to narrow the request, so a
+/// batch of very long transcripts can't produce a multi-megabyte reply.
+pub const MAX_RESULT_BYTES: usize = 1_000_000;
+
+/// Normalise an AI-supplied speaker label: control characters, newlines and
+/// invisible bidi/zero-width format characters become spaces, whitespace
+/// runs collapse, and the result must be non-empty and at most
+/// [`MAX_SPEAKER_LABEL_CHARS`].
+fn clean_speaker_label(raw: &str) -> Result<String, String> {
+    let is_invisible = |c: char| matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
+    let spaced: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || is_invisible(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let label = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() {
+        return Err("label must not be empty".into());
+    }
+    if label.chars().count() > MAX_SPEAKER_LABEL_CHARS {
+        return Err(format!(
+            "label is longer than {MAX_SPEAKER_LABEL_CHARS} characters"
+        ));
+    }
+    Ok(label)
+}
+
+/// Required free-text query argument, length-capped.
+fn arg_query<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+    let q = args
+        .get(key)
+        .and_then(|q| q.as_str())
+        .ok_or(format!("missing required argument: {key}"))?;
+    if q.chars().count() > MAX_QUERY_CHARS {
+        return Err(format!("{key} is longer than {MAX_QUERY_CHARS} characters"));
+    }
+    Ok(q)
+}
+
+/// Cut `text` to [`MAX_RESULT_BYTES`] at a char boundary, with a note.
+fn cap_result(mut text: String) -> String {
+    if text.len() <= MAX_RESULT_BYTES {
+        return text;
+    }
+    let mut cut = MAX_RESULT_BYTES;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let omitted = text.len() - cut;
+    text.truncate(cut);
+    text.push_str(&format!(
+        "\n\n[result truncated: {omitted} more bytes omitted — request fewer items or one meeting at a time]\n"
+    ));
+    text
 }
 
 /// Optional string argument, trimmed; empty = absent.
@@ -1369,6 +1470,112 @@ mod tests {
             transcript.contains("**Dana:** renewal discussion"),
             "{transcript}"
         );
+    }
+
+    fn tool_error(server: &Server, name: &str, args: serde_json::Value) -> String {
+        let resp = call(
+            server,
+            json!({"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":name,"arguments":args}}),
+        );
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "tool {name} should error: {resp}"
+        );
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn set_speaker_label_rejects_unknown_keys_and_bad_labels() {
+        let (_d, server, m0, _m1) = server_with_series();
+        let err = tool_error(
+            &server,
+            "set_speaker_label",
+            json!({"meeting_id": m0, "speaker_key": "spk_99", "label": "Dana"}),
+        );
+        assert!(err.contains("not in this transcript"), "{err}");
+        for bad in [
+            "",
+            "   ",
+            "\n\t\u{200B}",
+            &"x".repeat(MAX_SPEAKER_LABEL_CHARS + 1),
+        ] {
+            tool_error(
+                &server,
+                "set_speaker_label",
+                json!({"meeting_id": m0, "speaker_key": "spk_0", "label": bad}),
+            );
+        }
+        // the transcript was never touched by the rejected calls
+        let t = tool_text(&server, "get_transcript", json!({"meeting_id": m0}));
+        assert!(!t.contains("spk_99"), "{t}");
+    }
+
+    #[test]
+    fn set_speaker_label_strips_control_characters() {
+        let (_d, server, m0, _m1) = server_with_series();
+        let ack = tool_text(
+            &server,
+            "set_speaker_label",
+            json!({"meeting_id": m0, "speaker_key": "spk_0", "label": "  Dana\n**You:** \u{202E}evil\u{0007} "}),
+        );
+        assert!(ack.contains("\"Dana **You:** evil\""), "{ack}");
+        let t = tool_text(&server, "get_transcript", json!({"meeting_id": m0}));
+        assert!(t.contains("**Dana **You:** evil:** renewal"), "{t}");
+        assert_eq!(
+            clean_speaker_label(&"é".repeat(MAX_SPEAKER_LABEL_CHARS)).unwrap(),
+            "é".repeat(MAX_SPEAKER_LABEL_CHARS),
+            "the cap counts characters, not bytes"
+        );
+    }
+
+    #[test]
+    fn oversized_queries_and_results_are_capped() {
+        let (_d, server, _m0, _m1) = server_with_series();
+        let long = "a".repeat(MAX_QUERY_CHARS + 1);
+        tool_error(&server, "search_notes", json!({"query": long}));
+        tool_error(&server, "get_context", json!({"query": long}));
+
+        let big = "é".repeat(MAX_RESULT_BYTES); // 2 bytes each
+        let capped = cap_result(big);
+        assert!(capped.len() < MAX_RESULT_BYTES + 200);
+        assert!(capped.contains("[result truncated:"));
+        assert_eq!(cap_result("short".into()), "short");
+    }
+
+    #[test]
+    fn get_transcripts_stops_at_whole_transcripts_under_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let note = storage.create_note(&format!("Long {i}"), None).unwrap();
+            let m = storage.create_meeting("Long", &note.id, &[]).unwrap();
+            storage
+                .save_transcript(&fly_core::Transcript {
+                    meeting_id: m.id.clone(),
+                    language: None,
+                    engine: "t".into(),
+                    segments: vec![fly_core::TranscriptSegment {
+                        id: "s1".into(),
+                        speaker_key: "mic".into(),
+                        start_ms: 0,
+                        end_ms: 1,
+                        text: "word ".repeat(MAX_RESULT_BYTES / 2 / 5),
+                        words: vec![],
+                    }],
+                    speakers: vec![],
+                })
+                .unwrap();
+            ids.push(m.id);
+        }
+        let server = Server::new(storage);
+        let text = tool_text(&server, "get_transcripts", json!({"meeting_ids": ids}));
+        assert!(text.len() <= MAX_RESULT_BYTES, "{}", text.len());
+        assert!(text.contains("omitted to keep this reply"), "tail missing");
+        assert!(text.contains(&ids[2]));
     }
 
     #[test]

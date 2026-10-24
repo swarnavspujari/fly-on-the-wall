@@ -117,7 +117,7 @@ impl CheckpointFile {
             std::fs::rename(&tmp, &self.path)
         });
         if let Err(e) = write {
-            tracing::warn!(path = %self.path.display(), error = %e, "could not persist ASR checkpoint");
+            tracing::warn!(file = %self.path.file_name().unwrap_or_default().to_string_lossy(), error = %e, "could not persist ASR checkpoint");
         }
     }
 }

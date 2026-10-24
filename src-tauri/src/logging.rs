@@ -2,6 +2,15 @@
 //! `<data dir>/logs`, because a packaged app's stdout is unrecoverable —
 //! the community bug reports that motivated this arrived as screenshots.
 //! Local files only; nothing ever leaves the machine.
+//!
+//! **Log hygiene rule.** Log files get attached to bug reports, so no
+//! `tracing` call anywhere in the workspace may carry user content: meeting
+//! or note titles, folder names or paths under `recordings/` / `notes/`
+//! (they are named after meetings), transcript, note or prompt text,
+//! attendee names or emails, calendar ids, tokens or keys. Log ids
+//! (`meeting_id`, `note_id`), counts, sizes, durations and bare file names
+//! instead. `tests::no_user_content_in_log_calls` enforces a lexical version
+//! of this over `crates/` and `src-tauri/src`.
 
 use std::path::Path;
 
@@ -106,6 +115,103 @@ mod tests {
             entries.iter().any(|n| n.starts_with(FILE_PREFIX)),
             "expected a {FILE_PREFIX}* file in {}: {entries:?}",
             logs.display()
+        );
+    }
+
+    /// Every `trace!/debug!/info!/warn!/error!(…)` call in `src` (with its
+    /// balanced argument list), as (file, call text).
+    fn log_calls(dir: &Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n != "target") {
+                    log_calls(&path, out);
+                }
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).unwrap();
+            for mac in ["trace!(", "debug!(", "info!(", "warn!(", "error!("] {
+                let mut from = 0;
+                while let Some(i) = src[from..].find(mac).map(|i| i + from) {
+                    from = i + mac.len();
+                    let word_start = src[..i]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+                    if !word_start {
+                        continue;
+                    }
+                    let mut depth = 0usize;
+                    let mut end = src.len();
+                    for (j, c) in src[i + mac.len() - 1..].char_indices() {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = i + mac.len() - 1 + j + 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    out.push((path.display().to_string(), src[i..end].to_string()));
+                }
+            }
+        }
+    }
+
+    /// Lexical enforcement of the module's log hygiene rule. A hit here
+    /// means a log call names user content; log an id or count instead.
+    #[test]
+    fn no_user_content_in_log_calls() {
+        const BANNED: &[&str] = &[
+            ".title",
+            "title =",
+            "email",
+            ".phrase,",
+            "phrase =",
+            "prompt =",
+            ".prompt",
+            "access_token",
+            "refresh_token",
+            "api_key",
+            ".text",
+            "cal_id",
+            "dir = %rel",
+            "stderr,",
+        ];
+        // `.display()` of a path is banned except for app-owned locations
+        // that never contain meeting names (model downloads, the data dir
+        // root, the managed Ollama binary) — and this test itself.
+        const DISPLAY_OK: &[&str] = &["models.rs", "state.rs", "ollama.rs", "logging.rs"];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut calls = Vec::new();
+        log_calls(&root.join("src"), &mut calls);
+        log_calls(&root.join("../crates"), &mut calls);
+        assert!(
+            calls.len() > 50,
+            "scanner found too few calls: {}",
+            calls.len()
+        );
+        let offenders: Vec<String> = calls
+            .iter()
+            .filter(|(file, _)| !file.ends_with("logging.rs"))
+            .filter(|(file, call)| {
+                BANNED.iter().any(|b| call.contains(b))
+                    || (call.contains(".display()")
+                        && !DISPLAY_OK.iter().any(|ok| file.ends_with(ok)))
+            })
+            .map(|(file, call)| format!("{file}: {call}"))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "log calls carrying user content:\n{}",
+            offenders.join("\n")
         );
     }
 

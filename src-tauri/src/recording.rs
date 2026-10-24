@@ -151,7 +151,7 @@ pub fn start_recording_impl(
         };
         if !attendees.is_empty() {
             tracing::info!(
-                note_title = %note.title,
+                note_id = %note.id,
                 count = attendees.len(),
                 "seeding meeting attendees from calendar event"
             );

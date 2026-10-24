@@ -216,7 +216,7 @@ impl ScreenRecorder for FfmpegScreenRecorder {
                         use std::io::Read;
                         let _ = e.read_to_string(&mut stderr);
                     }
-                    tracing::warn!(%status, stderr, "ffmpeg died at capture start");
+                    tracing::warn!(%status, stderr_bytes = stderr.len(), "ffmpeg died at capture start");
                     return Err(ScreenError::Capture(format!(
                         "{} (ffmpeg {status})",
                         brief_stderr(&stderr)
@@ -288,7 +288,7 @@ impl ScreenSession for FfmpegSession {
                             use std::io::Read;
                             let _ = e.read_to_string(&mut stderr);
                         }
-                        tracing::warn!(%status, stderr, "screen capture ffmpeg failed");
+                        tracing::warn!(%status, stderr_bytes = stderr.len(), "screen capture ffmpeg failed");
                         return Err(ScreenError::Capture(format!(
                             "{} (ffmpeg {status})",
                             brief_stderr(&stderr)
