@@ -25,6 +25,18 @@ pub mod keys {
     pub const GROQ_API_KEY: &str = "groq_api_key";
     pub const GOOGLE_OAUTH_TOKEN: &str = "google_oauth_token";
     pub const MS_OAUTH_TOKEN: &str = "ms_oauth_token";
+
+    /// Every well-known key above, for "Delete all my data". Keys defined
+    /// elsewhere (e.g. the Google OAuth client secret) are added by the
+    /// caller.
+    pub const ALL: &[&str] = &[
+        OPENAI_API_KEY,
+        ANTHROPIC_API_KEY,
+        NIM_API_KEY,
+        GROQ_API_KEY,
+        GOOGLE_OAUTH_TOKEN,
+        MS_OAUTH_TOKEN,
+    ];
 }
 
 pub trait SecretStore: Send + Sync {

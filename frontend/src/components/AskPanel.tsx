@@ -5,6 +5,9 @@ import type { AskMessage } from "../types";
 import { X } from "lucide-react";
 import { api } from "../api";
 import { Button, SectionLabel } from "./ui";
+import { SAFE_A, SAFE_IMG } from "./markdownSafe";
+
+const ASK_MD = { a: SAFE_A, img: SAFE_IMG };
 
 interface Props {
   noteId: string;
@@ -97,7 +100,9 @@ export default function AskPanel({ noteId, onInsert, onClose }: Props) {
               }}
             >
               <div className="[&_a]:text-primary-text [&_a]:underline [&_li]:ml-4 [&_li]:list-disc [&_p]:my-1">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={ASK_MD}>
+                  {m.content}
+                </ReactMarkdown>
               </div>
             </div>
             {m.role === "assistant" &&

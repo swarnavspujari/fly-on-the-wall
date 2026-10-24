@@ -161,7 +161,12 @@ pub async fn ensure_video_thumbnail(
     state: State<'_, AppState>,
     rel_path: String,
 ) -> CmdResult<String> {
-    let video = state.storage.lock().unwrap().attachment_abs_path(&rel_path);
+    let video = state
+        .storage
+        .lock()
+        .unwrap()
+        .attachment_abs_path(&rel_path)
+        .map_err(|e| e.to_string())?;
     if !video.is_file() {
         return Err(format!("video not found: {rel_path}"));
     }

@@ -31,14 +31,20 @@ fn link_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()
     Ok(())
 }
 
+/// Installed-file path of a registry artifact (relative to the data dir) —
+/// the same probe path the app checks, so a version bump in models.rs can't
+/// leave these tests looking in a stale location.
+fn probe(id: &str) -> &'static str {
+    fly_app_lib::models::artifact(id)
+        .unwrap_or_else(|| panic!("no {id} artifact on this OS"))
+        .probe_rel
+}
+
 #[test]
 #[ignore = "needs whisper artifacts in %APPDATA%/FlyOnTheWall + network; run with --ignored"]
 fn transcribe_downloads_and_extracts_diarization_artifacts_in_process() {
     let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
-    let needed = [
-        "bin/whisper/Release/whisper-cli.exe",
-        "models/asr/ggml-small-q5_1.bin",
-    ];
+    let needed = [probe("whisper-bin"), "models/asr/ggml-small-q5_1.bin"];
     if needed.iter().any(|p| !real_data.join(p).exists()) {
         eprintln!(
             "SKIP: whisper artifacts not installed under {}",
@@ -132,9 +138,7 @@ fn transcribe_downloads_and_extracts_diarization_artifacts_in_process() {
     }
 
     // the archives were downloaded and extracted in-process into the clean dir
-    assert!(data_dir
-        .join("bin/sherpa/sherpa-onnx-v1.13.3-win-x64-shared-MD-Release/bin/sherpa-onnx-offline-speaker-diarization.exe")
-        .exists());
+    assert!(data_dir.join(probe("sherpa-bin")).exists());
     assert!(data_dir
         .join("models/diarize/sherpa-onnx-pyannote-segmentation-3-0/model.onnx")
         .exists());

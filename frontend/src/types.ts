@@ -403,3 +403,57 @@ export interface AudioDevice {
   name: string;
   is_default: boolean;
 }
+
+/* ---- privacy controls (privacy.rs) ---- */
+
+/** Per-meeting privacy state (`get_meeting_privacy`). */
+export interface MeetingPrivacy {
+  meeting_id: string;
+  /** The note's own "Keep local" flag. */
+  keep_local: boolean;
+  /** A folder (this note's or a parent) forces keep-local. */
+  keep_local_from_folder: boolean;
+  participants_notified: boolean;
+  /** Set when the retention setting deleted this meeting's audio. */
+  audio_deleted_at: string | null;
+}
+
+export interface WipeReport {
+  removed: number;
+  /** Data-folder paths that couldn't be deleted (locked / permissions). */
+  failed: string[];
+  secrets_failed: string[];
+  restart_required: boolean;
+  /** Every table emptied in place. */
+  db_erased: boolean;
+  /** Erased pages reached the file (false = another program, e.g. an MCP
+   *  client, holds the database open and old content may remain). */
+  db_checkpointed: boolean;
+  /** Notes for the user (stale request discarded, DB held open, …). */
+  notes: string[];
+}
+
+export interface PrivacySettings {
+  /** null = keep audio forever (default). */
+  audio_retention_days: number | null;
+  retention_choices: number[];
+  /** Meetings a background sweep held back (too much audio at once). */
+  retention_held: number | null;
+  /** Leftovers of the last "Delete all my data" restart, if any. */
+  last_wipe: WipeReport | null;
+}
+
+export interface SweepReport {
+  meetings: number;
+  files_removed: number;
+  bytes_removed: number;
+  meetings_failed: number;
+  /** Why a background sweep held back, if it did. */
+  held: string | null;
+}
+
+export interface DiskEncryption {
+  state: "on" | "off" | "unknown";
+  method: "BitLocker" | "FileVault" | null;
+  volume: string | null;
+}

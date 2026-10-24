@@ -179,7 +179,8 @@ impl Storage {
                 Ok(Some(Healed::Resurrected(id))) => report.resurrected.push(id),
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::warn!(dir = %dir.display(), error = %e, "recording self-heal skipped this folder");
+                    // No folder path: folder names are meeting titles (log hygiene).
+                    tracing::warn!(error = %e, "recording self-heal skipped a folder");
                 }
             }
         }
@@ -230,7 +231,11 @@ impl Storage {
         let Some(rel) = manifest.dir_rel() else {
             return Ok(false);
         };
-        let dir = self.data_dir.join(rel);
+        // Rows healed by older builds may carry unrebased manifest paths;
+        // never write outside `recordings/<folder>` because of one.
+        let Some(dir) = crate::contained_recordings_dir(&self.data_dir, &rel) else {
+            return Ok(false);
+        };
         if !dir.is_dir() {
             return Ok(false);
         }
@@ -288,6 +293,52 @@ fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// The scanned folder's own name, which must itself be a plain name.
+fn folder_name_of(dir: &Path) -> Result<String> {
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| {
+            crate::safe_path::contained(
+                Path::new(""),
+                &format!("recordings/{n}"),
+                &["recordings"],
+                2,
+            )
+            .is_some()
+        })
+        .ok_or_else(|| {
+            crate::StorageError::Invalid("recording folder name is not a plain name".into())
+        })
+}
+
+/// Rebase every recording path onto `folder_rel` (`recordings/<folder>`),
+/// keeping only each path's final file name. Directory components from the
+/// manifest are discarded; a file name that isn't a plain name (empty, `..`,
+/// trailing dot/space, `a:stream`, reserved device name) rejects the whole
+/// manifest rather than being "fixed up".
+fn rebase_recording(data_dir: &Path, rec: &RecordingRef, folder_rel: &str) -> Result<RecordingRef> {
+    let one = |p: &Option<String>| -> Result<Option<String>> {
+        let Some(p) = p else {
+            return Ok(None);
+        };
+        let file = p.rsplit(['/', '\\']).next().unwrap_or(p);
+        let rel = format!("{folder_rel}/{file}");
+        if crate::safe_path::contained(data_dir, &rel, &["recordings"], 3).is_none() {
+            return Err(crate::StorageError::Invalid(
+                "manifest recording path is not a plain file name".into(),
+            ));
+        }
+        Ok(Some(rel))
+    };
+    Ok(RecordingRef {
+        mic_path: one(&rec.mic_path)?,
+        system_path: one(&rec.system_path)?,
+        mixed_path: one(&rec.mixed_path)?,
+        playback_path: one(&rec.playback_path)?,
+        duration_ms: rec.duration_ms,
+    })
+}
+
 enum Healed {
     Attached(String),
     Resurrected(String),
@@ -298,33 +349,35 @@ impl Storage {
         let manifest: RecordingManifest =
             serde_json::from_str(&std::fs::read_to_string(dir.join(RECORDING_MANIFEST))?)?;
 
-        // Meeting already whole → nothing to do.
-        if let Ok(meeting) = self.get_meeting(&manifest.meeting_id) {
-            if meeting.recording.is_some() {
-                return Ok(None);
-            }
-            if parked {
-                // A row exists but its folder was parked (shouldn't normally
-                // happen together) — restore the folder first.
-                let manifest = self.unpark(dir, manifest)?;
-                self.attach(&manifest)?;
-                return Ok(Some(Healed::Attached(manifest.meeting_id)));
-            }
+        // Meeting already whole → nothing to do (and nothing written).
+        let existing = self.get_meeting(&manifest.meeting_id).ok();
+        if existing.as_ref().is_some_and(|m| m.recording.is_some()) {
+            return Ok(None);
+        }
+
+        // Never trust the manifest's directory components: a `manifest.json`
+        // copied in from elsewhere could point at another meeting's folder,
+        // or outside the data dir, and the backfill pass later WRITES
+        // manifest.json / note.json wherever these paths lead. Every path is
+        // rebased onto the folder actually being scanned (file name only).
+        let manifest = if parked {
+            // A parked folder moves back under `recordings/` first.
+            self.unpark(dir, manifest)?
+        } else {
+            self.rebase_onto_scanned(dir, manifest)?
+        };
+
+        if existing.is_some() {
             self.attach(&manifest)?;
             return Ok(Some(Healed::Attached(manifest.meeting_id)));
         }
 
         // No meeting row: the database was lost/recreated (or this folder was
-        // copied in from another machine). Restore the folder to its normal
-        // home, then resurrect the rows under their ORIGINAL ids so the
+        // copied in from another machine). The folder is already in its
+        // normal home; resurrect the rows under their ORIGINAL ids so the
         // folder's transcript.json (same meeting_id) still lines up and
         // provenance citations keep resolving. Manifest data wins over
         // derived values; a v1 manifest degrades to exactly the old behavior.
-        let manifest = if parked {
-            self.unpark(dir, manifest)?
-        } else {
-            manifest
-        };
         let folder_name = manifest
             .dir_rel()
             .and_then(|r| {
@@ -413,37 +466,46 @@ impl Storage {
         Ok(())
     }
 
+    /// Rebase a manifest found in `recordings/<name>/` onto that folder and
+    /// persist it when the paths changed (e.g. the folder was renamed or
+    /// copied in under another name).
+    fn rebase_onto_scanned(
+        &self,
+        dir: &Path,
+        manifest: RecordingManifest,
+    ) -> Result<RecordingManifest> {
+        let rel = format!("recordings/{}", folder_name_of(dir)?);
+        let recording = rebase_recording(&self.data_dir, &manifest.recording, &rel)?;
+        if recording == manifest.recording {
+            return Ok(manifest);
+        }
+        let healed = RecordingManifest {
+            recording,
+            ..manifest
+        };
+        write_recording_manifest(dir, &healed)?;
+        Ok(healed)
+    }
+
     /// Move a parked folder back under `recordings/` (deduping the name if
-    /// taken), rewrite the manifest's relative paths for the new home, and
-    /// persist the updated manifest.
+    /// taken), rebase the manifest's paths onto the new home, and persist
+    /// the updated manifest. The manifest is validated BEFORE anything
+    /// moves, so a hostile one leaves the parked folder where it is.
     fn unpark(&self, dir: &Path, manifest: RecordingManifest) -> Result<RecordingManifest> {
-        let name = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = folder_name_of(dir)?;
+        rebase_recording(
+            &self.data_dir,
+            &manifest.recording,
+            &format!("recordings/_unlinked/{name}"),
+        )?;
         let recordings = self.data_dir.join("recordings");
         let mut dest = recordings.join(&name);
         if dest.exists() {
             dest = naming::unique_path(&recordings, &name, "", &|_| false);
         }
         std::fs::rename(dir, &dest)?;
-        let new_rel = format!(
-            "recordings/{}",
-            dest.file_name().unwrap_or_default().to_string_lossy()
-        );
-        let rebase = |p: &Option<String>| {
-            p.as_ref().map(|p| {
-                let file = p.rsplit('/').next().unwrap_or(p);
-                format!("{new_rel}/{file}")
-            })
-        };
-        let recording = RecordingRef {
-            mic_path: rebase(&manifest.recording.mic_path),
-            system_path: rebase(&manifest.recording.system_path),
-            mixed_path: rebase(&manifest.recording.mixed_path),
-            playback_path: rebase(&manifest.recording.playback_path),
-            duration_ms: manifest.recording.duration_ms,
-        };
+        let new_rel = format!("recordings/{}", folder_name_of(&dest)?);
+        let recording = rebase_recording(&self.data_dir, &manifest.recording, &new_rel)?;
         let healed = RecordingManifest {
             recording,
             ..manifest
@@ -838,6 +900,141 @@ mod tests {
         assert_eq!(n.folder_id, None);
         assert_eq!(n.scratchpad, "");
         assert!(n.blocks.is_empty());
+    }
+
+    fn hostile_manifest(meeting_id: &str, mixed: &str) -> RecordingManifest {
+        RecordingManifest {
+            version: 2,
+            meeting_id: meeting_id.into(),
+            note_id: format!("n-{meeting_id}"),
+            ended_at: Utc::now(),
+            recording: RecordingRef {
+                mic_path: None,
+                system_path: None,
+                mixed_path: Some(mixed.into()),
+                playback_path: None,
+                duration_ms: 1_000,
+            },
+            title: Some("hostile".into()),
+            started_at: None,
+            attendees: None,
+            attendees_confirmed: None,
+            folder_path: None,
+        }
+    }
+
+    /// A manifest whose paths point outside the data dir or at another
+    /// meeting's folder is rebased onto the folder it was found in: the
+    /// resurrected row, and every later manifest/note.json write, stay in
+    /// that folder.
+    #[test]
+    fn hostile_manifest_paths_are_rebased_onto_scanned_folder() {
+        let (tmp, s) = test_storage();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = make_folder(tmp.path(), "recordings", "2026-07-01 Victim");
+        let outside_abs = outside.path().join("x.wav").to_string_lossy().into_owned();
+        let cases = [
+            ("m-abs", outside_abs.as_str()),
+            ("m-dotdot", "recordings/../../evil/recording.mixed.wav"),
+            (
+                "m-other",
+                "recordings/2026-07-01 Victim/recording.mixed.wav",
+            ),
+            ("m-unc", r"\\server\share\recording.mixed.wav"),
+        ];
+        for (i, (id, path)) in cases.iter().enumerate() {
+            let folder = format!("2026-07-1{i} Copied {id}");
+            let dir = make_folder(tmp.path(), "recordings", &folder);
+            write_recording_manifest(&dir, &hostile_manifest(id, path)).unwrap();
+        }
+
+        let report = s.self_heal_recordings().unwrap();
+        assert_eq!(report.resurrected.len(), cases.len());
+        for (i, (id, _)) in cases.iter().enumerate() {
+            let folder = format!("2026-07-1{i} Copied {id}");
+            let m = s.get_meeting(id).unwrap();
+            let file = match *id {
+                "m-abs" => "x.wav",
+                _ => "recording.mixed.wav",
+            };
+            assert_eq!(
+                m.recording.unwrap().mixed_path.as_deref(),
+                Some(format!("recordings/{folder}/{file}").as_str()),
+                "{id} must be rebased onto its own folder"
+            );
+            // the persisted manifest was rewritten with contained paths
+            let on_disk: RecordingManifest = serde_json::from_str(
+                &std::fs::read_to_string(
+                    tmp.path()
+                        .join("recordings")
+                        .join(&folder)
+                        .join(RECORDING_MANIFEST),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(on_disk
+                .recording
+                .mixed_path
+                .unwrap()
+                .starts_with(&format!("recordings/{folder}/")));
+        }
+        // nothing was written outside, nor into the victim's folder
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert!(!victim.join(RECORDING_MANIFEST).exists());
+        assert!(!victim.join(NOTE_MIRROR).exists());
+        assert!(!tmp.path().join("evil").exists());
+    }
+
+    /// A file name that isn't a plain name rejects the manifest outright —
+    /// for a parked folder, before the folder is moved.
+    #[test]
+    fn manifest_with_unsafe_file_name_is_rejected() {
+        let (tmp, s) = test_storage();
+        for (i, bad) in [
+            "recordings/x/recording.mixed.wav.",
+            "recordings/x/a:stream",
+            "recordings/x/NUL",
+            "recordings/x/..",
+            "",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = format!("m-bad{i}");
+            let dir = make_folder(tmp.path(), "recordings/_unlinked", &format!("bad {i}"));
+            write_recording_manifest(&dir, &hostile_manifest(&id, bad)).unwrap();
+        }
+        let report = s.self_heal_recordings().unwrap();
+        assert!(report.is_empty(), "{report:?}");
+        for i in 0..5 {
+            assert!(s.get_meeting(&format!("m-bad{i}")).is_err());
+            assert!(tmp
+                .path()
+                .join(format!("recordings/_unlinked/bad {i}"))
+                .is_dir());
+        }
+    }
+
+    /// Rows healed by older builds may still carry unrebased paths; the
+    /// backfill must not write manifest.json/note.json through them.
+    #[test]
+    fn backfill_never_writes_through_uncontained_row_paths() {
+        let (_tmp, s) = test_storage();
+        let outside = tempfile::tempdir().unwrap();
+        let note = s.create_note("legacy", None).unwrap();
+        let meeting = s.create_meeting("legacy", &note.id, &[]).unwrap();
+        let rec = RecordingRef {
+            mic_path: None,
+            system_path: None,
+            mixed_path: Some(format!("{}/x.wav", outside.path().to_string_lossy())),
+            playback_path: None,
+            duration_ms: 1_000,
+        };
+        s.end_meeting(&meeting.id, &rec).unwrap();
+        let report = s.self_heal_recordings().unwrap();
+        assert!(report.refreshed.is_empty());
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     /// Startup backfill: a meeting from before this feature (no manifest at

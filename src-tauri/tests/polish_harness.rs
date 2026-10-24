@@ -110,6 +110,7 @@ fn polish_harness() {
             let output = chat_with_retry(
                 provider.as_ref(),
                 ChatRequest {
+                    effort: None,
                     messages: vec![
                         ChatMessage::system(prompt.system),
                         ChatMessage::user(prompt.user),

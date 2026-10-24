@@ -101,12 +101,12 @@ async fn get_text(client: &reqwest::Client, url: &str, token: &str) -> Result<St
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| CalendarError::Network(e.to_string()))?;
+        .map_err(|e| CalendarError::Network(e.without_url().to_string()))?;
     let status = resp.status();
     let text = resp
         .text()
         .await
-        .map_err(|e| CalendarError::Network(e.to_string()))?;
+        .map_err(|e| CalendarError::Network(e.without_url().to_string()))?;
     if status.as_u16() == 401 {
         return Err(CalendarError::NotConnected);
     }
@@ -182,7 +182,7 @@ impl CalendarProvider for GoogleCalendarProvider {
             }
             match self.fetch_events(&client, &token, &cal_id, from, to).await {
                 Ok(mut ev) => events.append(&mut ev),
-                Err(e) => tracing::warn!("google events fetch for {cal_id} failed: {e}"),
+                Err(e) => tracing::warn!("google events fetch for one calendar failed: {e}"),
             }
         }
         events.sort_by_key(|e| e.start);

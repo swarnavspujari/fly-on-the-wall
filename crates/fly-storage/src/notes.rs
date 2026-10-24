@@ -107,6 +107,8 @@ impl Storage {
     /// updated first. `before` is the `(updated_at, id)` of the last row of
     /// the previous page — rows strictly after it in the sort order are
     /// returned. Timestamps compare lexicographically (uniform RFC 3339 UTC).
+    /// `exclude_keep_local` drops keep-local notes inside the query, so they
+    /// never fill a page or become the cursor (MCP).
     pub fn list_notes_filtered(
         &self,
         limit: usize,
@@ -114,8 +116,16 @@ impl Storage {
         since: Option<chrono::DateTime<chrono::Utc>>,
         until: Option<chrono::DateTime<chrono::Utc>>,
         before: Option<(String, String)>,
+        exclude_keep_local: bool,
     ) -> Result<Vec<NoteSummary>> {
-        let mut sql = format!("{SUMMARY_SELECT} WHERE 1=1");
+        let mut sql = if exclude_keep_local {
+            format!(
+                "{}{SUMMARY_SELECT} WHERE n.id NOT IN (SELECT id FROM local_notes)",
+                crate::privacy::KEEP_LOCAL_CTE
+            )
+        } else {
+            format!("{SUMMARY_SELECT} WHERE 1=1")
+        };
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(f) = folder_id {
             sql.push_str(&format!(" AND n.folder_id = ?{}", params.len() + 1));
@@ -212,6 +222,9 @@ impl Storage {
 
     pub fn delete_note(&self, id: &str) -> Result<()> {
         let mirror = self.note_mirror_path(id); // before the row disappears
+                                                // All-or-nothing: a crash mid-delete must not leave searchable text
+                                                // (FTS / embedding chunks) behind for a note that no longer exists.
+        let tx = self.conn.unchecked_transaction()?;
         let n = self.conn.execute("DELETE FROM notes WHERE id = ?1", [id])?;
         if n == 0 {
             return Err(StorageError::NotFound(format!("note {id}")));
@@ -219,8 +232,20 @@ impl Storage {
         self.conn
             .execute("DELETE FROM notes_fts WHERE note_id = ?1", [id])?;
         self.delete_chunks("note", id)?;
-        let _ = std::fs::remove_file(mirror);
-        let _ = std::fs::remove_dir_all(self.data_dir.join("attachments").join(id));
+        tx.commit()?;
+        self.checkpoint_after_delete();
+        for path in [mirror, self.data_dir.join("attachments").join(id)] {
+            let res = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(e) = res {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(note = %id, error = %e, "could not remove a deleted note's files");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -396,6 +421,18 @@ fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteSummary> {
         updated_at: parse_ts(r.get::<_, String>(4)?),
         happened_at: parse_ts(r.get::<_, String>(5)?),
     })
+}
+
+impl Storage {
+    /// Fold the write-ahead log back into the database and truncate it, so
+    /// text just deleted (and scrubbed by `secure_delete`) doesn't linger in
+    /// `flyonthewall.db-wal`. Best-effort: a concurrent reader (e.g. the MCP
+    /// server) can make it a partial checkpoint, which is fine.
+    pub(crate) fn checkpoint_after_delete(&self) {
+        let _ = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    }
 }
 
 #[cfg(test)]

@@ -42,11 +42,11 @@ local speaker turns (spec §6.3): "who said what" never depends on the network.
 
 | Artifact | Version | Size | Purpose |
 |---|---|---|---|
-| whisper.cpp CLI (`whisper-cli.exe`, Windows) | v1.9.1 (CPU build) | ~8 MB zip | ASR; the same zip ships `parakeet-cli.exe` for a future Parakeet engine |
-| whisper.cpp CLI (Vulkan GPU, Windows) | v1.9.1 (`GGML_VULKAN=1` build) | ~24 MB zip | optional GPU ASR — one cross-vendor build (NVIDIA/AMD/Intel); see below |
-| whisper.cpp CLI (macOS universal) | v1.9.1 (static, Metal embedded) | ~2.4 MB tar.bz2 | ASR — one archive for Intel + Apple Silicon; see "Building the macOS engine" |
+| whisper.cpp CLI (`whisper-cli.exe`, Windows) | v1.9.5 (CPU build) | ~9 MB zip | ASR; the same zip ships `parakeet-cli.exe` for a future Parakeet engine |
+| whisper.cpp CLI (Vulkan GPU, Windows) | v1.9.5 (`GGML_VULKAN=1` build, CI-built) | ~17 MB zip | optional GPU ASR — one cross-vendor build (NVIDIA/AMD/Intel); see below |
+| whisper.cpp CLI (macOS universal) | v1.9.5 (static, Metal embedded) | ~3.1 MB tar.bz2 | ASR — one archive for Intel + Apple Silicon; see "Building the macOS engine" |
 | sherpa-onnx diarization CLI | v1.13.3 | ~19 MB | speaker diarization |
-| ffmpeg | n8.1 (BtbN autobuild, dated tag) | ~79 MB zip | screen capture (gdigrab) + media import conversion |
+| ffmpeg | n8.1.3 (BtbN autobuild 2026-09-30, dated tag) | ~90 MB zip | screen capture (gdigrab) + media import conversion |
 
 ### Building the macOS engine
 
@@ -54,7 +54,7 @@ Upstream whisper.cpp ships **no** macOS or Linux binary, so those platforms
 historically depended on a `whisper-cli` on `PATH` (e.g. `brew install
 whisper-cpp`) — which most users don't have, producing a dead-end transcribe
 error. To close that on macOS, the maintainer builds the same pinned commit
-(v1.9.1, `f049fff`) and hosts it as a `tools-whisper-v1.9.1` release on THIS
+(v1.9.5, `d1be6fd`) and hosts it as a `tools-whisper-v1.9.5` release on THIS
 repo — the same pattern as the Windows Vulkan build — so `ensure_tool`
 auto-downloads it on first transcribe exactly like Windows.
 
@@ -90,6 +90,15 @@ whoever adds that platform later. Where no engine is resolvable, the app
 shows an actionable "engine not installed" prompt (Install / Settings)
 rather than a raw error.
 
+Refreshed 2026-10-23 to **v1.9.5** (fixes CVE-2026-110810, an out-of-bounds
+read in `whisper_model_load`): workflow run 40054818817 built the macOS
+universal and Windows Vulkan engines (releases `tools-whisper-v1.9.5` and
+`tools-whisper-vulkan-v1.9.5`, both **prerelease** so the updater's
+`/releases/latest` keeps pointing at the app); the Windows CPU build comes from
+upstream's own release. Install folders are now versioned
+(`bin/whisper/v1.9.5`), so existing users pick up the fix on their next
+transcription.
+
 ## GPU transcription (post-meeting only)
 
 The CPU whisper build stays the shipped, validated default everywhere. With
@@ -102,7 +111,7 @@ launch, or mid-run — falls back to CPU visibly and re-pins the machine to CPU
 
 Per-OS strategy: **Windows** downloads the pinned Vulkan build above (upstream
 whisper.cpp publishes no Vulkan Windows binary — only CPU/BLAS/CUDA-only — so
-this one is built from the upstream v1.9.1 tag with `-DGGML_VULKAN=1` and
+this one is built from the upstream v1.9.5 tag with `-DGGML_VULKAN=1` by the same workflow and
 hosted as a tools release on this repo). **macOS** whisper.cpp builds default
 to Metal already — the managed universal archive above is built with Metal
 embedded, and a brew/PATH build works the same. Metal runs as a guarded

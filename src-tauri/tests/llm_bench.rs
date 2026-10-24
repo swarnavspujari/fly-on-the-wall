@@ -458,6 +458,7 @@ async fn run_generate(
             let res = chat_with_retry(
                 provider,
                 ChatRequest {
+                    effort: None,
                     messages: vec![
                         ChatMessage::system(prompt.system.clone()),
                         ChatMessage::user(prompt.user.clone()),
@@ -529,6 +530,7 @@ async fn run_generate(
                 match chat_with_retry(
                     provider,
                     ChatRequest {
+                        effort: None,
                         messages: vec![
                             ChatMessage::system(prompt.system),
                             ChatMessage::user(prompt.user),
@@ -604,6 +606,7 @@ async fn run_generate(
                 match chat_with_retry(
                     provider,
                     ChatRequest {
+                        effort: None,
                         messages: vec![
                             ChatMessage::system(prompt.system),
                             ChatMessage::user(prompt.user),
@@ -672,6 +675,7 @@ async fn run_generate(
                 let res = chat_with_retry(
                     provider,
                     ChatRequest {
+                        effort: None,
                         messages: vec![
                             ChatMessage::system(system.clone()),
                             ChatMessage::user(q.text.clone()),
@@ -745,6 +749,7 @@ async fn judge_one(
     let out = chat_with_retry(
         judge,
         ChatRequest {
+            effort: None,
             messages: vec![ChatMessage::system(JUDGE_SYSTEM), ChatMessage::user(user)],
             temperature: None,
             max_tokens: Some(300),

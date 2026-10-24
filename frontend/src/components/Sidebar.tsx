@@ -2,12 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Inbox,
   List,
+  Lock,
+  LockOpen,
   Plus,
   Settings as SettingsIcon,
   TriangleAlert,
   Upload,
   X,
 } from "lucide-react";
+import { api } from "../api";
+import { PRIVACY_CHANGED_EVENT } from "../privacy";
 import type { CalendarEvent, Folder } from "../types";
 import { Badge, Button, SectionLabel } from "./ui";
 import logoLight from "../assets/brand/fly-on-the-wall-logo.svg";
@@ -165,6 +169,37 @@ export default function Sidebar({
     const t = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(t);
   }, []);
+  // Folder-level "Keep local" (backend-enforced for every note filed under it)
+  const [localOnly, setLocalOnly] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    api
+      .listLocalOnlyFolders()
+      .then((ids) => setLocalOnly(new Set(ids)))
+      .catch(() => {});
+  }, [folders]);
+  const toggleFolderLocal = (id: string, name: string) => {
+    const next = !localOnly.has(id);
+    if (
+      next &&
+      !confirm(
+        `Keep everything in "${name}" local? Notes in this folder and its subfolders will never be sent to cloud AI providers or Groq.`,
+      )
+    ) {
+      return;
+    }
+    const apply = (on: boolean) =>
+      setLocalOnly((s) => {
+        const n = new Set(s);
+        if (on) n.add(id);
+        else n.delete(id);
+        return n;
+      });
+    apply(next);
+    api
+      .setFolderKeepLocal(id, next)
+      .then(() => window.dispatchEvent(new Event(PRIVACY_CHANGED_EVENT)))
+      .catch(() => apply(!next));
+  };
   const [newFolderParent, setNewFolderParent] = useState<string | null | "none">("none");
   const [newFolderName, setNewFolderName] = useState("");
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
@@ -287,6 +322,30 @@ export default function Sidebar({
               {folder.name}
             </span>
           )}
+          <button
+            title={
+              localOnly.has(folder.id)
+                ? "Kept local: notes here never go to cloud AI or Groq. Click to allow cloud processing."
+                : "Keep notes in this folder local (no cloud AI or Groq)"
+            }
+            aria-label={localOnly.has(folder.id) ? "Folder kept local" : "Keep folder local"}
+            aria-pressed={localOnly.has(folder.id)}
+            className={`flex-none cursor-pointer rounded p-0.5 ${
+              localOnly.has(folder.id)
+                ? "inline-flex text-primary-text"
+                : "hidden text-text-3 hover:text-text group-hover:inline-flex"
+            }`}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleFolderLocal(folder.id, folder.name);
+            }}
+          >
+            {localOnly.has(folder.id) ? (
+              <Lock size={13} strokeWidth={1.75} />
+            ) : (
+              <LockOpen size={13} strokeWidth={1.75} />
+            )}
+          </button>
           <button
             title="New subfolder"
             className="hidden flex-none cursor-pointer rounded p-0.5 text-text-3 hover:text-text group-hover:inline-flex"

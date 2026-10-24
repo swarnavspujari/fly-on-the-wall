@@ -36,7 +36,12 @@ pub struct SearchFilter {
     pub until: Option<chrono::DateTime<chrono::Utc>>,
     pub limit: usize,
     /// Rank-ordered offset — the cursor for paging deeper into results.
+    /// Applied to the note and transcript rankings independently.
     pub offset: usize,
+    /// Drop keep-local notes (and transcripts of keep-local meetings)
+    /// inside the query, so they never count toward `limit`/`offset` and
+    /// paging reveals nothing about them (MCP).
+    pub exclude_keep_local: bool,
 }
 
 impl Storage {
@@ -76,15 +81,24 @@ impl Storage {
         let mut note_hits = Vec::new();
         let mut transcript_hits = Vec::new();
 
-        let mut stmt = self.conn.prepare(
-            "SELECT f.note_id, n.title, snippet(notes_fts, 2, '[[', ']]', ' … ', 12)
+        let (cte, not_local_note, not_local_meeting) = if filter.exclude_keep_local {
+            (
+                crate::privacy::KEEP_LOCAL_CTE,
+                " AND n.id NOT IN (SELECT id FROM local_notes)",
+                " AND m.note_id NOT IN (SELECT id FROM local_notes)",
+            )
+        } else {
+            ("", "", "")
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "{cte}SELECT f.note_id, n.title, snippet(notes_fts, 2, '[[', ']]', ' … ', 12)
              FROM notes_fts f JOIN notes n ON n.id = f.note_id
              WHERE notes_fts MATCH ?1
                AND (?2 IS NULL OR n.folder_id = ?2)
                AND (?3 IS NULL OR n.updated_at >= ?3)
-               AND (?4 IS NULL OR n.updated_at <= ?4)
-             ORDER BY rank LIMIT ?5 OFFSET ?6",
-        )?;
+               AND (?4 IS NULL OR n.updated_at <= ?4){not_local_note}
+             ORDER BY rank LIMIT ?5 OFFSET ?6"
+        ))?;
         let rows = stmt.query_map(
             rusqlite::params![&fts_query, folder, &since, &until, limit, offset],
             |r| {
@@ -104,16 +118,16 @@ impl Storage {
 
         // Transcript hits join back to the owning note through meetings;
         // folder filtering goes through that note.
-        let mut stmt = self.conn.prepare(
-            "SELECT m.note_id, m.id, m.title, snippet(transcripts_fts, 1, '[[', ']]', ' … ', 12)
+        let mut stmt = self.conn.prepare(&format!(
+            "{cte}SELECT m.note_id, m.id, m.title, snippet(transcripts_fts, 1, '[[', ']]', ' … ', 12)
              FROM transcripts_fts t JOIN meetings m ON m.id = t.meeting_id
              LEFT JOIN notes n ON n.id = m.note_id
              WHERE transcripts_fts MATCH ?1
                AND (?2 IS NULL OR n.folder_id = ?2)
                AND (?3 IS NULL OR m.started_at >= ?3)
-               AND (?4 IS NULL OR m.started_at <= ?4)
-             ORDER BY rank LIMIT ?5 OFFSET ?6",
-        )?;
+               AND (?4 IS NULL OR m.started_at <= ?4){not_local_meeting}
+             ORDER BY rank LIMIT ?5 OFFSET ?6"
+        ))?;
         let rows = stmt.query_map(
             rusqlite::params![&fts_query, folder, &since, &until, limit, offset],
             |r| {

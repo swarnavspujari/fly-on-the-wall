@@ -19,6 +19,9 @@
      fotwMockTapDenied = "1"       → app_info reports macOS + the system-audio
                                      preflight reports a TCC denial (shows the
                                      SystemAudioNotice card)
+     fotwMockEncryption = "off" | "on" → disk_encryption_status (default
+                                     "unknown": no banner)
+     fotwMockAudioDeleted = "1"    → m1's audio reports deleted by retention
 
    QA hook: fotwMockEmit(event, payload) fires a mock backend event at the
    app's listeners (pipeline:progress, model:progress, …) from the console.
@@ -477,10 +480,10 @@ const llmSettings = {
     },
     {
       id: "anthropic",
-      default_model: "claude-sonnet",
+      default_model: "claude-sonnet-5-5",
       is_local: false,
       has_key: true,
-      model: "claude-sonnet",
+      model: "claude-sonnet-5-5",
       base_url: null,
     },
     {
@@ -598,6 +601,31 @@ const mcpSnippet = `{
   }
 }`;
 
+/* ---- privacy controls ---- */
+const mockFlag = (k: string) =>
+  typeof localStorage !== "undefined" ? localStorage.getItem(k) : null;
+const mockUiSettings: Record<string, string> = {};
+const mockLocalFolders = new Set<string>();
+const mockPrivacy: Record<
+  string,
+  { keep_local: boolean; participants_notified: boolean; audio_deleted_at: string | null }
+> = {};
+let mockRetentionDays: number | null = null;
+function meetingPrivacy(meetingId: string) {
+  const p = (mockPrivacy[meetingId] ??= {
+    keep_local: false,
+    participants_notified: false,
+    audio_deleted_at:
+      meetingId === "m1" && mockFlag("fotwMockAudioDeleted") === "1" ? ago(600) : null,
+  });
+  const folder = noteMeta.find((n) => n.meeting_id === meetingId)?.folder_id ?? null;
+  return {
+    meeting_id: meetingId,
+    ...p,
+    keep_local_from_folder: folder != null && mockLocalFolders.has(folder),
+  };
+}
+
 /* ---- command router ---- */
 function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
   switch (cmd) {
@@ -605,7 +633,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "pong";
     case "app_info":
       return {
-        version: "2.2.0",
+        version: "2.3.0",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
         // fotwMockTapDenied demos the macOS-only SystemAudioNotice, which is
         // gated on app_info.os — so the flag flips the reported OS too.
@@ -832,6 +860,11 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
           ? null
           : "true";
       }
+      if (String(args.key).startsWith("ui.privacy."))
+        return mockUiSettings[String(args.key)] ?? null;
+      return null;
+    case "set_app_setting":
+      mockUiSettings[String(args.key)] = String(args.value);
       return null;
     case "download_model":
       return "";
@@ -859,6 +892,68 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return importTranscribe((args.order as string[]) ?? []);
     case "pending_backfill_count":
       return 3;
+    case "get_meeting_privacy":
+      return meetingPrivacy(String(args.meetingId));
+    case "set_note_keep_local": {
+      for (const n of noteMeta.filter((m) => m.id === args.noteId && m.meeting_id)) {
+        meetingPrivacy(n.meeting_id as string);
+        mockPrivacy[n.meeting_id as string].keep_local = !!args.keepLocal;
+      }
+      return null;
+    }
+    case "set_participants_notified":
+      meetingPrivacy(String(args.meetingId));
+      mockPrivacy[String(args.meetingId)].participants_notified = !!args.notified;
+      return null;
+    case "set_folder_keep_local":
+      if (args.keepLocal) mockLocalFolders.add(String(args.folderId));
+      else mockLocalFolders.delete(String(args.folderId));
+      return null;
+    case "list_local_only_folders":
+      return [...mockLocalFolders];
+    case "copy_recording_notice":
+      void navigator.clipboard?.writeText(String(args.text ?? "")).catch(() => {});
+      return null;
+    case "get_privacy_settings":
+      return {
+        audio_retention_days: mockRetentionDays,
+        retention_choices: [7, 30, 90, 365],
+        retention_held: mockFlag("fotwMockRetentionHeld") === "1" ? 6 : null,
+        last_wipe: null,
+      };
+    case "preview_audio_retention":
+      return Number(args.days) <= 30 ? 4 : 0;
+    case "set_audio_retention":
+      mockRetentionDays = (args.days as number | null) ?? null;
+      return {
+        meetings: mockRetentionDays && mockRetentionDays <= 30 ? 4 : 0,
+        files_removed: mockRetentionDays && mockRetentionDays <= 30 ? 9 : 0,
+        bytes_removed: mockRetentionDays && mockRetentionDays <= 30 ? 812_000_000 : 0,
+        meetings_failed: 0,
+        held: null,
+      };
+    case "dismiss_wipe_report":
+      return null;
+    case "delete_all_data":
+      if (args.confirmation !== "delete everything") throw new Error("confirmation mismatch");
+      return {
+        removed: 42,
+        failed: [],
+        secrets_failed: [],
+        restart_required: true,
+        db_erased: true,
+        // fotwMockWipeDbBusy = "1" → an MCP client holds the database open
+        db_checkpointed: mockFlag("fotwMockWipeDbBusy") !== "1",
+        notes: [],
+      };
+    case "disk_encryption_status": {
+      const s = mockFlag("fotwMockEncryption");
+      return {
+        state: s === "on" || s === "off" ? s : "unknown",
+        method: "BitLocker",
+        volume: "C:",
+      };
+    }
     default:
       return null;
   }

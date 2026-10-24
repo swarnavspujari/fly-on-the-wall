@@ -21,6 +21,10 @@ pub struct ItemFilter {
     /// Restrict to these meetings (e.g. one recurring series).
     pub meeting_ids: Option<Vec<String>>,
     pub limit: usize,
+    /// Drop items of meetings whose note is keep-local (own flag, a sibling
+    /// meeting's flag, or a local-only folder chain) BEFORE the limit —
+    /// for readers that hand results to external AI tools (MCP).
+    pub exclude_keep_local: bool,
 }
 
 impl Storage {
@@ -81,12 +85,19 @@ impl Storage {
 
     /// Query items across meetings, newest meeting first (then row order).
     pub fn query_items(&self, filter: &ItemFilter) -> Result<Vec<MeetingItem>> {
-        let mut sql = String::from(
+        let mut sql = String::new();
+        if filter.exclude_keep_local {
+            sql.push_str(crate::privacy::KEEP_LOCAL_CTE);
+        }
+        sql.push_str(
             "SELECT i.id, i.meeting_id, i.kind, i.text, i.owner, i.status, i.speaker_key,
                     i.segment_ids_json, i.created_at, i.extracted_by
              FROM meeting_items i JOIN meetings m ON m.id = i.meeting_id
              WHERE i.kind != '_none'",
         );
+        if filter.exclude_keep_local {
+            sql.push_str(" AND m.note_id NOT IN (SELECT id FROM local_notes)");
+        }
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(kind) = filter.kind {
             sql.push_str(&format!(" AND i.kind = ?{}", params.len() + 1));
@@ -313,6 +324,39 @@ mod tests {
             .unwrap();
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].meeting_id, m2);
+    }
+
+    #[test]
+    fn query_items_can_exclude_keep_local_before_the_limit() {
+        let (_d, s) = test_storage();
+        let visible = meeting(&s, "Open sync");
+        let flagged = meeting(&s, "Board");
+        let folder = s.create_folder("Legal", None).unwrap();
+        let sub = s.create_folder("Cases", Some(&folder.id)).unwrap();
+        let filed_note = s.create_note("Deposition", Some(&sub.id)).unwrap();
+        let filed = s
+            .create_meeting("Deposition", &filed_note.id, &[])
+            .unwrap()
+            .id;
+        for m in [&visible, &flagged, &filed] {
+            s.replace_meeting_items(m, &[item(m, ItemKind::Decision, m, None)])
+                .unwrap();
+        }
+        s.set_note_keep_local(&s.get_meeting(&flagged).unwrap().note_id, true)
+            .unwrap();
+        s.set_folder_keep_local(&folder.id, true).unwrap();
+
+        let all = s.query_items(&ItemFilter::default()).unwrap();
+        assert_eq!(all.len(), 3);
+        let shared = s
+            .query_items(&ItemFilter {
+                exclude_keep_local: true,
+                limit: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(shared.len(), 1, "filtered before LIMIT");
+        assert_eq!(shared[0].meeting_id, visible);
     }
 
     #[test]

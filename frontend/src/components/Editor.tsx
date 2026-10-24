@@ -6,6 +6,7 @@ import type {
   Folder,
   ImportStaged,
   Meeting,
+  MeetingPrivacy,
   ModelProgress,
   Note,
   RecordingStatus,
@@ -23,6 +24,8 @@ import {
   Folder as FolderIcon,
   LayoutTemplate,
   List,
+  Lock,
+  LockOpen,
   MessageSquare,
   Mic,
   Monitor,
@@ -36,6 +39,7 @@ import {
 } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
+import { PRIVACY_CHANGED_EVENT, isKeptLocal, keepLocalTitle } from "../privacy";
 import { fmtElapsed } from "./RecordingBar";
 import { Button, Modal, SectionLabel } from "./ui";
 import AttendeeEditor from "./AttendeeEditor";
@@ -589,9 +593,13 @@ function MetaRow({
   onShowInFolder,
   onOpenAttachment,
   onRemoveAttachment,
+  privacy,
+  onToggleKeepLocal,
 }: {
   note: Note;
   meeting: Meeting | null;
+  privacy: MeetingPrivacy | null;
+  onToggleKeepLocal: () => void;
   hasTranscript: boolean;
   folders: Folder[];
   templates: Template[];
@@ -726,11 +734,49 @@ function MetaRow({
         />
       )}
 
-      {rec && (
-        <span className={CHIP}>
-          <Mic size={13} strokeWidth={1.75} style={{ color: "var(--rec)" }} /> Recorded · {mins} min
-        </span>
+      {meeting && (
+        <button
+          className={`${CHIP} ${privacy?.keep_local_from_folder ? "cursor-default" : "cursor-pointer hover:bg-surface-3"}`}
+          style={
+            isKeptLocal(privacy)
+              ? { background: "var(--primary-soft)", color: "var(--primary-soft-text)" }
+              : undefined
+          }
+          role="switch"
+          aria-checked={isKeptLocal(privacy)}
+          aria-label="Keep local (no cloud processing)"
+          title={keepLocalTitle(privacy)}
+          disabled={!privacy || privacy.keep_local_from_folder}
+          onClick={onToggleKeepLocal}
+        >
+          {isKeptLocal(privacy) ? (
+            <Lock size={13} strokeWidth={1.75} />
+          ) : (
+            <LockOpen size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} />
+          )}{" "}
+          {privacy?.keep_local_from_folder
+            ? "Kept local (folder)"
+            : isKeptLocal(privacy)
+              ? "Kept local"
+              : "Keep local"}
+        </button>
       )}
+
+      {rec &&
+        (privacy?.audio_deleted_at ? (
+          <span
+            className={CHIP}
+            title="Your retention setting deleted this recording's audio. The transcript and notes are kept."
+          >
+            <Mic size={13} strokeWidth={1.75} style={{ color: "var(--text-3)" }} /> Audio deleted
+            per retention
+          </span>
+        ) : (
+          <span className={CHIP}>
+            <Mic size={13} strokeWidth={1.75} style={{ color: "var(--rec)" }} /> Recorded · {mins}{" "}
+            min
+          </span>
+        ))}
 
       {fileAtts.map((a) => (
         <span
@@ -940,6 +986,40 @@ export default function Editor({
   const [exportState, setExportState] = useState<"idle" | "saved" | "failed">("idle");
   const saveTimer = useRef<number | null>(null);
   const noteIdRef = useRef(note.id);
+
+  // Privacy state of the shown meeting (Keep local, retention). Re-read when
+  // the note moves folders or a keep-local change is announced elsewhere.
+  const [privacy, setPrivacy] = useState<MeetingPrivacy | null>(null);
+  const privacyMeetingId = meeting?.id ?? null;
+  useEffect(() => {
+    if (!privacyMeetingId) {
+      setPrivacy(null);
+      return;
+    }
+    let live = true;
+    const load = () =>
+      api
+        .getMeetingPrivacy(privacyMeetingId)
+        .then((p) => live && setPrivacy(p))
+        .catch(() => {});
+    void load();
+    window.addEventListener(PRIVACY_CHANGED_EVENT, load);
+    return () => {
+      live = false;
+      window.removeEventListener(PRIVACY_CHANGED_EVENT, load);
+    };
+  }, [privacyMeetingId, note.folder_id]);
+  const toggleKeepLocal = () => {
+    if (!privacy || privacy.keep_local_from_folder) return;
+    const before = privacy;
+    const next = !privacy.keep_local;
+    setPrivacy({ ...privacy, keep_local: next });
+    api
+      .setNoteKeepLocal(note.id, next)
+      .then(() => window.dispatchEvent(new Event(PRIVACY_CHANGED_EVENT)))
+      .catch(() => setPrivacy(before));
+  };
+  const audioDeleted = !!privacy?.audio_deleted_at;
 
   const enhanced = note.blocks.length > 0;
   const isRecordingThisNote = recStatus.active && recStatus.note_id === note.id;
@@ -1287,6 +1367,8 @@ export default function Editor({
               onShowInFolder={showInFolder}
               onOpenAttachment={openAttachmentRel}
               onRemoveAttachment={(id) => void removeAttachment(id)}
+              privacy={privacy}
+              onToggleKeepLocal={toggleKeepLocal}
             />
           </div>
         </div>
@@ -1360,7 +1442,14 @@ export default function Editor({
                     })}
                   </div>
                 )}
-                {audioPath && (
+                {audioDeleted && (
+                  <p className="mb-3 text-[12.5px] text-text-3">
+                    Audio deleted on{" "}
+                    {new Date(privacy?.audio_deleted_at ?? "").toLocaleDateString()} by your
+                    retention setting (Settings → Privacy). The transcript and notes are kept.
+                  </p>
+                )}
+                {audioPath && !audioDeleted && (
                   <AudioPlayer
                     src={audioSrc}
                     durationMs={rec?.duration_ms ?? 0}

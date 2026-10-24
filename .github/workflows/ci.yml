@@ -5,6 +5,9 @@ on:
     branches: ["main", "m*"]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -14,9 +17,11 @@ jobs:
     name: Lint, test & build (Windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -24,10 +29,13 @@ jobs:
             package-lock.json
             frontend/package-lock.json
 
+      # Lockfile-exact and no dependency install scripts (none of the locked
+      # packages need one; fsevents' is a node-gyp fallback for a prebuilt
+      # binary that ships in its tarball).
       - name: Install JS dependencies
         run: |
-          npm ci
-          npm --prefix frontend ci
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
 
       - name: Frontend lint
         run: |
@@ -37,11 +45,12 @@ jobs:
       - name: Frontend typecheck & build
         run: npm --prefix frontend run build
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # tauri-build validates externalBin existence at compile time, so the
       # fly-mcp sidecar must be staged before any cargo build/check
@@ -70,7 +79,9 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-22.04]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
@@ -80,7 +91,7 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libpulse-dev \
             libssl-dev libxdo-dev
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -88,34 +99,22 @@ jobs:
             package-lock.json
             frontend/package-lock.json
 
-      # The lockfiles were generated on Windows and npm's optional-deps bug
-      # (npm/cli#4828) leaves other platforms' native bindings out of them —
-      # even npm install trusts the broken tree. Resolve fresh on this OS.
-      - name: Install JS dependencies (fresh resolve — npm/cli#4828)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          # npm 10.9.x (bundled with Node 22 runners since 2026-09) crashes
-          # resolving frontend/ with "Cannot read properties of null
-          # (reading 'edgesOut')"; npm 11 resolves the same package.json fine.
-          npm install -g npm@11 --no-audit --no-fund
-          npm --version
-          rm -f package-lock.json frontend/package-lock.json
-          npm install --no-audit --no-fund
-          (cd frontend && npm install --no-audit --no-fund)
-
+      # The lockfiles record every platform's optional native binding
+      # (rolldown, lightningcss, @tailwindcss/oxide, @tauri-apps/cli), so the
+      # lockfile-exact install works on every OS — no fresh resolve needed.
       - name: Install JS dependencies
-        if: runner.os == 'Windows'
         run: |
-          npm ci
-          npm --prefix frontend ci
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
 
       - name: Frontend build
         run: npm --prefix frontend run build
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Stage sidecar binaries
         run: npm run prepare-sidecars
@@ -125,3 +124,33 @@ jobs:
 
       - name: Build
         run: cargo build --workspace
+
+  # Known-vulnerability gate for both dependency trees. npm audit reads the
+  # lockfile alone (no install, no dependency code executed); cargo-deny
+  # checks RustSec advisories, duplicate/banned crates and crate sources
+  # against deny.toml (accepted advisories are listed there with reasons).
+  security-audit:
+    name: Dependency audit (npm + cargo-deny)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: npm audit (root)
+        run: npm audit --package-lock-only --audit-level=high
+
+      - name: npm audit (frontend)
+        run: npm --prefix frontend audit --package-lock-only --audit-level=high
+
+      - name: cargo-deny (advisories, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          command-arguments: advisories bans sources

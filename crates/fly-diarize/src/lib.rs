@@ -57,6 +57,10 @@ impl Default for DiarizeOptions {
     }
 }
 
+// Rust 1.99's clippy flags the `#[must_use]` that async-trait 0.1.89 (the
+// latest) puts on the boxed-future method it generates. That's macro output,
+// not our code; drop this allow once async-trait stops emitting it.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait DiarizationEngine: Send + Sync {
     fn id(&self) -> &'static str;

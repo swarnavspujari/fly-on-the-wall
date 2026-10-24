@@ -63,9 +63,19 @@ impl Storage {
         self.set_note_attachments(note_id, &attachments)
     }
 
-    /// Absolute path of an attachment (for open/reveal in the UI).
-    pub fn attachment_abs_path(&self, rel_path: &str) -> std::path::PathBuf {
-        self.data_dir.join(rel_path)
+    /// Absolute path of an attachment (for open/reveal in the UI). `rel_path`
+    /// arrives over IPC, so it must stay inside the data dir: an absolute or
+    /// UNC path, a drive prefix, or a `..` segment would otherwise replace or
+    /// escape the base and let the caller open (launch) any file.
+    pub fn attachment_abs_path(&self, rel_path: &str) -> Result<std::path::PathBuf> {
+        // Only the app's own media folders — never the database, logs or
+        // downloaded engine binaries elsewhere in the data dir.
+        crate::safe_path::contained(&self.data_dir, rel_path, &["attachments", "recordings"], 3)
+            .ok_or_else(|| {
+                StorageError::Invalid(format!(
+                    "attachment path must be inside attachments/ or recordings/: {rel_path}"
+                ))
+            })
     }
 
     /// Register a file that is ALREADY inside the data dir (e.g. a screen
@@ -127,7 +137,7 @@ mod tests {
 
         let n1 = s.add_attachment(&note.id, &src).unwrap();
         assert_eq!(n1.attachments.len(), 1);
-        let abs = s.attachment_abs_path(&n1.attachments[0].rel_path);
+        let abs = s.attachment_abs_path(&n1.attachments[0].rel_path).unwrap();
         assert!(abs.exists());
         assert_eq!(std::fs::read_to_string(&abs).unwrap(), "hello");
 
@@ -141,5 +151,24 @@ mod tests {
             .unwrap();
         assert_eq!(n3.attachments.len(), 1);
         assert!(!abs.exists());
+    }
+
+    #[test]
+    fn attachment_abs_path_rejects_escapes() {
+        let (_dir, s) = test_storage();
+        for bad in [
+            "",
+            "../outside.txt",
+            "attachments/../../outside.txt",
+            "/etc/passwd",
+            r"C:\Windows\System32\calc.exe",
+            r"\\attacker\share\x.exe",
+        ] {
+            assert!(
+                s.attachment_abs_path(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+        assert!(s.attachment_abs_path("attachments/n1/report.txt").is_ok());
     }
 }

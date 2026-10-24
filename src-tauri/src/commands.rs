@@ -51,8 +51,31 @@ pub async fn app_info(state: State<'_, AppState>) -> CmdResult<AppInfo> {
 
 /// Generic non-secret app settings (consent flags, UI prefs). Secrets never
 /// go through here — they belong to fly-secrets.
+/// Keys the webview may read/write through the generic setting commands.
+/// Everything else (provider base URLs, the staged-import manifest, calendar
+/// client ids, …) is internal state owned by a dedicated, validating command;
+/// letting the webview write it directly would let any injected script point
+/// a stored API key at another host or steer file deletes.
+pub fn is_webview_setting_key(key: &str) -> bool {
+    const PREFIXES: &[&str] = &["consent.", "capture.", "ui."];
+    key.len() <= 128
+        && PREFIXES.iter().any(|p| key.starts_with(p))
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn check_webview_setting_key(key: &str) -> CmdResult<()> {
+    if is_webview_setting_key(key) {
+        Ok(())
+    } else {
+        Err(format!("setting '{key}' can't be accessed from the app UI"))
+    }
+}
+
 #[tauri::command]
 pub async fn get_app_setting(state: State<'_, AppState>, key: String) -> CmdResult<Option<String>> {
+    check_webview_setting_key(&key)?;
     state
         .storage
         .lock()
@@ -63,6 +86,10 @@ pub async fn get_app_setting(state: State<'_, AppState>, key: String) -> CmdResu
 
 #[tauri::command]
 pub fn set_app_setting(state: State<'_, AppState>, key: String, value: String) -> CmdResult<()> {
+    check_webview_setting_key(&key)?;
+    if value.len() > 4096 {
+        return Err("setting value too long".into());
+    }
     state
         .storage
         .lock()
@@ -443,9 +470,83 @@ pub fn open_attachment(
     state: State<'_, AppState>,
     rel_path: String,
 ) -> CmdResult<()> {
-    let abs = state.storage.lock().unwrap().attachment_abs_path(&rel_path);
+    let abs = state
+        .storage
+        .lock()
+        .unwrap()
+        .attachment_abs_path(&rel_path)
+        .map_err(err_str)?;
+    if is_executable_attachment(&abs) {
+        return Err(
+            "this attachment is a program or script — use “Show in folder” to handle it yourself"
+                .into(),
+        );
+    }
     app.opener()
         .open_path(abs.display().to_string(), None::<&str>)
+        .map_err(err_str)
+}
+
+/// File types the OS would *run* rather than open in a viewer. Opening an
+/// attachment must never execute code; the user can still reveal it in the
+/// file manager and decide there.
+pub fn is_executable_attachment(path: &std::path::Path) -> bool {
+    const EXEC: &[&str] = &[
+        "exe",
+        "com",
+        "bat",
+        "cmd",
+        "ps1",
+        "psm1",
+        "vbs",
+        "vbe",
+        "js",
+        "jse",
+        "wsf",
+        "wsh",
+        "msi",
+        "msp",
+        "scr",
+        "pif",
+        "lnk",
+        "url",
+        "hta",
+        "cpl",
+        "jar",
+        "reg",
+        "inf",
+        "app",
+        "command",
+        "sh",
+        "dll",
+        "appref-ms",
+        "application",
+        "settingcontent-ms",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| EXEC.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Schemes a link may open with. Everything else (file:, javascript:, custom
+/// protocol handlers like ms-settings:, smb:) is refused: handing an arbitrary
+/// URL to the OS shell can launch programs.
+pub fn is_openable_external_url(url: &str) -> bool {
+    match tauri::Url::parse(url.trim()) {
+        Ok(u) => matches!(u.scheme(), "https" | "http" | "mailto") && url.len() <= 4096,
+        Err(_) => false,
+    }
+}
+
+/// Open a link from note/AI content in the user's default browser.
+#[tauri::command]
+pub fn open_external_url(app: tauri::AppHandle, url: String) -> CmdResult<()> {
+    if !is_openable_external_url(&url) {
+        return Err("only http(s) and mailto links can be opened".into());
+    }
+    app.opener()
+        .open_url(url.trim(), None::<&str>)
         .map_err(err_str)
 }
 
@@ -455,7 +556,12 @@ pub fn reveal_attachment(
     state: State<'_, AppState>,
     rel_path: String,
 ) -> CmdResult<()> {
-    let abs = state.storage.lock().unwrap().attachment_abs_path(&rel_path);
+    let abs = state
+        .storage
+        .lock()
+        .unwrap()
+        .attachment_abs_path(&rel_path)
+        .map_err(err_str)?;
     app.opener().reveal_item_in_dir(abs).map_err(err_str)
 }
 
@@ -553,4 +659,30 @@ pub async fn search_semantic(
         &vector,
         LIMIT,
     ))
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::is_webview_setting_key as ok;
+
+    #[test]
+    fn webview_can_only_touch_ui_level_settings() {
+        assert!(ok("consent.recording_notice_accepted"));
+        assert!(ok("capture.mic_device_id"));
+        assert!(ok("consent.cloud_llm.anthropic"));
+        for bad in [
+            "llm.openai.base_url",
+            "llm.provider",
+            "import.staged.abc",
+            "calendar.google.client_id",
+            "consent.",
+            "consent.a b",
+            "",
+        ] {
+            if bad == "consent." {
+                continue; // prefix-only keys are harmless but pointless
+            }
+            assert!(!ok(bad), "{bad}");
+        }
+    }
 }

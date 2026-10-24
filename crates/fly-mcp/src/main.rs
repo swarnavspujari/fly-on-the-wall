@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, Write};
 
-use fly_mcp::Server;
+use fly_mcp::LazyServer;
 
 fn main() -> anyhow::Result<()> {
     let mut data_dir = dirs::data_dir()
@@ -18,8 +18,9 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let storage = fly_storage::Storage::open(&data_dir)?;
-    let server = Server::new(storage);
+    // Opens the app's database without migrating or seeding, and keeps
+    // serving (with a clear error per tool call) while it can't be opened.
+    let server = LazyServer::new(data_dir.clone());
     // logs must go to stderr — stdout is the protocol channel
     eprintln!(
         "flyonthewall-mcp v{} serving {}",

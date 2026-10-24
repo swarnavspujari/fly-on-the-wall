@@ -88,7 +88,7 @@ impl TranscriptionEngine for GroqEngine {
         let segment_ms = MAX_CHUNK_BYTES / 2 * 1000 / rate as u64;
         let total_speech_ms: u64 = spans.iter().map(|s| s.end_ms - s.start_ms).sum();
         tracing::debug!(
-            file = %wav_path.display(),
+            file = %wav_path.file_name().unwrap_or_default().to_string_lossy(),
             spans = spans.len(),
             speech_ms = total_speech_ms,
             total_ms = samples.len() as u64 * 1000 / rate.max(1) as u64,
