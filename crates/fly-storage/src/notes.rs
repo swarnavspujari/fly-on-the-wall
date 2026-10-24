@@ -107,6 +107,8 @@ impl Storage {
     /// updated first. `before` is the `(updated_at, id)` of the last row of
     /// the previous page — rows strictly after it in the sort order are
     /// returned. Timestamps compare lexicographically (uniform RFC 3339 UTC).
+    /// `exclude_keep_local` drops keep-local notes inside the query, so they
+    /// never fill a page or become the cursor (MCP).
     pub fn list_notes_filtered(
         &self,
         limit: usize,
@@ -114,8 +116,16 @@ impl Storage {
         since: Option<chrono::DateTime<chrono::Utc>>,
         until: Option<chrono::DateTime<chrono::Utc>>,
         before: Option<(String, String)>,
+        exclude_keep_local: bool,
     ) -> Result<Vec<NoteSummary>> {
-        let mut sql = format!("{SUMMARY_SELECT} WHERE 1=1");
+        let mut sql = if exclude_keep_local {
+            format!(
+                "{}{SUMMARY_SELECT} WHERE n.id NOT IN (SELECT id FROM local_notes)",
+                crate::privacy::KEEP_LOCAL_CTE
+            )
+        } else {
+            format!("{SUMMARY_SELECT} WHERE 1=1")
+        };
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(f) = folder_id {
             sql.push_str(&format!(" AND n.folder_id = ?{}", params.len() + 1));

@@ -279,57 +279,61 @@ impl Server {
     fn tool_search(&self, args: &Value) -> Result<String, String> {
         let query = arg_query(args, "query")?;
         let limit = arg_limit(args, 20);
-        let offset = args
+        // Cursor = "<note offset>:<transcript offset>" (a bare number from
+        // older replies applies to both). The two rankings page separately.
+        let (note_off, transcript_off) = args
             .get("cursor")
             .and_then(|c| c.as_str())
-            .and_then(|c| c.parse::<usize>().ok())
-            .unwrap_or(0);
-        let hidden = self.hidden_notes()?;
-        let mut filter = SearchFilter {
+            .and_then(|c| match c.split_once(':') {
+                Some((n, t)) => Some((n.parse().ok()?, t.parse().ok()?)),
+                None => c.parse().ok().map(|n| (n, n)),
+            })
+            .unwrap_or((0usize, 0usize));
+        let base = SearchFilter {
             folder_id: arg_str(args, "folder_id"),
             since: arg_time(args, "since")?,
             until: arg_time(args, "until")?,
             limit,
-            offset,
+            offset: 0,
+            // Keep-local rows are excluded inside SQL: they never fill a page,
+            // shift a cursor or make an empty page look different.
+            exclude_keep_local: true,
         };
-        // Keep-local hits are dropped; keep paging (bounded) so a page isn't
-        // left short just because hidden notes ranked high. The cursor is
-        // the raw rank offset of the next row NOT yet consumed (hidden or
-        // not), so later pages neither skip nor repeat rows, and at most
-        // `limit` hits are returned.
-        let mut hits = Vec::new();
-        let mut next_offset = offset;
-        let mut more = false;
-        'pages: for _ in 0..SEARCH_REFILL_PAGES {
-            filter.offset = next_offset;
-            let page = self
-                .storage
-                .search_filtered(query, &filter)
-                .map_err(|e| e.to_string())?;
-            let full = page.len() >= limit;
-            more = full;
-            let rows = page.len();
-            for (i, h) in page.into_iter().enumerate() {
-                next_offset += 1;
-                if !hidden.contains(&h.note_id) {
-                    hits.push(h);
-                    if hits.len() >= limit {
-                        more = full || i + 1 < rows;
-                        break 'pages;
-                    }
-                }
-            }
-            if !full {
-                break;
-            }
-        }
+        let search = |offset: usize| {
+            self.storage
+                .search_split(
+                    query,
+                    &SearchFilter {
+                        offset,
+                        ..base.clone()
+                    },
+                )
+                .map_err(|e| e.to_string())
+        };
+        let (notes, same_offset_transcripts) = search(note_off)?;
+        let transcripts = if transcript_off == note_off {
+            same_offset_transcripts
+        } else {
+            search(transcript_off)?.1
+        };
+        // Notes first, then transcripts, at most `limit` in total; each
+        // list's cursor advances only past the rows actually returned.
+        let take_notes = notes.len().min(limit);
+        let take_transcripts = transcripts.len().min(limit - take_notes);
+        let more = notes.len() >= limit
+            || transcripts.len() > take_transcripts
+            || transcripts.len() >= limit;
+        let next = format!(
+            "{}:{}",
+            note_off + take_notes,
+            transcript_off + take_transcripts
+        );
+        let hits: Vec<_> = notes
+            .into_iter()
+            .take(take_notes)
+            .chain(transcripts.into_iter().take(take_transcripts))
+            .collect();
         if hits.is_empty() {
-            if more {
-                return Ok(format!(
-                    "No shareable matches for \"{query}\" in this window.\n\
-                     More may exist — pass cursor: \"{next_offset}\" to continue.\n"
-                ));
-            }
             return Ok(format!("No matches for \"{query}\"."));
         }
         let n = hits.len();
@@ -352,7 +356,7 @@ impl Server {
         }
         if more {
             out.push_str(&format!(
-                "\nMore may exist — pass cursor: \"{next_offset}\" to continue.\n"
+                "\nMore may exist — pass cursor: \"{next}\" to continue.\n"
             ));
         }
         Ok(out)
@@ -620,41 +624,13 @@ impl Server {
             .map(|(ts, id)| (ts.to_string(), id.to_string()));
         let folder_id = arg_str(args, "folder_id");
         let (since, until) = (arg_time(args, "since")?, arg_time(args, "until")?);
-        let hidden = self.hidden_notes()?;
-        // Page through the keyset until `limit` visible notes are collected
-        // (bounded); the cursor is the last row CONSUMED, hidden or not, so
-        // the next page resumes exactly after it.
-        let mut notes = Vec::new();
-        let mut cursor = before;
-        let mut more = false;
-        'pages: for _ in 0..SEARCH_REFILL_PAGES {
-            let page = self
-                .storage
-                .list_notes_filtered(limit, folder_id.as_deref(), since, until, cursor.clone())
-                .map_err(|e| e.to_string())?;
-            let full = page.len() >= limit;
-            more = full;
-            for n in page {
-                cursor = Some((n.updated_at.to_rfc3339(), n.id.clone()));
-                if !hidden.contains(&n.id) {
-                    notes.push(n);
-                    if notes.len() >= limit {
-                        more = true;
-                        break 'pages;
-                    }
-                }
-            }
-            if !full {
-                break;
-            }
-        }
+        // Keep-local notes are excluded inside SQL, so they never fill a page
+        // and the cursor (the last row returned) is always a shareable note.
+        let notes = self
+            .storage
+            .list_notes_filtered(limit, folder_id.as_deref(), since, until, before, true)
+            .map_err(|e| e.to_string())?;
         if notes.is_empty() {
-            if let (true, Some((ts, id))) = (more, cursor) {
-                return Ok(format!(
-                    "No shareable notes in this window.\n\
-                     More may exist — pass cursor: \"{ts}|{id}\" to continue.\n"
-                ));
-            }
             return Ok("No notes match.".into());
         }
         let mut out = String::from("Recent notes:\n");
@@ -670,9 +646,12 @@ impl Server {
                     .unwrap_or_default()
             ));
         }
-        if let (true, Some((ts, id))) = (more, cursor) {
+        if notes.len() >= limit {
+            let last = notes.last().expect("non-empty");
             out.push_str(&format!(
-                "\nMore may exist — pass cursor: \"{ts}|{id}\" to continue.\n"
+                "\nMore may exist — pass cursor: \"{}|{}\" to continue.\n",
+                last.updated_at.to_rfc3339(),
+                last.id
             ));
         }
         Ok(out)
@@ -927,11 +906,6 @@ pub const KEEP_LOCAL_MEETING_MESSAGE: &str =
 /// Same, for a note.
 pub const KEEP_LOCAL_NOTE_MESSAGE: &str =
     "This note is marked Keep local and isn't shared with AI tools.";
-
-/// How many storage pages list/search tools read to refill a page that
-/// keep-local filtering left short.
-const SEARCH_REFILL_PAGES: usize = 10;
-
 /// A failed keep-local lookup refuses the whole result (fail closed).
 fn keep_local_lookup_error(e: StorageError) -> String {
     format!("couldn't check Keep local settings, so nothing was returned: {e}")
@@ -2133,12 +2107,11 @@ mod tests {
         }
     }
 
-    /// 25 keep-local notes all newer than / ranking with one shared note:
-    /// with limit 1 the refill window (10 pages) can be all hidden. Every
-    /// reply must then still offer a cursor, never more than `limit` hits,
-    /// and following cursors must reach the shared note.
+    /// 25 keep-local notes all newer than / ranking with one shared note.
+    /// Hidden rows are excluded in SQL, so the shared note comes straight
+    /// back, never more than `limit` hits, and no cursor names a hidden row.
     #[test]
-    fn hidden_only_windows_still_return_a_cursor() {
+    fn hidden_rows_never_shape_pages_or_cursors() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).unwrap();
         let shared = storage.create_note("zeta shared", None).unwrap();
@@ -2147,63 +2120,112 @@ mod tests {
             .unwrap();
         let legal = storage.create_folder("Legal", None).unwrap();
         storage.set_folder_keep_local(&legal.id, true).unwrap();
+        let mut hidden_ids = Vec::new();
         for i in 0..25 {
             let n = storage
                 .create_note(&format!("zeta hidden {i}"), Some(&legal.id))
                 .unwrap();
-            storage.update_note_scratchpad(&n.id, "zeta topic").unwrap();
+            storage
+                .update_note_scratchpad(&n.id, "zeta topic onlyhidden")
+                .unwrap();
+            hidden_ids.push(n.id);
         }
         let server = Server::new(storage);
-        let cursor_of = |text: &str| {
-            text.split("pass cursor: \"")
-                .nth(1)
-                .map(|rest| rest.split('"').next().unwrap().to_string())
+        let no_hidden = |text: &str| {
+            assert!(!text.contains("hidden"), "leaked: {text}");
+            for id in &hidden_ids {
+                assert!(!text.contains(id.as_str()), "hidden id leaked: {text}");
+            }
         };
-        for (tool, base) in [
+        for (tool, args) in [
             ("search_notes", json!({"query": "zeta", "limit": 1})),
             ("list_recent", json!({"limit": 1})),
         ] {
-            let mut args = base.clone();
-            let mut found = false;
-            for _ in 0..10 {
-                let text = tool_text(&server, tool, args.clone());
-                assert!(!text.contains("hidden"), "{tool} leaked: {text}");
-                assert!(
-                    text.matches("note_id: ").count() <= 1,
-                    "{tool} returned more than limit: {text}"
-                );
-                if text.contains(&shared.id) {
-                    found = true;
-                    break;
-                }
-                let next = cursor_of(&text)
-                    .unwrap_or_else(|| panic!("{tool}: no cursor while rows remain: {text}"));
-                args["cursor"] = json!(next);
-            }
-            assert!(found, "{tool}: shared note never reached");
+            let text = tool_text(&server, tool, args);
+            no_hidden(&text);
+            assert!(text.contains(&shared.id), "{tool}: {text}");
+            assert_eq!(text.matches("note_id: ").count(), 1, "{tool}: {text}");
         }
+        // A query only hidden notes match reads exactly like one nothing
+        // matches: no cursor, no count, nothing to probe with.
+        let only_hidden = tool_text(&server, "search_notes", json!({"query": "onlyhidden"}));
+        let nothing = tool_text(&server, "search_notes", json!({"query": "nosuchword"}));
+        assert_eq!(
+            only_hidden.replace("onlyhidden", "Q"),
+            nothing.replace("nosuchword", "Q")
+        );
     }
 
+    /// At most `limit` hits per page, and following the cursor visits every
+    /// shareable note and transcript exactly once.
     #[test]
-    fn search_returns_at_most_limit_hits() {
+    fn search_pages_are_capped_and_complete() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).unwrap();
         let legal = storage.create_folder("Legal", None).unwrap();
         storage.set_folder_keep_local(&legal.id, true).unwrap();
-        // interleave hidden and shared so a refill page overshoots
+        let mut want = std::collections::BTreeSet::new();
         for i in 0..12 {
             let folder = (i % 2 == 0).then_some(legal.id.as_str());
             let n = storage.create_note(&format!("omega {i}"), folder).unwrap();
             storage.update_note_scratchpad(&n.id, "omega").unwrap();
+            let m = storage.create_meeting("omega", &n.id, &[]).unwrap();
+            storage
+                .save_transcript(&fly_core::Transcript {
+                    meeting_id: m.id.clone(),
+                    language: None,
+                    engine: "t".into(),
+                    segments: vec![fly_core::TranscriptSegment {
+                        id: "s1".into(),
+                        speaker_key: "mic".into(),
+                        start_ms: 0,
+                        end_ms: 1,
+                        text: "omega".into(),
+                        words: vec![],
+                    }],
+                    speakers: vec![],
+                })
+                .unwrap();
+            if folder.is_none() {
+                want.insert(format!("note:{}", n.id));
+                want.insert(format!("transcript:{}", m.id));
+            }
         }
         let server = Server::new(storage);
-        let text = tool_text(
-            &server,
-            "search_notes",
-            json!({"query": "omega", "limit": 4}),
-        );
-        assert_eq!(text.matches("note_id: ").count(), 4, "{text}");
-        assert!(text.contains("pass cursor"), "{text}");
+        let mut seen = std::collections::BTreeSet::new();
+        let mut args = json!({"query": "omega", "limit": 4});
+        for _ in 0..10 {
+            let text = tool_text(&server, "search_notes", args.clone());
+            let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("- [")).collect();
+            assert!(lines.len() <= 4, "{text}");
+            for l in lines {
+                let key = if l.starts_with("- [note]") {
+                    let id = l
+                        .split("note_id: ")
+                        .nth(1)
+                        .unwrap()
+                        .split(')')
+                        .next()
+                        .unwrap();
+                    format!("note:{id}")
+                } else {
+                    let id = l
+                        .split("meeting_id: ")
+                        .nth(1)
+                        .unwrap()
+                        .split(')')
+                        .next()
+                        .unwrap();
+                    format!("transcript:{id}")
+                };
+                assert!(seen.insert(key.clone()), "repeated {key}: {text}");
+            }
+            match text.split("pass cursor: \"").nth(1) {
+                Some(rest) => args["cursor"] = json!(rest.split('"').next().unwrap()),
+                None => break,
+            }
+        }
+        assert_eq!(seen, want);
     }
 
     #[test]
