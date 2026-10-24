@@ -24,12 +24,15 @@ ignore = [
   # until the upstream Tauri bundler/plist chain moves to a patched quick-xml.
   { id = "RUSTSEC-2026-0194", reason = "quick-xml via build-time plist only; awaiting upstream bump" },
   { id = "RUSTSEC-2026-0195", reason = "quick-xml via build-time plist only; awaiting upstream bump" },
-  # zip 4.x — a direct dependency (models.rs::extract_archive unpacks the
-  # SHA-256-pinned engine downloads) and also used by tauri-plugin-updater.
-  # Inputs are verified before extraction; upgrade to zip 9 is tracked.
-  { id = "RUSTSEC-2026-0367", reason = "zip 4 is a direct dep (src-tauri models.rs extract_archive) and used by tauri-plugin-updater; only extracts SHA-256-pinned engine downloads; bump to zip 9 tracked" },
-  { id = "RUSTSEC-2026-0368", reason = "zip 4 is a direct dep (src-tauri models.rs extract_archive) and used by tauri-plugin-updater; only extracts SHA-256-pinned engine downloads; bump to zip 9 tracked" },
-  { id = "RUSTSEC-2026-0369", reason = "zip 4 is a direct dep (src-tauri models.rs extract_archive) and used by tauri-plugin-updater; only extracts SHA-256-pinned engine downloads; bump to zip 9 tracked" },
+  # zip 4.x — our own extraction (models.rs::extract_archive) is on zip 9,
+  # where these are fixed. The only remaining zip 4 is tauri-plugin-updater's
+  # private copy (Windows only; 2.14.0 is the newest 2.x and still requires
+  # ^4), which extracts nothing but update archives whose minisign signature
+  # has already been verified against the pubkey in tauri.conf.json. Drop
+  # these once the updater moves to a fixed zip.
+  { id = "RUSTSEC-2026-0367", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
+  { id = "RUSTSEC-2026-0368", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
+  { id = "RUSTSEC-2026-0369", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
 ]
 
 [bans]
