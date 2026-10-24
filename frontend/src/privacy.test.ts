@@ -10,6 +10,7 @@ import {
   retentionOptions,
   retentionWarning,
   showEncryptionBanner,
+  wipeOutcome,
 } from "./privacy";
 import type { MeetingPrivacy } from "./types";
 
@@ -104,4 +105,27 @@ it("formats byte counts", () => {
   expect(formatBytes(512)).toBe("512 B");
   expect(formatBytes(1536)).toBe("1.5 KB");
   expect(formatBytes(250 * 1024 * 1024)).toBe("250 MB");
+});
+
+describe("wipe outcome", () => {
+  const base = {
+    removed: 10,
+    failed: [] as string[],
+    secrets_failed: [] as string[],
+    restart_required: true,
+    db_erased: true,
+    db_checkpointed: true,
+    notes: [] as string[],
+  };
+  it("restarts on its own only when everything was erased", () => {
+    expect(wipeOutcome(base)).toBe("clean");
+  });
+  it("never claims success while the database is held open elsewhere", () => {
+    expect(wipeOutcome({ ...base, db_checkpointed: false })).toBe("db-open");
+    expect(wipeOutcome({ ...base, db_erased: false, failed: ["x"] })).toBe("db-open");
+  });
+  it("lists stuck files and keychain entries", () => {
+    expect(wipeOutcome({ ...base, failed: ["logs/app.log"] })).toBe("leftovers");
+    expect(wipeOutcome({ ...base, secrets_failed: ["groq_api_key"] })).toBe("leftovers");
+  });
 });

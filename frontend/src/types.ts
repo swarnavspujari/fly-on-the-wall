@@ -424,12 +424,21 @@ export interface WipeReport {
   failed: string[];
   secrets_failed: string[];
   restart_required: boolean;
+  /** Every table emptied in place. */
+  db_erased: boolean;
+  /** Erased pages reached the file (false = another program, e.g. an MCP
+   *  client, holds the database open and old content may remain). */
+  db_checkpointed: boolean;
+  /** Notes for the user (stale request discarded, DB held open, …). */
+  notes: string[];
 }
 
 export interface PrivacySettings {
   /** null = keep audio forever (default). */
   audio_retention_days: number | null;
   retention_choices: number[];
+  /** Meetings a background sweep held back (too much audio at once). */
+  retention_held: number | null;
   /** Leftovers of the last "Delete all my data" restart, if any. */
   last_wipe: WipeReport | null;
 }
@@ -439,6 +448,8 @@ export interface SweepReport {
   files_removed: number;
   bytes_removed: number;
   meetings_failed: number;
+  /** Why a background sweep held back, if it did. */
+  held: string | null;
 }
 
 export interface DiskEncryption {

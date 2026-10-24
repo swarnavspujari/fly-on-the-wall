@@ -159,6 +159,8 @@ pub async fn import_stage(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<Option<ImportStaged>> {
+    // "Delete all my data" refuses to run while files are being imported
+    let _busy = crate::privacy::ImportGuard::enter();
     let exts: Vec<&str> = AUDIO_EXTS.iter().chain(VIDEO_EXTS).copied().collect();
     let Some(picked) = app
         .dialog()
@@ -317,6 +319,7 @@ pub async fn import_transcribe(
     meeting_id: String,
     order: Vec<String>,
 ) -> CmdResult<ImportStaged> {
+    let _busy = crate::privacy::ImportGuard::enter();
     let Some(staged) = load_staged(&state, &meeting_id)? else {
         return Err("no staged import for this meeting".into());
     };

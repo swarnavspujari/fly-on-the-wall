@@ -119,20 +119,38 @@ pub fn keep_local_refusal(provider: &str) -> String {
     )
 }
 
-/// Cloud-processing policy, pure so it's testable without an app: a local
-/// provider always passes; a cloud provider must not see keep-local data and
-/// needs the user's recorded consent.
+/// True when `url` points at this machine (localhost / a loopback IP).
+pub fn is_loopback_url(url: &str) -> bool {
+    tauri::Url::parse(url.trim())
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .is_some_and(|h| {
+            h.eq_ignore_ascii_case("localhost")
+                || h.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+}
+
+/// Cloud-processing policy, pure so it's testable without an app.
+///
+/// `is_local` = a local *kind* of provider (Ollama), which needs no consent.
+/// `on_device` = the endpoint is actually this machine: an Ollama pointed at
+/// another host (`llm.ollama.base_url`) is local in kind but still sends the
+/// data off the device, so keep-local data is refused there too.
 pub fn check_cloud_policy(
     provider: &str,
     is_local: bool,
+    on_device: bool,
     consented: bool,
     keep_local: bool,
 ) -> Result<(), String> {
+    if keep_local && !on_device {
+        return Err(keep_local_refusal(provider));
+    }
     if is_local {
         return Ok(());
-    }
-    if keep_local {
-        return Err(keep_local_refusal(provider));
     }
     if !consented {
         return Err(format!(
@@ -184,7 +202,10 @@ pub fn build_provider(
         DataScope::Note(id) => storage.note_keep_local(id),
         DataScope::Meeting(id) => storage.meeting_keep_local(id),
     };
-    check_cloud_policy(&provider, is_local, consented, keep_local)?;
+    // Only Ollama can run on this device, and only at a loopback address
+    // (no base URL = the default localhost server).
+    let on_device = is_local && base_url.as_deref().is_none_or(is_loopback_url);
+    check_cloud_policy(&provider, is_local, on_device, consented, keep_local)?;
     drop(storage);
 
     let key = |name: &'static str| -> Result<String, String> {
@@ -778,19 +799,43 @@ mod security_tests {
 
     #[test]
     fn keep_local_refuses_cloud_providers_but_not_ollama() {
-        // local provider: fine with or without keep-local / consent
-        assert!(check_cloud_policy("ollama", true, false, true).is_ok());
-        assert!(check_cloud_policy("ollama", true, false, false).is_ok());
+        // on-device Ollama: fine with or without keep-local / consent
+        assert!(check_cloud_policy("ollama", true, true, false, true).is_ok());
+        assert!(check_cloud_policy("ollama", true, true, false, false).is_ok());
         // cloud + keep-local: refused even with consent, and says why
-        let err = check_cloud_policy("anthropic", false, true, true).unwrap_err();
+        let err = check_cloud_policy("anthropic", false, false, true, true).unwrap_err();
         assert!(
             err.contains("Keep local") && err.contains("anthropic"),
             "{err}"
         );
         assert!(err.contains("Ollama"), "must name the local way forward");
         // cloud without keep-local still needs recorded consent
-        assert!(check_cloud_policy("openai", false, false, false).is_err());
-        assert!(check_cloud_policy("openai", false, true, false).is_ok());
+        assert!(check_cloud_policy("openai", false, false, false, false).is_err());
+        assert!(check_cloud_policy("openai", false, false, true, false).is_ok());
+    }
+
+    /// M4: an Ollama on another machine is not "local" for keep-local data
+    /// (but still needs no consent for ordinary notes, as before).
+    #[test]
+    fn remote_ollama_is_not_on_device() {
+        use super::is_loopback_url;
+        for local in [
+            "http://localhost:11434",
+            "http://127.0.0.1:11434/v1",
+            "http://[::1]:11434",
+        ] {
+            assert!(is_loopback_url(local), "{local}");
+        }
+        for remote in [
+            "http://192.168.1.20:11434",
+            "https://ollama.example.com",
+            "http://localhost.evil.example",
+            "not a url",
+        ] {
+            assert!(!is_loopback_url(remote), "{remote}");
+        }
+        assert!(check_cloud_policy("ollama", true, false, false, true).is_err());
+        assert!(check_cloud_policy("ollama", true, false, false, false).is_ok());
     }
 
     #[test]
