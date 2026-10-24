@@ -69,18 +69,38 @@ The second pass followed staff-engineer and SOC 2 (Security, Confidentiality and
   - A real person's name used as the shipped transcript-cleanup example was replaced with a neutral one.
   - Ask puts the transcript before the notes so note edits don't invalidate the prompt cache. History always starts and ends on a user turn.
 
+## Round 3 (v2.3.0): remaining code items closed
+
+- **Self-heal:** manifest paths are always rebased onto the scanned `recordings/<folder>`. Directory parts from a manifest are ignored, and names failing the safe-path rules reject the manifest. The portability backfill refuses rows whose folder isn't inside `recordings/`.
+- **MCP server:**
+  - It opens the existing database without migrating or seeding (`Storage::open_existing`, 5 s busy timeout, schema checks).
+  - `set_speaker_label` only accepts existing speakers, with sanitised labels of at most 100 characters.
+  - Query and result sizes are capped.
+  - Keep-local meetings and notes are never returned: direct lookups are refused, and lists, search, items and briefings filter them out.
+- **Calendar OAuth:** the loopback listener ignores stray local connections until the redirect with the matching `state` arrives.
+- **Logs:** meeting titles, folder names, transcript text, window titles and calendar ids are kept out of log calls, and a test enforces the rule.
+- **Privacy controls:**
+  - *Keep local* per meeting or folder: no cloud LLM or cloud transcription, enforced in the backend.
+  - Optional audio retention (7/30/90/365 days; transcripts and notes are kept).
+  - *Delete all my data* (database, files, keychain entries; two confirmations).
+  - A recording-notice helper with a "participants notified" flag.
+  - A disk-encryption check with a warning banner.
+- **Dependencies:**
+  - zip 9.0.5 for the app's own extraction, hardened against path, symlink, permission and size tricks.
+  - whisper.cpp v1.9.5 (CVE-2026-110810), CI-built on all platforms and published as prereleases.
+  - ffmpeg n8.1.3, with every pin re-hashed and download-tested.
+- **Live tests:** `src-tauri/tests/anthropic_live.rs` checks every Claude 5.5 request shape with the fallback switched off. Run it with your own key.
+
 ## Still open
 
 | Item | Why it's open | Owner |
 |---|---|---|
 | Require reviewers on the `release` environment and move the signing secrets into it | GitHub setting | Repo owner |
-| Branch protection on `main` and a tag ruleset for `v*`; turn on secret scanning + push protection | GitHub setting | Repo owner |
-| Windows Authenticode signing (Azure Artifact Signing via OIDC) | Needs a signing account | Repo owner + code |
-| Live check of the Claude 5.5 changes (structured outputs, effort, fallback) and an `llm_bench` run | No API key available in this environment. Unit tests pin the exact request shapes, and every new feature degrades to the old request on a 400. | Run once with a key |
-| Rebase manifest paths during self-heal (the write side of finding 7) | Deletes are guarded; writes of `manifest.json`/`note.json` still follow manifest paths | Code |
-| zip 9 upgrade (RUSTSEC-2026-0367/8/9), quick-xml (build-time only) | Needs upstream / semver-major work | Code |
-| whisper.cpp ≥1.9.5 at the next sidecar rebuild; periodic ffmpeg refresh | Sidecar rebuild | Code |
-| Written policies (access control, change management, vendor management with DPAs for Anthropic/Groq/OpenAI/NVIDIA/Google/Microsoft, risk assessment) | SOC 2 is an organisational audit; code can't satisfy these | Owner |
+| Rulesets for `main` and `v*` tags; secret scanning + push protection; private vulnerability reporting | GitHub settings | Repo owner |
+| Windows Authenticode signing | The owner chose to skip it for now (it costs about $10/month on Azure; SignPath Foundation is free for OSS). Updates stay minisign-verified. | Repo owner (later) |
+| Run the live Claude 5.5 test once with a real key | Needs the owner's API key | Repo owner |
+| tauri-plugin-updater's own zip 4 copy (RUSTSEC-2026-0367/8/9) and quick-xml (build-time only) | Waiting on upstream; the updater only unpacks signature-verified updates | Upstream |
+| Screen-recording videos aren't covered by audio retention; the WebView2 profile isn't wiped by delete-all; the FileVault check hasn't run on a real Mac | Small follow-ups | Code |
 
 ## Verified good practices
 - API keys live in the OS keychain and are never returned to the webview (only `has_key`).
