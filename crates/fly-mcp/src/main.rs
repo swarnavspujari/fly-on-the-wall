@@ -18,7 +18,14 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let storage = fly_storage::Storage::open(&data_dir)?;
+    // The app owns the schema: open its database without migrating or
+    // seeding (both would race the app's own startup). Only a first run,
+    // before the app has ever created a database, falls back to the full
+    // open so Claude Desktop still gets a working (empty) server.
+    let storage = match fly_storage::Storage::open_existing(&data_dir) {
+        Err(fly_storage::StorageError::NotFound(_)) => fly_storage::Storage::open(&data_dir)?,
+        other => other?,
+    };
     let server = Server::new(storage);
     // logs must go to stderr — stdout is the protocol channel
     eprintln!(
