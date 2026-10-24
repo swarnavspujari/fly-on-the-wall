@@ -317,6 +317,12 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: false
+          # Stay a prerelease (never "Latest") until latest.json is attached:
+          # installed apps poll /releases/latest/download/latest.json, so a
+          # release that becomes Latest before its manifest 404s every
+          # updater (happened on v2.3.0 when notarization failed).
+          prerelease: true
+          make_latest: false
           generate_release_notes: true
           files: dist-upload/*
           fail_on_unmatched_files: true
@@ -363,6 +369,10 @@ jobs:
           draft: false
           files: latest.json
           fail_on_unmatched_files: true
+          # Only now — with every platform signed and the manifest attached —
+          # does this release become the one updaters see.
+          prerelease: false
+          make_latest: true
 
   # CycloneDX SBOMs for both dependency trees, generated from the lockfiles
   # with NO secrets in scope (the generators are pinned to exact versions).
@@ -444,6 +454,9 @@ jobs:
           draft: false
           files: sbom/*.cdx.json
           fail_on_unmatched_files: true
+          # Runs after the manifest job; keep the Latest state it set.
+          prerelease: false
+          make_latest: true
 
       # Attest the bytes users actually download: pull every asset back from
       # the published release (installers, .app.tar.gz, latest.json, SBOMs).
