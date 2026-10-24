@@ -169,9 +169,13 @@ pub async fn interactive_auth(
 /// How long the interactive flow waits for the browser redirect.
 const REDIRECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// How long one loopback connection gets to send its request before it is
-/// dropped, so a silent connection can't hold the listener.
+/// How long one loopback connection gets to send its request headers before
+/// it is dropped. Connections are read concurrently, so a silent one (e.g. a
+/// browser's speculative preconnect) never delays the real redirect.
 const REDIRECT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Most bytes read from one loopback connection (request line + headers).
+const MAX_REDIRECT_REQUEST: usize = 8 * 1024;
 
 /// Reply to loopback connections that aren't this sign-in's redirect.
 const BAD_REQUEST_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>Bad request</title><p>This is not the sign-in redirect Fly on the Wall is waiting for.</p>";
@@ -180,38 +184,66 @@ const BAD_REQUEST_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>Ba
 /// `timeout` elapses). Any other local process can connect to the port
 /// first — a stray or hostile connection gets a small 400 page and is
 /// closed instead of ending the sign-in. Only the matching request decides
-/// the outcome: its code, or the provider's error.
+/// the outcome: its code, or the provider's error. Each connection is read
+/// in its own task, so slow or silent ones don't block the others.
 async fn wait_for_redirect(
     listener: &tokio::net::TcpListener,
     expected_state: &str,
     timeout: std::time::Duration,
 ) -> Result<String> {
     let deadline = tokio::time::Instant::now() + timeout;
+    // Dropped on return, which aborts any reads still in flight.
+    let mut reads = tokio::task::JoinSet::new();
     loop {
-        let (mut stream, _) = tokio::time::timeout_at(deadline, listener.accept())
-            .await
-            .map_err(|_| CalendarError::Auth("timed out waiting for the browser redirect".into()))?
-            .map_err(|e| CalendarError::Auth(e.to_string()))?;
-        let mut buf = vec![0u8; 4096];
-        let read_until = deadline.min(tokio::time::Instant::now() + REDIRECT_READ_TIMEOUT);
-        let n = match tokio::time::timeout_at(read_until, stream.read(&mut buf)).await {
-            Ok(Ok(n)) if n > 0 => n,
-            _ => continue, // silent, closed or broken: drop it
-        };
-        let request = String::from_utf8_lossy(&buf[..n]).to_string();
-        if !redirect_state_matches(&request, expected_state) {
-            respond(&mut stream, "400 Bad Request", BAD_REQUEST_PAGE).await;
-            continue;
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.map_err(|e| CalendarError::Auth(e.to_string()))?;
+                reads.spawn(read_request_head(stream));
+            }
+            Some(done) = reads.join_next(), if !reads.is_empty() => {
+                let Ok((mut stream, Some(request))) = done else {
+                    continue; // silent, closed or broken: dropped
+                };
+                if !redirect_state_matches(&request, expected_state) {
+                    respond(&mut stream, "400 Bad Request", BAD_REQUEST_PAGE).await;
+                    continue;
+                }
+                let result = parse_redirect_request(&request, expected_state);
+                let page = if result.is_ok() { CONNECTED_PAGE } else { FAILED_PAGE };
+                respond(&mut stream, "200 OK", page).await;
+                return result;
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(CalendarError::Auth(
+                    "timed out waiting for the browser redirect".into(),
+                ));
+            }
         }
-        let result = parse_redirect_request(&request, expected_state);
-        let page = if result.is_ok() {
-            CONNECTED_PAGE
-        } else {
-            FAILED_PAGE
-        };
-        respond(&mut stream, "200 OK", page).await;
-        return result;
     }
+}
+
+/// Read until the end of the request headers (`\r\n\r\n`), EOF, the size cap
+/// or [`REDIRECT_READ_TIMEOUT`]. `None` when nothing arrived at all.
+async fn read_request_head(
+    mut stream: tokio::net::TcpStream,
+) -> (tokio::net::TcpStream, Option<String>) {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    let until = tokio::time::Instant::now() + REDIRECT_READ_TIMEOUT;
+    while buf.len() < MAX_REDIRECT_REQUEST {
+        match tokio::time::timeout_at(until, stream.read(&mut chunk)).await {
+            Ok(Ok(n)) if n > 0 => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            _ => break, // EOF, error or timeout: judge what we have
+        }
+    }
+    buf.truncate(MAX_REDIRECT_REQUEST);
+    let request = (!buf.is_empty()).then(|| String::from_utf8_lossy(&buf).into_owned());
+    (stream, request)
 }
 
 async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
@@ -363,7 +395,7 @@ mod tests {
         // an attacker-supplied error must not abort the real sign-in
         let err = send(port, "GET /?error=access_denied HTTP/1.1\r\n\r\n").await;
         assert!(err.starts_with("HTTP/1.1 400"), "{err}");
-        let garbage = send(port, "\x16\x03\x01 not http").await;
+        let garbage = send(port, "\x16\x03\x01 not http\r\n\r\n").await;
         assert!(garbage.starts_with("HTTP/1.1 400"), "{garbage}");
         // a connection that closes without sending anything
         drop(
@@ -376,6 +408,35 @@ mod tests {
         assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
         assert!(ok.contains("connected"));
         assert_eq!(waiter.await.unwrap().unwrap(), "4/real");
+    }
+
+    /// A connection that opens and says nothing (a browser preconnect)
+    /// must not delay the real redirect arriving on another connection.
+    #[tokio::test]
+    async fn silent_connection_does_not_delay_the_redirect() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let waiter = tokio::spawn(async move {
+            wait_for_redirect(&listener, "good", std::time::Duration::from_secs(20)).await
+        });
+        let _silent = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        // headers split across writes are reassembled
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        s.write_all(b"GET /?state=good&code=c1 HTTP/1.1\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        s.write_all(b"Host: 127.0.0.1\r\n\r\n").await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        assert_eq!(waiter.await.unwrap().unwrap(), "c1");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     /// The provider's own error (matching state) still ends the flow.

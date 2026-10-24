@@ -548,7 +548,9 @@ mod tests {
             .unwrap();
         assert_eq!(busy, 5000);
         // ordinary reads and the one MCP write work
-        assert!(s.list_notes_filtered(10, None, None, None, None).is_ok());
+        assert!(s
+            .list_notes_filtered(10, None, None, None, None, false)
+            .is_ok());
     }
 
     #[test]
