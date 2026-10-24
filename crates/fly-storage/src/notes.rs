@@ -212,6 +212,9 @@ impl Storage {
 
     pub fn delete_note(&self, id: &str) -> Result<()> {
         let mirror = self.note_mirror_path(id); // before the row disappears
+                                                // All-or-nothing: a crash mid-delete must not leave searchable text
+                                                // (FTS / embedding chunks) behind for a note that no longer exists.
+        let tx = self.conn.unchecked_transaction()?;
         let n = self.conn.execute("DELETE FROM notes WHERE id = ?1", [id])?;
         if n == 0 {
             return Err(StorageError::NotFound(format!("note {id}")));
@@ -219,8 +222,20 @@ impl Storage {
         self.conn
             .execute("DELETE FROM notes_fts WHERE note_id = ?1", [id])?;
         self.delete_chunks("note", id)?;
-        let _ = std::fs::remove_file(mirror);
-        let _ = std::fs::remove_dir_all(self.data_dir.join("attachments").join(id));
+        tx.commit()?;
+        self.checkpoint_after_delete();
+        for path in [mirror, self.data_dir.join("attachments").join(id)] {
+            let res = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(e) = res {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(note = %id, error = %e, "could not remove a deleted note's files");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -396,6 +411,18 @@ fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteSummary> {
         updated_at: parse_ts(r.get::<_, String>(4)?),
         happened_at: parse_ts(r.get::<_, String>(5)?),
     })
+}
+
+impl Storage {
+    /// Fold the write-ahead log back into the database and truncate it, so
+    /// text just deleted (and scrubbed by `secure_delete`) doesn't linger in
+    /// `flyonthewall.db-wal`. Best-effort: a concurrent reader (e.g. the MCP
+    /// server) can make it a partial checkpoint, which is fine.
+    pub(crate) fn checkpoint_after_delete(&self) {
+        let _ = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    }
 }
 
 #[cfg(test)]

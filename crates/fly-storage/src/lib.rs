@@ -27,6 +27,7 @@ mod migrations;
 pub mod naming;
 mod notes;
 mod recovery;
+pub mod safe_path;
 mod search;
 mod settings;
 mod templates;
@@ -35,7 +36,7 @@ mod transcripts;
 pub use embeddings::{PendingChunk, VectorHit};
 pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
-pub use meetings::recording_dir_rel;
+pub use meetings::{contained_recordings_dir, recording_dir_rel};
 pub use notes::NoteSummary;
 pub use recovery::{
     HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR, RECORDING_MANIFEST,
@@ -111,6 +112,9 @@ impl Storage {
         let conn = Connection::open(data_dir.join(Self::DB_FILE))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Deleted meeting text is overwritten in the database file instead of
+        // lingering in free pages until reused (confidential-data disposal).
+        conn.pragma_update(None, "secure_delete", "ON")?;
         Self::migrate(&conn, data_dir)?;
         let storage = Self {
             conn,

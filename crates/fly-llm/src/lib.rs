@@ -121,6 +121,11 @@ pub struct ChatRequest {
     /// impossible); ignored by other providers. `None` = free-form text.
     #[serde(default)]
     pub format: Option<serde_json::Value>,
+    /// Reasoning effort hint (`"low"` | `"medium"` | `"high"`), set per task
+    /// from the model's prompt profile. Honored by Anthropic models that
+    /// support `output_config.effort`; ignored elsewhere. `None` = model default.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// Per-provider connection settings, editable in the app's Settings screen.

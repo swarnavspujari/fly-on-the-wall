@@ -23,6 +23,18 @@ pub fn recording_dir_rel(rec: &RecordingRef) -> Option<String> {
     path.rsplit_once('/').map(|(dir, _)| dir.to_string())
 }
 
+/// Resolve a data-dir-relative recordings folder for a recursive delete, or
+/// `None` when it isn't strictly `recordings/<folder>[/…]` inside the data
+/// dir. Recording paths can come from a `manifest.json` copied in from
+/// elsewhere, so an absolute path or `..` must never steer `remove_dir_all`
+/// outside the app's own recordings tree.
+pub fn contained_recordings_dir(
+    data_dir: &std::path::Path,
+    rel: &str,
+) -> Option<std::path::PathBuf> {
+    crate::safe_path::contained(data_dir, rel, &["recordings"], 2)
+}
+
 impl Storage {
     /// Create a meeting attached to a note and point the note back at it.
     /// Attendees at creation come from the calendar (or nowhere), so the
@@ -88,6 +100,9 @@ impl Storage {
             .ok()
             .and_then(|m| m.recording)
             .and_then(|r| recording_dir_rel(&r));
+        // All-or-nothing, so a crash can't strand transcript text or extracted
+        // items for a meeting that no longer exists.
+        let tx = self.conn.unchecked_transaction()?;
         self.conn
             .execute("DELETE FROM transcripts WHERE meeting_id = ?1", [id])?;
         self.conn
@@ -99,9 +114,15 @@ impl Storage {
             .execute("DELETE FROM transcription_jobs WHERE meeting_id = ?1", [id])?;
         self.conn
             .execute("DELETE FROM meetings WHERE id = ?1", [id])?;
+        tx.commit()?;
+        self.checkpoint_after_delete();
         if let Some(rel) = rec_dir {
+            let Some(dir) = contained_recordings_dir(&self.data_dir, &rel) else {
+                tracing::warn!(dir = %rel, "refusing to delete a folder outside recordings/");
+                return Ok(());
+            };
             // best-effort: a locked file only strands the folder, never the delete
-            if let Err(e) = std::fs::remove_dir_all(self.data_dir.join(&rel)) {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(dir = %rel, error = %e, "could not remove recordings folder");
                 }
@@ -689,5 +710,31 @@ mod tests {
         let mixed = rec.mixed_path.unwrap();
         assert_eq!(mixed, format!("recordings/{renamed}/recording.mixed.wav"));
         assert!(dir.path().join(mixed).exists());
+    }
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use super::contained_recordings_dir;
+
+    #[test]
+    fn recursive_delete_target_must_stay_in_recordings() {
+        let base = std::path::Path::new("data");
+        assert!(contained_recordings_dir(base, "recordings/doomed").is_some());
+        for bad in [
+            "",
+            "recordings",
+            "attachments/x",
+            "recordings/../../Documents",
+            "../../Documents",
+            "/home/victim/Documents",
+            r"C:\Users\victim\Documents",
+            r"\server\share\dir",
+        ] {
+            assert!(
+                contained_recordings_dir(base, bad).is_none(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 }

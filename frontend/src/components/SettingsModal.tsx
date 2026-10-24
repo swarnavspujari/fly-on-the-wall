@@ -60,6 +60,19 @@ const TEXTAREA: CSSProperties = {
   outline: "none",
   resize: "vertical",
 };
+/** Company that processes data for each cloud LLM provider (disclosure copy). */
+const CLOUD_VENDORS: Record<string, string> = {
+  anthropic: "Anthropic (Claude)",
+  openai: "OpenAI",
+  nim: "NVIDIA (NIM)",
+};
+
+/** Claude models offered for the Anthropic provider; the first is the default. */
+const ANTHROPIC_MODELS = [
+  { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (recommended)" },
+  { value: "claude-haiku-5-5", label: "Claude Haiku 5.5 (faster, lower cost)" },
+];
+
 const MONO_KEY: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: "12px" };
 /* "LEAVES this machine" emphasis pill in the cloud-tier tooltip/warning. */
 const LEAVES_PILL: CSSProperties = {
@@ -439,7 +452,13 @@ export default function SettingsModal({
       .catch(console.error);
   }, []);
 
-  const pickProvider = (id: string) => {
+  const pickProvider = async (id: string) => {
+    // Disclose cloud processing before the provider is persisted (picking a
+    // tab saves immediately). The backend enforces the same consent.
+    if (!(await confirmCloudProvider(id))) {
+      setLlmTest("Kept your current provider — nothing was sent anywhere.");
+      return;
+    }
     const prev = llmProvider;
     setLlmProvider(id);
     const info = llm?.providers.find((p) => p.id === id);
@@ -464,7 +483,34 @@ export default function SettingsModal({
       });
   };
 
+  /** One-time disclosure before a cloud provider first receives meeting
+   *  content: who processes it and what is sent. Accepted per provider. */
+  const confirmCloudProvider = async (provider: string): Promise<boolean> => {
+    const info = llm?.providers.find((p) => p.id === provider);
+    if (!info || info.is_local) return true;
+    const key = `consent.cloud_llm.${provider}`;
+    try {
+      if ((await api.getAppSetting(key)) === "true") return true;
+    } catch {
+      /* fall through to asking */
+    }
+    const vendor = CLOUD_VENDORS[provider] ?? provider;
+    const ok = confirm(
+      `Use ${vendor} for Enhance and Ask?\n\n` +
+        `Your notes and full meeting transcripts will be sent to ${vendor} for processing ` +
+        `whenever you run Enhance, Ask, transcript polish or item extraction. ` +
+        `Their data-retention terms apply (see their privacy / data-usage policy).\n\n` +
+        `Recordings themselves stay on this computer. Choose Ollama to keep everything local.`,
+    );
+    if (ok) await api.setAppSetting(key, "true").catch(() => {});
+    return ok;
+  };
+
   const saveLlm = async () => {
+    if (!(await confirmCloudProvider(llmProvider))) {
+      setLlmTest("Not saved — cloud processing wasn't confirmed.");
+      return;
+    }
     setLlmBusy(true);
     setLlmTest(null);
     // The Ollama model that was saved BEFORE this save — the "old" side of a
@@ -502,6 +548,7 @@ export default function SettingsModal({
   };
 
   const testLlm = async () => {
+    if (!(await confirmCloudProvider(llmProvider))) return;
     setLlmBusy(true);
     setLlmTest("testing…");
     try {
@@ -1223,6 +1270,24 @@ export default function SettingsModal({
                     onChange={(e) => setLlmKey(e.target.value)}
                   />
                 )}
+                {llmProvider === "anthropic" && (
+                  <Select
+                    className="mt-2"
+                    style={{ maxWidth: "22rem" }}
+                    aria-label="Claude model"
+                    value={llmModel || p.default_model || ANTHROPIC_MODELS[0].value}
+                    onChange={(e) => setLlmModel(e.target.value)}
+                  >
+                    {ANTHROPIC_MODELS.map((m) => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
+                    ))}
+                    {llmModel && !ANTHROPIC_MODELS.some((m) => m.value === llmModel) && (
+                      <option value={llmModel}>Custom: {llmModel}</option>
+                    )}
+                  </Select>
+                )}
                 {technical && (
                   <div className="mt-2 grid grid-cols-2 gap-2">
                     <Input
@@ -1541,8 +1606,9 @@ export default function SettingsModal({
               >
                 claude_desktop_config.json
               </code>
-              , or any client) to search and read your notes and transcripts — everything stays on
-              this machine.
+              , or any client) to search and read your notes and transcripts. The server runs on
+              this machine, but whatever it returns is sent to the AI model your client uses (for
+              Claude Desktop, Anthropic&apos;s cloud) under that client&apos;s terms.
             </p>
             {mcpJson && (
               <div style={{ position: "relative" }}>

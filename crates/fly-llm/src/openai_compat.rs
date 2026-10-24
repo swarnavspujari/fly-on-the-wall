@@ -118,6 +118,7 @@ impl LLMProvider for OpenAiCompatProvider {
 
     async fn test_connection(&self) -> Result<()> {
         self.chat(ChatRequest {
+            effort: None,
             messages: vec![crate::ChatMessage::user("Reply with the single word: ok")],
             temperature: Some(0.0),
             max_tokens: Some(5),
@@ -310,6 +311,7 @@ mod tests {
 
     fn req(thinking: ThinkingMode) -> ChatRequest {
         ChatRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::system("sys"),
                 ChatMessage::user("hi"),
@@ -418,6 +420,7 @@ mod tests {
         let out = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(provider.chat(ChatRequest {
+                effort: None,
                 messages: vec![
                     ChatMessage::system(system),
                     ChatMessage::user(

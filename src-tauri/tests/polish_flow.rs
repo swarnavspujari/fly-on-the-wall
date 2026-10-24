@@ -96,6 +96,7 @@ fn run_polish(storage: &Storage, meeting_id: &str, canned: &str) -> enhance::Pol
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let output = runtime
         .block_on(provider.chat(ChatRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::system(prompt.system),
                 ChatMessage::user(prompt.user),

@@ -16,14 +16,18 @@ on:
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     name: Build & pin (macOS universal)
     runs-on: macos-latest
+    permissions:
+      contents: write # only used by "Attach to tools release" (create_release input)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # git + cmake + Xcode CLTs are preinstalled on GitHub's macOS runners.
       - name: Build whisper-cli (static universal, Metal embedded)
@@ -46,7 +50,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload tarball as run artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: whisper-bin-macos-universal2
           path: dist/whisper-bin-macos-universal2-*.tar.bz2
@@ -54,7 +58,7 @@ jobs:
 
       - name: Attach to tools release
         if: inputs.create_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: tools-whisper-v1.9.1
           name: "tools: whisper.cpp v1.9.1 (macOS engine)"

@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import { marked } from "marked";
-import DOMPurify from "dompurify";
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
+import { BLOCKED_IMG_ATTR, sanitizeHtml } from "../safeContent";
 import {
   Bold,
   Heading2,
@@ -32,6 +32,18 @@ const td = new TurndownService({
 });
 td.use(gfm);
 td.keep(["mark"]); // preserve highlights as inline HTML in the markdown
+// A remote image is shown as an inert placeholder (privacy: no auto-load);
+// turn it back into its original markdown so editing never loses it.
+td.addRule("blockedImage", {
+  filter: (node) => node.nodeName === "SPAN" && node.hasAttribute(BLOCKED_IMG_ATTR),
+  replacement: (_content, node) => {
+    const el = node as HTMLElement;
+    const url = el.getAttribute(BLOCKED_IMG_ATTR) ?? "";
+    const alt = (el.getAttribute("data-alt") ?? "").replace(/[[\]]/g, "");
+    const dest = /[\s()<>]/.test(url) ? `<${url.replace(/[<>]/g, "")}>` : url;
+    return url ? `![${alt}](${dest})` : alt;
+  },
+});
 
 function mdToHtml(md: string): string {
   const html = (marked.parse(md ?? "") as string)
@@ -39,7 +51,7 @@ function mdToHtml(md: string): string {
     .replace(/<input([^>]*?)\sdisabled([^>]*)>/gi, "<input$1$2>");
   // Sanitize before it ever touches innerHTML — scratchpad can carry imported
   // or AI-generated content, and this webview holds the Tauri IPC surface.
-  return DOMPurify.sanitize(html);
+  return sanitizeHtml(html);
 }
 
 const RT_CSS = `
@@ -196,7 +208,11 @@ export default function NotesEditor({ markdown, revision, onChange, placeholder 
         try {
           r.surroundContents(mark);
         } catch {
-          document.execCommand("insertHTML", false, `<mark>${sel.toString()}</mark>`);
+          // Selection crosses element boundaries: move the nodes into the
+          // mark with DOM APIs. Never re-parse selected text as HTML — text
+          // that merely displays as markup would become live markup (XSS).
+          mark.appendChild(r.extractContents());
+          r.insertNode(mark);
         }
       }
     } else {

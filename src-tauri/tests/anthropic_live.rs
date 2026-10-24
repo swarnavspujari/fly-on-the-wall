@@ -24,6 +24,7 @@ fn temperature_request_succeeds_on_sonnet5() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let out = runtime
         .block_on(provider.chat(ChatRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::system("You are terse."),
                 ChatMessage::user("Reply with exactly: ok"),

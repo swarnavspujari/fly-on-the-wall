@@ -109,8 +109,12 @@ pub(crate) fn reset_staged_started(state: &AppState, meeting_id: &str) {
 pub(crate) fn purge_staged_import(state: &AppState, meeting_id: &str) {
     if let Ok(Some(staged)) = load_staged(state, meeting_id) {
         if let Some(rel) = staged.files.iter().find_map(|f| f.rel_path.clone()) {
-            if let Some(dir) = state.data_dir.join(rel).parent() {
-                let _ = std::fs::remove_dir_all(dir);
+            // Only ever the staged-copies folder under recordings/: the
+            // manifest lives in a settings row, so don't trust it blindly.
+            if let Some((dir, _)) = rel.rsplit_once('/') {
+                if let Some(dir) = fly_storage::contained_recordings_dir(&state.data_dir, dir) {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
             }
         }
     }

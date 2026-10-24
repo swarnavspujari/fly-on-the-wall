@@ -96,6 +96,7 @@ fn enhance_flow_with_mock_provider_offline() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let output = runtime
         .block_on(provider.chat(ChatRequest {
+            effort: None,
             messages: vec![
                 ChatMessage::system(prompt.system.clone()),
                 ChatMessage::user(prompt.user.clone()),

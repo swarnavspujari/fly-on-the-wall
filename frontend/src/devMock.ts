@@ -477,10 +477,10 @@ const llmSettings = {
     },
     {
       id: "anthropic",
-      default_model: "claude-sonnet",
+      default_model: "claude-sonnet-5-5",
       is_local: false,
       has_key: true,
-      model: "claude-sonnet",
+      model: "claude-sonnet-5-5",
       base_url: null,
     },
     {

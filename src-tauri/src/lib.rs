@@ -14,6 +14,7 @@ mod live;
 pub mod llm_commands;
 pub mod logging;
 pub mod models;
+mod nav_guard;
 pub mod ollama;
 pub mod pipeline;
 pub mod recording;
@@ -54,6 +55,8 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // The app window only ever shows the app; links open in the browser.
+        .plugin(nav_guard::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // Updater + relaunch only exist on desktop targets.
@@ -87,11 +90,22 @@ pub fn run() {
                     std::process::exit(1);
                 }
             };
-            // Let the webview stream recordings from the data dir so the editor's
-            // audio player can embed & scrub them (asset protocol).
-            let _ = app
-                .asset_protocol_scope()
-                .allow_directory(&app_state.data_dir, true);
+            // Let the webview stream recordings and attachments (audio player,
+            // video thumbnails) over the asset protocol — those two folders
+            // only. The database, logs and settings stay unreadable from the
+            // webview even if a script ever ran there.
+            for sub in ["recordings", "attachments"] {
+                let dir = app_state.data_dir.join(sub);
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = app.asset_protocol_scope().allow_directory(&dir, true);
+            }
+            // Saved Claude Sonnet/Haiku picks from older releases → their 5.5
+            // successors (a settings-row rewrite; Opus/Fable picks untouched).
+            {
+                let storage = app_state.storage.lock().unwrap();
+                llm_commands::migrate_anthropic_model(&storage);
+                llm_commands::grandfather_cloud_consent(&storage);
+            }
             app.manage(app_state);
             // Warm the hardware cache off the startup path: detection shells
             // out to nvidia-smi and must never sit in front of first paint.
@@ -176,6 +190,7 @@ pub fn run() {
             commands::copy_note_markdown,
             commands::remove_attachment,
             commands::open_attachment,
+            commands::open_external_url,
             commands::reveal_attachment,
             commands::reveal_data_dir,
             commands::reveal_logs_dir,

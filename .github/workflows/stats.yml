@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: stats
@@ -15,8 +15,14 @@ concurrency:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # "Commit snapshot" pushes docs/data back to main
     steps:
-      - uses: actions/checkout@v4
+      # Credentials stay persisted ON PURPOSE: the final step's plain
+      # `git push` authenticates with the checkout-stored GITHUB_TOKEN. No
+      # third-party dependencies run in this job (collect-stats.mjs uses only
+      # node: built-ins).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Collect release + traffic stats
         env:
           # STATS_TOKEN (fine-grained PAT, Administration: read) unlocks the

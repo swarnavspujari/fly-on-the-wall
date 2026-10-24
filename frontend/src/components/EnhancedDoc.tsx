@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import type { Note } from "../types";
 import { api } from "../api";
 import { Button, CitationChip, SectionLabel } from "./ui";
+import { SAFE_IMG, SafeLink } from "./markdownSafe";
 
 interface Props {
   note: Note;
@@ -41,10 +42,11 @@ const MD_COMPONENTS: Components = {
   ),
   strong: ({ children }) => <strong className="font-semibold text-text">{children}</strong>,
   a: ({ href, title, children }) => (
-    <a href={href} title={title} className="text-primary-text underline">
+    <SafeLink href={href} title={title} className="text-primary-text underline">
       {children}
-    </a>
+    </SafeLink>
   ),
+  img: SAFE_IMG,
   code: ({ children }) => (
     <code className="rounded bg-surface-3 px-1 font-mono text-[12.5px]">{children}</code>
   ),
