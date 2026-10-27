@@ -43,10 +43,12 @@ fn object_schema() -> serde_json::Value {
 /// Request shapes mirroring the app's call sites (llm_commands.rs,
 /// extraction.rs, test_connection).
 fn requests() -> Vec<(&'static str, ChatRequest)> {
-    let transcript = "TRANSCRIPT:\nDana: We agreed on the Q3 budget of eighty four hundred.\n"
-        .repeat(40);
+    let transcript =
+        "TRANSCRIPT:\nDana: We agreed on the Q3 budget of eighty four hundred.\n".repeat(40);
     let ask_messages = vec![
-        ChatMessage::system(format!("You answer questions about a meeting.\n\n{transcript}")),
+        ChatMessage::system(format!(
+            "You answer questions about a meeting.\n\n{transcript}"
+        )),
         ChatMessage::user("What did we decide?"),
         ChatMessage::assistant("You decided on the Q3 budget."),
         ChatMessage::user("How much was it?"),
@@ -101,7 +103,10 @@ fn requests() -> Vec<(&'static str, ChatRequest)> {
             "polish",
             ChatRequest {
                 effort: Some("low".into()),
-                messages: pair("Clean each segment.", "[{\"id\":\"s1\",\"text\":\"um hi\"}]"),
+                messages: pair(
+                    "Clean each segment.",
+                    "[{\"id\":\"s1\",\"text\":\"um hi\"}]",
+                ),
                 temperature: None,
                 max_tokens: Some(8192),
                 thinking: ThinkingMode::Disabled,

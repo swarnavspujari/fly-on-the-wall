@@ -1,8 +1,28 @@
 //! Anthropic Claude provider (`POST /v1/messages`).
+//!
+//! Tool calling (`converse` / `chat_stream`): tools go out as
+//! `{name, description, input_schema, strict}` — strict (schema-guaranteed
+//! arguments, objects closed) on models with the structured-outputs surface,
+//! at most [`MAX_STRICT_TOOLS`] per request. Calls come back as `tool_use`
+//! blocks and results go back as `tool_result` blocks, first in the next
+//! user turn. `thinking` / `redacted_thinking` blocks are kept as opaque
+//! blocks and echoed back, because the API checks them when a tool result
+//! follows. Forced tool choice (`any`) is never sent to Opus/Sonnet 5.5,
+//! Fable or Mythos (they reject it) or to a request that may be thinking;
+//! those fall back to auto. `relax_after_400` also drops a rejected
+//! `tool_choice` or `strict`.
 
-use serde_json::json;
+use serde_json::{json, Value};
 
-use crate::{ChatRequest, LLMProvider, LlmError, Result, Role};
+use crate::conversation::{
+    closed_schema, Capabilities, ChatResponse, ContentBlock, ConverseRequest, Message, StopReason,
+    StreamEvent, ToolChoice, Usage,
+};
+use crate::stream::{decode_body, sse_data, LineDecoder};
+use crate::{ChatRequest, ChatStream, LLMProvider, LlmError, Result, Role};
+
+/// Anthropic's limit on strict tools in one request.
+pub const MAX_STRICT_TOOLS: usize = 20;
 
 pub const ANTHROPIC_DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 
@@ -113,28 +133,30 @@ impl AnthropicProvider {
         }
     }
 
-    /// Build the `/v1/messages` request body. Split out from `chat` so the
-    /// parameter shaping (system out-of-band, optional temperature, thinking
-    /// off) is unit-testable without a network round-trip.
+    /// Build the `/v1/messages` request body for a legacy text request.
+    /// Split out from `chat` so the parameter shaping (system out-of-band,
+    /// optional temperature, thinking off) is unit-testable without a
+    /// network round-trip.
     pub(crate) fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
+        self.converse_body(&ConverseRequest::from(req))
+    }
+
+    /// The `/v1/messages` body for a block request. Text-only messages keep
+    /// the legacy `{role, content: "<text>"}` shape exactly.
+    fn converse_body(&self, req: &ConverseRequest) -> serde_json::Value {
         // Anthropic takes the system prompt out-of-band.
         let system: String = req
             .messages
             .iter()
             .filter(|m| m.role == Role::System)
-            .map(|m| m.content.clone())
+            .map(Message::text)
             .collect::<Vec<_>>()
             .join("\n\n");
         let messages: Vec<_> = req
             .messages
             .iter()
             .filter(|m| m.role != Role::System)
-            .map(|m| {
-                json!({
-                    "role": if m.role == Role::Assistant { "assistant" } else { "user" },
-                    "content": m.content,
-                })
-            })
+            .map(anthropic_message)
             .collect();
 
         let mut body = json!({
@@ -206,10 +228,126 @@ impl AnthropicProvider {
         {
             body["fallbacks"] = json!("default");
         }
+        if req.has_tools() {
+            let strict_ok = supports_output_config(&self.model);
+            let tools: Vec<Value> = req
+                .tools
+                .iter()
+                .map(|t| {
+                    let strict = t.strict && strict_ok;
+                    let mut tool = json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": if strict {
+                            closed_schema(&t.input_schema)
+                        } else {
+                            t.input_schema.clone()
+                        },
+                    });
+                    if strict {
+                        tool["strict"] = json!(true);
+                    }
+                    tool
+                })
+                .collect();
+            body["tools"] = json!(tools);
+            match req.tool_choice {
+                // `auto` is the API default.
+                ToolChoice::Auto => {}
+                ToolChoice::None => body["tool_choice"] = json!({ "type": "none" }),
+                ToolChoice::Required => {
+                    if self.forced_tool_choice_ok(req) {
+                        body["tool_choice"] = json!({ "type": "any" });
+                    }
+                }
+            }
+        }
         body
     }
 
-    async fn post(&self, body: &serde_json::Value) -> Result<(reqwest::StatusCode, String)> {
+    /// Forced tool choice is a 400 on Opus/Sonnet 5.5, Fable and Mythos, and
+    /// on any request where thinking may be on (current models think by
+    /// default) — only send it where neither applies.
+    fn forced_tool_choice_ok(&self, req: &ConverseRequest) -> bool {
+        if rejects_forced_tool_choice(&self.model) {
+            return false;
+        }
+        let thinking_off = req.thinking == crate::ThinkingMode::Disabled
+            && matches!(thinking_off_for(&self.model), ThinkingOff::Disabled);
+        thinking_off || !supports_output_config(&self.model)
+    }
+
+    /// Refuse request shapes the API would reject outright.
+    fn validate(&self, req: &ConverseRequest) -> Result<()> {
+        if supports_output_config(&self.model) {
+            let strict = req.tools.iter().filter(|t| t.strict).count();
+            if strict > MAX_STRICT_TOOLS {
+                return Err(LlmError::InvalidRequest(format!(
+                    "{strict} strict tools; Anthropic allows at most {MAX_STRICT_TOOLS} per request"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// POST with `relax_after_400` retries; the success body text.
+    async fn post_relaxed(&self, body: &mut serde_json::Value) -> Result<String> {
+        let (mut status, mut text) = self.post(body).await?;
+        for _ in 0..4 {
+            if !self.relax_on_400 || status.as_u16() != 400 || !relax_after_400(body, &text) {
+                break;
+            }
+            (status, text) = self.post(body).await?;
+        }
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err(LlmError::Auth);
+        }
+        if !status.is_success() {
+            return Err(LlmError::Provider(format!(
+                "{status}: {}",
+                text.chars().take(300).collect::<String>()
+            )));
+        }
+        Ok(text)
+    }
+
+    /// Streaming send: relax-and-retry happens on the 400 before any bytes
+    /// stream, so it behaves like `post_relaxed`.
+    async fn send_stream(&self, body: &mut serde_json::Value) -> Result<reqwest::Response> {
+        let mut attempts = 0;
+        loop {
+            let resp = self
+                .request(body)
+                .send()
+                .await
+                .map_err(|e| crate::transport_error("anthropic", false, &self.base_url, e))?;
+            let status = resp.status();
+            if status.is_success() {
+                return Ok(resp);
+            }
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| LlmError::Network(e.to_string()))?;
+            if attempts < 4
+                && self.relax_on_400
+                && status.as_u16() == 400
+                && relax_after_400(body, &text)
+            {
+                attempts += 1;
+                continue;
+            }
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(LlmError::Auth);
+            }
+            return Err(LlmError::Provider(format!(
+                "{status}: {}",
+                text.chars().take(300).collect::<String>()
+            )));
+        }
+    }
+
+    fn request(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
         let mut request = http_client()
             .post(format!(
                 "{}/v1/messages",
@@ -220,8 +358,12 @@ impl AnthropicProvider {
         if body.get("fallbacks").is_some() {
             request = request.header("anthropic-beta", FALLBACK_BETA);
         }
-        let resp = request
-            .json(body)
+        request.json(body)
+    }
+
+    async fn post(&self, body: &serde_json::Value) -> Result<(reqwest::StatusCode, String)> {
+        let resp = self
+            .request(body)
             .send()
             .await
             .map_err(|e| crate::transport_error("anthropic", false, &self.base_url, e))?;
@@ -235,6 +377,67 @@ impl AnthropicProvider {
 }
 
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+
+/// One non-system message. Plain text keeps the legacy string content;
+/// anything else becomes a block array with tool results first (the API
+/// requires them at the start of the user turn after a `tool_use`). Opaque
+/// blocks from other providers are dropped; empty text blocks too (the API
+/// rejects them).
+fn anthropic_message(m: &Message) -> Value {
+    let role = if m.role == Role::Assistant {
+        "assistant"
+    } else {
+        "user"
+    };
+    if m.is_plain_text() {
+        return json!({ "role": role, "content": m.text() });
+    }
+    let mut results = Vec::new();
+    let mut rest = Vec::new();
+    for b in &m.content {
+        match b {
+            ContentBlock::Text { text } if !text.is_empty() => {
+                rest.push(json!({ "type": "text", "text": text }))
+            }
+            ContentBlock::Text { .. } => {}
+            ContentBlock::ToolUse { id, name, input } => rest.push(json!({
+                "type": "tool_use", "id": id, "name": name, "input": input,
+            })),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let mut r = json!({
+                    "type": "tool_result", "tool_use_id": tool_use_id, "content": content,
+                });
+                if *is_error {
+                    r["is_error"] = json!(true);
+                }
+                results.push(r);
+            }
+            ContentBlock::Opaque { provider, raw } if provider == "anthropic" => {
+                rest.push(raw.clone())
+            }
+            ContentBlock::Opaque { .. } => {}
+        }
+    }
+    results.extend(rest);
+    json!({ "role": role, "content": results })
+}
+
+/// Models that 400 on `tool_choice: any | tool`.
+fn rejects_forced_tool_choice(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable",
+        "claude-mythos",
+    ]
+    .iter()
+    .any(|p| m.starts_with(p))
+}
 
 /// Models with the current request surface: `output_config.effort` and
 /// `output_config.format` (structured outputs). Older ids keep the legacy
@@ -267,22 +470,7 @@ fn output_config(body: &mut serde_json::Value) -> &mut serde_json::Map<String, s
 /// the root (arrays are wrapped as `{"items": [...]}`) and
 /// `additionalProperties: false` on every object.
 fn api_schema(schema: &serde_json::Value) -> serde_json::Value {
-    fn close_objects(v: &mut serde_json::Value) {
-        match v {
-            serde_json::Value::Object(map) => {
-                if map.contains_key("properties") && !map.contains_key("additionalProperties") {
-                    map.insert("additionalProperties".into(), json!(false));
-                }
-                for child in map.values_mut() {
-                    close_objects(child);
-                }
-            }
-            serde_json::Value::Array(items) => items.iter_mut().for_each(close_objects),
-            _ => {}
-        }
-    }
-    let mut s = schema.clone();
-    close_objects(&mut s);
+    let s = closed_schema(schema);
     if schema_root_is_array(schema) {
         json!({
             "type": "object",
@@ -336,6 +524,22 @@ fn relax_after_400(body: &mut serde_json::Value, err_body: &str) -> bool {
     if err.contains("fallback") && obj.remove("fallbacks").is_some() {
         return true;
     }
+    // Tool features first: a forced-choice rejection can mention thinking.
+    // Legacy bodies carry neither key, so these never fire for them.
+    if err.contains("tool_choice") && obj.remove("tool_choice").is_some() {
+        return true;
+    }
+    if err.contains("strict") {
+        let mut dropped = false;
+        if let Some(tools) = obj.get_mut("tools").and_then(|t| t.as_array_mut()) {
+            for t in tools.iter_mut().filter_map(|t| t.as_object_mut()) {
+                dropped |= t.remove("strict").is_some();
+            }
+        }
+        if dropped {
+            return true;
+        }
+    }
     if err.contains("thinking.") && obj.remove("thinking").is_some() {
         // Closest stand-in for "thinking off" on models with an effort knob;
         // older models (no output_config at all) just drop the field.
@@ -375,23 +579,7 @@ impl LLMProvider for AnthropicProvider {
 
     async fn chat(&self, req: ChatRequest) -> Result<String> {
         let mut body = self.request_body(&req);
-
-        let (mut status, mut text) = self.post(&body).await?;
-        for _ in 0..4 {
-            if !self.relax_on_400 || status.as_u16() != 400 || !relax_after_400(&mut body, &text) {
-                break;
-            }
-            (status, text) = self.post(&body).await?;
-        }
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Err(LlmError::Auth);
-        }
-        if !status.is_success() {
-            return Err(LlmError::Provider(format!(
-                "{status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
-        }
+        let text = self.post_relaxed(&mut body).await?;
         let structured = body.pointer("/output_config/format").is_some();
         let out = parse_messages_response_checked(&text, structured)?;
         // Undo the root-array wrapping applied in `api_schema`.
@@ -416,6 +604,304 @@ impl LLMProvider for AnthropicProvider {
         .await
         .map(|_| ())
     }
+
+    fn capabilities(&self) -> Capabilities {
+        let modern = supports_output_config(&self.model);
+        Capabilities {
+            tools: true,
+            tool_choice_none: true,
+            tool_choice_required: !rejects_forced_tool_choice(&self.model),
+            strict_tools: modern,
+            max_strict_tools: if modern { MAX_STRICT_TOOLS } else { 0 },
+            streaming: true,
+            thinking_control: true,
+            structured_output: modern,
+            probed: false,
+        }
+    }
+
+    async fn converse(&self, req: ConverseRequest) -> Result<ChatResponse> {
+        self.validate(&req)?;
+        let mut body = self.converse_body(&req);
+        let text = self.post_relaxed(&mut body).await?;
+        let structured = body.pointer("/output_config/format").is_some();
+        let mut resp = parse_messages_converse(&text, structured)?;
+        // Undo the root-array wrapping applied in `api_schema`.
+        if let (Some(schema), true) = (&req.format, structured) {
+            if schema_root_is_array(schema) {
+                let joined = resp.text();
+                resp.blocks
+                    .retain(|b| !matches!(b, ContentBlock::Text { .. }));
+                resp.blocks
+                    .insert(0, ContentBlock::text(unwrap_items(&joined)));
+            }
+        }
+        Ok(resp)
+    }
+
+    /// Note: with an array-rooted `format`, streamed text is the wrapped
+    /// `{"items": [...]}` object (deltas can't be unwrapped mid-stream) —
+    /// stream prose, use `converse` for structured output.
+    async fn chat_stream(&self, req: ConverseRequest) -> Result<ChatStream> {
+        self.validate(&req)?;
+        let mut body = self.converse_body(&req);
+        body["stream"] = json!(true);
+        let resp = self.send_stream(&mut body).await?;
+        let structured = body.pointer("/output_config/format").is_some();
+        Ok(decode_body(
+            resp.bytes_stream(),
+            AnthropicSse {
+                structured,
+                ..Default::default()
+            },
+        ))
+    }
+}
+
+fn refusal_error(category: Option<&str>) -> LlmError {
+    LlmError::Provider(format!(
+        "Claude declined this request (safety category: {}). \
+         Try again, or switch to another model in Settings.",
+        category.unwrap_or("unspecified")
+    ))
+}
+
+fn stop_reason_of(stop: &str) -> StopReason {
+    match stop {
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" | "model_context_window_exceeded" => StopReason::MaxTokens,
+        _ => StopReason::EndTurn,
+    }
+}
+
+fn usage_of(u: Option<&Value>) -> Usage {
+    let get = |k: &str| {
+        u.and_then(|u| u.get(k))
+            .and_then(|n| n.as_u64())
+            .map(|n| n as u32)
+    };
+    Usage {
+        input_tokens: get("input_tokens"),
+        output_tokens: get("output_tokens"),
+        cache_read_tokens: get("cache_read_input_tokens"),
+        cache_write_tokens: get("cache_creation_input_tokens"),
+    }
+}
+
+/// Parse a Messages response into blocks, with the same refusal and
+/// truncation rules as [`parse_messages_response_checked`]: a refusal is an
+/// error; hitting `max_tokens` is an error when `strict` (structured JSON)
+/// or when nothing usable came back.
+pub fn parse_messages_converse(json_text: &str, strict: bool) -> Result<ChatResponse> {
+    let v: Value = serde_json::from_str(json_text)
+        .map_err(|e| LlmError::Provider(format!("bad JSON from provider: {e}")))?;
+    let stop = v.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
+    if stop == "refusal" {
+        return Err(refusal_error(
+            v.pointer("/stop_details/category").and_then(|c| c.as_str()),
+        ));
+    }
+    let content = v
+        .get("content")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| LlmError::Provider("response had no content array".into()))?;
+    let mut blocks = Vec::new();
+    for b in content {
+        let s = |k: &str| b.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        match b.get("type").and_then(|t| t.as_str()) {
+            Some("text") => {
+                let text = s("text");
+                if !text.is_empty() {
+                    blocks.push(ContentBlock::Text { text });
+                }
+            }
+            Some("tool_use") => blocks.push(ContentBlock::ToolUse {
+                id: s("id"),
+                name: s("name"),
+                input: b.get("input").cloned().unwrap_or_else(|| json!({})),
+            }),
+            Some("thinking") | Some("redacted_thinking") => blocks.push(ContentBlock::Opaque {
+                provider: "anthropic".into(),
+                raw: b.clone(),
+            }),
+            // e.g. server-side `fallback` markers: not part of the answer.
+            _ => {}
+        }
+    }
+    let stop_reason = stop_reason_of(stop);
+    let resp = ChatResponse {
+        blocks,
+        stop_reason,
+        usage: usage_of(v.get("usage")),
+    };
+    if stop_reason == StopReason::MaxTokens {
+        let empty = resp.text().is_empty() && resp.tool_uses().is_empty();
+        if strict || empty {
+            return Err(LlmError::Provider(if empty {
+                "response hit the token limit before any text (thinking used the budget)".into()
+            } else {
+                "response was cut off at the token limit before the JSON was complete".into()
+            }));
+        }
+    }
+    Ok(resp)
+}
+
+/// Messages API SSE: `message_start` → per-block `content_block_start` /
+/// `_delta` / `_stop` → `message_delta` (stop reason, output usage) →
+/// `message_stop`. Thinking blocks are accumulated and emitted whole as
+/// opaque blocks (with their signature) when they close.
+#[derive(Debug, Default)]
+pub(crate) struct AnthropicSse {
+    structured: bool,
+    /// block index → open block
+    open: std::collections::HashMap<u64, SseBlock>,
+    stop: Option<StopReason>,
+    usage: Usage,
+    output: bool,
+    done: bool,
+}
+
+#[derive(Debug)]
+enum SseBlock {
+    Text,
+    Tool(String),
+    Opaque(Value),
+    Other,
+}
+
+impl LineDecoder for AnthropicSse {
+    fn line(&mut self, line: &str) -> Result<Vec<StreamEvent>> {
+        let Some(data) = sse_data(line) else {
+            return Ok(vec![]);
+        };
+        if self.done || data.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        let v: Value = serde_json::from_str(data)
+            .map_err(|e| LlmError::Provider(format!("bad JSON in stream: {e}")))?;
+        let index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+        let mut out = Vec::new();
+        match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+            "message_start" => {
+                self.usage = usage_of(v.pointer("/message/usage"));
+            }
+            "content_block_start" => {
+                let b = v.get("content_block").cloned().unwrap_or(Value::Null);
+                let s = |k: &str| b.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let block = match b.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => {
+                        let text = s("text");
+                        if !text.is_empty() {
+                            self.output = true;
+                            out.push(StreamEvent::TextDelta { text });
+                        }
+                        SseBlock::Text
+                    }
+                    Some("tool_use") => {
+                        let id = s("id");
+                        self.output = true;
+                        out.push(StreamEvent::ToolUseStart {
+                            id: id.clone(),
+                            name: s("name"),
+                        });
+                        SseBlock::Tool(id)
+                    }
+                    Some("thinking") | Some("redacted_thinking") => SseBlock::Opaque(b),
+                    _ => SseBlock::Other,
+                };
+                self.open.insert(index, block);
+            }
+            "content_block_delta" => {
+                let d = v.get("delta").cloned().unwrap_or(Value::Null);
+                let s = |k: &str| d.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                match (
+                    self.open.get_mut(&index),
+                    d.get("type").and_then(|t| t.as_str()),
+                ) {
+                    (Some(SseBlock::Text), Some("text_delta")) => {
+                        let text = s("text");
+                        if !text.is_empty() {
+                            self.output = true;
+                            out.push(StreamEvent::TextDelta { text });
+                        }
+                    }
+                    (Some(SseBlock::Tool(id)), Some("input_json_delta")) => {
+                        out.push(StreamEvent::ToolInputDelta {
+                            id: id.clone(),
+                            partial_json: s("partial_json"),
+                        });
+                    }
+                    (Some(SseBlock::Opaque(raw)), Some("thinking_delta")) => {
+                        append_str(raw, "thinking", &s("thinking"));
+                    }
+                    (Some(SseBlock::Opaque(raw)), Some("signature_delta")) => {
+                        append_str(raw, "signature", &s("signature"));
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {
+                if let Some(SseBlock::Opaque(raw)) = self.open.remove(&index) {
+                    out.push(StreamEvent::Opaque {
+                        provider: "anthropic".into(),
+                        raw,
+                    });
+                }
+            }
+            "message_delta" => {
+                if let Some(stop) = v.pointer("/delta/stop_reason").and_then(|s| s.as_str()) {
+                    if stop == "refusal" {
+                        return Err(refusal_error(
+                            v.pointer("/delta/stop_details/category")
+                                .and_then(|c| c.as_str()),
+                        ));
+                    }
+                    self.stop = Some(stop_reason_of(stop));
+                }
+                if let Some(n) = v.pointer("/usage/output_tokens").and_then(|n| n.as_u64()) {
+                    self.usage.output_tokens = Some(n as u32);
+                }
+            }
+            "message_stop" => {
+                self.done = true;
+                let stop_reason = self.stop.unwrap_or(StopReason::EndTurn);
+                if stop_reason == StopReason::MaxTokens && (self.structured || !self.output) {
+                    return Err(LlmError::Provider(
+                        "response hit the token limit before it was complete".into(),
+                    ));
+                }
+                out.push(StreamEvent::Done {
+                    stop_reason,
+                    usage: self.usage,
+                });
+            }
+            "error" => {
+                let msg = v
+                    .pointer("/error/message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("stream error");
+                return Err(LlmError::Provider(msg.chars().take(300).collect()));
+            }
+            _ => {} // ping and future event types
+        }
+        Ok(out)
+    }
+
+    fn finish(&mut self) -> Result<Vec<StreamEvent>> {
+        if self.done {
+            Ok(vec![])
+        } else {
+            Err(LlmError::Network(
+                "Claude's reply stream ended before it finished".into(),
+            ))
+        }
+    }
+}
+
+fn append_str(obj: &mut Value, key: &str, more: &str) {
+    let prev = obj.get(key).and_then(|t| t.as_str()).unwrap_or("");
+    obj[key] = json!(format!("{prev}{more}"));
 }
 
 /// `{"items": [...]}` → `[...]` as JSON text; anything else passes through.
@@ -938,5 +1424,386 @@ mod tests {
             parse_messages_response_checked(j, false).unwrap(),
             "[{\"a\":1},"
         );
+    }
+
+    // ---- tool calling -------------------------------------------------
+
+    use crate::conversation::ToolSpec;
+
+    fn tool(name: &str, strict: bool) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: format!("{name} tool"),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "filters": {"type": "object", "properties": {"since": {"type": "string"}}}
+                },
+                "required": ["query"]
+            }),
+            strict,
+        }
+    }
+
+    fn tool_req(choice: ToolChoice, thinking: crate::ThinkingMode) -> ConverseRequest {
+        ConverseRequest {
+            messages: vec![
+                Message::system("sys"),
+                Message::user("What was the budget?"),
+                Message::new(
+                    Role::Assistant,
+                    vec![
+                        ContentBlock::Opaque {
+                            provider: "anthropic".into(),
+                            raw: json!({"type": "thinking", "thinking": "hm", "signature": "sig"}),
+                        },
+                        ContentBlock::Opaque {
+                            provider: "ollama".into(),
+                            raw: json!({"x": 1}),
+                        },
+                        ContentBlock::text(""),
+                        ContentBlock::ToolUse {
+                            id: "toolu_1".into(),
+                            name: "search_passages".into(),
+                            input: json!({"query": "budget"}),
+                        },
+                    ],
+                ),
+                Message::new(
+                    Role::User,
+                    vec![
+                        ContentBlock::text("also check dates"),
+                        ContentBlock::ToolResult {
+                            tool_use_id: "toolu_1".into(),
+                            content: "[seg:s1] $8,400".into(),
+                            is_error: false,
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "toolu_2".into(),
+                            content: "no such meeting".into(),
+                            is_error: true,
+                        },
+                    ],
+                ),
+            ],
+            tools: vec![tool("search_passages", true), tool("get_note", false)],
+            tool_choice: choice,
+            max_tokens: Some(2048),
+            thinking,
+            ..Default::default()
+        }
+    }
+
+    fn body(model: &str, req: &ConverseRequest) -> serde_json::Value {
+        AnthropicProvider::new("k".into(), model.into()).converse_body(req)
+    }
+
+    #[test]
+    fn tool_body_shape_strict_and_blocks() {
+        let b = body(
+            "claude-sonnet-5-5",
+            &tool_req(ToolChoice::Auto, crate::ThinkingMode::Default),
+        );
+        // Strict tool: closed schema, nested objects too. Non-strict: as given.
+        assert_eq!(b["tools"][0]["strict"], true);
+        assert_eq!(b["tools"][0]["input_schema"]["additionalProperties"], false);
+        assert_eq!(
+            b["tools"][0]["input_schema"]["properties"]["filters"]["additionalProperties"],
+            false
+        );
+        assert!(b["tools"][1].get("strict").is_none());
+        assert!(b["tools"][1]["input_schema"]
+            .get("additionalProperties")
+            .is_none());
+        assert!(b.get("tool_choice").is_none(), "auto is the default");
+        assert_eq!(b["system"][0]["text"], "sys");
+
+        let msgs = b["messages"].as_array().unwrap();
+        // Plain-text turn keeps the legacy string content.
+        assert_eq!(msgs[0]["content"], "What was the budget?");
+        // Assistant: anthropic thinking echoed first, ollama opaque and the
+        // empty text dropped, then the tool_use.
+        let a = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0]["type"], "thinking");
+        assert_eq!(a[0]["signature"], "sig");
+        assert_eq!(
+            a[1],
+            json!({"type": "tool_use", "id": "toolu_1", "name": "search_passages", "input": {"query": "budget"}})
+        );
+        // User: tool results first, then the text; is_error only when set.
+        let u = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(u[0]["type"], "tool_result");
+        assert_eq!(u[0]["tool_use_id"], "toolu_1");
+        assert!(u[0].get("is_error").is_none());
+        assert_eq!(u[1]["is_error"], true);
+        assert_eq!(u[2], json!({"type": "text", "text": "also check dates"}));
+    }
+
+    #[test]
+    fn legacy_models_get_no_strict() {
+        let b = body(
+            "claude-sonnet-4-5",
+            &tool_req(ToolChoice::Auto, crate::ThinkingMode::Default),
+        );
+        assert!(b["tools"][0].get("strict").is_none());
+        assert!(b["tools"][0]["input_schema"]
+            .get("additionalProperties")
+            .is_none());
+    }
+
+    #[test]
+    fn forced_tool_choice_only_where_accepted() {
+        use crate::ThinkingMode::{Default as D, Disabled as Off};
+        let choice = |model: &str, thinking| {
+            body(model, &tool_req(ToolChoice::Required, thinking))
+                .get("tool_choice")
+                .cloned()
+        };
+        // 5.5 / Fable / Mythos reject forced choice → auto (omitted).
+        for m in [
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+        ] {
+            assert_eq!(choice(m, Off), None, "{m}");
+        }
+        // Haiku 5.5 with thinking really off → any; thinking default → auto.
+        assert_eq!(
+            choice("claude-haiku-5-5", Off),
+            Some(json!({"type": "any"}))
+        );
+        assert_eq!(choice("claude-haiku-5-5", D), None);
+        // Older models don't think unless asked → any.
+        assert_eq!(choice("claude-sonnet-4-5", D), Some(json!({"type": "any"})));
+        // None is always expressible.
+        let b = body(
+            "claude-sonnet-5-5",
+            &tool_req(ToolChoice::None, crate::ThinkingMode::Default),
+        );
+        assert_eq!(b["tool_choice"], json!({"type": "none"}));
+    }
+
+    #[test]
+    fn more_than_twenty_strict_tools_is_refused() {
+        let p = AnthropicProvider::new("k".into(), "claude-sonnet-5-5".into());
+        let mut req = tool_req(ToolChoice::Auto, crate::ThinkingMode::Default);
+        req.tools = (0..21).map(|i| tool(&format!("t{i}"), true)).collect();
+        assert!(matches!(p.validate(&req), Err(LlmError::InvalidRequest(_))));
+        req.tools.truncate(20);
+        assert!(p.validate(&req).is_ok());
+        // Legacy models don't get strict at all, so no limit applies.
+        let old = AnthropicProvider::new("k".into(), "claude-sonnet-4-5".into());
+        req.tools = (0..25).map(|i| tool(&format!("t{i}"), true)).collect();
+        assert!(old.validate(&req).is_ok());
+    }
+
+    #[test]
+    fn relax_drops_rejected_tool_choice_and_strict() {
+        let mut b = body(
+            "claude-haiku-5-5",
+            &tool_req(ToolChoice::Required, crate::ThinkingMode::Disabled),
+        );
+        assert!(b.get("tool_choice").is_some());
+        assert!(relax_after_400(
+            &mut b,
+            &api_err("tool_choice.type: 'any' is not supported when thinking is enabled")
+        ));
+        assert!(b.get("tool_choice").is_none());
+        // Thinking stays: the tool_choice branch ran first.
+        assert!(b.get("thinking").is_some());
+        assert!(relax_after_400(
+            &mut b,
+            &api_err("tools.0.strict: not supported for this model")
+        ));
+        assert!(b["tools"][0].get("strict").is_none());
+        // A legacy body is untouched by a message that mentions strict.
+        let mut legacy = task(
+            "claude-sonnet-5-5",
+            crate::ThinkingMode::Default,
+            None,
+            None,
+        );
+        let before = legacy.clone();
+        assert!(!relax_after_400(
+            &mut legacy,
+            &api_err("strict mode rejected")
+        ));
+        assert_eq!(legacy, before);
+    }
+
+    #[test]
+    fn parses_tool_use_thinking_and_usage() {
+        let j = r#"{"content":[
+            {"type":"thinking","thinking":"plan","signature":"s1"},
+            {"type":"text","text":"Let me search."},
+            {"type":"tool_use","id":"toolu_9","name":"search_passages","input":{"query":"q"}},
+            {"type":"fallback","from":"x"}],
+            "stop_reason":"tool_use",
+            "usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":80,"cache_creation_input_tokens":0}}"#;
+        let r = parse_messages_converse(j, false).unwrap();
+        assert_eq!(r.stop_reason, StopReason::ToolUse);
+        assert_eq!(r.blocks.len(), 3);
+        assert!(matches!(r.blocks[0], ContentBlock::Opaque { .. }));
+        assert_eq!(r.text(), "Let me search.");
+        assert_eq!(r.tool_uses()[0].0, "toolu_9");
+        assert_eq!(r.usage.input_tokens, Some(100));
+        assert_eq!(r.usage.cache_read_tokens, Some(80));
+        // The opaque block round-trips into the next request unchanged.
+        let next = AnthropicProvider::new("k".into(), "claude-sonnet-5-5".into()).converse_body(
+            &ConverseRequest {
+                messages: vec![Message::user("q"), r.to_message()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            next["messages"][1]["content"][0],
+            json!({"type":"thinking","thinking":"plan","signature":"s1"})
+        );
+    }
+
+    #[test]
+    fn converse_parse_keeps_refusal_and_truncation_rules() {
+        let refusal =
+            r#"{"content":[],"stop_reason":"refusal","stop_details":{"category":"cyber"}}"#;
+        let e = parse_messages_converse(refusal, false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("declined") && e.contains("cyber"), "{e}");
+        let empty = r#"{"content":[{"type":"thinking","thinking":"","signature":""}],"stop_reason":"max_tokens"}"#;
+        assert!(parse_messages_converse(empty, false).is_err());
+        // A cut-off answer with text is usable for prose…
+        let cut = r#"{"content":[{"type":"text","text":"The bud"}],"stop_reason":"max_tokens"}"#;
+        let r = parse_messages_converse(cut, false).unwrap();
+        assert_eq!(r.stop_reason, StopReason::MaxTokens);
+        // …but not for structured JSON.
+        assert!(parse_messages_converse(cut, true).is_err());
+    }
+
+    fn decode_sse(text: &str) -> Result<ChatResponse> {
+        let mut d = AnthropicSse::default();
+        let mut acc = crate::stream::Accumulator::default();
+        for line in text.lines() {
+            for ev in d.line(line)? {
+                acc.push(ev);
+            }
+        }
+        for ev in d.finish()? {
+            acc.push(ev);
+        }
+        acc.finish()
+    }
+
+    #[test]
+    fn sse_stream_decodes_text_tools_and_thinking() {
+        let text = r#"event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":42,"output_tokens":1,"cache_read_input_tokens":30}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me "}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"search."}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQ"}}
+data: {"type":"content_block_stop","index":0}
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+event: ping
+data: {"type":"ping"}
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Searching"}}
+data: {"type":"content_block_stop","index":1}
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"search_passages","input":{}}}
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"query\": "}}
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"\"budget\"}"}}
+data: {"type":"content_block_stop","index":2}
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":33}}
+data: {"type":"message_stop"}"#;
+        let r = decode_sse(text).unwrap();
+        assert_eq!(r.stop_reason, StopReason::ToolUse);
+        assert_eq!(
+            r.blocks[0],
+            ContentBlock::Opaque {
+                provider: "anthropic".into(),
+                raw: json!({"type":"thinking","thinking":"Let me search.","signature":"EqQ"}),
+            }
+        );
+        assert_eq!(r.text(), "Searching");
+        assert_eq!(r.tool_uses()[0].2, &json!({"query": "budget"}));
+        assert_eq!(r.usage.input_tokens, Some(42));
+        assert_eq!(r.usage.output_tokens, Some(33));
+        assert_eq!(r.usage.cache_read_tokens, Some(30));
+    }
+
+    #[test]
+    fn sse_stream_errors_on_refusal_error_event_and_cut() {
+        let refusal = r#"data: {"type":"message_delta","delta":{"stop_reason":"refusal"}}"#;
+        assert!(decode_sse(refusal).is_err());
+        let err =
+            r#"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        assert!(decode_sse(err)
+            .unwrap_err()
+            .to_string()
+            .contains("Overloaded"));
+        let cut = r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"Hi"}}"#;
+        assert!(decode_sse(cut).is_err());
+    }
+
+    #[test]
+    fn capabilities_follow_the_model() {
+        let caps = |m: &str| AnthropicProvider::new("k".into(), m.into()).capabilities();
+        let s55 = caps("claude-sonnet-5-5");
+        assert!(s55.tools && s55.strict_tools && !s55.tool_choice_required);
+        assert_eq!(s55.max_strict_tools, MAX_STRICT_TOOLS);
+        let h55 = caps("claude-haiku-5-5");
+        assert!(h55.tool_choice_required);
+        let old = caps("claude-sonnet-4-5");
+        assert!(old.tools && !old.strict_tools && old.max_strict_tools == 0);
+    }
+
+    /// Live: one tool round trip against the real API (each of the default
+    /// models). Set ANTHROPIC_API_KEY; optional FLY_LLM_ANTHROPIC_MODELS
+    /// (comma-separated). `relax_on_400` is off so a rejected request shape
+    /// fails loudly instead of degrading.
+    #[test]
+    #[ignore = "needs ANTHROPIC_API_KEY"]
+    fn anthropic_tool_round_trip_live() {
+        let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY");
+        let models = std::env::var("FLY_LLM_ANTHROPIC_MODELS")
+            .unwrap_or_else(|_| format!("{ANTHROPIC_DEFAULT_MODEL},{ANTHROPIC_FAST_MODEL}"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for model in models.split(',').map(str::trim) {
+            let mut p = AnthropicProvider::new(key.clone(), model.into());
+            p.relax_on_400 = false;
+            let mut req = ConverseRequest {
+                messages: vec![
+                    Message::system(
+                        "Use search_passages before answering. Answer in one sentence.",
+                    ),
+                    Message::user("What budget did Dana agree to?"),
+                ],
+                tools: vec![tool("search_passages", true)],
+                max_tokens: Some(2048),
+                ..Default::default()
+            };
+            let first = rt.block_on(p.converse(req.clone())).expect(model);
+            let (id, _, input) = first.tool_uses()[0];
+            assert!(input.get("query").is_some(), "{model}: {input}");
+            let id = id.to_string();
+            req.messages.push(first.to_message());
+            req.messages
+                .push(Message::tool_results(vec![ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content: "[seg:s1] Dana: We agreed on $8,400 for Q3.".into(),
+                    is_error: false,
+                }]));
+            let second = rt
+                .block_on(async { crate::stream::collect(p.chat_stream(req).await?).await })
+                .expect(model);
+            assert!(
+                second.text().contains("8,400"),
+                "{model}: {}",
+                second.text()
+            );
+        }
     }
 }
