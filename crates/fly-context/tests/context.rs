@@ -27,6 +27,8 @@ struct Fixture {
     one_on_one: String,
     budget_note: String,
     legal_note: String,
+    /// Keep local only by inheritance: a sub-folder of the local-only Legal.
+    case: String,
 }
 
 fn seg(i: usize, key: &str, text: &str) -> TranscriptSegment {
@@ -223,6 +225,27 @@ fn fixture() -> Fixture {
         )],
     )
     .unwrap();
+    // Keep local by inheritance: Legal/Cases (the sub-folder itself is not
+    // flagged). Oldest meeting, so date windows can isolate it.
+    let cases = s.create_folder("Cases", Some(&folder.id)).unwrap();
+    let (case, _) = meeting(&s, "Case budget", Some(&cases.id), 19, &["Paralegal"]);
+    s.save_transcript(&transcript(
+        &case,
+        "c",
+        &[("spk_0", "The case budget is SECRET-SUBFOLDER four million.")],
+    ))
+    .unwrap();
+    s.replace_meeting_items(
+        &case,
+        &[item(
+            &case,
+            ItemKind::Figure,
+            "SECRET-SUBFOLDER budget figure",
+            None,
+            &["c000"],
+        )],
+    )
+    .unwrap();
     s.set_folder_keep_local(&folder.id, true).unwrap();
 
     // Keep local via the note's own flag: a 1:1.
@@ -255,6 +278,7 @@ fn fixture() -> Fixture {
         one_on_one,
         budget_note,
         legal_note,
+        case,
     }
 }
 
@@ -322,12 +346,13 @@ fn keyword_search_returns_citable_passages() {
     )
     .unwrap();
     assert!(out.text.contains("[seg:b030] Dana (2:30):"), "{}", out.text);
+    // Nothing about what was excluded reaches the model.
     assert!(
-        out.text.contains("2 Keep-local meetings were not searched"),
+        !out.text.contains("Keep-local") && !out.text.contains("not searched"),
         "{}",
         out.text
     );
-    assert_eq!(out.json["keep_local_excluded"], 2);
+    assert!(out.json.get("keep_local_excluded").is_none());
 }
 
 #[test]
@@ -469,7 +494,7 @@ fn list_meetings_filters() {
     let f = fixture();
     let ctx = Context::new(&f.storage, Visibility::All);
     let all = ctx.list_meetings(&ListMeetingsArgs::default()).unwrap();
-    assert_eq!(all.meetings.len(), 4);
+    assert_eq!(all.meetings.len(), 5);
     assert_eq!(all.meetings[0].meeting_id, f.one_on_one, "newest first");
     let r = ctx
         .list_meetings(&ListMeetingsArgs {
@@ -564,7 +589,7 @@ fn keep_local_is_excluded_on_every_path() {
     };
     let shared = Context::new(&f.storage, Visibility::ShareableOnly);
     let local = Context::new(&f.storage, Visibility::All);
-    assert_eq!(shared.excluded_keep_local_meetings().unwrap(), 2);
+    assert_eq!(shared.excluded_keep_local_meetings().unwrap(), 3);
     assert_eq!(local.excluded_keep_local_meetings().unwrap(), 0);
 
     let calls: Vec<(&str, Value)> = vec![
@@ -709,4 +734,329 @@ fn schemas_are_strict_compatible_and_args_round_trip() {
     assert!(matches!(e, ContextError::InvalidArgs(_)), "{e}");
     let e = call(&ctx, "delete_meeting", &json!({}), None).unwrap_err();
     assert!(e.to_string().contains("search_passages"), "{e}");
+}
+
+// ---------------------------------------------------------------------------
+// Keep local, path by path (not just the union of every output)
+// ---------------------------------------------------------------------------
+
+fn ids_in(json: &Value, key: &str) -> Vec<String> {
+    fn walk(v: &Value, key: &str, out: &mut Vec<String>) {
+        match v {
+            Value::Object(m) => {
+                for (k, x) in m {
+                    if k == key {
+                        if let Some(s) = x.as_str() {
+                            out.push(s.to_string());
+                        }
+                    }
+                    walk(x, key, out);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, key, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(json, key, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[test]
+fn each_path_hides_keep_local_on_its_own() {
+    let f = fixture();
+    embed_all(&f.storage);
+    let shared = Context::new(&f.storage, Visibility::ShareableOnly);
+    let local = Context::new(&f.storage, Visibility::All);
+    let hidden = [f.legal.clone(), f.one_on_one.clone(), f.case.clone()];
+    let mut visible = vec![f.budget.clone(), f.renewal.clone()];
+    visible.sort();
+
+    // list_meetings: exactly the shareable meetings.
+    let out = call(&shared, "list_meetings", &json!({}), None).unwrap();
+    assert_eq!(ids_in(&out.json, "meeting_id"), visible);
+    let out = call(&local, "list_meetings", &json!({}), None).unwrap();
+    assert_eq!(ids_in(&out.json, "meeting_id").len(), 5);
+
+    // get_items: only shareable meetings' items, even when asked by id.
+    let out = call(&shared, "get_items", &json!({}), None).unwrap();
+    assert_eq!(ids_in(&out.json, "meeting_id"), vec![f.budget.clone()]);
+    let out = call(
+        &shared,
+        "get_items",
+        &json!({ "meeting_ids": hidden }),
+        None,
+    )
+    .unwrap();
+    assert_eq!(out.json["items"], json!([]));
+    let out = call(&local, "get_items", &json!({ "meeting_ids": hidden }), None).unwrap();
+    assert_eq!(out.json["items"].as_array().unwrap().len(), 3);
+
+    // Keyword search over transcripts and notes.
+    for q in ["SECRET", "settlement", "case budget", "personal worry"] {
+        let out = call(&shared, "search_passages", &json!({ "query": q }), None).unwrap();
+        let found = ids_in(&out.json, "meeting_id");
+        assert!(found.iter().all(|m| visible.contains(m)), "{q}: {found:?}");
+    }
+    let out = call(&local, "search_passages", &json!({"query": "SECRET"}), None).unwrap();
+    assert_eq!(
+        ids_in(&out.json, "meeting_id").len(),
+        3,
+        "All sees every kind"
+    );
+
+    // Scoped keyword search naming only hidden meetings.
+    let out = call(
+        &shared,
+        "search_passages",
+        &json!({"query": "budget", "meeting_ids": hidden}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(out.json["passages"], json!([]));
+
+    // Semantic-only search (FTS can't match the nonsense term).
+    for q in [
+        "SECRET settlement",
+        "SECRET subfolder case",
+        "SECRET personal worry",
+    ] {
+        let v = embed(q);
+        let qv = QueryVector {
+            vector: &v,
+            model: MODEL,
+        };
+        let args = json!({ "query": format!("{q} zzqx") });
+        let out = call(&shared, "search_passages", &args, Some(qv)).unwrap();
+        let found = ids_in(&out.json, "meeting_id");
+        assert!(found.iter().all(|m| visible.contains(m)), "{q}: {found:?}");
+        let out = call(&local, "search_passages", &args, Some(qv)).unwrap();
+        assert!(
+            ids_in(&out.json, "meeting_id")
+                .iter()
+                .any(|m| hidden.contains(m)),
+            "{q}: All should find the keep-local passage"
+        );
+    }
+
+    // By-id reads refuse, including the sub-folder (inherited) case.
+    for (name, args) in [
+        ("get_event", json!({ "meeting_id": f.case })),
+        ("get_note", json!({ "meeting_id": f.case })),
+        (
+            "read_segments",
+            json!({"meeting_id": f.case, "around_segment_id": "c000"}),
+        ),
+    ] {
+        let e = call(&shared, name, &args, None).unwrap_err();
+        assert!(matches!(e, ContextError::KeepLocal(_)), "{name}: {e}");
+        assert!(call(&local, name, &args, None).is_ok(), "{name} under All");
+    }
+}
+
+/// No tool output may reveal anything about kept-local meetings: not their
+/// text, ids, titles or dates, nor a count. In particular a date window
+/// holding only kept-local meetings must look exactly like an empty window
+/// (otherwise a client could binary-search their start times).
+#[test]
+fn tool_output_carries_no_keep_local_metadata() {
+    let f = fixture();
+    let shared = Context::new(&f.storage, Visibility::ShareableOnly);
+    let forbidden = [
+        f.legal.as_str(),
+        f.one_on_one.as_str(),
+        f.case.as_str(),
+        "Settlement budget",
+        "1:1 budget chat",
+        "Case budget",
+        "SECRET",
+        "2026-10-19",
+        "2026-10-21",
+        "2026-10-23",
+        "Keep-local",
+        "keep_local",
+        "not searched",
+    ];
+    let dates = [
+        None,
+        Some("2026-10-01"),
+        Some("2026-10-19"),
+        Some("2026-10-20"),
+        Some("2026-10-21"),
+        Some("2026-10-22"),
+        Some("2026-10-23"),
+        Some("2026-10-24"),
+    ];
+    for since in dates {
+        for until in dates {
+            let mut window = serde_json::Map::new();
+            if let Some(s) = since {
+                window.insert("since".into(), json!(s));
+            }
+            if let Some(u) = until {
+                window.insert("until".into(), json!(u));
+            }
+            let mut search = window.clone();
+            search.insert("query".into(), json!("budget"));
+            let mut items = serde_json::Map::new();
+            if let Some(s) = since {
+                items.insert("since".into(), json!(s));
+            }
+            for (name, args) in [
+                ("list_meetings", Value::Object(window.clone())),
+                ("search_passages", Value::Object(search)),
+                ("get_items", Value::Object(items)),
+            ] {
+                let out = call(&shared, name, &args, None).unwrap();
+                let all = format!("{}\n{}", out.json, out.text);
+                for bad in forbidden {
+                    assert!(!all.contains(bad), "{name} {args} revealed {bad:?}:\n{all}");
+                }
+            }
+        }
+    }
+    // A window with only kept-local meetings == a window with none.
+    let a = call(
+        &shared,
+        "list_meetings",
+        &json!({"since": "2026-10-23", "until": "2026-10-23"}),
+        None,
+    )
+    .unwrap();
+    let b = call(
+        &shared,
+        "list_meetings",
+        &json!({"since": "2026-11-01"}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(a, b);
+    let a = call(
+        &shared,
+        "search_passages",
+        &json!({"query": "budget", "since": "2026-10-23", "until": "2026-10-23"}),
+        None,
+    )
+    .unwrap();
+    let b = call(
+        &shared,
+        "search_passages",
+        &json!({"query": "budget", "since": "2026-11-01"}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(a, b);
+}
+
+// ---------------------------------------------------------------------------
+// Vector candidate pool: filter before capping
+// ---------------------------------------------------------------------------
+
+/// `heavy_hidden`: a keep-local meeting with 210 windows that match the
+/// query better than anything else. `heavy_shared` (optional): the same,
+/// shareable. `weak`: one shareable window that matches less well.
+fn starvation_fixture(heavy_shared: bool) -> (tempfile::TempDir, Storage, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Storage::open(dir.path()).unwrap();
+    let strong = "budget forecast ".repeat(85);
+    let heavy: Vec<(&str, &str)> = (0..210)
+        .map(|i| (if i % 2 == 0 { "mic" } else { "spk_0" }, strong.as_str()))
+        .collect();
+    let (hidden, hidden_note) = meeting(&s, "Private planning", None, 10, &[]);
+    s.save_transcript(&transcript(&hidden, "h", &heavy))
+        .unwrap();
+    s.set_note_keep_local(&hidden_note, true).unwrap();
+    if heavy_shared {
+        let (m, _) = meeting(&s, "Planning marathon", None, 11, &[]);
+        s.save_transcript(&transcript(&m, "p", &heavy)).unwrap();
+    }
+    let (weak, _) = meeting(&s, "Weekly sync", None, 12, &[]);
+    s.save_transcript(&transcript(
+        &weak,
+        "w",
+        &[(
+            "spk_0",
+            "We covered lunch plans, parking, travel, the budget forecast, and hiring.",
+        )],
+    ))
+    .unwrap();
+    embed_all(&s);
+    (dir, s, weak)
+}
+
+#[test]
+fn keep_local_chunks_cannot_starve_the_vector_pool() {
+    let (_dir, s, weak) = starvation_fixture(false);
+    let ctx = Context::new(&s, Visibility::ShareableOnly);
+    let v = embed("budget forecast");
+    // "zzqx" keeps FTS out of it: only the semantic list can find `weak`.
+    let r = ctx
+        .search_passages(
+            &search("budget forecast zzqx"),
+            Some(QueryVector {
+                vector: &v,
+                model: MODEL,
+            }),
+        )
+        .unwrap();
+    assert_eq!(r.passages.len(), 1, "{:?}", r.passages);
+    assert_eq!(r.passages[0].meeting_id.as_deref(), Some(weak.as_str()));
+    assert_eq!(r.passages[0].matched_by, vec!["semantic"]);
+}
+
+#[test]
+fn out_of_scope_chunks_cannot_starve_a_scoped_search() {
+    let (_dir, s, weak) = starvation_fixture(true);
+    let ctx = Context::new(&s, Visibility::ShareableOnly);
+    let v = embed("budget forecast");
+    let r = ctx
+        .search_passages(
+            &SearchPassagesArgs {
+                // Scoped search scores windows by these words: none occur
+                // in `weak`, so only the semantic list can find it.
+                query: "zzqx".into(),
+                meeting_ids: Some(vec![weak.clone()]),
+                ..Default::default()
+            },
+            Some(QueryVector {
+                vector: &v,
+                model: MODEL,
+            }),
+        )
+        .unwrap();
+    assert_eq!(r.passages.len(), 1);
+    assert_eq!(r.passages[0].meeting_id.as_deref(), Some(weak.as_str()));
+    assert_eq!(r.passages[0].matched_by, vec!["semantic"]);
+}
+
+#[test]
+fn argument_limits_are_enforced() {
+    let f = fixture();
+    let ctx = Context::new(&f.storage, Visibility::All);
+    let many: Vec<String> = (0..51).map(|i| format!("m{i}")).collect();
+    for (name, args) in [
+        ("get_items", json!({ "meeting_ids": many })),
+        (
+            "search_passages",
+            json!({"query": "x", "meeting_ids": many}),
+        ),
+        ("get_items", json!({"status": "pending"})),
+        ("get_items", json!({"kind": "todo"})),
+    ] {
+        let e = call(&ctx, name, &args, None).unwrap_err();
+        assert!(
+            matches!(e, ContextError::InvalidArgs(_)),
+            "{name} {args}: {e}"
+        );
+    }
+    let ok: Vec<String> = (0..50).map(|i| format!("m{i}")).collect();
+    assert!(call(
+        &ctx,
+        "get_items",
+        &json!({"meeting_ids": ok, "status": "done"}),
+        None
+    )
+    .is_ok());
 }

@@ -10,7 +10,9 @@
 //!   the storage queries where storage supports it (FTS, items, note
 //!   listings) and by a fail-closed set check everywhere else (vector hits,
 //!   meeting listings, by-id reads). A failed keep-local lookup returns an
-//!   error, never unfiltered content.
+//!   error, never unfiltered content. Tool results say nothing about
+//!   what was excluded — not even a count (see
+//!   [`Context::excluded_keep_local_meetings`]).
 //! * **Every function is a tool contract:** typed args with a JSON schema
 //!   ([`tools::tool_defs`]), a serializable result, and a compact text
 //!   rendering for a model ([`render`]) that cites transcript lines as
@@ -134,8 +136,13 @@ impl<'a> Context<'a> {
         })
     }
 
-    /// How many meetings this view can't see — for the Ask trace ("N
-    /// kept-local meetings not searched"). Always 0 under `All`.
+    /// How many meetings this view can't see — for the USER's Ask trace
+    /// ("N kept-local meetings not searched") only. Never put it in
+    /// model-facing output or tool results: a count that responds to
+    /// filters lets a model or MCP client probe kept-local meetings (e.g.
+    /// binary-search their dates). Tool results carry no trace of them.
+    /// Loads every meeting per call — call once per answer. Always 0 under
+    /// `All`.
     pub fn excluded_keep_local_meetings(&self) -> Result<usize> {
         if !self.shareable_only() {
             return Ok(0);

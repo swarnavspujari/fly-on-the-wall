@@ -31,25 +31,13 @@ pub fn segment_line(s: &SegmentView) -> String {
     )
 }
 
-fn excluded_note(out: &mut String, n: usize) {
-    if n > 0 {
-        let _ = writeln!(
-            out,
-            "({n} Keep-local meeting{} not searched.)",
-            if n == 1 { " was" } else { "s were" }
-        );
-    }
-}
-
 pub fn passages(r: &PassageResults) -> String {
     let mut out = String::new();
     if r.passages.is_empty() {
         out.push_str("No matching passages found in the user's meetings.\n");
-        excluded_note(&mut out, r.keep_local_excluded);
         return out;
     }
     let _ = writeln!(out, "{} passage(s):", r.passages.len());
-    excluded_note(&mut out, r.keep_local_excluded);
     for p in &r.passages {
         out.push('\n');
         let date = p
@@ -117,7 +105,6 @@ pub fn meetings(l: &MeetingList) -> String {
             who
         );
     }
-    excluded_note(&mut out, l.keep_local_excluded);
     out
 }
 

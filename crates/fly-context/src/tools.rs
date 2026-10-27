@@ -33,6 +33,10 @@ const PER_OWNER_CAP: usize = 3;
 const PER_MEETING_KEYWORD: usize = 2;
 /// Longest accepted query.
 pub const MAX_QUERY_CHARS: usize = 1_000;
+/// Most meeting ids one call may scope to.
+pub const MAX_MEETING_IDS: usize = 50;
+/// Action-item statuses `get_items` accepts.
+const STATUSES: &[&str] = &["open", "done"];
 /// Every meeting (list_meetings has no offset; corpora are hundreds).
 const ALL_ROWS: usize = 1_000_000;
 
@@ -476,8 +480,6 @@ pub struct PassageResults {
     pub passages: Vec<Passage>,
     /// Semantic search ran (a query vector was supplied).
     pub semantic: bool,
-    /// Meetings this view couldn't search (Keep local, `ShareableOnly`).
-    pub keep_local_excluded: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -503,7 +505,6 @@ pub struct MeetingSummary {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MeetingList {
     pub meetings: Vec<MeetingSummary>,
-    pub keep_local_excluded: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -637,12 +638,15 @@ impl Context<'_> {
             offset: 0,
             exclude_keep_local: self.shareable_only(),
         };
-        let scope: Option<Vec<String>> = args.meeting_ids.as_ref().map(|ids| {
-            let mut v: Vec<String> = ids.iter().map(|s| s.trim().to_string()).collect();
-            v.dedup();
-            v.truncate(50);
-            v
-        });
+        let scope: Option<Vec<String>> = match &args.meeting_ids {
+            Some(ids) => {
+                check_meeting_ids(ids)?;
+                let mut v: Vec<String> = ids.iter().map(|s| s.trim().to_string()).collect();
+                v.dedup();
+                Some(v)
+            }
+            None => None,
+        };
 
         let mut cache: HashMap<String, Option<Loaded>> = HashMap::new();
         let mut notes: HashMap<String, fly_core::Note> = HashMap::new();
@@ -731,10 +735,17 @@ impl Context<'_> {
         // Semantic list.
         let mut semantic: Vec<PassageKey> = Vec::new();
         if let Some(qv) = query_vector {
-            let hits =
-                self.storage()
-                    .vector_search(qv.vector, qv.model, &filter, VECTOR_CANDIDATES)?;
+            // vector_search has no keep-local filter and truncates after
+            // sorting, so ask for every hit, filter, THEN cap: truncating
+            // first would let keep-local (or out-of-scope) chunks crowd
+            // shareable ones out of the candidate pool.
+            let hits = self
+                .storage()
+                .vector_search(qv.vector, qv.model, &filter, ALL_ROWS)?;
             for h in hits {
+                if semantic.len() >= VECTOR_CANDIDATES {
+                    break;
+                }
                 // vector_search has no keep-local filter: apply the set. An
                 // orphan chunk (no owning note) can't be checked → dropped.
                 if self.shareable_only() && (h.note_id.is_empty() || hidden.note(&h.note_id)) {
@@ -855,7 +866,6 @@ impl Context<'_> {
         Ok(PassageResults {
             passages: out,
             semantic: query_vector.is_some(),
-            keep_local_excluded: self.excluded_keep_local_meetings()?,
         })
     }
 
@@ -910,14 +920,12 @@ impl Context<'_> {
         let title_words = non_empty(&args.title_contains).map(passages::query_terms);
         let attendee = non_empty(&args.attendee).map(str::to_lowercase);
         let folder = non_empty(&args.folder_id);
-        let mut excluded = 0usize;
         let mut meetings = Vec::new();
         for m in self.storage().list_meetings(since, ALL_ROWS)? {
-            if hidden.meeting(&m.id, &m.note_id) {
-                excluded += 1;
-                continue;
+            if meetings.len() >= limit {
+                break;
             }
-            if meetings.len() >= limit || until.is_some_and(|u| m.started_at > u) {
+            if hidden.meeting(&m.id, &m.note_id) || until.is_some_and(|u| m.started_at > u) {
                 continue;
             }
             if let Some(words) = &title_words {
@@ -953,10 +961,7 @@ impl Context<'_> {
                 ended_at: m.ended_at,
             });
         }
-        Ok(MeetingList {
-            meetings,
-            keep_local_excluded: excluded,
-        })
+        Ok(MeetingList { meetings })
     }
 
     pub fn get_event(&self, args: &GetEventArgs) -> Result<EventInfo> {
@@ -1073,10 +1078,21 @@ impl Context<'_> {
             })?),
             None => None,
         };
+        let status = non_empty(&args.status);
+        if let Some(s) = status {
+            if !STATUSES.contains(&s) {
+                return Err(ContextError::InvalidArgs(format!(
+                    "status must be one of open, done (got {s:?})"
+                )));
+            }
+        }
+        if let Some(ids) = &args.meeting_ids {
+            check_meeting_ids(ids)?;
+        }
         let items = self.storage().query_items(&ItemFilter {
             kind,
             owner: non_empty(&args.owner).map(str::to_string),
-            status: non_empty(&args.status).map(str::to_string),
+            status: status.map(str::to_string),
             since: parse_when("since", &args.since, false)?,
             meeting_ids: args.meeting_ids.clone(),
             limit: clamp(args.limit, 50, 1, 200),
@@ -1084,6 +1100,16 @@ impl Context<'_> {
         })?;
         Ok(ItemList { items })
     }
+}
+
+fn check_meeting_ids(ids: &[String]) -> Result<()> {
+    if ids.len() > MAX_MEETING_IDS {
+        return Err(ContextError::InvalidArgs(format!(
+            "meeting_ids may list at most {MAX_MEETING_IDS} meetings (got {})",
+            ids.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Whitespace-collapsed text.

@@ -8,7 +8,7 @@ Today's schema forces `fly-context` into several workarounds:
 - **`embedding_chunks` stores only `start_ms`.** No segment ids, no `end_ms`. A vector hit is mapped back to its window by re-running the chunker and matching `start_ms`. That works only because `fly-context`'s windowing is pinned to `chunk_transcript` by a test.
 - **Chunk text embeds speaker labels** (`Dana: …`). A speaker rename changes every chunk of the meeting and re-embeds the whole meeting.
 - **The polished transcript is never indexed.** Proper nouns that polish fixed are invisible to keyword search.
-- **`vector_search` ignores `SearchFilter.exclude_keep_local`.** `fly-context` filters vector hits against `keep_local_note_ids()` after the fact (fail-closed). Today the only caller is the UI's semantic search (`commands.rs:648`), so nothing leaks. But it's a trap for the next AI caller.
+- **`vector_search` ignores `SearchFilter.exclude_keep_local`** and truncates before any caller can filter. `fly-context` requests every hit, then filters against `keep_local_note_ids()` (fail-closed), then caps. Today the only caller is the UI's semantic search (`commands.rs:648`), so nothing leaks. But it's a trap for the next AI caller, and the fix below is required before wiring.
 - **`list_meetings` has no keep-local or `until` filter.** `fly-context` filters in memory.
 - **Citations are bare segment ids.** Re-transcribing builds new ids (`align.rs` `new_id()`), so every citation in Enhanced blocks and items silently dangles.
 
@@ -71,7 +71,11 @@ CREATE INDEX IF NOT EXISTS idx_citation_locators_meeting ON citation_locators(me
   Re-diarize keeps ids (`pipeline.rs:720`), so it never triggers this. **Required before re-transcribe-with-Parakeet is offered** (spec 4.2a #6).
 
 ## Read paths added to fly-storage
-- `vector_search` honors `filter.exclude_keep_local` inside SQL (`KEEP_LOCAL_CTE` + `SHAREABLE_CHUNK`, both already in `privacy.rs`). `VectorHit` gains `segment_ids`, `end_ms` and the full chunk `text`.
+- **Required before anything wires `fly-context` to a cloud model or the MCP** (spec §4.2a #13): `vector_search` honors `filter.exclude_keep_local` inside SQL (`KEEP_LOCAL_CTE` + `SHAREABLE_CHUNK`, both already in `privacy.rs`).
+  - It must also take an **orphan guard**: a transcript chunk whose meeting row is gone, or a note chunk whose note is gone, has no checkable privacy and is excluded under `exclude_keep_local`.
+  - Its `limit` must apply *after* that filter.
+  - Until then, `fly-context` asks `vector_search` for every hit, drops keep-local and orphan chunks, and only then caps the candidate pool at 200. That's correct, but it scans and sorts every chunk per query. Tests `keep_local_chunks_cannot_starve_the_vector_pool` and `out_of_scope_chunks_cannot_starve_a_scoped_search` pin the behavior.
+  - Alongside this, `VectorHit` gains `segment_ids`, `end_ms` and the full chunk `text`.
 - `search_segments(query, &SearchFilter) -> Vec<SegmentHit { meeting_id, segment_id, start_ms, end_ms, snippet }>`, bm25-ranked, keep-local in SQL.
 - `list_meetings(&MeetingFilter { since, until, folder_id, exclude_keep_local, limit })`.
 - Optionally `segments_by_ids(meeting_id, &[seg_id])` for the citation validator. It avoids parsing the whole transcript JSON per check.
