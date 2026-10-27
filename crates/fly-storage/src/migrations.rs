@@ -141,13 +141,15 @@ fn remap_into(rec: &RecordingRef, new_rel_dir: &str) -> RecordingRef {
 /// Delete leftover 16 kHz intermediates (`mic.16k.wav`, `system.16k.wav`,
 /// `track.16k.wav`) that pre-cleanup pipelines never removed. Pure derived
 /// data: the pipeline regenerates them from the originals when needed.
+/// Exact names only — a user's own `<name>.16k.wav` is never matched.
 fn sweep_16k(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name.to_string_lossy().ends_with(".16k.wav") {
+        let is_file = entry.file_type().is_ok_and(|t| t.is_file());
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_file && crate::scratch::is_legacy_intermediate_name(&name) {
             let _ = std::fs::remove_file(entry.path());
         }
     }

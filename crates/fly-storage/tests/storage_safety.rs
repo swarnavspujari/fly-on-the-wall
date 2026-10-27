@@ -131,29 +131,36 @@ fn fresh_database_never_creates_unlinked() {
 }
 
 /// An existing (pre-v2) database keeps today's behavior: the v2 sweep still
-/// parks folders no row points at. (The full v1 fixture lives in
-/// `migration_v2.rs`; this pins the fresh/existing boundary.)
+/// parks folders no row points at — including an UNVERSIONED database
+/// (`user_version` 0, the earliest builds never stamped one) that has
+/// tables. Only a database with no tables at all counts as fresh. (The full
+/// v1 fixture lives in `migration_v2.rs`; this pins the boundary.)
 #[test]
 fn existing_pre_v2_database_still_parks_orphans() {
-    let tmp = tempfile::tempdir().unwrap();
-    {
-        let c = Connection::open(tmp.path().join("flyonthewall.db")).unwrap();
-        c.execute_batch(
-            "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL,
-                                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-             PRAGMA user_version = 1;",
-        )
-        .unwrap();
-    }
-    let orphan = tmp.path().join("recordings").join("orphan-folder");
-    std::fs::create_dir_all(&orphan).unwrap();
-    std::fs::write(orphan.join("recording.mixed.wav"), b"RIFF").unwrap();
+    for version in [0, 1] {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let c = Connection::open(tmp.path().join("flyonthewall.db")).unwrap();
+            c.execute_batch(&format!(
+                "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                 PRAGMA user_version = {version};"
+            ))
+            .unwrap();
+        }
+        let orphan = tmp.path().join("recordings").join("orphan-folder");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("recording.mixed.wav"), b"RIFF").unwrap();
 
-    Storage::open(tmp.path()).unwrap();
-    assert!(tmp
-        .path()
-        .join("recordings/_unlinked/orphan-folder/recording.mixed.wav")
-        .exists());
+        Storage::open(tmp.path()).unwrap();
+        assert!(
+            tmp.path()
+                .join("recordings/_unlinked/orphan-folder/recording.mixed.wav")
+                .exists(),
+            "user_version {version}"
+        );
+        assert_eq!(user_version(tmp.path()), 2);
+    }
 }
 
 // ---- (c) backfill never clobbers ----------------------------------------
@@ -423,7 +430,7 @@ fn stale_scratch_is_swept_but_resumable_scratch_is_kept() {
     let (_, done_id, done_dir) = recorded_meeting(&s, "Done meeting");
     let (_, failed_id, failed_dir) = recorded_meeting(&s, "Failed meeting");
     for dir in [&done_dir, &failed_dir] {
-        std::fs::write(dir.join("track.16k.wav"), b"RIFF").unwrap();
+        std::fs::write(dir.join("track.16k.wav"), wav_header(16_000, 1)).unwrap();
         std::fs::write(dir.join("track.16k.asrpart.json"), b"{}").unwrap();
         std::fs::create_dir_all(dir.join("live-tmp")).unwrap();
     }
@@ -453,6 +460,66 @@ fn stale_scratch_is_swept_but_resumable_scratch_is_kept() {
     // deleting the meeting takes its scratch with it
     s.purge_meeting(&failed_id).unwrap();
     assert!(!failed_scratch.exists());
+}
+
+/// Media import keeps the user's own file names, so a meeting folder can
+/// hold a user's `Board call.16k.wav`. Neither a pipeline start nor the
+/// startup sweep may touch it — nor a file that carries one of the
+/// pipeline's exact names but isn't in its 16 kHz mono format. Only the
+/// pipeline's own leftovers go.
+#[test]
+fn imported_16k_wav_survives_the_sweep_and_a_pipeline_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let s = Storage::open(tmp.path()).unwrap();
+    let (_, meeting_id, dir) = recorded_meeting(&s, "Board call");
+    let originals = [
+        ("Board call.16k.wav", wav_header(16_000, 1)),
+        ("x.16k.wav", wav_header(16_000, 1)),
+        // an exact pipeline name, but a 44.1 kHz stereo original
+        ("track.16k.wav", wav_header(44_100, 2)),
+    ];
+    for (name, bytes) in &originals {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+    // the pipeline's own leftover, for contrast
+    std::fs::write(dir.join("mic.16k.wav"), wav_header(16_000, 1)).unwrap();
+
+    fly_storage::scratch::prepare_meeting_scratch(tmp.path(), &meeting_id, Some(&dir)).unwrap();
+    for (name, bytes) in &originals {
+        assert_eq!(&std::fs::read(dir.join(name)).unwrap(), bytes, "{name}");
+    }
+    assert!(
+        dir.join("mic.16k.wav").exists(),
+        "pipeline start deletes nothing"
+    );
+
+    s.self_heal_recordings().unwrap();
+    for (name, bytes) in &originals {
+        assert_eq!(&std::fs::read(dir.join(name)).unwrap(), bytes, "{name}");
+    }
+    assert!(
+        !dir.join("mic.16k.wav").exists(),
+        "the real leftover is swept"
+    );
+    assert!(dir.join("recording.mixed.wav").exists());
+}
+
+/// A canonical 44-byte PCM 16-bit WAV header (no samples).
+fn wav_header(rate: u32, channels: u16) -> Vec<u8> {
+    let mut h = Vec::with_capacity(44);
+    h.extend_from_slice(b"RIFF");
+    h.extend_from_slice(&36u32.to_le_bytes());
+    h.extend_from_slice(b"WAVEfmt ");
+    h.extend_from_slice(&16u32.to_le_bytes());
+    h.extend_from_slice(&1u16.to_le_bytes());
+    h.extend_from_slice(&channels.to_le_bytes());
+    h.extend_from_slice(&rate.to_le_bytes());
+    h.extend_from_slice(&(rate * channels as u32 * 2).to_le_bytes());
+    h.extend_from_slice(&(channels * 2).to_le_bytes());
+    h.extend_from_slice(&16u16.to_le_bytes());
+    h.extend_from_slice(b"data");
+    h.extend_from_slice(&0u32.to_le_bytes());
+    h
 }
 
 /// "Delete all my data" must reach the scratch root too: it sits outside
