@@ -1,0 +1,48 @@
+Fly on the Wall is a local-first desktop meeting notetaker (Tauri 2). Assets, trust boundaries and threats T1-T13 are in docs/THREAT_MODEL.md. Untrusted input: meeting speech (anyone in a call can say text that lands in a transcript and then in an LLM prompt), calendar titles and descriptions, imported recording folders (manifest.json, note.json, media files) and AI output. The webview is semi-trusted because it renders that content. Same-user malware is out of scope; the user's data folder and OS keychain are trusted.
+
+**Untrusted content reaching the webview (T1, T2):**
+- Transcript, note, AI-output, calendar or imported text rendered through innerHTML / dangerouslySetInnerHTML / `marked` output without frontend/src/safeContent.ts sanitizeHtml, or through react-markdown without the components in frontend/src/markdownSafe.tsx, or with raw HTML enabled (rehype-raw, allowDangerousHtml, skipHtml false on untrusted text).
+- Anything that loads a remote image, media, font, iframe or script: removing or bypassing the DOMPurify hook that turns remote <img> into a `data-blocked-img` placeholder, isSafeMediaSrc accepting http(s), or a new remote URL in the CSP.
+- A link opener outside installLinkGuard / openExternal / the open_external_url command, or one that accepts schemes other than http, https and mailto (file:, javascript:, custom protocol handlers, UNC paths).
+
+- frontend/src/devMock.ts stubs every IPC command for browser QA. main.tsx imports it unconditionally and its only guard is inside the file (import.meta.env.DEV and no __TAURI_INTERNALS__): weakening or moving that guard, or changing how main.tsx loads it, so the mock can run in a shipped build.
+
+**Untrusted content reaching the LLM or tools (T1, T10):**
+- Meeting data (transcripts, notes, calendar text, imported files, MCP results) put into a prompt outside the XML fencing, or without the statement that it is data and never instructions.
+- Model output used, without validation, to pick a file path, URL, shell or process argument, IPC command, settings key, speaker label, tool call or citation. Citations are segment ids that the app validates; a model-supplied id, quote or number trusted as-is is a finding.
+- A new tool-calling path (Ask harness, connectors, MCP client) that can write, delete, send or fetch anything without a user-visible confirmation.
+
+**Tauri boundary (T2, T3, T5, T6):**
+- src-tauri/tauri*.conf.json: the CSP widened (new host, 'unsafe-eval', 'unsafe-inline' in script-src, remote img/media/connect/frame sources), devCsp or devUrl reaching a production build, dangerousDisableAssetCspModification beyond "style-src", assetProtocol.scope beyond recordings/ and attachments/ under the data folder, withGlobalTauri enabled, updater pubkey or endpoint changed (the endpoint must stay https on github.com/swarnavspujari/fly-on-the-wall).
+- src-tauri/capabilities/*.json: any fs, shell, http, process-spawn, opener or dialog permission exposed to the webview, a wildcard permission, or remote URLs / extra windows granted IPC.
+- src-tauri/src/nav_guard.rs: any relaxation that lets the main window navigate away from the app's own origin.
+- A new or changed #[tauri::command] that takes a path, file name, URL, command line, provider base URL or settings key from the webview without fly_storage::safe_path::contained / contained_recordings_dir, an allow-list or a scheme check.
+- The get_app_setting / set_app_setting allow-list (src-tauri/src/commands.rs, prefixes consent., capture., ui.) widened, or a new generic key-value command that lets the webview write settings the backend trusts (provider, base URL, model download source, consent flags it shouldn't set).
+- Recursive deletes (remove_dir_all, or remove_file in a loop) outside recordings/<folder> and the documented "Delete all my data" path, or a delete whose target comes from an imported manifest without containment (T7).
+
+**Keys, cloud calls and consent (T4, T10):**
+- An LLM or cloud ASR provider constructed anywhere but build_provider (src-tauri/src/llm_commands.rs), or a path that skips its checks: the per-provider cloud consent (`consent.cloud_llm.<provider>`) and per-note / per-folder Keep local. Groq or any cloud ASR running for a keep-local meeting.
+- validate_base_url weakened: keyed providers must use https except loopback, checked on save and on use; Anthropic and Groq hosts stay fixed.
+- API keys or OAuth tokens stored outside the OS keychain (crates/fly-secrets), written to logs, files, URLs, error strings or the webview, or sent to any host other than the provider's.
+- A new network destination (telemetry, analytics, crash reporting, update or model hosts, connectors) that isn't opt-in and disclosed to the user before data leaves the machine.
+- crates/fly-mcp: the MCP binary holding keys, calling a cloud LLM, reading outside the data folder, or gaining a write tool beyond set_speaker_label.
+
+**Files, imports, downloads and processes (T3, T7, T9):**
+- Imported folders and media: paths from manifest.json / note.json joined without containment; archive extraction without per-entry path validation (zip slip, absolute paths, `..`, symlinks); trusting sizes or counts from the file.
+- Model and sidecar downloads (src-tauri/src/models.rs, src-tauri/src/ollama.rs): a SHA-256 pin removed or weakened, verification after extraction or execution, an http URL, a download source taken from settings or the webview, or executing a binary that isn't pinned.
+- Spawning whisper-cli, sherpa-onnx, ffmpeg, ollama or other tools with arguments built into a shell string, or resolving them from PATH or the current directory on Windows when a pinned copy is expected.
+
+**Data at rest and deletion (T11, T13):**
+- SQLite secure_delete turned off (crates/fly-storage), or "Delete all my data" / audio retention leaving copies behind (transcript and note mirrors, attachments, FTS and embedding tables, caches, keychain entries).
+- The database or WAL placed in a user-chosen, synced or network folder.
+
+**Consent (T12):**
+- Recording, the system-audio probe that triggers the macOS TCC prompt, or any capture starting before the first-run consent is accepted (frontend/src/App.tsx, src-tauri/src/recording.rs).
+
+**Release pipeline and supply chain (T8, T9):**
+- .github/workflows: a secret (TAURI_SIGNING_PRIVATE_KEY*, APPLE_*, FOTW_*_CLIENT_*, STATS_TOKEN) reaching a job or step that installs or runs the frontend dependency tree, runs npm scripts, restores a cache, or runs PR-controlled code; pull_request_target or workflow_run checking out PR code; an action not pinned to a full commit SHA; persist-credentials left on where the token isn't needed; permissions widened; the skip-before-build overlay (.github/tauri/skip-before-build.conf.json) dropped from the signing build; a release marked Latest before latest.json is attached.
+- src-tauri/installer-hooks.nsi: new commands that run during install or uninstall.
+- New dependencies from git or path sources, with install scripts, or outside deny.toml's allowed sources; scripts/** that build shipped binaries fetching unpinned inputs.
+- docs/index.html (the download page): installer or update links pointing anywhere but this repo's GitHub releases, or over http.
+- Agent instructions and config (CLAUDE*.md, .claude/**, .mcp.json, skills/** incl. the shipped MCP skill): text that tells a coding agent or MCP client to run commands, fetch or send data to new hosts, skip checks or reviews, or treat meeting content as instructions.
+- This review's own machinery (.github/workflows/security-review.yml, .github/security-review/**): a narrower scope, new exclusions, wider tool or token access, or scripts or rules no longer taken from the base branch.

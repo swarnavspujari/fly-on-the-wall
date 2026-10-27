@@ -1,0 +1,91 @@
+# Which changes get a Claude security review (one list, used by the scope job
+# of .github/workflows/security-review.yml and by `relevant-files.sh` locally).
+#
+# Each line is a git pathspec with glob magic (`**` = any number of folders).
+# A changed file needs a review when it matches an include line and no line
+# starting with "!" (exclude). Blank lines and lines starting with "#" are
+# ignored. The workflow unites this list with the base branch's copy, so a PR
+# can add paths but never drop its own files out of review. Check a branch:
+#   bash .github/security-review/relevant-files.sh origin/main...HEAD
+
+# Rust backend: every IPC command, the nav guard, downloads and SHA pins,
+# process spawning, the cloud-consent gate (src-tauri/src/llm_commands.rs).
+src-tauri/src/**
+src-tauri/build.rs
+src-tauri/Cargo.toml
+# Tauri security config: CSP, asset scope, capabilities, updater key/endpoint,
+# macOS entitlements, the NSIS hooks that run during install.
+src-tauri/tauri*.conf.json
+src-tauri/capabilities/**
+src-tauri/Entitlements.plist
+src-tauri/Info.plist
+src-tauri/installer-hooks.nsi
+
+# Workspace crates: storage and path containment, keychain, LLM providers,
+# calendar OAuth, the MCP server, ASR / diarization sidecars, capture.
+crates/*/src/**
+crates/*/build.rs
+crates/*/Cargo.toml
+Cargo.toml
+deny.toml
+
+# Webview: renders untrusted transcripts, AI output and calendar text
+# (safeContent.ts, markdownSafe.tsx) and calls every IPC command (api.ts).
+frontend/src/**
+frontend/index.html
+frontend/vite.config.ts
+frontend/package.json
+package.json
+
+# Scripts that build shipped binaries or run in CI with a token.
+scripts/**
+
+# CI, the release pipeline, and this review's own machinery.
+.github/workflows/**
+.github/security-review/**
+.github/tauri/**
+.github/dependabot.yml
+.github/zizmor.yml
+
+# Agent instructions and config (they steer coding agents and MCP clients),
+# including the shipped MCP skill.
+CLAUDE.md
+CLAUDE.local.md
+**/CLAUDE*.md
+.claude/**
+.mcp.json
+skills/**
+
+# The download page: its installer links are what new users run (T9).
+docs/index.html
+
+# Never reviewed on their own: tests, fixtures (meeting text and audio is
+# prompt-injection material, not code), generated files, lockfiles (Dependabot
+# + npm audit + cargo-deny cover them), static assets and styles.
+# There is deliberately no blanket `!**/*.md`: an exclude always beats an
+# include in git pathspecs, so it would drop CLAUDE.md and SKILL.md above.
+# Docs (README.md, ARCHITECTURE.md, docs/**) need no exclude: paths not listed
+# above are never reviewed.
+!**/package-lock.json
+!**/tests/**
+!**/*.test.*
+!**/*.spec.*
+!**/fixtures/**
+!**/benches/**
+!src-tauri/gen/**
+!src-tauri/icons/**
+!frontend/src/assets/**
+!**/*.css
+!**/*.png
+!**/*.jpg
+!**/*.jpeg
+!**/*.webp
+!**/*.gif
+!**/*.svg
+!**/*.ico
+!**/*.icns
+!**/*.wav
+!**/*.woff
+!**/*.woff2
+!**/*.ttf
+!**/*.otf

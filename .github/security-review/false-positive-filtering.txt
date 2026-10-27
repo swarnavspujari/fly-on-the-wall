@@ -1,0 +1,32 @@
+HARD EXCLUSIONS - Automatically exclude findings matching these patterns:
+1. Files that never ship or run in CI: prose docs (README.md, ARCHITECTURE.md, DECISIONS.md, SECURITY.md, docs/ except docs/index.html, the download page), test files (tests/, *.test.ts, #[cfg(test)] modules), fixtures and bench data (src-tauri/fixtures/, docs/data/), the opt-in harnesses in src-tauri/tests/ (accuracy_harness.rs, llm_bench.rs, *_e2e.rs, anthropic_live.rs) and scripts/macos-selfsign.sh (local development only). Agent instruction files (CLAUDE*.md, .claude/**, skills/**) are NOT in this category.
+2. Same-user attackers: anything that needs code running as the user, or write access to the data folder (%APPDATA%/FlyOnTheWall and its macOS/Linux equivalents) or the OS keychain. THREAT_MODEL.md puts these out of scope. Imported folders and media are NOT in this category: they are untrusted.
+3. Public-by-design values reported as secrets: the updater minisign public key in tauri.conf.json, the app identifier, SHA-256 pins and download URLs in models.rs, the Google desktop (PKCE) OAuth client id and secret and the Microsoft client id (non-confidential installed-app credentials compiled in from CI secrets), and test or example keys in tests.
+4. Denial of service, resource exhaustion or slowness in this single-user desktop app (large files, long transcripts, regex cost, unbounded loops on the user's own data). Report only when untrusted content (speech, calendar text, an imported folder) can permanently break the app or corrupt stored data.
+5. Existing, tracked CSP allowances: 'unsafe-inline' in style-src (dangerousDisableAssetCspModification: ["style-src"]), data: and blob: in img-src / media-src / font-src / worker-src, and the asset: / asset.localhost / ipc: sources. Report CSP only when a change widens it.
+6. Prompt injection whose only effect is the wording of AI output that the user reads (a skewed summary, a wrong answer, an odd title). Report injection only when injected text can trigger an action (tool call, file write or delete, network request, remote image or link load, settings change, MCP write, speaker relabel), leak data off the machine, or become a citation that looks sourced when it isn't.
+7. Known, documented gaps: Windows installers are not Authenticode-signed yet (T9); data at rest relies on OS full-disk encryption (T13); the MCP server can return keep-local meetings to its own local client (T10 note).
+8. Local services: Ollama on 127.0.0.1 without auth, the Vite dev server on port 1420, http on loopback for keyed-provider base URLs (validate_base_url allows it by design).
+9. Logging of meeting ids, note titles, file names, model names, durations, provider names, HTTP status codes and error messages. Report logging only for API keys, OAuth tokens, signing material, or transcript / note text written outside the data folder.
+10. `unsafe` blocks in the OS capture and audio backends (WASAPI, Windows Graphics Capture, CoreAudio process tap, PulseAudio) and memory-safety claims about dependencies, unless the change makes undefined behaviour reachable from untrusted input.
+11. Timing attacks, missing rate limiting, CSRF and session handling: there is no server.
+12. CI: contents: write on the release jobs that attach assets, id-token / attestations: write on the attest job, stats.yml keeping its checkout token (it pushes with it and runs no third-party code), Dependabot PRs.
+
+SIGNAL QUALITY CRITERIA - For remaining findings, assess:
+1. Who triggers it? A meeting participant (speech), a calendar invite author, whoever sent an imported folder or media file, a web page the user opens from a link, an MCP client steered by other content, a compromised dependency or action, or a same-repo PR in CI. "The user does it to themselves" is not a finding.
+2. Does it cross a trust boundary in docs/THREAT_MODEL.md: untrusted content -> webview -> IPC -> backend, backend -> cloud, or CI -> signing keys?
+3. Does meeting data, a key or a token leave the machine without the user's explicit, labeled opt-in?
+4. Can the webview or untrusted content read, write, open or delete anything outside the data folder's allowed subfolders?
+5. Would it get past the existing controls (CSP, DOMPurify and markdownSafe, nav_guard, the settings allow-list, safe_path containment, build_provider's consent and Keep local checks, SHA-256 download pins, minisign-verified updates), or does it assume one is already broken?
+
+PRECEDENTS -
+1. The webview has no fs, shell or http plugin; capabilities/default.json grants core:default, updater:default and process:allow-restart only. Everything else goes through #[tauri::command]s in src-tauri/src. A finding must show a command that trusts a webview argument, not assume the webview has direct access.
+2. Remote images never load: sanitizeHtml swaps remote <img> for a data-blocked-img placeholder, markdownSafe.tsx does the same for react-markdown, and the CSP img-src allows no remote hosts. Links open only in the system browser through open_external_url, which accepts http, https and mailto.
+3. The main window cannot navigate off the app origin (nav_guard.rs); installLinkGuard routes every <a> click.
+4. Settings the webview may read or write are limited to the consent., capture. and ui. prefixes; anything else has a dedicated command with its own validation.
+5. Every LLM provider is built by build_provider, which refuses a cloud provider without `consent.cloud_llm.<provider>` = "true" and refuses it for keep-local notes and folders. Groq ASR is skipped for keep-local meetings.
+6. API keys and OAuth tokens live in the OS keychain (fly-secrets). Keyed providers' base URLs must be https except loopback, checked on save and on use.
+7. Paths from the webview or from imported manifests go through fly_storage::safe_path::contained (rejects .., absolute paths, `:`, trailing dots and spaces, reserved names); recursive deletes only touch recordings/<folder> via contained_recordings_dir.
+8. Model and tool downloads are pinned by URL and SHA-256 in models.rs and verified before extraction or use.
+9. Updates are minisign-verified against the pubkey in tauri.conf.json; release builds run with no caches, the frontend is built in a secret-free job, and signing steps run no npm scripts.
+10. The MCP sidecar (crates/fly-mcp) reads the local database and allows one write, set_speaker_label, which validates speaker keys and labels. It holds no keys and makes no network calls.
