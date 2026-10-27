@@ -96,6 +96,7 @@ jobs:
     permissions:
       contents: read
       actions: read # find the last run whose review completed, or one still reviewing
+      pull-requests: read # the PR's event history (base-branch changes)
     outputs:
       review: ${{ steps.gate.outputs.run }}
       since: ${{ steps.scope.outputs.since }}
@@ -145,6 +146,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          SENDER: ${{ github.event.sender.login }}
           PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

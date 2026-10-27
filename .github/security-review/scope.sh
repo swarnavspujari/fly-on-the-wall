@@ -10,13 +10,15 @@
 #   then passes (waited for, up to 4 minutes). A review that fails, is
 #   cancelled or is still running after 4 minutes does not count: this run
 #   decides as below.
-# - A PR opened by Dependabot whose every commit GitHub records as authored by
-#   dependabot[bot] and committed + signed by web-flow: never reviewed
+# - A PR opened and (this event) pushed by Dependabot, changing only
+#   manifests, lockfiles and workflow files, whose every commit GitHub records
+#   as authored by dependabot[bot] and committed + signed by web-flow: never reviewed
 #   (third-party text; Dependabot, npm audit and cargo-deny cover dependencies).
 # - Otherwise find the last commit of this PR that a review actually covered:
 #   the newest earlier green run of this workflow for this PR (created after
 #   the PR was opened) whose "Run Claude security review" step succeeded and
-#   whose workflow file matches the base branch's byte for byte. A skipped,
+#   that started after the PR's last base-branch change, with a workflow file
+#   matching the base branch's byte for byte at its head commit. A skipped,
 #   cancelled or failed review never counts, so its changes are picked up by
 #   the next run.
 #   - none: review every security-relevant file the PR changes;
@@ -25,8 +27,8 @@
 # "Security-relevant" = the base branch's paths.txt united with the PR's, so a
 # PR can add paths but cannot drop its own files out of the list.
 #
-# Env: GH_TOKEN REPO PR PR_AUTHOR PR_CREATED_AT HEAD_REF HEAD_SHA BASE_SHA
-# ACTION LABEL RUN_ID, and GITHUB_OUTPUT / GITHUB_STEP_SUMMARY (optional by hand).
+# Env: GH_TOKEN REPO PR PR_AUTHOR SENDER PR_CREATED_AT HEAD_REF HEAD_SHA
+# BASE_SHA ACTION LABEL RUN_ID, and GITHUB_OUTPUT / GITHUB_STEP_SUMMARY (optional by hand).
 # Outputs: review (true/false), since, reason, files (newline-separated).
 set -euo pipefail
 
@@ -91,14 +93,26 @@ finish() { # review(true/false) reason files
 
 since=""
 
-# A Dependabot-only PR: opened by dependabot[bot], and every commit authored by
-# Dependabot and committed and signed by GitHub (web-flow). Names and emails in
-# git are self-reported, so GitHub's own record of each commit decides: its
-# author and committer logins and a verified signature. Anyone else's commit on
-# the branch (a fix, a merge from the base) gets the PR reviewed as usual.
+# A Dependabot-only PR, all of:
+# - opened by dependabot[bot], and this event sent by dependabot[bot] (the
+#   pusher on a synchronize). A person with write access can create commits
+#   through the API that GitHub signs as web-flow with any author email, but
+#   their push is still sent by them;
+# - only dependency manifests, lockfiles and workflow files (actions bumps)
+#   changed;
+# - every commit authored by Dependabot, committed and signed by GitHub
+#   (web-flow), going by GitHub's own record of each commit, since git names
+#   and emails are self-reported.
+# Anything else (a fix pushed by a person, a merge from the base, a label
+# added by a person) gets the PR reviewed as usual.
 dependabot_only() {
   local shas sha info n=0
   [ "${PR_AUTHOR:-}" = "dependabot[bot]" ] || return 1
+  [ "${SENDER:-}" = "dependabot[bot]" ] || return 1
+  if git -c core.quotePath=false diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" -- |
+    grep -qvE '(^|/)(Cargo\.toml|Cargo\.lock|package\.json|package-lock\.json)$|^\.github/workflows/[^/]+\.ya?ml$'; then
+    return 1
+  fi
   shas=$(git rev-list "$BASE_SHA..$HEAD_SHA")
   [ -n "$shas" ] || return 1
   if git log --format='%ae %ce' "$BASE_SHA..$HEAD_SHA" -- |
@@ -128,7 +142,7 @@ fi
 # job-level concurrency group).
 head_moved() {
   local now
-  # Git, not the pulls API: the job's token has no pull-requests permission.
+  # Git, not the pulls API: the PR's current head straight from the remote.
   now=$(git ls-remote origin "refs/pull/$PR/head" | cut -f1)
   if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
     finish false "the PR has a newer commit (${now:0:7}); that push's run decides" ""
@@ -166,25 +180,37 @@ if [ "$ACTION" = "labeled" ]; then
   head_moved
 fi
 
-# A pull_request run executes the PR's own copy of the workflow file, so a PR
-# could fake a "successful review" run (say, a push whose workflow skips
-# Claude) and then revert it. A run only counts as the baseline when the
-# workflow file at its head commit is byte-identical to the base branch's;
-# otherwise the review covers the whole PR. (When the base has no workflow
-# yet, nothing counts and every run is a full review.)
+# A pull_request run executes the workflow file of GitHub's merge of the PR
+# head into its base at that time, so a PR could fake a "successful review"
+# run (a push whose workflow skips Claude, or a retarget to a branch whose
+# workflow does) and then undo it. A run only counts as the baseline when:
+# - the workflow file at its head commit is byte-identical to the current
+#   base's (so, on the same base, the merge it executed had that file too);
+# - and it started after the PR's last base-branch change. The runs API
+#   reports a PR's base as it is now, not as it was for the run, so a retarget
+#   is read from the PR's own event history instead.
+# Otherwise the review covers the whole PR. When the base has no workflow yet,
+# nothing counts.
 base_wf=$(git rev-parse -q --verify "$BASE_SHA:.github/workflows/security-review.yml" 2>/dev/null || true)
+last_retarget=$(gh api --paginate "repos/$REPO/issues/$PR/events" \
+  --jq '.[] | select(.event == "base_ref_changed") | .created_at' | sort | tail -n 1)
 
 runs=$(gh api -X GET "repos/$REPO/actions/workflows/security-review.yml/runs" \
   -f event=pull_request -f branch="$HEAD_REF" -f status=success -f per_page=30 \
-  --jq ".workflow_runs[] | select(.id != $RUN_ID) | select(.created_at >= \"$PR_CREATED_AT\") | select(any(.pull_requests[]?; .number == $PR)) | \"\(.id) \(.head_sha)\"")
+  --jq ".workflow_runs[] | select(.id != $RUN_ID) | select(.created_at >= \"$PR_CREATED_AT\") | select(any(.pull_requests[]?; .number == $PR)) | \"\(.id) \(.head_sha) \(.created_at)\"")
 checked=0
-while read -r id sha; do
+while read -r id sha created; do
   [ -n "$id" ] || continue
   checked=$((checked + 1))
   [ "$checked" -le 10 ] || break
   ran=$(gh api "repos/$REPO/actions/runs/$id/jobs" \
     --jq '[.jobs[] | select(.name == "Security review") | .steps[]? | select(.name == "Run Claude security review" and .conclusion == "success")] | length')
   [ "$ran" -gt 0 ] || continue
+  # Runs are newest first: once one predates the last retarget, all the rest do.
+  if [ -n "$last_retarget" ] && [[ ! "$created" > "$last_retarget" ]]; then
+    echo "::notice::The PR's base branch changed at $last_retarget, after every earlier review; reviewing the whole PR."
+    break
+  fi
   run_wf=$(git rev-parse -q --verify "$sha:.github/workflows/security-review.yml" 2>/dev/null || true)
   if [ -n "$base_wf" ] && [ "$run_wf" = "$base_wf" ]; then
     since=$sha
