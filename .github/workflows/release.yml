@@ -318,7 +318,7 @@ jobs:
           retention-days: 1
 
       - name: Attach to release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: false
           # Stay a prerelease (never "Latest") until latest.json is attached:
@@ -368,7 +368,7 @@ jobs:
           cat latest.json
 
       - name: Attach to release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: false
           files: latest.json
@@ -454,7 +454,7 @@ jobs:
           path: sbom
 
       - name: Attach SBOMs to release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: false
           files: sbom/*.cdx.json
