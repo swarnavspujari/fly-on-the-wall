@@ -554,6 +554,240 @@
   }
 }
 
+/* ============================================================
+   SETTINGS OVERLAY (components/SettingsModal.tsx)
+   Full-window layer over the app: header, 220px nav with search
+   and scroll-spy, a 660px content column, and a save bar for the
+   Transcripts group.
+   ============================================================ */
+.fly-settings {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  animation: fly-fade-in var(--dur) var(--ease-out);
+}
+.fly-settings-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.fly-settings-title {
+  flex: 1;
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: var(--text-title);
+  letter-spacing: var(--tracking-title);
+  color: var(--text);
+}
+.fly-settings-frame {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.fly-settings-nav {
+  flex: none;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 12px;
+  overflow-y: auto;
+  background: var(--surface);
+  border-right: 1px solid var(--line-2);
+}
+.fly-settings-search {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.fly-settings-search::placeholder {
+  color: var(--text-3);
+}
+/* The native clear button ignores theme tokens; Esc clears instead. */
+.fly-settings-search::-webkit-search-cancel-button {
+  appearance: none;
+}
+.fly-settings-search:focus,
+.fly-settings-search:focus-visible {
+  border-color: var(--primary);
+  box-shadow: var(--focus-ring-tight);
+}
+.fly-settings-navitem {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  font-weight: var(--fw-semibold);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dur) var(--ease-out),
+    color var(--dur) var(--ease-out);
+}
+.fly-settings-navitem:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.fly-settings-navitem[aria-current="true"] {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+.fly-settings-nomatch {
+  padding: 8px 10px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+.fly-settings-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.fly-settings-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.fly-settings-content {
+  max-width: 660px;
+  padding: 24px 36px 40vh;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+.fly-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Search hides non-matching sections (kept mounted, so open forms survive). */
+.fly-settings-section[hidden] {
+  display: none;
+}
+.fly-settings-h {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: 19px;
+  color: var(--text);
+}
+.fly-settings-label {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-label);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-3);
+}
+.fly-settings-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.fly-settings-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.fly-settings-tile:hover {
+  border-color: var(--line-strong);
+}
+.fly-settings-savebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 36px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  box-shadow: var(--shadow-md);
+  animation: fly-fade-up var(--dur-slow) var(--ease-out);
+}
+/* A deep-linked row briefly lights up so you can see where you landed. */
+.fly-settings-flash {
+  animation: fly-settings-flash 1.8s var(--ease-out);
+}
+@keyframes fly-settings-flash {
+  0%,
+  45% {
+    background: var(--primary-soft);
+  }
+  100% {
+    background: transparent;
+  }
+}
+@media (max-width: 719px) {
+  .fly-settings-frame {
+    flex-direction: column;
+  }
+  .fly-settings-nav {
+    width: auto;
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 10px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-2);
+  }
+  .fly-settings-search {
+    flex: none;
+    width: 170px;
+    margin: 0 8px 0 0;
+  }
+  .fly-settings-navitem {
+    flex: none;
+    white-space: nowrap;
+  }
+  .fly-settings-content {
+    padding: 20px 16px 40vh;
+  }
+  .fly-settings-tiles {
+    grid-template-columns: 1fr;
+  }
+  .fly-settings-savebar {
+    padding: 12px 16px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
