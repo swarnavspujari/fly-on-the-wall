@@ -192,9 +192,13 @@ Format per screen: **Agree**, **Push back**, then build notes. Sizes: S < ½ day
   - None of these displaces Parakeet for FOTW today.
 - **Measure first.**
   - Extend `src-tauri/tests/accuracy_harness.rs` to run alternate engines, with a Whisper-style normalizer.
-  - Corpus: the gold built-in-mic meeting (current merged WER 27.1%), two Teams meetings with VTT, and a 1:1. Never committed.
+  - **Corpus** (local-only in `fotw-design-2026-10\corpus\`, never committed). The original fixtures were deleted in October 2026, so it's rebuilt in three layers:
+    1. **AMI** (public, human transcripts + RTTM, CC-BY-4.0): 3–4 meetings, distant-mic and headset mixes. This gives *true* WER and DER on meeting audio.
+    2. **2–3 new Teams meetings** (recording + Teams `.vtt`, supplied by the user). This gives *relative* WER against Teams' own ASR and speaker DER in your real conditions.
+    3. **A 15-minute gold excerpt:** one new meeting recorded on the built-in mic with laptop speakers (the hardest echo case), with a draft transcript the user hand-corrects (~1 hour). It replaces the lost human-verified gold.
+    - Your 27 existing meetings are used read-only for RTF, hallucination loops, duplicate rate and engine agreement.
   - **Ship gates:**
-    - no WER regression on any corpus item;
+    - no WER regression on any corpus item (AMI, the Teams meetings and the gold excerpt each count);
     - speaker-attributed WER ≤ baseline;
     - ≥ 5× realtime on the Balanced CPU;
     - live first partial ≤ 2 s;
