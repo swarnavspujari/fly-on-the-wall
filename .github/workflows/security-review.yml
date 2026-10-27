@@ -123,6 +123,11 @@ jobs:
           mkdir -p "$dir"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null ||
             git fetch --quiet --no-tags --filter=blob:none origin "$BASE_SHA"
+          # Bootstrap: when the base has no scope.sh, this machinery doesn't exist
+          # on the base yet (the PR that adds it, or a PR against an older
+          # branch), so the PR's own copy is all there is. Such a PR could also
+          # edit this workflow, so the fallback gives it nothing it lacks; once
+          # the scripts are on the base, they always win.
           from=$BASE_SHA
           if ! git cat-file -e "$BASE_SHA:.github/security-review/scope.sh" 2>/dev/null; then
             from=$HEAD_SHA
@@ -226,6 +231,11 @@ jobs:
           mkdir -p "$dir"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null ||
             git fetch --quiet --no-tags --filter=blob:none origin "$BASE_SHA"
+          # Bootstrap: when the base has no scope.sh, this machinery doesn't exist
+          # on the base yet (the PR that adds it, or a PR against an older
+          # branch), so the PR's own copy is all there is. Such a PR could also
+          # edit this workflow, so the fallback gives it nothing it lacks; once
+          # the scripts are on the base, they always win.
           from=$BASE_SHA
           if ! git cat-file -e "$BASE_SHA:.github/security-review/scope.sh" 2>/dev/null; then
             from=$HEAD_SHA

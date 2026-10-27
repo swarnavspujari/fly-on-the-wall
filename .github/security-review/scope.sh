@@ -10,13 +10,15 @@
 #   then passes (waited for, up to 4 minutes). A review that fails, is
 #   cancelled or is still running after 4 minutes does not count: this run
 #   decides as below.
-# - A PR whose every commit is Dependabot's: never reviewed (third-party text;
-#   Dependabot, npm audit and cargo-deny cover dependencies).
+# - A PR opened by Dependabot whose every commit GitHub records as authored by
+#   dependabot[bot] and committed + signed by web-flow: never reviewed
+#   (third-party text; Dependabot, npm audit and cargo-deny cover dependencies).
 # - Otherwise find the last commit of this PR that a review actually covered:
 #   the newest earlier green run of this workflow for this PR (created after
-#   the PR was opened) whose "Run Claude security review" step succeeded.
-#   A skipped, cancelled or failed review never counts, so its changes are
-#   picked up by the next run.
+#   the PR was opened) whose "Run Claude security review" step succeeded and
+#   whose workflow file matches the base branch's byte for byte. A skipped,
+#   cancelled or failed review never counts, so its changes are picked up by
+#   the next run.
 #   - none: review every security-relevant file the PR changes;
 #   - found: review the security-relevant PR files whose content changed since
 #     then, or whose base side changed (a merge from the base branch).
@@ -89,11 +91,30 @@ finish() { # review(true/false) reason files
 
 since=""
 
-if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
-  authors=$(git log --format='%an' "$BASE_SHA..$HEAD_SHA" --)
-  if ! grep -qvx 'dependabot\[bot\]' <<<"$authors"; then
-    finish false "every commit is Dependabot's (dependency updates are covered by Dependabot, npm audit and cargo-deny)" ""
+# A Dependabot-only PR: opened by dependabot[bot], and every commit authored by
+# Dependabot and committed and signed by GitHub (web-flow). Names and emails in
+# git are self-reported, so GitHub's own record of each commit decides: its
+# author and committer logins and a verified signature. Anyone else's commit on
+# the branch (a fix, a merge from the base) gets the PR reviewed as usual.
+dependabot_only() {
+  local shas sha info n=0
+  [ "${PR_AUTHOR:-}" = "dependabot[bot]" ] || return 1
+  shas=$(git rev-list "$BASE_SHA..$HEAD_SHA")
+  [ -n "$shas" ] || return 1
+  if git log --format='%ae %ce' "$BASE_SHA..$HEAD_SHA" -- |
+    grep -qvx '49699333+dependabot\[bot\]@users\.noreply\.github\.com noreply@github\.com'; then
+    return 1
   fi
+  for sha in $shas; do
+    n=$((n + 1))
+    [ "$n" -le 20 ] || return 1
+    info=$(gh api "repos/$REPO/commits/$sha" \
+      --jq '"\(.author.login // "-") \(.committer.login // "-") \(.commit.verification.verified)"') || return 1
+    [ "$info" = "dependabot[bot] web-flow true" ] || return 1
+  done
+}
+if dependabot_only; then
+  finish false "every commit is Dependabot's, signed by GitHub (dependency updates are covered by Dependabot, npm audit and cargo-deny)" ""
 fi
 
 if [ "$ACTION" = "labeled" ] && [ "${LABEL:-}" = "security-review" ]; then
@@ -145,6 +166,14 @@ if [ "$ACTION" = "labeled" ]; then
   head_moved
 fi
 
+# A pull_request run executes the PR's own copy of the workflow file, so a PR
+# could fake a "successful review" run (say, a push whose workflow skips
+# Claude) and then revert it. A run only counts as the baseline when the
+# workflow file at its head commit is byte-identical to the base branch's;
+# otherwise the review covers the whole PR. (When the base has no workflow
+# yet, nothing counts and every run is a full review.)
+base_wf=$(git rev-parse -q --verify "$BASE_SHA:.github/workflows/security-review.yml" 2>/dev/null || true)
+
 runs=$(gh api -X GET "repos/$REPO/actions/workflows/security-review.yml/runs" \
   -f event=pull_request -f branch="$HEAD_REF" -f status=success -f per_page=30 \
   --jq ".workflow_runs[] | select(.id != $RUN_ID) | select(.created_at >= \"$PR_CREATED_AT\") | select(any(.pull_requests[]?; .number == $PR)) | \"\(.id) \(.head_sha)\"")
@@ -155,10 +184,13 @@ while read -r id sha; do
   [ "$checked" -le 10 ] || break
   ran=$(gh api "repos/$REPO/actions/runs/$id/jobs" \
     --jq '[.jobs[] | select(.name == "Security review") | .steps[]? | select(.name == "Run Claude security review" and .conclusion == "success")] | length')
-  if [ "$ran" -gt 0 ]; then
+  [ "$ran" -gt 0 ] || continue
+  run_wf=$(git rev-parse -q --verify "$sha:.github/workflows/security-review.yml" 2>/dev/null || true)
+  if [ -n "$base_wf" ] && [ "$run_wf" = "$base_wf" ]; then
     since=$sha
     break
   fi
+  echo "::notice::Run $id reviewed ${sha:0:7} with a workflow file that differs from the base branch's; it doesn't count as a baseline."
 done <<<"$runs"
 
 if [ -n "$since" ] && ! git cat-file -e "$since^{commit}" 2>/dev/null; then

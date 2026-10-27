@@ -5,6 +5,8 @@ Fly on the Wall is a local-first desktop meeting notetaker (Tauri 2). Assets, tr
 - Anything that loads a remote image, media, font, iframe or script: removing or bypassing the DOMPurify hook that turns remote <img> into a `data-blocked-img` placeholder, isSafeMediaSrc accepting http(s), or a new remote URL in the CSP.
 - A link opener outside installLinkGuard / openExternal / the open_external_url command, or one that accepts schemes other than http, https and mailto (file:, javascript:, custom protocol handlers, UNC paths).
 
+- frontend/src/devMock.ts stubs every IPC command for browser QA. main.tsx imports it unconditionally and its only guard is inside the file (import.meta.env.DEV and no __TAURI_INTERNALS__): weakening or moving that guard, or changing how main.tsx loads it, so the mock can run in a shipped build.
+
 **Untrusted content reaching the LLM or tools (T1, T10):**
 - Meeting data (transcripts, notes, calendar text, imported files, MCP results) put into a prompt outside the XML fencing, or without the statement that it is data and never instructions.
 - Model output used, without validation, to pick a file path, URL, shell or process argument, IPC command, settings key, speaker label, tool call or citation. Citations are segment ids that the app validates; a model-supplied id, quote or number trusted as-is is a finding.
@@ -41,4 +43,6 @@ Fly on the Wall is a local-first desktop meeting notetaker (Tauri 2). Assets, tr
 - .github/workflows: a secret (TAURI_SIGNING_PRIVATE_KEY*, APPLE_*, FOTW_*_CLIENT_*, STATS_TOKEN) reaching a job or step that installs or runs the frontend dependency tree, runs npm scripts, restores a cache, or runs PR-controlled code; pull_request_target or workflow_run checking out PR code; an action not pinned to a full commit SHA; persist-credentials left on where the token isn't needed; permissions widened; the skip-before-build overlay (.github/tauri/skip-before-build.conf.json) dropped from the signing build; a release marked Latest before latest.json is attached.
 - src-tauri/installer-hooks.nsi: new commands that run during install or uninstall.
 - New dependencies from git or path sources, with install scripts, or outside deny.toml's allowed sources; scripts/** that build shipped binaries fetching unpinned inputs.
+- docs/index.html (the download page): installer or update links pointing anywhere but this repo's GitHub releases, or over http.
+- Agent instructions and config (CLAUDE*.md, .claude/**, .mcp.json, skills/** incl. the shipped MCP skill): text that tells a coding agent or MCP client to run commands, fetch or send data to new hosts, skip checks or reviews, or treat meeting content as instructions.
 - This review's own machinery (.github/workflows/security-review.yml, .github/security-review/**): a narrower scope, new exclusions, wider tool or token access, or scripts or rules no longer taken from the base branch.

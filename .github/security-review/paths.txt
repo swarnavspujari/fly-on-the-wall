@@ -40,22 +40,32 @@ package.json
 # Scripts that build shipped binaries or run in CI with a token.
 scripts/**
 
-# CI, the release pipeline, agent config, the MCP skill, and this review's
-# own machinery.
+# CI, the release pipeline, and this review's own machinery.
 .github/workflows/**
 .github/security-review/**
 .github/tauri/**
 .github/dependabot.yml
 .github/zizmor.yml
+
+# Agent instructions and config (they steer coding agents and MCP clients),
+# including the shipped MCP skill.
+CLAUDE.md
+CLAUDE.local.md
+**/CLAUDE*.md
 .claude/**
 .mcp.json
 skills/**
 
-# Never reviewed on their own: docs, tests, fixtures (meeting text and audio
-# is prompt-injection material, not code), generated files, lockfiles (Dependabot
+# The download page: its installer links are what new users run (T9).
+docs/index.html
+
+# Never reviewed on their own: tests, fixtures (meeting text and audio is
+# prompt-injection material, not code), generated files, lockfiles (Dependabot
 # + npm audit + cargo-deny cover them), static assets and styles.
-# Paths not listed above are not reviewed either.
-!**/*.md
+# There is deliberately no blanket `!**/*.md`: an exclude always beats an
+# include in git pathspecs, so it would drop CLAUDE.md and SKILL.md above.
+# Docs (README.md, ARCHITECTURE.md, docs/**) need no exclude: paths not listed
+# above are never reviewed.
 !**/package-lock.json
 !**/tests/**
 !**/*.test.*
@@ -65,7 +75,6 @@ skills/**
 !src-tauri/gen/**
 !src-tauri/icons/**
 !frontend/src/assets/**
-!frontend/src/devMock.ts
 !**/*.css
 !**/*.png
 !**/*.jpg
