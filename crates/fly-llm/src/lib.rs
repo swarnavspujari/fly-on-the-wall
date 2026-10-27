@@ -1,14 +1,32 @@
 //! fly-llm: the `LLMProvider` trait and its backends.
 //!
-//! Backends (landing in M4): NVIDIA NIM, OpenAI, Anthropic Claude, and local
-//! Ollama — all bring-your-own-key/base-URL. `is_local()` drives the UI's
-//! "this stays on your machine" vs "this calls out" indicator.
+//! Backends: NVIDIA NIM, OpenAI, Anthropic Claude, and local Ollama — all
+//! bring-your-own-key/base-URL. `is_local()` drives the UI's "this stays on
+//! your machine" vs "this calls out" indicator.
+//!
+//! Two request surfaces share one body builder per provider:
+//! * `chat(ChatRequest) -> String` — the original text-only call every
+//!   current feature uses. Its request bodies are frozen by a golden test.
+//! * `converse(ConverseRequest) -> ChatResponse` / `chat_stream()` — content
+//!   blocks, tools, stop reasons and usage, for the agentic Ask harness.
+//!
+//! Providers are only ever constructed by the app's `build_provider`, which
+//! enforces cloud consent and Keep local; nothing here changes that.
+
+use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
+pub mod conversation;
 pub mod mock;
 pub mod openai_compat;
+pub mod repair;
+pub mod stream;
+pub mod tool_loop;
+
+#[cfg(test)]
+mod golden;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
@@ -24,6 +42,15 @@ pub enum LlmError {
     /// person-actionable message (verbatim shown in the UI).
     #[error("{0}")]
     Unavailable(String),
+    /// The request can't be expressed for this provider (e.g. `format` and
+    /// `tools` together on Ollama, too many strict tools on Anthropic) — a
+    /// caller bug, refused before anything is sent.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+    /// The model broke the tool-calling protocol and the one repair attempt
+    /// failed too (see `tool_loop`).
+    #[error("the model's tool call couldn't be understood: {0}")]
+    ToolProtocol(String),
 }
 
 /// Turn a transport failure into something a person can act on. A local
@@ -104,6 +131,9 @@ pub enum ThinkingMode {
     Default,
     /// Turn extended thinking off — full token budget goes to the answer.
     Disabled,
+    /// Ask for thinking where the provider lets a request opt in (Ollama
+    /// `think: true`). Elsewhere the same as `Default`.
+    Enabled,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -136,6 +166,15 @@ pub struct ProviderSettings {
     pub model: String,
 }
 
+pub use conversation::{
+    Capabilities, ChatResponse, ContentBlock, ConverseRequest, Message, StopReason, StreamEvent,
+    ToolChoice, ToolSpec, Usage,
+};
+
+/// A streamed reply: events in order, ending with `StreamEvent::Done` (or an
+/// error item).
+pub type ChatStream = Pin<Box<dyn futures_util::Stream<Item = Result<StreamEvent>> + Send>>;
+
 // See fly-diarize: async-trait output trips Rust 1.99 clippy::double_must_use.
 #[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
@@ -151,4 +190,36 @@ pub trait LLMProvider: Send + Sync {
     async fn chat(&self, req: ChatRequest) -> Result<String>;
     /// Cheap round-trip used by the Settings "test connection" button.
     async fn test_connection(&self) -> Result<()>;
+
+    /// What this provider/model supports, from a static table (no I/O).
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
+
+    /// Ask the server what the model supports (Ollama `/api/show`); falls
+    /// back to [`LLMProvider::capabilities`] where there's nothing to ask.
+    async fn probe_capabilities(&self) -> Result<Capabilities> {
+        Ok(self.capabilities())
+    }
+
+    /// Block-structured chat with optional tools. The default serves
+    /// text-only requests through `chat()` and refuses anything else, so a
+    /// provider without tool support fails loudly instead of ignoring tools.
+    async fn converse(&self, req: ConverseRequest) -> Result<ChatResponse> {
+        if req.has_tools() || req.messages.iter().any(|m| !m.is_plain_text()) {
+            return Err(LlmError::InvalidRequest(format!(
+                "{} doesn't support tools or content blocks",
+                self.id()
+            )));
+        }
+        let text = self.chat(conversation::to_chat_request(req)).await?;
+        Ok(ChatResponse::text_reply(text))
+    }
+
+    /// Streaming `converse()`. The default runs `converse()` and replays the
+    /// whole reply as events (no incremental first token).
+    async fn chat_stream(&self, req: ConverseRequest) -> Result<ChatStream> {
+        let resp = self.converse(req).await?;
+        Ok(stream::replay(resp))
+    }
 }
