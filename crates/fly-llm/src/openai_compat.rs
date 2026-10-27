@@ -201,7 +201,7 @@ impl OpenAiCompatProvider {
 /// margin absorbs tokenizer variance), add the response budget, and clamp:
 /// floor 4096 keeps short chats on a known-good size, cap 32768 bounds the
 /// KV-cache allocation on small machines.
-fn estimate_num_ctx(req: &ChatRequest) -> u32 {
+pub(crate) fn estimate_num_ctx(req: &ChatRequest) -> u32 {
     let prompt_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
     let prompt_tokens = (prompt_chars / 3) as u32;
     let response = req.max_tokens.unwrap_or(4096);
@@ -210,7 +210,7 @@ fn estimate_num_ctx(req: &ChatRequest) -> u32 {
 
 /// Request body for the OpenAI-compatible `/chat/completions` endpoint
 /// (OpenAI, NIM). `thinking` has no representation here and is ignored.
-fn openai_chat_body(model: &str, req: &ChatRequest) -> serde_json::Value {
+pub(crate) fn openai_chat_body(model: &str, req: &ChatRequest) -> serde_json::Value {
     let messages: Vec<_> = req
         .messages
         .iter()
@@ -235,7 +235,7 @@ fn openai_chat_body(model: &str, req: &ChatRequest) -> serde_json::Value {
 /// `include_think` adds `"think": false` (we never ask for MORE thinking —
 /// `ThinkingMode::Default` leaves the model's own default in place);
 /// `req.format` passes a JSON schema for grammar-constrained decoding.
-fn native_chat_body(
+pub(crate) fn native_chat_body(
     model: &str,
     req: &ChatRequest,
     include_think: bool,

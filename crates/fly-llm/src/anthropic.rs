@@ -116,7 +116,7 @@ impl AnthropicProvider {
     /// Build the `/v1/messages` request body. Split out from `chat` so the
     /// parameter shaping (system out-of-band, optional temperature, thinking
     /// off) is unit-testable without a network round-trip.
-    fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
+    pub(crate) fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
         // Anthropic takes the system prompt out-of-band.
         let system: String = req
             .messages

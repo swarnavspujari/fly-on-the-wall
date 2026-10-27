@@ -10,6 +10,9 @@ pub mod anthropic;
 pub mod mock;
 pub mod openai_compat;
 
+#[cfg(test)]
+mod golden;
+
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     #[error("provider is not configured: {0}")]
