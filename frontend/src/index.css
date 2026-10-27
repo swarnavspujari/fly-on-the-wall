@@ -123,6 +123,7 @@
   --line: rgba(20, 18, 28, 0.12);
   --line-2: rgba(20, 18, 28, 0.06);
   --line-strong: rgba(20, 18, 28, 0.26);
+  --switch-knob: #ffffff; /* Switch thumb, on and off */
 
   --rec: #d6342e; /* live recording (also error fill) */
   --on-rec: #ffffff;
@@ -274,6 +275,7 @@
   --line: rgba(242, 242, 232, 0.14);
   --line-2: rgba(242, 242, 232, 0.07);
   --line-strong: rgba(242, 242, 232, 0.3);
+  --switch-knob: #ffffff;
 
   --rec: #d6342e;
   --on-rec: #ffffff;
