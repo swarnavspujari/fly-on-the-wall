@@ -21,8 +21,8 @@ jobs:
       # Credentials stay persisted ON PURPOSE: the final step's plain
       # `git push` authenticates with the checkout-stored GITHUB_TOKEN. No
       # third-party dependencies run in this job (collect-stats.mjs uses only
-      # node: built-ins).
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # node: built-ins) and nothing is uploaded as an artifact.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 # zizmor: ignore[artipacked]
       - name: Collect release + traffic stats
         env:
           # STATS_TOKEN (fine-grained PAT, Administration: read) unlocks the

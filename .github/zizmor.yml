@@ -1,0 +1,14 @@
+# zizmor (GitHub Actions security lint), run by the `workflows` job in
+# .github/workflows/ci.yml. Per-line exceptions live next to the line as
+# `# zizmor: ignore[<audit>]` comments with their reason.
+rules:
+  # Informational: suggests `gh release` instead of softprops/action-gh-release.
+  # The release flow relies on that action's prerelease / make_latest handling
+  # (see release.yml); swapping it is a separate, tested change.
+  superfluous-actions:
+    disable: true
+
+  # Matches .github/dependabot.yml (cooldown default-days: 5).
+  dependabot-cooldown:
+    config:
+      days: 5
