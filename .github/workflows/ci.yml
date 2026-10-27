@@ -311,10 +311,13 @@ jobs:
           "$RUNNER_TEMP/actionlint" -color
 
       # Prebuilt binary, checksum-verified by install-action's manifest.
+      # fallback: none, so a version missing from the manifest fails instead
+      # of falling back to an unchecked cargo-binstall download.
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         if: ${{ !cancelled() }}
         with:
           tool: zizmor@1.31.1
+          fallback: none
 
       - name: zizmor
         if: ${{ !cancelled() }}
