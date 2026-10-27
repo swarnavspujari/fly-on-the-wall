@@ -67,7 +67,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload tarball as run artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: whisper-bin-macos-universal2
           path: dist/whisper-bin-macos-universal2-*.tar.bz2
@@ -155,7 +155,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload zip as run artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: whisper-bin-x64-vulkan
           path: dist/whisper-bin-x64-vulkan-*.zip
