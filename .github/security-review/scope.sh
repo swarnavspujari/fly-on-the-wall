@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# Decide whether this pull request event needs a Claude security review.
+# Run by the scope job of .github/workflows/security-review.yml, always from
+# the BASE branch's copy (the job copies it out of git before running it), so
+# a PR cannot change the rules that decide whether it gets reviewed.
+#
+# - Label `security-review` just added: review the whole PR.
+# - Any other label: stand down when the PR already has a newer commit (that
+#   push's run decides), or when a review of this same commit is running and
+#   then passes (waited for, up to 4 minutes). A review that fails, is
+#   cancelled or is still running after 4 minutes does not count: this run
+#   decides as below.
+# - A PR whose every commit is Dependabot's: never reviewed (third-party text;
+#   Dependabot, npm audit and cargo-deny cover dependencies).
+# - Otherwise find the last commit of this PR that a review actually covered:
+#   the newest earlier green run of this workflow for this PR (created after
+#   the PR was opened) whose "Run Claude security review" step succeeded.
+#   A skipped, cancelled or failed review never counts, so its changes are
+#   picked up by the next run.
+#   - none: review every security-relevant file the PR changes;
+#   - found: review the security-relevant PR files whose content changed since
+#     then, or whose base side changed (a merge from the base branch).
+# "Security-relevant" = the base branch's paths.txt united with the PR's, so a
+# PR can add paths but cannot drop its own files out of the list.
+#
+# Env: GH_TOKEN REPO PR PR_AUTHOR PR_CREATED_AT HEAD_REF HEAD_SHA BASE_SHA
+# ACTION LABEL RUN_ID, and GITHUB_OUTPUT / GITHUB_STEP_SUMMARY (optional by hand).
+# Outputs: review (true/false), since, reason, files (newline-separated).
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+out=${GITHUB_OUTPUT:-/dev/stdout}
+summary=${GITHUB_STEP_SUMMARY:-/dev/null}
+
+if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+  git fetch --quiet --no-tags --filter=blob:none origin "$BASE_SHA"
+fi
+
+# Both copies of the list, read from git (not the working tree).
+lists=()
+for rev in "$BASE_SHA" "$HEAD_SHA"; do
+  if git cat-file -e "$rev:.github/security-review/paths.txt" 2>/dev/null; then
+    f=$(mktemp)
+    git show "$rev:.github/security-review/paths.txt" >"$f"
+    lists+=("$f")
+  fi
+done
+if [ "${#lists[@]}" -eq 0 ]; then
+  echo "::error::Neither the base branch nor the PR has .github/security-review/paths.txt."
+  exit 1
+fi
+
+# Security-relevant files changed between the given revisions (all lists,
+# deduplicated).
+files_for() {
+  local l
+  for l in "${lists[@]}"; do
+    PATHS_FILE="$l" bash "$here/relevant-files.sh" "$@"
+  done | sed '/^$/d' | sort -u
+}
+
+finish() { # review(true/false) reason files
+  local count delim
+  count=$(printf '%s' "$3" | grep -c . || true)
+  delim="EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  {
+    echo "review=$1"
+    echo "since=$since"
+    echo "reason=$2"
+    echo "files<<$delim"
+    printf '%s\n' "$3"
+    echo "$delim"
+  } >>"$out"
+  if [ "$1" = true ]; then
+    echo "::notice::Security review needed ($2): $count file(s)."
+    {
+      echo "### Security review: $count file(s) to review"
+      echo "Scope: $2."
+      echo
+      # shellcheck disable=SC2016 # literal backticks: a Markdown list
+      printf '%s\n' "$3" | sed 's/.*/- `&`/'
+    } >>"$summary"
+  else
+    echo "::notice::No security review needed: $2."
+    printf '### Security review: skipped\n\n%s.\n' "$2" >>"$summary"
+  fi
+  exit 0
+}
+
+since=""
+
+if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
+  authors=$(git log --format='%an' "$BASE_SHA..$HEAD_SHA" --)
+  if ! grep -qvx 'dependabot\[bot\]' <<<"$authors"; then
+    finish false "every commit is Dependabot's (dependency updates are covered by Dependabot, npm audit and cargo-deny)" ""
+  fi
+fi
+
+if [ "$ACTION" = "labeled" ] && [ "${LABEL:-}" = "security-review" ]; then
+  all=$(git -c core.quotePath=false diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" --)
+  if [ -n "$all" ]; then finish true "label security-review: the whole PR" "$all"; fi
+  finish false "label security-review, but the PR changes no file" ""
+fi
+
+# Any other label (see the header). A label run of an older commit must not
+# review it: its review job would cancel the newer push's review (the
+# job-level concurrency group).
+head_moved() {
+  local now
+  # Git, not the pulls API: the job's token has no pull-requests permission.
+  now=$(git ls-remote origin "refs/pull/$PR/head" | cut -f1)
+  if [ -n "$now" ] && [ "$now" != "$HEAD_SHA" ]; then
+    finish false "the PR has a newer commit (${now:0:7}); that push's run decides" ""
+  fi
+}
+review_job() { # run id -> "status conclusion" of its review job
+  gh api "repos/$REPO/actions/runs/$1/jobs" \
+    --jq '[.jobs[] | select(.name == "Security review")][0] | "\(.status) \(.conclusion)"'
+}
+if [ "$ACTION" = "labeled" ]; then
+  head_moved
+  # Only a review job that is already executing counts, not one still waiting
+  # for its scope job, so two label events at once can't both stand down.
+  busy=$(gh api -X GET "repos/$REPO/actions/workflows/security-review.yml/runs" \
+    -f event=pull_request -f head_sha="$HEAD_SHA" -f per_page=20 \
+    --jq ".workflow_runs[] | select(.id != $RUN_ID and .status != \"completed\") | select(any(.pull_requests[]?; .number == $PR)) | .id")
+  for id in $busy; do
+    state=$(review_job "$id")
+    # Its review may already be done while the run is still wrapping up.
+    if [ "$state" = "completed success" ]; then
+      finish false "run $id reviewed this commit while the label was added" ""
+    fi
+    [ "${state%% *}" = in_progress ] || continue
+    echo "::notice::Run $id is reviewing this commit; waiting for it (up to 4 minutes)."
+    for _ in $(seq 16); do
+      sleep 15
+      state=$(review_job "$id")
+      [ "${state%% *}" = completed ] && break
+    done
+    if [ "$state" = "completed success" ]; then
+      finish false "run $id reviewed this commit while the label was added" ""
+    fi
+    echo "::notice::Run $id's review is '$state'; deciding as usual."
+  done
+  head_moved
+fi
+
+runs=$(gh api -X GET "repos/$REPO/actions/workflows/security-review.yml/runs" \
+  -f event=pull_request -f branch="$HEAD_REF" -f status=success -f per_page=30 \
+  --jq ".workflow_runs[] | select(.id != $RUN_ID) | select(.created_at >= \"$PR_CREATED_AT\") | select(any(.pull_requests[]?; .number == $PR)) | \"\(.id) \(.head_sha)\"")
+checked=0
+while read -r id sha; do
+  [ -n "$id" ] || continue
+  checked=$((checked + 1))
+  [ "$checked" -le 10 ] || break
+  ran=$(gh api "repos/$REPO/actions/runs/$id/jobs" \
+    --jq '[.jobs[] | select(.name == "Security review") | .steps[]? | select(.name == "Run Claude security review" and .conclusion == "success")] | length')
+  if [ "$ran" -gt 0 ]; then
+    since=$sha
+    break
+  fi
+done <<<"$runs"
+
+if [ -n "$since" ] && ! git cat-file -e "$since^{commit}" 2>/dev/null; then
+  echo "::notice::The last reviewed commit $since is no longer in the history; reviewing the whole PR."
+  since=""
+fi
+
+pr_files=$(files_for "$BASE_SHA...$HEAD_SHA")
+
+if [ -z "$since" ]; then
+  if [ -n "$pr_files" ]; then finish true "first review: every security-relevant file in the PR" "$pr_files"; fi
+  finish false "first look: no file listed in .github/security-review/paths.txt changed" ""
+fi
+
+fork_then=$(git merge-base "$BASE_SHA" "$since" || true)
+fork_now=$(git merge-base "$BASE_SHA" "$HEAD_SHA" || true)
+if [ -z "$fork_then" ] || [ -z "$fork_now" ]; then
+  since=""
+  if [ -n "$pr_files" ]; then finish true "no merge base with the base branch: every security-relevant file in the PR" "$pr_files"; fi
+  finish false "no file listed in .github/security-review/paths.txt changed" ""
+fi
+
+changed=$(files_for "$since" "$HEAD_SHA")
+base_moved=""
+if [ "$fork_then" != "$fork_now" ]; then
+  base_moved=$(files_for "$fork_then" "$fork_now")
+fi
+files=$(comm -12 <(printf '%s\n' "$pr_files" | sed '/^$/d' | sort -u) \
+  <(printf '%s\n%s\n' "$changed" "$base_moved" | sed '/^$/d' | sort -u))
+
+if [ -n "$files" ]; then finish true "changes since the last completed review (${since:0:7})" "$files"; fi
+finish false "nothing security-relevant changed since the last completed review (${since:0:7})" ""
