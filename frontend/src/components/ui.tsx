@@ -255,7 +255,7 @@ const CSS = `
 .fly-notice-main{flex:1;min-width:0}
 .fly-notice-title{margin:0;font-family:var(--font-sans);font-size:13.5px;font-weight:var(--fw-semibold);line-height:1.4}
 .fly-notice-body{margin:3px 0 0;font-size:12.5px;line-height:1.5;color:var(--text-2)}
-.fly-notice-steps{margin:8px 0 0;padding-left:18px;font-size:12.5px;line-height:1.5;color:var(--text)}
+.fly-notice-steps{margin:8px 0 0;padding-left:18px;list-style:decimal;font-size:12.5px;line-height:1.5;color:var(--text)}
 .fly-notice-details{margin-top:8px;font-size:12px;color:var(--text-3)}
 .fly-notice-details summary{cursor:pointer;font-weight:var(--fw-semibold);color:var(--text-2)}
 .fly-notice-details-body{margin-top:6px;font-family:var(--font-mono);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
