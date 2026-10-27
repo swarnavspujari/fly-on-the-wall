@@ -27,6 +27,8 @@ import {
   SettingsRow,
   Switch,
   useEscapeLayer,
+  useDialogFocus,
+  EscapeLayerScope,
 } from "./ui";
 import { useTheme } from "../theme";
 import PrivacySection from "./PrivacySection";
@@ -381,16 +383,13 @@ export default function SettingsModal({
     if (asrDirty) setConfirmClose(true);
     else onClose();
   };
-  useEscapeLayer(requestClose);
+  const escDepth = useEscapeLayer(requestClose);
 
-  // Focus the search on open (unless deep-linked) and give focus back to
-  // whatever had it when Settings closes, so you land where you were.
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    if (!initialFocus) searchRef.current?.focus();
-    return () => previous?.focus?.();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount/unmount only
-  }, []);
+  // Focus moves in on open (the search box, unless deep-linked), Tab stays
+  // inside, and focus goes back to whatever had it when Settings closes, so
+  // you land where you were.
+  const overlayRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(overlayRef, true, { trap: true });
 
   // Deep link: once settings have loaded (the target row is rendered),
   // bring it into view a single time — not on every later refresh.
@@ -1226,1049 +1225,1065 @@ export default function SettingsModal({
 
   return (
     <div
+      ref={overlayRef}
       className="fly-settings"
       role="dialog"
       aria-modal="true"
       aria-labelledby="fly-settings-title"
     >
-      <header className="fly-settings-head">
-        <Button
-          variant="ghost"
-          size="sm"
-          startIcon={<ArrowLeft size={15} strokeWidth={1.75} />}
-          onClick={requestClose}
-        >
-          Back
-        </Button>
-        <h1 id="fly-settings-title" className="fly-settings-title">
-          Settings
-        </h1>
-        <Button variant="primary" size="sm" onClick={requestClose}>
-          Done
-        </Button>
-      </header>
+      {/* Layers opened from inside Settings (the discard prompt, future
+          popovers) sit above it in the Esc stack. */}
+      <EscapeLayerScope depth={escDepth}>
+        <header className="fly-settings-head">
+          <Button
+            variant="ghost"
+            size="sm"
+            startIcon={<ArrowLeft size={15} strokeWidth={1.75} />}
+            onClick={requestClose}
+          >
+            Back
+          </Button>
+          <h1 id="fly-settings-title" className="fly-settings-title">
+            Settings
+          </h1>
+          <Button variant="primary" size="sm" onClick={requestClose}>
+            Done
+          </Button>
+        </header>
 
-      <div className="fly-settings-frame">
-        <nav className="fly-settings-nav" aria-label="Settings sections">
-          <input
-            ref={searchRef}
-            type="search"
-            className="fly-settings-search"
-            placeholder="Search settings"
-            aria-label="Search settings"
-            value={query}
-            onChange={(e) => onQuery(e.target.value)}
-            onKeyDown={(e) => {
-              // First Esc clears the search; the next one closes Settings.
-              if (e.key === "Escape" && query) {
-                e.preventDefault();
-                onQuery("");
-              }
-            }}
-          />
-          {visible.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              className="fly-settings-navitem"
-              aria-current={active === s.id ? "true" : undefined}
-              onClick={() => goSection(s.id)}
-            >
-              {s.title}
-            </button>
-          ))}
-          {visible.length === 0 && <span className="fly-settings-nomatch">No settings match.</span>}
-        </nav>
+        <div className="fly-settings-frame">
+          <nav className="fly-settings-nav" aria-label="Settings sections">
+            <input
+              ref={searchRef}
+              data-autofocus={initialFocus ? undefined : ""}
+              type="search"
+              className="fly-settings-search"
+              placeholder="Search settings"
+              aria-label="Search settings"
+              value={query}
+              onChange={(e) => onQuery(e.target.value)}
+              onKeyDown={(e) => {
+                // First Esc clears the search; the next one closes Settings.
+                if (e.key === "Escape" && query) {
+                  e.preventDefault();
+                  onQuery("");
+                }
+              }}
+            />
+            {visible.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                className="fly-settings-navitem"
+                aria-current={active === s.id ? "true" : undefined}
+                onClick={() => goSection(s.id)}
+              >
+                {s.title}
+              </button>
+            ))}
+            {visible.length === 0 && (
+              <span className="fly-settings-nomatch">No settings match.</span>
+            )}
+          </nav>
 
-        <div className="fly-settings-main">
-          <div ref={scrollRef} className="fly-settings-scroll" onScroll={onScroll}>
-            <div className="fly-settings-content">
-              <div className="fly-settings-section">
-                <h2 className="fly-settings-label">Where your data goes</h2>
-                <div className="fly-settings-tiles">
-                  {tiles.map((t) => (
-                    <button
-                      key={t.section}
-                      type="button"
-                      className="fly-settings-tile"
-                      onClick={() => {
-                        if (!show(t.section)) {
-                          setQuery("");
-                          window.requestAnimationFrame(() => goSection(t.section));
-                        } else goSection(t.section);
-                      }}
-                    >
-                      <span style={{ fontSize: 12, color: "var(--text-2)" }}>{t.label}</span>
-                      <span
-                        className="flex items-center"
-                        style={{
-                          gap: 6,
-                          fontSize: 13,
-                          fontWeight: 600,
-                          color: t.cloud ? "var(--warning-text)" : "var(--success-text)",
+          <div className="fly-settings-main">
+            <div ref={scrollRef} className="fly-settings-scroll" onScroll={onScroll}>
+              <div className="fly-settings-content">
+                <div className="fly-settings-section">
+                  <h2 className="fly-settings-label">Where your data goes</h2>
+                  <div className="fly-settings-tiles">
+                    {tiles.map((t) => (
+                      <button
+                        key={t.section}
+                        type="button"
+                        className="fly-settings-tile"
+                        onClick={() => {
+                          if (!show(t.section)) {
+                            setQuery("");
+                            window.requestAnimationFrame(() => goSection(t.section));
+                          } else goSection(t.section);
                         }}
                       >
+                        <span style={{ fontSize: 12, color: "var(--text-2)" }}>{t.label}</span>
                         <span
-                          aria-hidden="true"
+                          className="flex items-center"
                           style={{
-                            width: 7,
-                            height: 7,
-                            borderRadius: 999,
-                            background: "currentColor",
-                            flex: "none",
+                            gap: 6,
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: t.cloud ? "var(--warning-text)" : "var(--success-text)",
                           }}
-                        />
-                        {t.where}
-                      </span>
-                      {t.note && (
-                        <span style={{ fontSize: 11.5, lineHeight: 1.4, color: "var(--text-3)" }}>
-                          {t.note}
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {visible.length === 0 && (
-                <p className="text-text-3" style={{ margin: 0, fontSize: 13 }}>
-                  No settings match.
-                </p>
-              )}
-
-              <Section id="recording" hidden={!show("recording")} title="Recording">
-                <SettingsGroup>
-                  <SettingsRow
-                    title="Microphone"
-                    helper="Records your side of the call."
-                    control={
-                      <Select
-                        aria-label="Microphone"
-                        style={{ width: 240, maxWidth: "100%" }}
-                        value={micId}
-                        onChange={(e) => {
-                          setMicId(e.target.value);
-                          void api.setAppSetting("capture.mic_device_id", e.target.value);
-                        }}
-                      >
-                        <option value="">System default</option>
-                        {mics.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.name}
-                            {m.is_default ? " (default)" : ""}
-                          </option>
-                        ))}
-                      </Select>
-                    }
-                  />
-                  <SettingsRow
-                    title="Transcribe when I stop"
-                    helper={autoMsg ?? "Starts the transcript as soon as a recording stops."}
-                    helperTone={autoMsg ? "error" : "default"}
-                    control={
-                      <Switch
-                        label="Transcribe when I stop"
-                        checked={autoTranscribe}
-                        disabled={!settings || asrBusy}
-                        onChange={(v) => void setAutoNow(v)}
-                      />
-                    }
-                  />
-                </SettingsGroup>
-              </Section>
-
-              <Section id="transcripts" hidden={!show("transcripts")} title="Transcripts">
-                {!settings || !draft ? (
-                  <SettingsGroup>
-                    <SettingsRow title="Loading…" />
-                  </SettingsGroup>
-                ) : (
-                  <SettingsGroup
-                    expanded={!!advOpen.transcripts}
-                    onExpandedChange={(v) => setAdv("transcripts", v)}
-                    advanced={
-                      <>
-                        <SettingsRow
-                          title="This computer"
-                          helperTone="mono"
-                          helper={
-                            `${settings.hw.cpu_cores} cores · ${settings.hw.ram_gb} GB RAM · ` +
-                            (settings.hw.gpu_name
-                              ? `${settings.hw.gpu_name} (${Math.round((settings.hw.vram_mb ?? 0) / 1024)} GB VRAM)`
-                              : "no NVIDIA GPU") +
-                            ` · recommended quality: ${TIER_NAMES[settings.hw.recommended_tier] ?? settings.hw.recommended_tier}`
-                          }
-                        />
-                        {(() => {
-                          const eff = effectiveModel(draft, settings.models);
-                          return (
-                            <SettingsRow
-                              title="Model in use"
-                              helperTone="mono"
-                              helper={
-                                eff.model
-                                  ? `${eff.model.display} · ${gb(eff.model.bytes)}${eff.model.installed ? "" : " · downloads on first use"}`
-                                  : eff.id
-                              }
-                            />
-                          );
-                        })()}
-                        <SettingsRow
-                          title="Model"
-                          helper="Auto follows Quality. A specific model overrides Quality and Maximum quality."
-                          control={
-                            <Select
-                              aria-label="Transcription model"
-                              style={{ width: 230, maxWidth: "100%" }}
-                              value={draft.modelId}
-                              onChange={(e) => patchDraft({ modelId: e.target.value })}
-                            >
-                              <option value="">Auto (follows Quality)</option>
-                              {asrModels.map((m) => (
-                                <option key={m.id} value={m.id}>
-                                  {m.display}
-                                </option>
-                              ))}
-                            </Select>
-                          }
-                        />
-                        <SettingsRow
-                          title="Maximum quality"
-                          helper="Full large-v3. Slower, and about a 1 GB download."
-                          control={
-                            <Switch
-                              label="Maximum quality"
-                              checked={draft.maxQuality}
-                              onChange={(v) => patchDraft({ maxQuality: v })}
-                            />
-                          }
-                        />
-                        <SettingsRow
-                          title="Use the graphics card"
-                          helper={gpuHelper}
-                          helperTone={gpuMsg ? "error" : "default"}
-                          control={
-                            <>
-                              {showGpuTestAgain && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  disabled={asrBusy}
-                                  onClick={() => void testGpuAgain()}
-                                >
-                                  {gpuBusy ? "Resetting…" : "Test again"}
-                                </Button>
-                              )}
-                              <Switch
-                                label="Use the graphics card"
-                                checked={!gpuUnavailable && draft.useGpu}
-                                disabled={gpuUnavailable}
-                                onChange={(v) => patchDraft({ useGpu: v })}
-                              />
-                            </>
-                          }
-                        />
-                        <SettingsRow
-                          id="settings-row-engine"
-                          className={flash === "engine" ? "fly-settings-flash" : undefined}
-                          title="Models on this computer"
-                          helper="The speech engine and models this app downloads."
                         >
-                          {modelsList}
-                        </SettingsRow>
-                      </>
-                    }
-                  >
+                          <span
+                            aria-hidden="true"
+                            style={{
+                              width: 7,
+                              height: 7,
+                              borderRadius: 999,
+                              background: "currentColor",
+                              flex: "none",
+                            }}
+                          />
+                          {t.where}
+                        </span>
+                        {t.note && (
+                          <span style={{ fontSize: 11.5, lineHeight: 1.4, color: "var(--text-3)" }}>
+                            {t.note}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {visible.length === 0 && (
+                  <p className="text-text-3" style={{ margin: 0, fontSize: 13 }}>
+                    No settings match.
+                  </p>
+                )}
+
+                <Section id="recording" hidden={!show("recording")} title="Recording">
+                  <SettingsGroup>
                     <SettingsRow
-                      title="Quality"
-                      helper={
-                        draft.madeOn === "groq"
-                          ? "Not used with Groq: if it needs help, this computer uses its default model (More options)."
-                          : qualityHelper(draft.quality, settings.hw.recommended_tier)
-                      }
+                      title="Microphone"
+                      helper="Records your side of the call."
                       control={
-                        <Segmented
-                          label="Quality"
-                          value={draft.quality}
-                          disabled={draft.madeOn === "groq"}
-                          onChange={(q) => patchDraft({ quality: q })}
-                          options={QUALITY_OPTIONS.map((o) =>
-                            o.value === settings.hw.recommended_tier
-                              ? { ...o, title: "Recommended for this computer" }
-                              : o,
-                          )}
-                        />
+                        <Select
+                          aria-label="Microphone"
+                          style={{ width: 240, maxWidth: "100%" }}
+                          value={micId}
+                          onChange={(e) => {
+                            setMicId(e.target.value);
+                            void api.setAppSetting("capture.mic_device_id", e.target.value);
+                          }}
+                        >
+                          <option value="">System default</option>
+                          {mics.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.name}
+                              {m.is_default ? " (default)" : ""}
+                            </option>
+                          ))}
+                        </Select>
                       }
                     />
                     <SettingsRow
-                      id="settings-row-groq"
-                      className={flash === "groq" ? "fly-settings-flash" : undefined}
-                      title="Made on"
-                      badge={
-                        draft.madeOn !== "local" && (
-                          <Badge tone="warning" size="md">
-                            Audio leaves this computer
-                          </Badge>
-                        )
-                      }
-                      helper={madeOnHelper(draft.madeOn)}
+                      title="Transcribe when I stop"
+                      helper={autoMsg ?? "Starts the transcript as soon as a recording stops."}
+                      helperTone={autoMsg ? "error" : "default"}
                       control={
-                        <Segmented
-                          label="Made on"
-                          value={draft.madeOn}
-                          onChange={(m) => patchDraft({ madeOn: m })}
-                          options={MADE_ON_OPTIONS}
+                        <Switch
+                          label="Transcribe when I stop"
+                          checked={autoTranscribe}
+                          disabled={!settings || asrBusy}
+                          onChange={(v) => void setAutoNow(v)}
                         />
                       }
-                    >
-                      {groqKeyBlock}
-                    </SettingsRow>
+                    />
                   </SettingsGroup>
-                )}
-              </Section>
+                </Section>
 
-              <Section id="ai" hidden={!show("ai")} title="Ask and Enhance">
-                {
-                  <SettingsGroup
-                    expanded={!!advOpen.ai}
-                    onExpandedChange={(v) => setAdv("ai", v)}
-                    advanced={
-                      <>
-                        <SettingsRow
-                          title="Endpoint and model"
-                          helper="Leave blank for the defaults. Custom OpenAI-compatible servers go here."
-                        >
-                          <div className="grid grid-cols-2 gap-2">
-                            <Input
-                              aria-label="Model name"
-                              placeholder={`Model (default: ${provider?.default_model ?? ""})`}
-                              value={llmModel}
-                              onChange={(e) => setLlmModel(e.target.value)}
-                            />
-                            <Input
-                              aria-label="Base URL"
-                              placeholder={
-                                llmProvider === "ollama"
-                                  ? "Base URL (default: localhost:11434)"
-                                  : "Base URL (optional)"
-                              }
-                              value={llmBaseUrl}
-                              onChange={(e) => setLlmBaseUrl(e.target.value)}
-                            />
-                          </div>
-                          <div className="mt-2 flex items-center gap-2">
-                            <Button
-                              variant="primary"
-                              size="sm"
-                              disabled={llmBusy}
-                              onClick={() => void saveLlm()}
-                            >
-                              Save
-                            </Button>
-                          </div>
-                        </SettingsRow>
-                        {provider?.is_local && (
-                          <SettingsRow title="Local models" helper={ollamaServer}>
-                            {ollama && ollama.running && ollama.models.length > 0 && (
-                              <div>
-                                {ollama.models.map((m) => {
-                                  const inUse =
-                                    m.name === effOllamaModel ||
-                                    m.name.split(":")[0] === effOllamaModel.split(":")[0];
-                                  return (
-                                    <div key={m.name} className={LIST_ROW}>
-                                      <span className="flex min-w-0 items-center gap-2">
-                                        <span
-                                          className="truncate text-text"
-                                          style={{
-                                            fontFamily: "var(--font-mono)",
-                                            fontSize: 12.5,
-                                          }}
-                                        >
-                                          {m.name}
-                                        </span>
-                                        <span className="text-text-3" style={{ fontSize: 11 }}>
-                                          {gb(m.size)}
-                                        </span>
-                                      </span>
-                                      {inUse ? (
-                                        <Badge tone="neutral" size="sm">
-                                          in use
-                                        </Badge>
-                                      ) : (
-                                        <Button
-                                          variant="ghost"
-                                          size="xs"
-                                          disabled={ollamaBusy !== null}
-                                          title="Remove this model from disk"
-                                          onClick={() => void deleteOllamaModel(m.name)}
-                                        >
-                                          Delete
-                                        </Button>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
+                <Section id="transcripts" hidden={!show("transcripts")} title="Transcripts">
+                  {!settings || !draft ? (
+                    <SettingsGroup>
+                      <SettingsRow title="Loading…" />
+                    </SettingsGroup>
+                  ) : (
+                    <SettingsGroup
+                      expanded={!!advOpen.transcripts}
+                      onExpandedChange={(v) => setAdv("transcripts", v)}
+                      advanced={
+                        <>
+                          <SettingsRow
+                            title="This computer"
+                            helperTone="mono"
+                            helper={
+                              `${settings.hw.cpu_cores} cores · ${settings.hw.ram_gb} GB RAM · ` +
+                              (settings.hw.gpu_name
+                                ? `${settings.hw.gpu_name} (${Math.round((settings.hw.vram_mb ?? 0) / 1024)} GB VRAM)`
+                                : "no NVIDIA GPU") +
+                              ` · recommended quality: ${TIER_NAMES[settings.hw.recommended_tier] ?? settings.hw.recommended_tier}`
+                            }
+                          />
+                          {(() => {
+                            const eff = effectiveModel(draft, settings.models);
+                            return (
+                              <SettingsRow
+                                title="Model in use"
+                                helperTone="mono"
+                                helper={
+                                  eff.model
+                                    ? `${eff.model.display} · ${gb(eff.model.bytes)}${eff.model.installed ? "" : " · downloads on first use"}`
+                                    : eff.id
+                                }
+                              />
+                            );
+                          })()}
+                          <SettingsRow
+                            title="Model"
+                            helper="Auto follows Quality. A specific model overrides Quality and Maximum quality."
+                            control={
+                              <Select
+                                aria-label="Transcription model"
+                                style={{ width: 230, maxWidth: "100%" }}
+                                value={draft.modelId}
+                                onChange={(e) => patchDraft({ modelId: e.target.value })}
+                              >
+                                <option value="">Auto (follows Quality)</option>
+                                {asrModels.map((m) => (
+                                  <option key={m.id} value={m.id}>
+                                    {m.display}
+                                  </option>
+                                ))}
+                              </Select>
+                            }
+                          />
+                          <SettingsRow
+                            title="Maximum quality"
+                            helper="Full large-v3. Slower, and about a 1 GB download."
+                            control={
+                              <Switch
+                                label="Maximum quality"
+                                checked={draft.maxQuality}
+                                onChange={(v) => patchDraft({ maxQuality: v })}
+                              />
+                            }
+                          />
+                          <SettingsRow
+                            title="Use the graphics card"
+                            helper={gpuHelper}
+                            helperTone={gpuMsg ? "error" : "default"}
+                            control={
+                              <>
+                                {showGpuTestAgain && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={asrBusy}
+                                    onClick={() => void testGpuAgain()}
+                                  >
+                                    {gpuBusy ? "Resetting…" : "Test again"}
+                                  </Button>
+                                )}
+                                <Switch
+                                  label="Use the graphics card"
+                                  checked={!gpuUnavailable && draft.useGpu}
+                                  disabled={gpuUnavailable}
+                                  onChange={(v) => patchDraft({ useGpu: v })}
+                                />
+                              </>
+                            }
+                          />
+                          <SettingsRow
+                            id="settings-row-engine"
+                            className={flash === "engine" ? "fly-settings-flash" : undefined}
+                            title="Models on this computer"
+                            helper="The speech engine and models this app downloads."
+                          >
+                            {modelsList}
                           </SettingsRow>
-                        )}
-                      </>
-                    }
-                  >
-                    <SettingsRow
-                      title="Runs on"
-                      badge={
-                        providerCloud && (
-                          <Badge tone="warning" size="md">
-                            Text leaves this computer
-                          </Badge>
-                        )
-                      }
-                      helper={
-                        !llm
-                          ? (llmLoadError ?? "Loading…")
-                          : !provider
-                            ? `Unknown provider “${llmProvider}”. Pick one to continue.`
-                            : providerCloud
-                              ? `Notes and transcripts go to ${providerVendor(provider.id)} for Ask, Enhance, transcript cleanup and action items. Audio stays here, and so do notes you keep local.`
-                              : "Nothing leaves this computer. Slower on long meetings."
-                      }
-                      helperTone={llm ? "default" : llmLoadError ? "error" : "default"}
-                      control={
-                        llm && (
-                          <>
-                            <Select
-                              aria-label="Runs on"
-                              style={{ width: 210, maxWidth: "100%" }}
-                              value={llmProvider}
-                              onChange={(e) => void pickProvider(e.target.value)}
-                            >
-                              {!provider && <option value={llmProvider}>{llmProvider}</option>}
-                              {llm.providers.map((p) => (
-                                <option key={p.id} value={p.id}>
-                                  {providerLabel(p.id)}
-                                </option>
-                              ))}
-                            </Select>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={llmBusy}
-                              onClick={() => void testLlm()}
-                            >
-                              Test
-                            </Button>
-                          </>
-                        )
+                        </>
                       }
                     >
-                      {(cloudProvider || llmTest) && (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                          {cloudProvider && (
-                            <div className="flex flex-wrap items-end gap-2">
-                              <div style={{ flex: "1 1 240px", minWidth: 0 }}>
-                                <Input
-                                  type="password"
-                                  label={`${providerVendor(cloudProvider.id)} API key`}
-                                  hint="Saved in your keychain."
-                                  autoComplete="off"
-                                  style={MONO_KEY}
-                                  placeholder={
-                                    cloudProvider.has_key
-                                      ? "Saved. Enter a new key to replace it."
-                                      : `Paste your ${providerVendor(cloudProvider.id)} API key`
-                                  }
-                                  value={llmKey}
-                                  onChange={(e) => setLlmKey(e.target.value)}
-                                />
-                              </div>
-                              <div style={{ paddingBottom: 22 }}>
-                                <Button
-                                  variant="primary"
-                                  size="md"
-                                  disabled={llmBusy || !llmKey}
-                                  onClick={() => void saveLlm()}
-                                >
-                                  {cloudProvider.has_key ? "Update" : "Save"}
-                                </Button>
-                              </div>
-                            </div>
-                          )}
-                          {cloudProvider && !cloudProvider.has_key && !llmKey && (
-                            <p className="text-warning-text" style={SMALL}>
-                              No key saved yet. Ask, Enhance and cleanup won&apos;t work until you
-                              add one.
-                            </p>
-                          )}
-                          {llmTest && (
-                            <p role="status" className="text-text-2" style={SMALL}>
-                              {llmTest}
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </SettingsRow>
-
-                    {llmProvider === "anthropic" && (
                       <SettingsRow
-                        title="Model"
-                        helper="The Claude model used for Ask, Enhance and cleanup."
+                        title="Quality"
+                        helper={
+                          draft.madeOn === "groq"
+                            ? "Not used with Groq: if it needs help, this computer uses its default model (More options)."
+                            : qualityHelper(draft.quality, settings.hw.recommended_tier)
+                        }
                         control={
-                          <Select
-                            aria-label="Claude model"
-                            style={{ width: 260, maxWidth: "100%" }}
-                            value={llmModel || provider?.default_model || ANTHROPIC_MODELS[0].value}
-                            onChange={(e) => void saveClaudeModel(e.target.value)}
-                          >
-                            {ANTHROPIC_MODELS.map((m) => (
-                              <option key={m.value} value={m.value}>
-                                {m.label}
-                              </option>
-                            ))}
-                            {llmModel && !ANTHROPIC_MODELS.some((m) => m.value === llmModel) && (
-                              <option value={llmModel}>Custom: {llmModel}</option>
+                          <Segmented
+                            label="Quality"
+                            value={draft.quality}
+                            disabled={draft.madeOn === "groq"}
+                            onChange={(q) => patchDraft({ quality: q })}
+                            options={QUALITY_OPTIONS.map((o) =>
+                              o.value === settings.hw.recommended_tier
+                                ? { ...o, title: "Recommended for this computer" }
+                                : o,
                             )}
-                          </Select>
+                          />
                         }
                       />
-                    )}
-
-                    {provider?.is_local && (
                       <SettingsRow
-                        title="Local model"
-                        helper={localModelHelper}
-                        helperTone={
-                          ollama?.running && ollamaModelReady
-                            ? "success"
-                            : ollama?.running && !ollamaModelReady
-                              ? "warning"
-                              : "default"
+                        id="settings-row-groq"
+                        className={flash === "groq" ? "fly-settings-flash" : undefined}
+                        title="Made on"
+                        badge={
+                          draft.madeOn !== "local" && (
+                            <Badge tone="warning" size="md">
+                              Audio leaves this computer
+                            </Badge>
+                          )
                         }
+                        helper={madeOnHelper(draft.madeOn)}
                         control={
-                          <>
-                            {ollama && !ollama.installed && ollama.can_install && (
-                              <Button
-                                variant="primary"
-                                size="sm"
-                                disabled={ollamaBusy !== null}
-                                onClick={() => void installOllama()}
-                              >
-                                {ollamaBusy === "install"
-                                  ? "Installing…"
-                                  : "Install Ollama (1.5 GB download)"}
-                              </Button>
-                            )}
-                            {ollama && ollama.installed && !ollamaModelReady && (
-                              <Button
-                                variant="primary"
-                                size="sm"
-                                disabled={ollamaBusy !== null}
-                                onClick={() => void pullOllamaModel(effOllamaModel)}
-                              >
-                                {ollamaBusy === "pull"
-                                  ? "Downloading…"
-                                  : `Download ${effOllamaModel}`}
-                              </Button>
-                            )}
-                          </>
+                          <Segmented
+                            label="Made on"
+                            value={draft.madeOn}
+                            onChange={(m) => patchDraft({ madeOn: m })}
+                            options={MADE_ON_OPTIONS}
+                          />
                         }
                       >
-                        {(ollamaPct !== null || ollamaMsg || swapOffer || deleteOffer) && (
-                          <div className="space-y-2">
-                            {ollamaPct !== null && (
-                              <div className="flex items-center gap-2">
-                                <ProgressBar value={ollamaPct} style={{ width: 180 }} />
-                                <span className="text-text-3" style={{ fontSize: 11 }}>
-                                  {ollamaPct}%
-                                </span>
+                        {groqKeyBlock}
+                      </SettingsRow>
+                    </SettingsGroup>
+                  )}
+                </Section>
+
+                <Section id="ai" hidden={!show("ai")} title="Ask and Enhance">
+                  {
+                    <SettingsGroup
+                      expanded={!!advOpen.ai}
+                      onExpandedChange={(v) => setAdv("ai", v)}
+                      advanced={
+                        <>
+                          <SettingsRow
+                            title="Endpoint and model"
+                            helper="Leave blank for the defaults. Custom OpenAI-compatible servers go here."
+                          >
+                            <div className="grid grid-cols-2 gap-2">
+                              <Input
+                                aria-label="Model name"
+                                placeholder={`Model (default: ${provider?.default_model ?? ""})`}
+                                value={llmModel}
+                                onChange={(e) => setLlmModel(e.target.value)}
+                              />
+                              <Input
+                                aria-label="Base URL"
+                                placeholder={
+                                  llmProvider === "ollama"
+                                    ? "Base URL (default: localhost:11434)"
+                                    : "Base URL (optional)"
+                                }
+                                value={llmBaseUrl}
+                                onChange={(e) => setLlmBaseUrl(e.target.value)}
+                              />
+                            </div>
+                            <div className="mt-2 flex items-center gap-2">
+                              <Button
+                                variant="primary"
+                                size="sm"
+                                disabled={llmBusy}
+                                onClick={() => void saveLlm()}
+                              >
+                                Save
+                              </Button>
+                            </div>
+                          </SettingsRow>
+                          {provider?.is_local && (
+                            <SettingsRow title="Local models" helper={ollamaServer}>
+                              {ollama && ollama.running && ollama.models.length > 0 && (
+                                <div>
+                                  {ollama.models.map((m) => {
+                                    const inUse =
+                                      m.name === effOllamaModel ||
+                                      m.name.split(":")[0] === effOllamaModel.split(":")[0];
+                                    return (
+                                      <div key={m.name} className={LIST_ROW}>
+                                        <span className="flex min-w-0 items-center gap-2">
+                                          <span
+                                            className="truncate text-text"
+                                            style={{
+                                              fontFamily: "var(--font-mono)",
+                                              fontSize: 12.5,
+                                            }}
+                                          >
+                                            {m.name}
+                                          </span>
+                                          <span className="text-text-3" style={{ fontSize: 11 }}>
+                                            {gb(m.size)}
+                                          </span>
+                                        </span>
+                                        {inUse ? (
+                                          <Badge tone="neutral" size="sm">
+                                            in use
+                                          </Badge>
+                                        ) : (
+                                          <Button
+                                            variant="ghost"
+                                            size="xs"
+                                            disabled={ollamaBusy !== null}
+                                            title="Remove this model from disk"
+                                            onClick={() => void deleteOllamaModel(m.name)}
+                                          >
+                                            Delete
+                                          </Button>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </SettingsRow>
+                          )}
+                        </>
+                      }
+                    >
+                      <SettingsRow
+                        title="Runs on"
+                        badge={
+                          providerCloud && (
+                            <Badge tone="warning" size="md">
+                              Text leaves this computer
+                            </Badge>
+                          )
+                        }
+                        helper={
+                          !llm
+                            ? (llmLoadError ?? "Loading…")
+                            : !provider
+                              ? `Unknown provider “${llmProvider}”. Pick one to continue.`
+                              : providerCloud
+                                ? `Notes and transcripts go to ${providerVendor(provider.id)} for Ask, Enhance, transcript cleanup and action items. Audio stays here, and so do notes you keep local.`
+                                : "Nothing leaves this computer. Slower on long meetings."
+                        }
+                        helperTone={llm ? "default" : llmLoadError ? "error" : "default"}
+                        control={
+                          llm && (
+                            <>
+                              <Select
+                                aria-label="Runs on"
+                                style={{ width: 210, maxWidth: "100%" }}
+                                value={llmProvider}
+                                onChange={(e) => void pickProvider(e.target.value)}
+                              >
+                                {!provider && <option value={llmProvider}>{llmProvider}</option>}
+                                {llm.providers.map((p) => (
+                                  <option key={p.id} value={p.id}>
+                                    {providerLabel(p.id)}
+                                  </option>
+                                ))}
+                              </Select>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={llmBusy}
+                                onClick={() => void testLlm()}
+                              >
+                                Test
+                              </Button>
+                            </>
+                          )
+                        }
+                      >
+                        {(cloudProvider || llmTest) && (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {cloudProvider && (
+                              <div className="flex flex-wrap items-end gap-2">
+                                <div style={{ flex: "1 1 240px", minWidth: 0 }}>
+                                  <Input
+                                    type="password"
+                                    label={`${providerVendor(cloudProvider.id)} API key`}
+                                    hint="Saved in your keychain."
+                                    autoComplete="off"
+                                    style={MONO_KEY}
+                                    placeholder={
+                                      cloudProvider.has_key
+                                        ? "Saved. Enter a new key to replace it."
+                                        : `Paste your ${providerVendor(cloudProvider.id)} API key`
+                                    }
+                                    value={llmKey}
+                                    onChange={(e) => setLlmKey(e.target.value)}
+                                  />
+                                </div>
+                                <div style={{ paddingBottom: 22 }}>
+                                  <Button
+                                    variant="primary"
+                                    size="md"
+                                    disabled={llmBusy || !llmKey}
+                                    onClick={() => void saveLlm()}
+                                  >
+                                    {cloudProvider.has_key ? "Update" : "Save"}
+                                  </Button>
+                                </div>
                               </div>
                             )}
-                            {ollamaMsg && (
-                              <p role="status" className="text-text-2" style={SMALL}>
-                                {ollamaMsg}
+                            {cloudProvider && !cloudProvider.has_key && !llmKey && (
+                              <p className="text-warning-text" style={SMALL}>
+                                No key saved yet. Ask, Enhance and cleanup won&apos;t work until you
+                                add one.
                               </p>
                             )}
-                            {swapOffer && !ollamaModelReady && (
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-text-2" style={{ fontSize: 12 }}>
-                                  “{swapOffer.to}” isn’t downloaded yet. Enhance and Ask would fail
-                                  until it is.
-                                </span>
-                                <Button
-                                  variant="primary"
-                                  size="sm"
-                                  disabled={ollamaBusy !== null}
-                                  onClick={() => void pullOllamaModel(swapOffer.to)}
-                                >
-                                  {ollamaBusy === "pull"
-                                    ? "Downloading…"
-                                    : `Download ${swapOffer.to}`}
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => setSwapOffer(null)}
-                                >
-                                  Later
-                                </Button>
-                              </div>
-                            )}
-                            {deleteOffer && (
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-text-2" style={{ fontSize: 12 }}>
-                                  Switched models. Delete “{deleteOffer.name}” to free{" "}
-                                  {gb(deleteOffer.size)}?
-                                </span>
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => {
-                                    const d = deleteOffer;
-                                    setDeleteOffer(null);
-                                    void deleteOllamaModel(d.name);
-                                  }}
-                                >
-                                  Delete
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => setDeleteOffer(null)}
-                                >
-                                  Keep
-                                </Button>
-                              </div>
+                            {llmTest && (
+                              <p role="status" className="text-text-2" style={SMALL}>
+                                {llmTest}
+                              </p>
                             )}
                           </div>
                         )}
                       </SettingsRow>
-                    )}
 
-                    <SettingsRow
-                      title="Changes to your notes"
-                      helper="Ask reads freely. It only writes when you click Insert."
-                      control={
-                        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-2)" }}>
-                          Always asks first
-                        </span>
-                      }
-                    />
+                      {llmProvider === "anthropic" && (
+                        <SettingsRow
+                          title="Model"
+                          helper="The Claude model used for Ask, Enhance and cleanup."
+                          control={
+                            <Select
+                              aria-label="Claude model"
+                              style={{ width: 260, maxWidth: "100%" }}
+                              value={
+                                llmModel || provider?.default_model || ANTHROPIC_MODELS[0].value
+                              }
+                              onChange={(e) => void saveClaudeModel(e.target.value)}
+                            >
+                              {ANTHROPIC_MODELS.map((m) => (
+                                <option key={m.value} value={m.value}>
+                                  {m.label}
+                                </option>
+                              ))}
+                              {llmModel && !ANTHROPIC_MODELS.some((m) => m.value === llmModel) && (
+                                <option value={llmModel}>Custom: {llmModel}</option>
+                              )}
+                            </Select>
+                          }
+                        />
+                      )}
 
-                    <SettingsRow
-                      title="Note templates"
-                      helper="Saved prompts that shape Enhance."
-                      control={
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          aria-expanded={templatesOpen}
-                          // An open edit is saved or cancelled in the editor,
-                          // never dropped by collapsing the list.
-                          disabled={!!editingTpl}
-                          title={editingTpl ? "Save or cancel the template first" : undefined}
-                          onClick={() => setTemplatesOpen((o) => !o)}
-                        >
-                          {templatesOpen ? "Close" : `Manage · ${templates.length}`}
-                        </Button>
-                      }
-                    >
-                      {templatesOpen &&
-                        (editingTpl ? (
-                          <Card tone="muted" pad="md">
-                            <div className="space-y-2">
-                              <Input
-                                aria-label="Template name"
-                                value={editingTpl.name}
-                                onChange={(e) =>
-                                  setEditingTpl({ ...editingTpl, name: e.target.value })
-                                }
-                                placeholder="Template name"
-                              />
-                              <textarea
-                                aria-label="System prompt"
-                                value={editingTpl.system_prompt}
-                                onChange={(e) =>
-                                  setEditingTpl({ ...editingTpl, system_prompt: e.target.value })
-                                }
-                                rows={3}
-                                style={TEXTAREA}
-                                placeholder="System prompt"
-                              />
-                              <textarea
-                                aria-label="Structure hint"
-                                value={editingTpl.structure_hint}
-                                onChange={(e) =>
-                                  setEditingTpl({
-                                    ...editingTpl,
-                                    structure_hint: e.target.value,
-                                  })
-                                }
-                                rows={3}
-                                style={{ ...TEXTAREA, fontFamily: "var(--font-mono)" }}
-                                placeholder="Structure hint (markdown headings)"
-                              />
-                              <div className="flex gap-2">
-                                <Button variant="primary" size="sm" onClick={() => void saveTpl()}>
-                                  Save template
-                                </Button>
+                      {provider?.is_local && (
+                        <SettingsRow
+                          title="Local model"
+                          helper={localModelHelper}
+                          helperTone={
+                            ollama?.running && ollamaModelReady
+                              ? "success"
+                              : ollama?.running && !ollamaModelReady
+                                ? "warning"
+                                : "default"
+                          }
+                          control={
+                            <>
+                              {ollama && !ollama.installed && ollama.can_install && (
                                 <Button
-                                  variant="outline"
+                                  variant="primary"
                                   size="sm"
-                                  onClick={() => setEditingTpl(null)}
+                                  disabled={ollamaBusy !== null}
+                                  onClick={() => void installOllama()}
                                 >
-                                  Cancel
+                                  {ollamaBusy === "install"
+                                    ? "Installing…"
+                                    : "Install Ollama (1.5 GB download)"}
                                 </Button>
-                              </div>
-                            </div>
-                          </Card>
-                        ) : (
-                          <div>
-                            {templates.map((t) => (
-                              <div key={t.id} className={LIST_ROW} style={{ fontSize: 13 }}>
-                                <span className="flex min-w-0 items-center gap-2">
-                                  <span className="truncate text-text">{t.name}</span>
-                                  {t.built_in && (
-                                    <Badge tone="neutral" size="sm">
-                                      built-in
-                                    </Badge>
-                                  )}
-                                </span>
-                                <span className="flex flex-none items-center gap-1.5">
+                              )}
+                              {ollama && ollama.installed && !ollamaModelReady && (
+                                <Button
+                                  variant="primary"
+                                  size="sm"
+                                  disabled={ollamaBusy !== null}
+                                  onClick={() => void pullOllamaModel(effOllamaModel)}
+                                >
+                                  {ollamaBusy === "pull"
+                                    ? "Downloading…"
+                                    : `Download ${effOllamaModel}`}
+                                </Button>
+                              )}
+                            </>
+                          }
+                        >
+                          {(ollamaPct !== null || ollamaMsg || swapOffer || deleteOffer) && (
+                            <div className="space-y-2">
+                              {ollamaPct !== null && (
+                                <div className="flex items-center gap-2">
+                                  <ProgressBar value={ollamaPct} style={{ width: 180 }} />
+                                  <span className="text-text-3" style={{ fontSize: 11 }}>
+                                    {ollamaPct}%
+                                  </span>
+                                </div>
+                              )}
+                              {ollamaMsg && (
+                                <p role="status" className="text-text-2" style={SMALL}>
+                                  {ollamaMsg}
+                                </p>
+                              )}
+                              {swapOffer && !ollamaModelReady && (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-text-2" style={{ fontSize: 12 }}>
+                                    “{swapOffer.to}” isn’t downloaded yet. Enhance and Ask would
+                                    fail until it is.
+                                  </span>
+                                  <Button
+                                    variant="primary"
+                                    size="sm"
+                                    disabled={ollamaBusy !== null}
+                                    onClick={() => void pullOllamaModel(swapOffer.to)}
+                                  >
+                                    {ollamaBusy === "pull"
+                                      ? "Downloading…"
+                                      : `Download ${swapOffer.to}`}
+                                  </Button>
                                   <Button
                                     variant="ghost"
                                     size="sm"
-                                    onClick={() => setEditingTpl(t)}
+                                    onClick={() => setSwapOffer(null)}
                                   >
-                                    Edit
+                                    Later
+                                  </Button>
+                                </div>
+                              )}
+                              {deleteOffer && (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-text-2" style={{ fontSize: 12 }}>
+                                    Switched models. Delete “{deleteOffer.name}” to free{" "}
+                                    {gb(deleteOffer.size)}?
+                                  </span>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                      const d = deleteOffer;
+                                      setDeleteOffer(null);
+                                      void deleteOllamaModel(d.name);
+                                    }}
+                                  >
+                                    Delete
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setDeleteOffer(null)}
+                                  >
+                                    Keep
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </SettingsRow>
+                      )}
+
+                      <SettingsRow
+                        title="Changes to your notes"
+                        helper="Ask reads freely. It only writes when you click Insert."
+                        control={
+                          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-2)" }}>
+                            Always asks first
+                          </span>
+                        }
+                      />
+
+                      <SettingsRow
+                        title="Note templates"
+                        helper="Saved prompts that shape Enhance."
+                        control={
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            aria-expanded={templatesOpen}
+                            // An open edit is saved or cancelled in the editor,
+                            // never dropped by collapsing the list.
+                            disabled={!!editingTpl}
+                            title={editingTpl ? "Save or cancel the template first" : undefined}
+                            onClick={() => setTemplatesOpen((o) => !o)}
+                          >
+                            {templatesOpen ? "Close" : `Manage · ${templates.length}`}
+                          </Button>
+                        }
+                      >
+                        {templatesOpen &&
+                          (editingTpl ? (
+                            <Card tone="muted" pad="md">
+                              <div className="space-y-2">
+                                <Input
+                                  aria-label="Template name"
+                                  value={editingTpl.name}
+                                  onChange={(e) =>
+                                    setEditingTpl({ ...editingTpl, name: e.target.value })
+                                  }
+                                  placeholder="Template name"
+                                />
+                                <textarea
+                                  aria-label="System prompt"
+                                  value={editingTpl.system_prompt}
+                                  onChange={(e) =>
+                                    setEditingTpl({ ...editingTpl, system_prompt: e.target.value })
+                                  }
+                                  rows={3}
+                                  style={TEXTAREA}
+                                  placeholder="System prompt"
+                                />
+                                <textarea
+                                  aria-label="Structure hint"
+                                  value={editingTpl.structure_hint}
+                                  onChange={(e) =>
+                                    setEditingTpl({
+                                      ...editingTpl,
+                                      structure_hint: e.target.value,
+                                    })
+                                  }
+                                  rows={3}
+                                  style={{ ...TEXTAREA, fontFamily: "var(--font-mono)" }}
+                                  placeholder="Structure hint (markdown headings)"
+                                />
+                                <div className="flex gap-2">
+                                  <Button
+                                    variant="primary"
+                                    size="sm"
+                                    onClick={() => void saveTpl()}
+                                  >
+                                    Save template
                                   </Button>
                                   <Button
                                     variant="outline"
                                     size="sm"
-                                    className="hover:text-rec"
-                                    onClick={() => void removeTpl(t.id)}
+                                    onClick={() => setEditingTpl(null)}
                                   >
-                                    Delete
+                                    Cancel
                                   </Button>
-                                </span>
+                                </div>
                               </div>
-                            ))}
-                            <div style={{ marginTop: 8 }}>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                startIcon={<Plus size={14} strokeWidth={1.75} />}
-                                onClick={() =>
-                                  setEditingTpl({
-                                    id: "",
-                                    name: "New template",
-                                    system_prompt:
-                                      "You are an expert meeting-notes editor. Never invent facts.",
-                                    structure_hint: "## Summary\n## Action items",
-                                    built_in: false,
-                                  })
-                                }
-                              >
-                                New template
-                              </Button>
+                            </Card>
+                          ) : (
+                            <div>
+                              {templates.map((t) => (
+                                <div key={t.id} className={LIST_ROW} style={{ fontSize: 13 }}>
+                                  <span className="flex min-w-0 items-center gap-2">
+                                    <span className="truncate text-text">{t.name}</span>
+                                    {t.built_in && (
+                                      <Badge tone="neutral" size="sm">
+                                        built-in
+                                      </Badge>
+                                    )}
+                                  </span>
+                                  <span className="flex flex-none items-center gap-1.5">
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => setEditingTpl(t)}
+                                    >
+                                      Edit
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="hover:text-rec"
+                                      onClick={() => void removeTpl(t.id)}
+                                    >
+                                      Delete
+                                    </Button>
+                                  </span>
+                                </div>
+                              ))}
+                              <div style={{ marginTop: 8 }}>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  startIcon={<Plus size={14} strokeWidth={1.75} />}
+                                  onClick={() =>
+                                    setEditingTpl({
+                                      id: "",
+                                      name: "New template",
+                                      system_prompt:
+                                        "You are an expert meeting-notes editor. Never invent facts.",
+                                      structure_hint: "## Summary\n## Action items",
+                                      built_in: false,
+                                    })
+                                  }
+                                >
+                                  New template
+                                </Button>
+                              </div>
                             </div>
-                          </div>
-                        ))}
-                    </SettingsRow>
-                  </SettingsGroup>
-                }
-              </Section>
+                          ))}
+                      </SettingsRow>
+                    </SettingsGroup>
+                  }
+                </Section>
 
-              <Section id="calendars" hidden={!show("calendars")} title="Calendars">
-                <SettingsGroup
-                  expanded={!!advOpen.calendars}
-                  onExpandedChange={(v) => setAdv("calendars", v)}
-                  advanced={
-                    <SettingsRow
-                      title="Your own OAuth app"
-                      helper="Optional. A Google Cloud “Desktop app” client (ID and secret) and/or an Azure app registration with a public client and loopback redirect. Sign-ins are kept in your system keychain; the README has a step-by-step."
-                    >
-                      <div className="grid grid-cols-2 gap-2">
-                        <Input
-                          aria-label="Google client ID"
-                          style={MONO_KEY}
-                          placeholder="Google client ID (….apps.googleusercontent.com)"
-                          value={googleId}
-                          onChange={(e) => setGoogleId(e.target.value)}
-                        />
-                        <Input
-                          aria-label="Google client secret"
-                          type="password"
-                          autoComplete="off"
-                          style={MONO_KEY}
-                          placeholder={
-                            cal?.google_has_secret
-                              ? "Google secret saved. Enter to replace."
-                              : "Google client secret"
-                          }
-                          value={googleSecret}
-                          onChange={(e) => setGoogleSecret(e.target.value)}
-                        />
-                        <div className="col-span-2">
+                <Section id="calendars" hidden={!show("calendars")} title="Calendars">
+                  <SettingsGroup
+                    expanded={!!advOpen.calendars}
+                    onExpandedChange={(v) => setAdv("calendars", v)}
+                    advanced={
+                      <SettingsRow
+                        title="Your own OAuth app"
+                        helper="Optional. A Google Cloud “Desktop app” client (ID and secret) and/or an Azure app registration with a public client and loopback redirect. Sign-ins are kept in your system keychain; the README has a step-by-step."
+                      >
+                        <div className="grid grid-cols-2 gap-2">
                           <Input
-                            aria-label="Outlook application (client) ID"
+                            aria-label="Google client ID"
                             style={MONO_KEY}
-                            placeholder="Outlook application (client) ID. No secret needed."
-                            value={msId}
-                            onChange={(e) => setMsId(e.target.value)}
+                            placeholder="Google client ID (….apps.googleusercontent.com)"
+                            value={googleId}
+                            onChange={(e) => setGoogleId(e.target.value)}
                           />
+                          <Input
+                            aria-label="Google client secret"
+                            type="password"
+                            autoComplete="off"
+                            style={MONO_KEY}
+                            placeholder={
+                              cal?.google_has_secret
+                                ? "Google secret saved. Enter to replace."
+                                : "Google client secret"
+                            }
+                            value={googleSecret}
+                            onChange={(e) => setGoogleSecret(e.target.value)}
+                          />
+                          <div className="col-span-2">
+                            <Input
+                              aria-label="Outlook application (client) ID"
+                              style={MONO_KEY}
+                              placeholder="Outlook application (client) ID. No secret needed."
+                              value={msId}
+                              onChange={(e) => setMsId(e.target.value)}
+                            />
+                          </div>
                         </div>
-                      </div>
-                      <div className="mt-2">
-                        <Button variant="primary" size="sm" onClick={() => void saveCal()}>
-                          Save
-                        </Button>
-                      </div>
-                    </SettingsRow>
-                  }
-                >
-                  {calendarRow("google")}
-                  {calendarRow("msgraph")}
-                </SettingsGroup>
-                {calMsg && (
-                  <p role="status" className="text-text-2" style={{ ...SMALL, paddingLeft: 4 }}>
-                    {calMsg}
-                  </p>
-                )}
-              </Section>
-
-              <Section id="files" hidden={!show("files")} title="Your files and privacy">
-                <PrivacySection recordingActive={recordingActive}>
-                  <SettingsRow
-                    title="Where your files are"
-                    helperTone="mono"
-                    helper={appInfo?.data_dir ?? "…"}
-                    control={
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void api.revealDataDir().catch(console.error)}
-                      >
-                        Show folder
-                      </Button>
-                    }
-                  />
-                  <SettingsRow
-                    title="Search index"
-                    helper="Pulls decisions and action items out of meetings recorded before this existed, so Ask and other AI apps can find them. Uses your Ask and Enhance provider."
-                    control={
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={backfillBusy || backfillPending === 0}
-                        onClick={() => void runBackfill()}
-                      >
-                        {backfillBusy
-                          ? "Extracting…"
-                          : backfillPending === 0
-                            ? "All meetings indexed"
-                            : backfillPending === null
-                              ? "Index older meetings"
-                              : `Index ${backfillPending} meeting${backfillPending === 1 ? "" : "s"}`}
-                      </Button>
+                        <div className="mt-2">
+                          <Button variant="primary" size="sm" onClick={() => void saveCal()}>
+                            Save
+                          </Button>
+                        </div>
+                      </SettingsRow>
                     }
                   >
-                    {backfillMsg && (
-                      <p role="status" className="text-text-2" style={SMALL}>
-                        {backfillMsg}
-                      </p>
-                    )}
-                  </SettingsRow>
-                </PrivacySection>
-              </Section>
+                    {calendarRow("google")}
+                    {calendarRow("msgraph")}
+                  </SettingsGroup>
+                  {calMsg && (
+                    <p role="status" className="text-text-2" style={{ ...SMALL, paddingLeft: 4 }}>
+                      {calMsg}
+                    </p>
+                  )}
+                </Section>
 
-              <Section id="apps" hidden={!show("apps")} title="Other AI apps">
-                <SettingsGroup
-                  expanded={!!advOpen.apps}
-                  onExpandedChange={(v) => setAdv("apps", v)}
-                  advanced={
+                <Section id="files" hidden={!show("files")} title="Your files and privacy">
+                  <PrivacySection recordingActive={recordingActive}>
                     <SettingsRow
-                      title="Claude Code, Cursor and VS Code"
-                      helper="They run the same local server."
-                    >
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {mcpCmd && (
-                          <SnippetCard label="Claude Code" text={claudeCodeCommand(mcpCmd)} />
-                        )}
-                        <p className="text-text-2" style={SMALL}>
-                          Cursor: add the Claude Desktop block to{" "}
-                          <code style={MONO_SMALL}>~/.cursor/mcp.json</code>. VS Code: add the same
-                          server under <code style={MONO_SMALL}>&quot;servers&quot;</code> in{" "}
-                          <code style={MONO_SMALL}>.vscode/mcp.json</code> with{" "}
-                          <code style={MONO_SMALL}>&quot;type&quot;: &quot;stdio&quot;</code>.
-                        </p>
-                      </div>
-                    </SettingsRow>
-                  }
-                >
-                  <SettingsRow
-                    title="Claude Desktop"
-                    helper="Lets Claude search and read your meetings. The server runs on this computer."
-                    control={
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        aria-expanded={mcpSetupOpen}
-                        onClick={() => setMcpSetupOpen((o) => !o)}
-                      >
-                        {mcpSetupOpen ? "Hide" : "Set up"}
-                      </Button>
-                    }
-                  >
-                    {mcpSetupOpen && (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                        <ol
-                          className="text-text-2"
-                          style={{ ...SMALL, paddingLeft: 18, listStyle: "decimal" }}
-                        >
-                          <li>
-                            In Claude Desktop, open Settings › Developer › Edit Config
-                            {appInfo?.os === "macos" && (
-                              <>
-                                {" "}
-                                (
-                                <code style={MONO_SMALL}>
-                                  ~/Library/Application Support/Claude/claude_desktop_config.json
-                                </code>
-                                )
-                              </>
-                            )}
-                            .
-                          </li>
-                          <li>Add this to the file, then restart Claude Desktop.</li>
-                        </ol>
-                        {mcpJson ? (
-                          <SnippetCard label="claude_desktop_config.json" text={mcpJson} />
-                        ) : (
-                          <p className="text-text-3" style={SMALL}>
-                            Loading the snippet…
-                          </p>
-                        )}
-                        <p className="text-text-3" style={{ ...SMALL, fontSize: 11.5 }}>
-                          Fly on the Wall never edits Claude&apos;s files itself.
-                        </p>
-                      </div>
-                    )}
-                  </SettingsRow>
-                  <SettingsRow
-                    title="What it can see"
-                    helper="Whatever the server returns goes to the AI model your app uses (for Claude Desktop, Anthropic's cloud) under that app's terms. It can read every note, including notes you keep local."
-                  />
-                </SettingsGroup>
-              </Section>
-
-              <Section id="general" hidden={!show("general")} title="General">
-                <SettingsGroup
-                  expanded={!!advOpen.general}
-                  onExpandedChange={(v) => setAdv("general", v)}
-                  advanced={
-                    <SettingsRow
-                      title="Diagnostics"
-                      helper="Local log files from the last few days, for troubleshooting. Nothing leaves this computer."
+                      title="Where your files are"
+                      helperTone="mono"
+                      helper={appInfo?.data_dir ?? "…"}
                       control={
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => void api.revealLogsDir()}
+                          onClick={() => void api.revealDataDir().catch(console.error)}
                         >
-                          Open logs folder
+                          Show folder
                         </Button>
                       }
                     />
-                  }
-                >
-                  <SettingsRow
-                    title="Appearance"
-                    control={
-                      <Segmented
-                        label="Appearance"
-                        value={theme}
-                        onChange={(v) => setTheme(v)}
-                        options={[
-                          { value: "system", label: "System" },
-                          { value: "light", label: "Light" },
-                          { value: "dark", label: "Dark" },
-                        ]}
+                    <SettingsRow
+                      title="Search index"
+                      helper="Pulls decisions and action items out of meetings recorded before this existed, so Ask and other AI apps can find them. Uses your Ask and Enhance provider."
+                      control={
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={backfillBusy || backfillPending === 0}
+                          onClick={() => void runBackfill()}
+                        >
+                          {backfillBusy
+                            ? "Extracting…"
+                            : backfillPending === 0
+                              ? "All meetings indexed"
+                              : backfillPending === null
+                                ? "Index older meetings"
+                                : `Index ${backfillPending} meeting${backfillPending === 1 ? "" : "s"}`}
+                        </Button>
+                      }
+                    >
+                      {backfillMsg && (
+                        <p role="status" className="text-text-2" style={SMALL}>
+                          {backfillMsg}
+                        </p>
+                      )}
+                    </SettingsRow>
+                  </PrivacySection>
+                </Section>
+
+                <Section id="apps" hidden={!show("apps")} title="Other AI apps">
+                  <SettingsGroup
+                    expanded={!!advOpen.apps}
+                    onExpandedChange={(v) => setAdv("apps", v)}
+                    advanced={
+                      <SettingsRow
+                        title="Claude Code, Cursor and VS Code"
+                        helper="They run the same local server."
+                      >
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          {mcpCmd && (
+                            <SnippetCard label="Claude Code" text={claudeCodeCommand(mcpCmd)} />
+                          )}
+                          <p className="text-text-2" style={SMALL}>
+                            Cursor: add the Claude Desktop block to{" "}
+                            <code style={MONO_SMALL}>~/.cursor/mcp.json</code>. VS Code: add the
+                            same server under <code style={MONO_SMALL}>&quot;servers&quot;</code> in{" "}
+                            <code style={MONO_SMALL}>.vscode/mcp.json</code> with{" "}
+                            <code style={MONO_SMALL}>&quot;type&quot;: &quot;stdio&quot;</code>.
+                          </p>
+                        </div>
+                      </SettingsRow>
+                    }
+                  >
+                    <SettingsRow
+                      title="Claude Desktop"
+                      helper="Lets Claude search and read your meetings. The server runs on this computer."
+                      control={
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          aria-expanded={mcpSetupOpen}
+                          onClick={() => setMcpSetupOpen((o) => !o)}
+                        >
+                          {mcpSetupOpen ? "Hide" : "Set up"}
+                        </Button>
+                      }
+                    >
+                      {mcpSetupOpen && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                          <ol
+                            className="text-text-2"
+                            style={{ ...SMALL, paddingLeft: 18, listStyle: "decimal" }}
+                          >
+                            <li>
+                              In Claude Desktop, open Settings › Developer › Edit Config
+                              {appInfo?.os === "macos" && (
+                                <>
+                                  {" "}
+                                  (
+                                  <code style={MONO_SMALL}>
+                                    ~/Library/Application Support/Claude/claude_desktop_config.json
+                                  </code>
+                                  )
+                                </>
+                              )}
+                              .
+                            </li>
+                            <li>Add this to the file, then restart Claude Desktop.</li>
+                          </ol>
+                          {mcpJson ? (
+                            <SnippetCard label="claude_desktop_config.json" text={mcpJson} />
+                          ) : (
+                            <p className="text-text-3" style={SMALL}>
+                              Loading the snippet…
+                            </p>
+                          )}
+                          <p className="text-text-3" style={{ ...SMALL, fontSize: 11.5 }}>
+                            Fly on the Wall never edits Claude&apos;s files itself.
+                          </p>
+                        </div>
+                      )}
+                    </SettingsRow>
+                    <SettingsRow
+                      title="What it can see"
+                      helper="Whatever the server returns goes to the AI model your app uses (for Claude Desktop, Anthropic's cloud) under that app's terms. It can read every note, including notes you keep local."
+                    />
+                  </SettingsGroup>
+                </Section>
+
+                <Section id="general" hidden={!show("general")} title="General">
+                  <SettingsGroup
+                    expanded={!!advOpen.general}
+                    onExpandedChange={(v) => setAdv("general", v)}
+                    advanced={
+                      <SettingsRow
+                        title="Diagnostics"
+                        helper="Local log files from the last few days, for troubleshooting. Nothing leaves this computer."
+                        control={
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void api.revealLogsDir()}
+                          >
+                            Open logs folder
+                          </Button>
+                        }
                       />
                     }
-                  />
-                  {updatesRow}
-                </SettingsGroup>
-              </Section>
+                  >
+                    <SettingsRow
+                      title="Appearance"
+                      control={
+                        <Segmented
+                          label="Appearance"
+                          value={theme}
+                          onChange={(v) => setTheme(v)}
+                          options={[
+                            { value: "system", label: "System" },
+                            { value: "light", label: "Light" },
+                            { value: "dark", label: "Dark" },
+                          ]}
+                        />
+                      }
+                    />
+                    {updatesRow}
+                  </SettingsGroup>
+                </Section>
+              </div>
             </div>
-          </div>
 
-          {asrDirty && (
-            <div
-              className="fly-settings-savebar"
-              role="region"
-              aria-label="Unsaved transcript settings"
-            >
-              <span style={{ flex: 1, minWidth: 200, fontSize: 13 }}>
-                {saveError ? (
-                  <span className="text-error-text">Couldn&apos;t save: {saveError}</span>
-                ) : (
-                  <span className="text-text">Your transcript changes aren&apos;t saved yet.</span>
-                )}
-              </span>
-              <Button variant="ghost" size="sm" disabled={asrBusy} onClick={discard}>
+            {asrDirty && (
+              <div
+                className="fly-settings-savebar"
+                role="region"
+                aria-label="Unsaved transcript settings"
+              >
+                <span style={{ flex: 1, minWidth: 200, fontSize: 13 }}>
+                  {saveError ? (
+                    <span className="text-error-text">Couldn&apos;t save: {saveError}</span>
+                  ) : (
+                    <span className="text-text">
+                      Your transcript changes aren&apos;t saved yet.
+                    </span>
+                  )}
+                </span>
+                <Button variant="ghost" size="sm" disabled={asrBusy} onClick={discard}>
+                  Discard
+                </Button>
+                <Button variant="primary" size="sm" disabled={asrBusy} onClick={() => void save()}>
+                  {saving ? "Saving…" : "Save changes"}
+                </Button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <Modal
+          open={confirmClose}
+          onClose={() => setConfirmClose(false)}
+          title="Save your transcript changes?"
+          width={440}
+          footer={
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmClose(false)}>
+                Keep editing
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={asrBusy}
+                onClick={() => {
+                  discard();
+                  setConfirmClose(false);
+                  onClose();
+                }}
+              >
                 Discard
               </Button>
-              <Button variant="primary" size="sm" disabled={asrBusy} onClick={() => void save()}>
-                {saving ? "Saving…" : "Save changes"}
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={asrBusy}
+                onClick={() =>
+                  void save().then((ok) => {
+                    setConfirmClose(false);
+                    if (ok) onClose();
+                  })
+                }
+              >
+                {saving ? "Saving…" : "Save"}
               </Button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <Modal
-        open={confirmClose}
-        onClose={() => setConfirmClose(false)}
-        title="Save your transcript changes?"
-        width={440}
-        footer={
-          <>
-            <Button variant="ghost" size="sm" onClick={() => setConfirmClose(false)}>
-              Keep editing
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={asrBusy}
-              onClick={() => {
-                discard();
-                setConfirmClose(false);
-                onClose();
-              }}
-            >
-              Discard
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={asrBusy}
-              onClick={() =>
-                void save().then((ok) => {
-                  setConfirmClose(false);
-                  if (ok) onClose();
-                })
-              }
-            >
-              {saving ? "Saving…" : "Save"}
-            </Button>
-          </>
-        }
-      >
-        <p className="text-text-2" style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55 }}>
-          Quality, Made on, model and graphics-card changes only apply when you save them.
-        </p>
-      </Modal>
+            </>
+          }
+        >
+          <p className="text-text-2" style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55 }}>
+            Quality, Made on, model and graphics-card changes only apply when you save them.
+          </p>
+        </Modal>
+      </EscapeLayerScope>
     </div>
   );
 }

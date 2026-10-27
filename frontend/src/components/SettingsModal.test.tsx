@@ -225,14 +225,14 @@ describe("Settings overlay", () => {
     const setAsr = vi.spyOn(api, "setAsrSettings");
     await open();
     const sw = $('[aria-label="Transcribe when I stop"]')!;
-    expect(sw.getAttribute("aria-pressed")).toBe("true");
+    expect(sw.getAttribute("aria-checked")).toBe("true");
     await click(byText('[role="radio"]', "Fast")); // an unsaved draft …
     await click(sw);
     // … is not sent along: only auto_transcribe changes
     expect(setAsr).toHaveBeenCalledWith(
       expect.objectContaining({ auto_transcribe: false, tier: "balanced" }),
     );
-    expect(sw.getAttribute("aria-pressed")).toBe("false");
+    expect(sw.getAttribute("aria-checked")).toBe("false");
     expect($(".fly-settings-savebar")).not.toBeNull();
     await click(sw); // restore
   });
