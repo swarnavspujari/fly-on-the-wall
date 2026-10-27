@@ -76,8 +76,10 @@ jobs:
     name: Bundle (${{ matrix.name }})
     needs: frontend
     runs-on: ${{ matrix.os }}
-    # A normal leg takes 15-25 min; notarization queues can add more.
-    timeout-minutes: 120
+    # A normal leg takes 15-25 min, but notarization can take hours: the
+    # v1.7.0 macos-arm64 leg ran 4h49m while Apple deep-scanned a first
+    # submission, and succeeded. 6 h is GitHub's own job limit.
+    timeout-minutes: 360
     # Gate the secret-bearing legs behind the `release` environment: configure
     # required reviewers on it and move the signing secrets into it (repo
     # Settings → Environments) so only approved runs can read them.
@@ -238,7 +240,9 @@ jobs:
       # compile: v2.3.0 failed at notarization with HTTP 403 (a developer
       # agreement waiting to be accepted) and v1.7.0 with 401 (a bad
       # app-specific password), each after a full build. `history` lists past
-      # submissions and submits nothing.
+      # submissions and submits nothing. Auth errors fail at once; anything
+      # else (v1.7.0's x64 leg once hit a -1009 network error) is retried
+      # twice with a short backoff.
       - name: Apple notary preflight
         if: runner.os == 'macOS'
         timeout-minutes: 5
@@ -247,20 +251,28 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if out=$(xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" --output-format json 2>&1); then
-            echo "Notary service accepted the credentials ($(jq '.history | length' <<<"$out" 2>/dev/null || echo '?') past submissions listed)."
-            exit 0
-          fi
-          echo "$out"
-          case "$out" in
-            *403*|*[Aa]greement*)
-              echo "::error::Apple's notary service refused the request (HTTP 403): a developer agreement is probably waiting to be accepted. Sign in to developer.apple.com as the Account Holder, accept it, then re-run." ;;
-            *401*|*[Uu]nauthorized*|*[Ii]nvalid*[Cc]redentials*)
-              echo "::error::Apple's notary service rejected the credentials (HTTP 401): check APPLE_ID, APPLE_TEAM_ID and the app-specific APPLE_PASSWORD (account.apple.com → Sign-In and Security → App-Specific Passwords)." ;;
-            *)
-              echo "::error::Apple notary preflight failed (see the output above). Notarization would fail after the build too." ;;
-          esac
+          for attempt in 1 2 3; do
+            if out=$(xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" --output-format json 2>&1); then
+              echo "Notary service accepted the credentials ($(jq '.history | length' <<<"$out" 2>/dev/null || echo '?') past submissions listed)."
+              exit 0
+            fi
+            echo "$out"
+            case "$out" in
+              *403*|*[Aa]greement*)
+                echo "::error::Apple's notary service refused the request (HTTP 403): a developer agreement is probably waiting to be accepted. Sign in to developer.apple.com as the Account Holder, accept it, then re-run."
+                exit 1 ;;
+              *401*|*[Uu]nauthorized*)
+                echo "::error::Apple's notary service rejected the credentials (HTTP 401): check APPLE_ID, APPLE_TEAM_ID and the app-specific APPLE_PASSWORD (account.apple.com → Sign-In and Security → App-Specific Passwords)."
+                exit 1 ;;
+            esac
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 15))
+              echo "::warning::Notary preflight attempt $attempt failed with a non-auth error; retrying in ${delay}s."
+              sleep "$delay"
+            fi
+          done
+          echo "::error::Apple notary preflight failed 3 times (see the output above). Notarization would fail after the build too."
           exit 1
 
       # The second half of tauri.conf.json's beforeBuildCommand, run here
@@ -447,9 +459,12 @@ jobs:
 
       # The upstream prebuilt binary, checksum-verified by install-action's
       # manifest: seconds, instead of compiling it with `cargo install`.
+      # fallback: none, so a version missing from the manifest fails instead
+      # of falling back to an unchecked cargo-binstall download.
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-cyclonedx@0.5.9
+          fallback: none
 
       # cargo-cyclonedx reads `cargo metadata` (no compile, no build scripts)
       # and writes one <crate>.cdx.json per workspace member; collect them
