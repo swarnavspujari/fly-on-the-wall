@@ -924,10 +924,12 @@ pub fn windows_drive(path: &Path) -> Option<String> {
 }
 
 /// How long a probe process may run before it is killed.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run `cmd`, returning its stdout if it exits successfully within
 /// `timeout`; a hung process is killed.
+#[cfg(target_os = "windows")]
 fn output_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Option<String> {
     use std::io::Read;
     let mut child = cmd

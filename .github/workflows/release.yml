@@ -49,11 +49,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      # No npm cache: this job builds the frontend that ships, and a cache
+      # restored from another run is bytes this tag build didn't fetch.
+      # (setup-node v4 caches only with an explicit `cache:` input; v5+ only
+      # when package.json names a packageManager, which ours doesn't.)
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies (lockfile-exact, no install scripts)
         run: npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
@@ -142,7 +144,9 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libpulse-dev \
             libssl-dev libxdo-dev
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      # setup-node v4 caches only with an explicit `cache:` input (and v5+
+      # only when package.json names a packageManager, which ours doesn't).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: 22
           # No dependency cache in the secret-bearing job: a cache restored
@@ -350,7 +354,7 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          count=$(ls fragments/*.json | wc -l)
+          count=$(find fragments -maxdepth 1 -name '*.json' | wc -l)
           if [ "$count" -ne 4 ]; then
             echo "::error::expected 4 updater fragments, found $count — refusing to publish a partial latest.json"
             exit 1
@@ -386,7 +390,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      # No cache (see the build job's setup-node note).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: 22
 

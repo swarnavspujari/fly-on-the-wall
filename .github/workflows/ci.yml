@@ -1,21 +1,149 @@
 name: CI
 
+# One required check, `ci-ok`, sits behind path-gated jobs:
+#
+#   changes ─┬─ fmt ── rust (windows / macos / linux: clippy, then tests)
+#            ├─ frontend (eslint, prettier, vitest, typecheck + build)
+#            ├─ audit (npm audit + cargo-deny; dependency changes or weekly)
+#            └─ workflows (actionlint + zizmor; any .github change)
+#   ci-ok ── green when every job passed or was skipped as not needed
+#
+# A docs-only PR runs `changes` and `ci-ok` only (seconds). A change to this
+# file runs everything, so the pipeline always tests itself.
 on:
   push:
-    branches: ["main", "m*"]
+    branches: [main]
   pull_request:
+  schedule:
+    - cron: "23 5 * * 1" # Mondays 05:23 UTC: dependency audit only
+  workflow_dispatch: # runs every job
 
-permissions:
-  contents: read
+permissions: {}
 
+# PRs and branches: a newer push cancels the older run. main: every commit
+# gets its own complete run (a group per SHA, never cancelled), so a red main
+# always points at the commit that broke it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # No debug info in CI builds: about half the target/ size (the Rust cache
+  # was over GitHub's 10 GB cap) and faster links. Panics still report
+  # file:line; only debugger symbols are lost.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-  build-windows:
-    name: Lint, test & build (Windows)
-    runs-on: windows-latest
+  # Plain `git diff --name-only`, no third-party action. Outputs are "true" or
+  # "false" strings consumed by the `if:` of each job below.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.diff.outputs.rust }}
+      frontend: ${{ steps.diff.outputs.frontend }}
+      deps: ${{ steps.diff.outputs.deps }}
+      ci: ${{ steps.diff.outputs.ci }}
+    steps:
+      # Depth 2: on pull_request the checked-out commit is GitHub's merge of
+      # the PR into its base, so HEAD^1..HEAD is exactly what the PR changes.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Diff
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          emit() { # rust frontend deps ci
+            {
+              echo "rust=$1"
+              echo "frontend=$2"
+              echo "deps=$3"
+              echo "ci=$4"
+            } | tee -a "$GITHUB_OUTPUT"
+            {
+              echo "### Jobs to run"
+              echo "rust=$1 · frontend=$2 · deps=$3 · ci=$4"
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          case "$EVENT" in
+            schedule) emit false false true false ;;
+            pull_request) range=(HEAD^1 HEAD) ;;
+            push)
+              # First push of a branch, or a force-push whose old tip is gone:
+              # nothing to diff against, so run everything.
+              if [[ "$BEFORE" =~ ^0*$ ]] || ! git fetch --quiet --depth=1 --no-tags origin "$BEFORE"; then
+                echo "::notice::No previous commit to diff against; running every job."
+                emit true true true true
+              fi
+              range=("$BEFORE" HEAD)
+              ;;
+            *) emit true true true true ;; # workflow_dispatch
+          esac
+
+          files=$(git -c core.quotePath=false diff --name-only --no-renames "${range[@]}" --)
+          printf 'Changed files:\n%s\n' "$files"
+          has() { if grep -qE "$1" <<<"$files"; then echo true; else echo false; fi; }
+
+          rust=$(has '^(crates/|src-tauri/|Cargo\.(toml|lock)$|rust-toolchain|\.cargo/|\.?(clippy|rustfmt)\.toml$)')
+          frontend=$(has '^frontend/')
+          deps=$(has '(^|/)(Cargo\.toml|Cargo\.lock|package\.json|package-lock\.json)$|^deny\.toml$')
+          ci=$(has '^\.github/')
+          # A change to this workflow runs every job it defines.
+          if [ "$(has '^\.github/workflows/ci\.yml$')" = true ]; then
+            rust=true frontend=true deps=true
+          fi
+          emit "$rust" "$frontend" "$deps" "$ci"
+
+  # Seconds, on Linux, with no compile: fails a badly formatted PR before
+  # three OS runners start building it.
+  fmt:
+    name: rustfmt
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - run: cargo fmt --all --check
+
+  # The frontend is platform-independent, so one Linux job covers it. Every
+  # check runs even when an earlier one fails, so one red step can't hide
+  # another (prettier failures used to mask rustfmt and clippy).
+  frontend:
+    name: Frontend (lint, test, build)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -25,59 +153,45 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            frontend/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       # Lockfile-exact and no dependency install scripts (none of the locked
-      # packages need one; fsevents' is a node-gyp fallback for a prebuilt
-      # binary that ships in its tarball).
-      - name: Install JS dependencies
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+      # packages need one; native bindings ship as prebuilt optional packages).
+      - name: Install
+        id: install
+        run: npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
 
-      - name: Frontend lint
-        run: |
-          npm --prefix frontend run lint
-          npm --prefix frontend run format:check
+      - name: eslint
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm --prefix frontend run lint
 
-      - name: Frontend typecheck & build
+      - name: prettier
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm --prefix frontend run format:check
+
+      - name: vitest
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm --prefix frontend test
+
+      - name: Typecheck and build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: npm --prefix frontend run build
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-
-      # tauri-build validates externalBin existence at compile time, so the
-      # fly-mcp sidecar must be staged before any cargo build/check
-      - name: Stage sidecar binaries
-        run: npm run prepare-sidecars
-
-      - name: rustfmt
-        run: cargo fmt --all --check
-
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Unit tests
-        run: cargo test --workspace
-
-      - name: Build
-        run: cargo build --workspace
-
-  # macOS / Linux: the app must compile and pass tests on every OS we ship.
-  # Capture backends degrade gracefully there until the platform impls land.
-  build-cross:
-    name: Build & test (${{ matrix.os }})
+  # The app must lint and pass tests on every OS we ship; clippy runs on all
+  # three because the capture backends (WASAPI, CoreAudio tap, PulseAudio
+  # loopback) only compile on their own OS.
+  rust:
+    name: Rust (${{ matrix.os }})
+    needs: [changes, fmt]
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-22.04]
+        os: [windows-latest, macos-latest, ubuntu-22.04]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -91,47 +205,53 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libpulse-dev \
             libssl-dev libxdo-dev
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            frontend/package-lock.json
-
-      # The lockfiles record every platform's optional native binding
-      # (rolldown, lightningcss, @tailwindcss/oxide, @tauri-apps/cli), so the
-      # lockfile-exact install works on every OS — no fresh resolve needed.
-      - name: Install JS dependencies
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
-
-      - name: Frontend build
-        run: npm --prefix frontend run build
-
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+          components: clippy
 
+      # Only main writes the cache; PRs restore main's. Per-PR caches used to
+      # evict main's (the repo sat above GitHub's 10 GB cap).
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Stage sidecar binaries
-        run: npm run prepare-sidecars
+      # tauri-build only checks that the externalBin file exists, so an empty
+      # stub replaces the release-profile fly-mcp build that
+      # `npm run prepare-sidecars` does. The fly-mcp tests spawn the debug
+      # binary cargo builds for them (CARGO_BIN_EXE_flyonthewall-mcp).
+      # The frontend bundle isn't needed either: without the custom-protocol
+      # feature Tauri compiles in dev mode against devUrl.
+      - name: Stub the MCP sidecar
+        id: stub
+        run: |
+          triple=$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')
+          ext=""
+          if [ "$RUNNER_OS" = Windows ]; then ext=.exe; fi
+          mkdir -p src-tauri/binaries
+          : >"src-tauri/binaries/flyonthewall-mcp-${triple}${ext}"
+          ls -la src-tauri/binaries
 
-      - name: Unit tests
-        run: cargo test --workspace
+      - name: clippy
+        if: ${{ !cancelled() && steps.stub.outcome == 'success' }}
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Build
-        run: cargo build --workspace
+      # Runs even when clippy failed, so a lint error can't hide a test failure.
+      - name: Tests
+        if: ${{ !cancelled() && steps.stub.outcome == 'success' }}
+        run: cargo test --workspace --locked
 
-  # Known-vulnerability gate for both dependency trees. npm audit reads the
-  # lockfile alone (no install, no dependency code executed); cargo-deny
-  # checks RustSec advisories, duplicate/banned crates and crate sources
-  # against deny.toml (accepted advisories are listed there with reasons).
-  security-audit:
+  # Known-vulnerability gate for both dependency trees, when a manifest or
+  # lockfile changes and weekly (new advisories land on unchanged trees).
+  # npm audit reads the lockfiles alone (no install, no dependency code runs);
+  # cargo-deny checks RustSec advisories, banned/duplicate crates and crate
+  # sources against deny.toml (accepted advisories are listed there).
+  audit:
     name: Dependency audit (npm + cargo-deny)
+    needs: changes
+    if: needs.changes.outputs.deps == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -147,10 +267,74 @@ jobs:
         run: npm audit --package-lock-only --audit-level=high
 
       - name: npm audit (frontend)
+        if: ${{ !cancelled() }}
         run: npm --prefix frontend audit --package-lock-only --audit-level=high
 
       - name: cargo-deny (advisories, bans, sources)
+        if: ${{ !cancelled() }}
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
           command-arguments: advisories bans sources
+
+  # Workflow lint: actionlint (syntax, expressions, shellcheck on run: blocks)
+  # and zizmor (Actions security: injection, credential persistence, cache
+  # poisoning, pinning, Dependabot cooldown). Config: .github/zizmor.yml.
+  workflows:
+    name: Workflow lint (actionlint + zizmor)
+    needs: changes
+    if: needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+      # sha256 of actionlint_1.7.12_linux_amd64.tar.gz (the release's
+      # published checksums file and asset digest).
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # shellcheck, which actionlint runs on every run: block, is preinstalled
+      # on ubuntu-latest.
+      - name: actionlint
+        id: actionlint
+        run: |
+          tgz="$RUNNER_TEMP/actionlint.tar.gz"
+          curl -fsSL -o "$tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $tgz" | sha256sum -c -
+          tar -xzf "$tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+
+      # Prebuilt binary, checksum-verified by install-action's manifest.
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        if: ${{ !cancelled() }}
+        with:
+          tool: zizmor@1.31.1
+
+      - name: zizmor
+        if: ${{ !cancelled() }}
+        env:
+          # Online audits (impostor commits, tag/SHA mismatches, known-
+          # vulnerable actions) read public repos with the job's token.
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format=github .
+
+  # The single required check. alls-green fails if any needed job failed or
+  # was cancelled and treats a job skipped by its path gate as passing.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [changes, fmt, frontend, rust, audit, workflows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          allowed-skips: fmt, frontend, rust, audit, workflows
+          jobs: ${{ toJSON(needs) }}

@@ -1,14 +1,30 @@
 version: 2
 
 # Keeps the SHA-pinned actions and the lockfile-pinned npm / cargo trees
-# current. Minor + patch bumps are grouped into one PR per ecosystem per week;
-# majors still arrive as individual PRs so they get individual review.
+# current. Minor + patch bumps are grouped into one PR per ecosystem;
+# majors still arrive as individual PRs so they get individual review, except
+# for the few packages that must move together (grouped below).
+#
+# cooldown: a release must be 5 days old before Dependabot proposes it, so a
+# compromised or broken publish is usually yanked before it reaches a PR.
+# Security updates ignore the cooldown.
+#
+# open-pull-requests-limit: the default of 5 per ecosystem silently held
+# updates back once five majors were waiting.
 updates:
+  # Actions change rarely and every bump is a SHA to review: monthly.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
+      interval: monthly
+    cooldown:
+      default-days: 5
+    open-pull-requests-limit: 10
     groups:
+      # upload-artifact and download-artifact share one artifact format:
+      # bump them together, majors included.
+      artifact-actions:
+        patterns: ["actions/upload-artifact", "actions/download-artifact"]
       actions-minor-patch:
         update-types: ["minor", "patch"]
 
@@ -16,6 +32,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 5
+    open-pull-requests-limit: 10
     groups:
       npm-root-minor-patch:
         update-types: ["minor", "patch"]
@@ -24,14 +43,37 @@ updates:
     directory: "/frontend"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 5
+    open-pull-requests-limit: 10
     groups:
+      # eslint and @eslint/js peer-depend on each other's major, and the
+      # plugins follow them: one PR, majors included.
+      eslint:
+        patterns: ["eslint", "@eslint/*", "eslint-plugin-*", "typescript-eslint"]
       npm-frontend-minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # typescript-eslint (peer typescript < 6.1) doesn't support the native
+      # TypeScript 7 compiler yet; `npm ci` fails with ERESOLVE.
+      - dependency-name: "typescript"
+        versions: [">= 7"]
 
   - package-ecosystem: cargo
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 5
+    open-pull-requests-limit: 10
     groups:
       cargo-minor-patch:
         update-types: ["minor", "patch"]
+        # ort ships breaking API changes between release candidates; on its
+        # own PR so one failing bump doesn't hold back the whole group.
+        exclude-patterns: ["ort"]
+    ignore:
+      # windows-capture (newest 2.0.1) requires parking_lot ^0.12 and hands us
+      # its Mutex type; 0.13 fails to compile on Windows.
+      - dependency-name: "parking_lot"
+        versions: [">= 0.13"]

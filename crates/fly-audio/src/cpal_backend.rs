@@ -70,6 +70,7 @@ impl AudioCapture for CpalAudioCapture {
     }
 
     fn capture_warnings(&self) -> Vec<String> {
+        #[allow(unused_mut)] // only the Windows volume check pushes
         let mut warnings = Vec::new();
         #[cfg(target_os = "windows")]
         if let Some((volume, muted)) = crate::win_volume::default_output_volume() {

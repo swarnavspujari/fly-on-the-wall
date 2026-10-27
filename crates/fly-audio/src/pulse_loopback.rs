@@ -104,8 +104,9 @@ impl PulseRecorder {
                         }
                         t_written.fetch_add(pad, Ordering::Relaxed);
                     }
-                    for pair in buf.chunks_exact(2) {
-                        let _ = w.write_sample(i16::from_le_bytes([pair[0], pair[1]]));
+                    let (pairs, _tail) = buf.as_chunks::<2>();
+                    for pair in pairs {
+                        let _ = w.write_sample(i16::from_le_bytes(*pair));
                     }
                     t_written.fetch_add(samples as u64, Ordering::Relaxed);
                 }
