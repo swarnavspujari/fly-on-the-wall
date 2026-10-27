@@ -4,7 +4,8 @@ name: CI
 #
 #   changes ─┬─ fmt ── rust (windows / macos / linux: clippy, then tests)
 #            ├─ frontend (eslint, prettier, vitest, typecheck + build)
-#            ├─ audit (npm audit + cargo-deny; dependency changes or weekly)
+#            ├─ audit (npm audit + cargo-deny + root npm ci; dependency changes or weekly)
+#            ├─ sidecar (release-profile fly-mcp build + staging, Linux; its inputs or weekly)
 #            └─ workflows (actionlint + zizmor; any .github change)
 #   ci-ok ── green when every job passed or was skipped as not needed
 #
@@ -15,7 +16,9 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    - cron: "23 5 * * 1" # Mondays 05:23 UTC: dependency audit only
+    # Mondays 05:23 UTC, on main's unchanged tree: the dependency audit (new
+    # advisories land without any commit) and the sidecar release build.
+    - cron: "23 5 * * 1"
   workflow_dispatch: # runs every job
 
 permissions: {}
@@ -53,6 +56,7 @@ jobs:
       frontend: ${{ steps.diff.outputs.frontend }}
       deps: ${{ steps.diff.outputs.deps }}
       ci: ${{ steps.diff.outputs.ci }}
+      sidecar: ${{ steps.diff.outputs.sidecar }}
     steps:
       # Depth 2: on pull_request the checked-out commit is GitHub's merge of
       # the PR into its base, so HEAD^1..HEAD is exactly what the PR changes.
@@ -68,33 +72,34 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          emit() { # rust frontend deps ci
+          emit() { # rust frontend deps ci sidecar
             {
               echo "rust=$1"
               echo "frontend=$2"
               echo "deps=$3"
               echo "ci=$4"
+              echo "sidecar=$5"
             } | tee -a "$GITHUB_OUTPUT"
             {
               echo "### Jobs to run"
-              echo "rust=$1 · frontend=$2 · deps=$3 · ci=$4"
+              echo "rust=$1 · frontend=$2 · deps=$3 · ci=$4 · sidecar=$5"
             } >>"$GITHUB_STEP_SUMMARY"
             exit 0
           }
 
           case "$EVENT" in
-            schedule) emit false false true false ;;
+            schedule) emit false false true false true ;;
             pull_request) range=(HEAD^1 HEAD) ;;
             push)
               # First push of a branch, or a force-push whose old tip is gone:
               # nothing to diff against, so run everything.
               if [[ "$BEFORE" =~ ^0*$ ]] || ! git fetch --quiet --depth=1 --no-tags origin "$BEFORE"; then
                 echo "::notice::No previous commit to diff against; running every job."
-                emit true true true true
+                emit true true true true true
               fi
               range=("$BEFORE" HEAD)
               ;;
-            *) emit true true true true ;; # workflow_dispatch
+            *) emit true true true true true ;; # workflow_dispatch
           esac
 
           files=$(git -c core.quotePath=false diff --name-only --no-renames "${range[@]}" --)
@@ -105,11 +110,14 @@ jobs:
           frontend=$(has '^frontend/')
           deps=$(has '(^|/)(Cargo\.toml|Cargo\.lock|package\.json|package-lock\.json)$|^deny\.toml$')
           ci=$(has '^\.github/')
+          # The staging script, the sidecar crate, the release profile (root
+          # Cargo.toml), the npm script that runs them, and the externalBin name.
+          sidecar=$(has '^(scripts/|crates/fly-mcp/|Cargo\.toml$|package\.json$|src-tauri/tauri\.conf\.json$)')
           # A change to this workflow runs every job it defines.
           if [ "$(has '^\.github/workflows/ci\.yml$')" = true ]; then
-            rust=true frontend=true deps=true
+            rust=true frontend=true deps=true sidecar=true
           fi
-          emit "$rust" "$frontend" "$deps" "$ci"
+          emit "$rust" "$frontend" "$deps" "$ci" "$sidecar"
 
   # Seconds, on Linux, with no compile: fails a badly formatted PR before
   # three OS runners start building it.
@@ -245,7 +253,8 @@ jobs:
   # lockfile changes and weekly (new advisories land on unchanged trees).
   # npm audit reads the lockfiles alone (no install, no dependency code runs);
   # cargo-deny checks RustSec advisories, banned/duplicate crates and crate
-  # sources against deny.toml (accepted advisories are listed there).
+  # sources against deny.toml (accepted advisories are listed there). The root
+  # npm ci is the exact install release.yml's bundle legs run for the Tauri CLI.
   audit:
     name: Dependency audit (npm + cargo-deny)
     needs: changes
@@ -276,6 +285,66 @@ jobs:
         with:
           command: check
           command-arguments: advisories bans sources
+
+      - name: npm ci (root, as the release legs run it)
+        if: ${{ !cancelled() }}
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx --no-install tauri --version
+
+  # The release legs build fly-mcp in the release profile and stage it with
+  # scripts/prepare-sidecars.mjs; the rust job above only stubs it. This runs
+  # that exact step on Linux when its inputs change and weekly, so a break
+  # shows up here instead of at release time.
+  sidecar:
+    name: MCP sidecar release build (Linux)
+    needs: changes
+    if: needs.changes.outputs.sidecar == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # `cargo build --release -p fly-mcp` + scripts/prepare-sidecars.mjs (node
+      # built-ins only, so no npm install is needed).
+      - name: npm run prepare-sidecars
+        run: npm run prepare-sidecars
+
+      # The staged name must match tauri.conf.json's externalBin, and the
+      # binary must answer MCP (tools/list needs no database).
+      - name: Smoke-test the staged sidecar
+        run: |
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          name=$(jq -r '.bundle.externalBin[] | select(endswith("flyonthewall-mcp"))' src-tauri/tauri.conf.json)
+          bin="src-tauri/${name}-${triple}"
+          if [ ! -x "$bin" ]; then
+            echo "::error::$bin is missing: scripts/prepare-sidecars.mjs and tauri.conf.json externalBin disagree."
+            exit 1
+          fi
+          data=$(mktemp -d)
+          resp=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' |
+            timeout 30 "$bin" --data-dir "$data")
+          if ! jq -e '.id == 1 and (.result.tools | length > 0)' <<<"$resp" >/dev/null; then
+            echo "::error::The staged sidecar didn't answer tools/list: $resp"
+            exit 1
+          fi
+          echo "Sidecar OK: $(jq '.result.tools | length' <<<"$resp") tools."
 
   # Workflow lint: actionlint (syntax, expressions, shellcheck on run: blocks)
   # and zizmor (Actions security: injection, credential persistence, cache
@@ -332,12 +401,12 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, fmt, frontend, rust, audit, workflows]
+    needs: [changes, fmt, frontend, rust, audit, sidecar, workflows]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: fmt, frontend, rust, audit, workflows
+          allowed-skips: fmt, frontend, rust, audit, sidecar, workflows
           jobs: ${{ toJSON(needs) }}
