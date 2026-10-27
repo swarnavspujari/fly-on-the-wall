@@ -9,6 +9,7 @@ members = [
     "crates/fly-calendar",
     "crates/fly-capture-screen",
     "crates/fly-storage",
+    "crates/fly-context",
     "crates/fly-mcp",
     "crates/fly-secrets",
     "src-tauri",
