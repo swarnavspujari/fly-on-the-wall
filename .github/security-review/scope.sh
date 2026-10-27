@@ -17,8 +17,9 @@
 # - Otherwise find the last commit of this PR that a review actually covered:
 #   the newest earlier green run of this workflow for this PR (created after
 #   the PR was opened) whose "Run Claude security review" step succeeded and
-#   that started after the PR's last base-branch change, with a workflow file
-#   matching the base branch's byte for byte at its head commit. A skipped,
+#   that started after the PR's last base change, on a PR against the default
+#   branch, with a workflow file matching the base's byte for byte at its head
+#   commit. A skipped,
 #   cancelled or failed review never counts, so its changes are picked up by
 #   the next run.
 #   - none: review every security-relevant file the PR changes;
@@ -28,7 +29,7 @@
 # PR can add paths but cannot drop its own files out of the list.
 #
 # Env: GH_TOKEN REPO PR PR_AUTHOR SENDER PR_CREATED_AT HEAD_REF HEAD_SHA
-# BASE_SHA ACTION LABEL RUN_ID, and GITHUB_OUTPUT / GITHUB_STEP_SUMMARY (optional by hand).
+# BASE_REF BASE_SHA DEFAULT_BRANCH ACTION LABEL RUN_ID, and GITHUB_OUTPUT / GITHUB_STEP_SUMMARY (optional by hand).
 # Outputs: review (true/false), since, reason, files (newline-separated).
 set -euo pipefail
 
@@ -186,14 +187,22 @@ fi
 # workflow does) and then undo it. A run only counts as the baseline when:
 # - the workflow file at its head commit is byte-identical to the current
 #   base's (so, on the same base, the merge it executed had that file too);
-# - and it started after the PR's last base-branch change. The runs API
-#   reports a PR's base as it is now, not as it was for the run, so a retarget
-#   is read from the PR's own event history instead.
+# - and it started after the PR's last base change of any kind (a retarget,
+#   GitHub's automatic retarget, a force-push of the base). The runs API
+#   reports a PR's base as it is now, not as it was for the run, so these are
+#   read from the PR's own event history instead;
+# - and the PR targets the default branch. A push and revert on any other
+#   base branch would change the workflow a run executed while leaving no
+#   event on the PR, so PRs against other branches always get a full review.
 # Otherwise the review covers the whole PR. When the base has no workflow yet,
 # nothing counts.
 base_wf=$(git rev-parse -q --verify "$BASE_SHA:.github/workflows/security-review.yml" 2>/dev/null || true)
 last_retarget=$(gh api --paginate "repos/$REPO/issues/$PR/events" \
-  --jq '.[] | select(.event == "base_ref_changed") | .created_at' | sort | tail -n 1)
+  --jq '.[] | select(.event | test("^(base_ref_|automatic_base_change)")) | .created_at' | sort | tail -n 1)
+if [ "$BASE_REF" != "$DEFAULT_BRANCH" ]; then
+  echo "::notice::This PR targets '$BASE_REF', not the default branch; reviewing the whole PR."
+  base_wf=""
+fi
 
 runs=$(gh api -X GET "repos/$REPO/actions/workflows/security-review.yml/runs" \
   -f event=pull_request -f branch="$HEAD_REF" -f status=success -f per_page=30 \
@@ -208,7 +217,7 @@ while read -r id sha created; do
   [ "$ran" -gt 0 ] || continue
   # Runs are newest first: once one predates the last retarget, all the rest do.
   if [ -n "$last_retarget" ] && [[ ! "$created" > "$last_retarget" ]]; then
-    echo "::notice::The PR's base branch changed at $last_retarget, after every earlier review; reviewing the whole PR."
+    echo "::notice::The PR's base changed at $last_retarget, after every earlier review; reviewing the whole PR."
     break
   fi
   run_wf=$(git rev-parse -q --verify "$sha:.github/workflows/security-review.yml" 2>/dev/null || true)
