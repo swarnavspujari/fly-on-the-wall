@@ -171,6 +171,9 @@ impl Storage {
         self.sync_note_derived(&note)?;
         // title-edit policy: meeting folders follow the note's title
         self.rename_meeting_dirs_for_note(id, title)?;
+        // The manifests carry the title too — including folders that kept
+        // their old name (busy, or a transcription running).
+        self.refresh_manifests_for_notes(&[id.to_string()]);
         Ok(note)
     }
 
@@ -286,7 +289,7 @@ impl Storage {
             (&note.id, &note.title, &body),
         )?;
         self.sync_note_chunks(note)?;
-        std::fs::write(self.note_mirror_path(&note.id), note.to_markdown(false))?;
+        crate::atomic::write_atomic(&self.note_mirror_path(&note.id), note.to_markdown(false))?;
         let portable = crate::recovery::PortableNote::from_note(note);
         for meeting in self.meetings_for_note(&note.id)? {
             let Some(rel) = meeting
