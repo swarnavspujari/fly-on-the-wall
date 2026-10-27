@@ -610,7 +610,12 @@ impl LLMProvider for AnthropicProvider {
         Capabilities {
             tools: true,
             tool_choice_none: true,
-            tool_choice_required: !rejects_forced_tool_choice(&self.model),
+            // Must match `forced_tool_choice_ok`: models that think by
+            // default (the output_config generation) only accept forced
+            // choice when the request turns thinking really off.
+            tool_choice_required: !rejects_forced_tool_choice(&self.model) && !modern,
+            tool_choice_required_thinking_off: !rejects_forced_tool_choice(&self.model)
+                && (!modern || matches!(thinking_off_for(&self.model), ThinkingOff::Disabled)),
             strict_tools: modern,
             max_strict_tools: if modern { MAX_STRICT_TOOLS } else { 0 },
             streaming: true,
@@ -766,8 +771,31 @@ pub(crate) struct AnthropicSse {
 enum SseBlock {
     Text,
     Tool(String),
-    Opaque(Value),
+    /// A thinking block: the start event, plus deltas accumulated in
+    /// growable strings (linear in the stream, unlike re-formatting the JSON
+    /// value per delta) and folded in when the block closes.
+    Opaque {
+        raw: Value,
+        thinking: String,
+        signature: String,
+    },
     Other,
+}
+
+impl SseBlock {
+    fn opaque(raw: Value) -> Self {
+        let field = |k: &str| {
+            raw.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        SseBlock::Opaque {
+            thinking: field("thinking"),
+            signature: field("signature"),
+            raw,
+        }
+    }
 }
 
 impl LineDecoder for AnthropicSse {
@@ -807,7 +835,7 @@ impl LineDecoder for AnthropicSse {
                         });
                         SseBlock::Tool(id)
                     }
-                    Some("thinking") | Some("redacted_thinking") => SseBlock::Opaque(b),
+                    Some("thinking") | Some("redacted_thinking") => SseBlock::opaque(b),
                     _ => SseBlock::Other,
                 };
                 self.open.insert(index, block);
@@ -832,17 +860,27 @@ impl LineDecoder for AnthropicSse {
                             partial_json: s("partial_json"),
                         });
                     }
-                    (Some(SseBlock::Opaque(raw)), Some("thinking_delta")) => {
-                        append_str(raw, "thinking", &s("thinking"));
+                    (Some(SseBlock::Opaque { thinking, .. }), Some("thinking_delta")) => {
+                        thinking.push_str(&s("thinking"));
                     }
-                    (Some(SseBlock::Opaque(raw)), Some("signature_delta")) => {
-                        append_str(raw, "signature", &s("signature"));
+                    (Some(SseBlock::Opaque { signature, .. }), Some("signature_delta")) => {
+                        signature.push_str(&s("signature"));
                     }
                     _ => {}
                 }
             }
             "content_block_stop" => {
-                if let Some(SseBlock::Opaque(raw)) = self.open.remove(&index) {
+                if let Some(SseBlock::Opaque {
+                    mut raw,
+                    thinking,
+                    signature,
+                }) = self.open.remove(&index)
+                {
+                    // redacted_thinking carries `data`, not these fields.
+                    if raw.get("type").and_then(|t| t.as_str()) == Some("thinking") {
+                        raw["thinking"] = json!(thinking);
+                        raw["signature"] = json!(signature);
+                    }
                     out.push(StreamEvent::Opaque {
                         provider: "anthropic".into(),
                         raw,
@@ -897,11 +935,6 @@ impl LineDecoder for AnthropicSse {
             ))
         }
     }
-}
-
-fn append_str(obj: &mut Value, key: &str, more: &str) {
-    let prev = obj.get(key).and_then(|t| t.as_str()).unwrap_or("");
-    obj[key] = json!(format!("{prev}{more}"));
 }
 
 /// `{"items": [...]}` → `[...]` as JSON text; anything else passes through.
@@ -1754,9 +1787,14 @@ data: {"type":"message_stop"}"#;
         let s55 = caps("claude-sonnet-5-5");
         assert!(s55.tools && s55.strict_tools && !s55.tool_choice_required);
         assert_eq!(s55.max_strict_tools, MAX_STRICT_TOOLS);
+        assert!(!s55.tool_choice_required_thinking_off);
+        // Haiku 5.5 thinks by default: forced choice only with thinking off,
+        // exactly as the request builder decides.
         let h55 = caps("claude-haiku-5-5");
-        assert!(h55.tool_choice_required);
+        assert!(!h55.tool_choice_required);
+        assert!(h55.tool_choice_required_thinking_off);
         let old = caps("claude-sonnet-4-5");
+        assert!(old.tool_choice_required && old.tool_choice_required_thinking_off);
         assert!(old.tools && !old.strict_tools && old.max_strict_tools == 0);
     }
 
@@ -1804,6 +1842,37 @@ data: {"type":"message_stop"}"#;
                 "{model}: {}",
                 second.text()
             );
+        }
+    }
+
+    /// The advertised capability and the request builder must agree, model
+    /// by model, for both thinking settings.
+    #[test]
+    fn forced_choice_capability_matches_the_request_builder() {
+        for m in [
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "claude-haiku-5-5",
+            "claude-sonnet-5",
+            "claude-opus-4-6",
+            "claude-sonnet-4-5",
+            "claude-3-5-haiku-latest",
+        ] {
+            let caps = AnthropicProvider::new("k".into(), m.into()).capabilities();
+            for (thinking, advertised) in [
+                (crate::ThinkingMode::Default, caps.tool_choice_required),
+                (
+                    crate::ThinkingMode::Disabled,
+                    caps.tool_choice_required_thinking_off,
+                ),
+            ] {
+                let forced = body(m, &tool_req(ToolChoice::Required, thinking))
+                    .get("tool_choice")
+                    .is_some();
+                assert_eq!(forced, advertised, "{m} {thinking:?}");
+            }
         }
     }
 }

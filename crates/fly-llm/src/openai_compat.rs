@@ -29,7 +29,7 @@
 use serde_json::{json, Value};
 
 use crate::conversation::{
-    closed_schema, result_text, tool_name_for, Capabilities, ChatResponse, ContentBlock,
+    result_text, strict_schema, tool_name_for, Capabilities, ChatResponse, ContentBlock,
     ConverseRequest, Message, StopReason, StreamEvent, ToolChoice, Usage,
 };
 use crate::stream::{decode_body, parse_tool_args, sse_data, LineDecoder};
@@ -78,11 +78,22 @@ impl OpenAiCompatProvider {
     fn is_ollama(&self) -> bool {
         self.provider_id == "ollama"
     }
+}
 
-    /// Strict function schemas: OpenAI only.
-    fn strict_supported(&self) -> bool {
-        self.provider_id == "openai"
-    }
+/// Client for the tool / streaming / probe paths (the legacy `chat()` path
+/// keeps its own unbounded client, unchanged). Bounded connect, and an idle
+/// read timeout rather than a total one: a stream may legitimately run for
+/// minutes, but a server that goes silent for 10 minutes is gone. Ten
+/// minutes covers a slow CPU model composing a non-streamed answer.
+fn tool_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .read_timeout(std::time::Duration::from_secs(600))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 fn role_str(role: Role) -> &'static str {
@@ -112,7 +123,7 @@ impl LLMProvider for OpenAiCompatProvider {
             return self.chat_ollama_native(&req).await;
         }
         let body = openai_chat_body(&self.model, &req);
-        let text = self.openai_post(&body).await?;
+        let text = self.openai_post(&reqwest::Client::new(), &body).await?;
         parse_chat_completion(&text)
     }
 
@@ -136,6 +147,7 @@ impl LLMProvider for OpenAiCompatProvider {
                 tools: false,
                 tool_choice_none: false,
                 tool_choice_required: false,
+                tool_choice_required_thinking_off: false,
                 strict_tools: false,
                 max_strict_tools: 0,
                 streaming: true,
@@ -147,6 +159,7 @@ impl LLMProvider for OpenAiCompatProvider {
                 tools: true,
                 tool_choice_none: true,
                 tool_choice_required: true,
+                tool_choice_required_thinking_off: true,
                 strict_tools: true,
                 max_strict_tools: 0,
                 streaming: true,
@@ -159,6 +172,7 @@ impl LLMProvider for OpenAiCompatProvider {
                 tools: true,
                 tool_choice_none: true,
                 tool_choice_required: false,
+                tool_choice_required_thinking_off: false,
                 strict_tools: false,
                 max_strict_tools: 0,
                 streaming: true,
@@ -175,7 +189,7 @@ impl LLMProvider for OpenAiCompatProvider {
         if !self.is_ollama() {
             return Ok(self.capabilities());
         }
-        let resp = reqwest::Client::new()
+        let resp = tool_client()
             .post(format!("{}/api/show", self.ollama_root()))
             .json(&json!({ "model": self.model }))
             .send()
@@ -198,29 +212,29 @@ impl LLMProvider for OpenAiCompatProvider {
     async fn converse(&self, req: ConverseRequest) -> Result<ChatResponse> {
         if self.is_ollama() {
             validate_ollama(&req)?;
-            let resp = self.ollama_send(&req, false).await?;
+            let resp = self.ollama_send(tool_client(), &req, false).await?;
             let text = resp
                 .text()
                 .await
                 .map_err(|e| LlmError::Network(e.to_string()))?;
             return parse_native_response(&text);
         }
-        let body = openai_body(&self.model, &req, false, self.strict_supported());
-        let text = self.openai_post(&body).await?;
+        let body = openai_body(&self.model, &req, false, &self.capabilities());
+        let text = self.openai_post(tool_client(), &body).await?;
         parse_openai_response(&text)
     }
 
     async fn chat_stream(&self, req: ConverseRequest) -> Result<ChatStream> {
         if self.is_ollama() {
             validate_ollama(&req)?;
-            let resp = self.ollama_send(&req, true).await?;
+            let resp = self.ollama_send(tool_client(), &req, true).await?;
             return Ok(decode_body(resp.bytes_stream(), OllamaNdjson::default()));
         }
-        let mut body = openai_body(&self.model, &req, true, self.strict_supported());
+        let mut body = openai_body(&self.model, &req, true, &self.capabilities());
         if self.provider_id == "openai" {
             body["stream_options"] = json!({ "include_usage": true });
         }
-        let resp = self.openai_send(&body).await?;
+        let resp = self.openai_send(tool_client(), &body).await?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp
@@ -242,8 +256,11 @@ impl OpenAiCompatProvider {
         u.trim_end_matches('/').to_string()
     }
 
-    async fn openai_send(&self, body: &Value) -> Result<reqwest::Response> {
-        let client = reqwest::Client::new();
+    async fn openai_send(
+        &self,
+        client: &reqwest::Client,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
         let mut http = client
             .post(format!(
                 "{}/chat/completions",
@@ -260,8 +277,8 @@ impl OpenAiCompatProvider {
 
     /// POST a non-streaming chat-completions body; the response text on
     /// success.
-    async fn openai_post(&self, body: &Value) -> Result<String> {
-        let resp = self.openai_send(body).await?;
+    async fn openai_post(&self, client: &reqwest::Client, body: &Value) -> Result<String> {
+        let resp = self.openai_send(client, body).await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -275,7 +292,9 @@ impl OpenAiCompatProvider {
 
     /// Ollama native `POST {root}/api/chat` for the legacy text path.
     async fn chat_ollama_native(&self, req: &ChatRequest) -> Result<String> {
-        let resp = self.ollama_send(&ConverseRequest::from(req), false).await?;
+        let resp = self
+            .ollama_send(&reqwest::Client::new(), &ConverseRequest::from(req), false)
+            .await?;
         let text = resp
             .text()
             .await
@@ -289,9 +308,13 @@ impl OpenAiCompatProvider {
     /// raised context crashes the model runner (some models 500 on
     /// constrained hardware — gemma4:e4b at num_ctx 8192 on 4 GB VRAM kills
     /// llama-server outright).
-    async fn ollama_send(&self, req: &ConverseRequest, stream: bool) -> Result<reqwest::Response> {
+    async fn ollama_send(
+        &self,
+        client: &reqwest::Client,
+        req: &ConverseRequest,
+        stream: bool,
+    ) -> Result<reqwest::Response> {
         let root = self.ollama_root();
-        let client = reqwest::Client::new();
         let mut think = ollama_think(req);
         let mut num_ctx = Some(estimate_num_ctx_for(req));
         loop {
@@ -415,12 +438,22 @@ fn estimate_num_ctx_for(req: &ConverseRequest) -> u32 {
 /// Request body for the OpenAI-compatible `/chat/completions` endpoint
 /// (OpenAI, NIM). `thinking` has no representation here and is ignored.
 pub(crate) fn openai_chat_body(model: &str, req: &ChatRequest) -> Value {
-    openai_body(model, &ConverseRequest::from(req), false, false)
+    openai_body(
+        model,
+        &ConverseRequest::from(req),
+        false,
+        &Capabilities::default(),
+    )
 }
 
 /// Chat-completions body for a block request. Text-only messages keep the
-/// legacy `{role, content}` shape exactly.
-fn openai_body(model: &str, req: &ConverseRequest, stream: bool, strict_ok: bool) -> Value {
+/// legacy `{role, content}` shape exactly. `caps` decides what tool
+/// features may be sent: `strict` only where `strict_tools` (with the
+/// OpenAI strict schema form), `tool_choice: "required"` only where
+/// `tool_choice_required` (else it degrades to auto, as documented on
+/// `ToolChoice::Required`).
+fn openai_body(model: &str, req: &ConverseRequest, stream: bool, caps: &Capabilities) -> Value {
+    let strict_ok = caps.strict_tools;
     let mut body = json!({
         "model": model,
         "messages": openai_messages(&req.messages),
@@ -440,7 +473,7 @@ fn openai_body(model: &str, req: &ConverseRequest, stream: bool, strict_ok: bool
                     "name": t.name,
                     "description": t.description,
                     "parameters": if t.strict && strict_ok {
-                        closed_schema(&t.input_schema)
+                        strict_schema(&t.input_schema)
                     } else {
                         t.input_schema.clone()
                     },
@@ -455,7 +488,10 @@ fn openai_body(model: &str, req: &ConverseRequest, stream: bool, strict_ok: bool
         match req.tool_choice {
             ToolChoice::Auto => {}
             ToolChoice::None => body["tool_choice"] = json!("none"),
-            ToolChoice::Required => body["tool_choice"] = json!("required"),
+            ToolChoice::Required if caps.tool_choice_required => {
+                body["tool_choice"] = json!("required")
+            }
+            ToolChoice::Required => {}
         }
     }
     if stream {
@@ -1272,10 +1308,13 @@ mod tests {
                 content: "boom".into(),
                 is_error: true,
             }]));
-        let body = openai_body("gpt-4o-mini", &req, false, true);
+        let openai = OpenAiCompatProvider::openai("k".into(), "gpt-4o-mini".into());
+        let body = openai_body("gpt-4o-mini", &req, false, &openai.capabilities());
         let f = &body["tools"][0]["function"];
         assert_eq!(f["strict"], true);
         assert_eq!(f["parameters"]["additionalProperties"], false);
+        // OpenAI strict: every property required, optional ones nullable.
+        assert_eq!(f["parameters"]["required"], json!(["query"]));
         assert_eq!(body["tool_choice"], "required");
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[2]["role"], "assistant");
@@ -1291,7 +1330,15 @@ mod tests {
         assert_eq!(msgs[4]["content"], "ERROR: boom");
 
         // NIM / compatible: no strict, schema untouched.
-        let body = openai_body("meta/llama-3.1-8b-instruct", &req, true, false);
+        let nim = OpenAiCompatProvider::nim("k".into(), "meta/llama-3.1-8b-instruct".into());
+        let body = openai_body(
+            "meta/llama-3.1-8b-instruct",
+            &req,
+            true,
+            &nim.capabilities(),
+        );
+        // NIM can't honor "required": degrade to auto (omitted).
+        assert!(body.get("tool_choice").is_none());
         assert!(body["tools"][0]["function"].get("strict").is_none());
         assert!(body["tools"][0]["function"]["parameters"]
             .get("additionalProperties")
@@ -1300,7 +1347,7 @@ mod tests {
         // Auto is the API default and isn't sent.
         let mut auto = tool_req();
         auto.tool_choice = ToolChoice::Auto;
-        assert!(openai_body("m", &auto, false, true)
+        assert!(openai_body("m", &auto, false, &openai.capabilities())
             .get("tool_choice")
             .is_none());
     }
@@ -1484,5 +1531,92 @@ data: [DONE]"#;
             !resp.tool_uses().is_empty() || !resp.text().is_empty(),
             "empty streamed reply"
         );
+    }
+
+    #[test]
+    fn openai_strict_schema_requires_every_property_with_nullable_optionals() {
+        let mut req = tool_req();
+        req.tools[0].input_schema = json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+                "kind": {"type": "string", "enum": ["a", "b"]},
+                "ids": {"type": ["array"], "items": {"type": "string"}},
+                "filters": {
+                    "type": "object",
+                    "properties": {"since": {"type": "string"}},
+                    "required": []
+                },
+                "anything": {"description": "untyped"}
+            },
+            "required": ["query"]
+        });
+        let openai = OpenAiCompatProvider::openai("k".into(), "gpt-4o-mini".into());
+        let body = openai_body("gpt-4o-mini", &req, false, &openai.capabilities());
+        let p = &body["tools"][0]["function"]["parameters"];
+        let mut required: Vec<&str> = p["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        required.sort();
+        assert_eq!(
+            required,
+            ["anything", "filters", "ids", "kind", "limit", "query"]
+        );
+        assert_eq!(p["additionalProperties"], false);
+        let props = &p["properties"];
+        assert_eq!(props["query"]["type"], "string", "required stays non-null");
+        assert_eq!(props["limit"]["type"], json!(["integer", "null"]));
+        assert_eq!(props["kind"]["enum"], json!(["a", "b", null]));
+        assert_eq!(props["ids"]["type"], json!(["array", "null"]));
+        assert_eq!(props["filters"]["type"], json!(["object", "null"]));
+        // Nested objects get the same treatment.
+        assert_eq!(props["filters"]["required"], json!(["since"]));
+        assert_eq!(props["filters"]["additionalProperties"], false);
+        assert_eq!(
+            props["filters"]["properties"]["since"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            props["anything"]["anyOf"][1],
+            json!({"type": "null"}),
+            "untyped optionals are wrapped"
+        );
+    }
+
+    /// The real no-tools mapping used by every legacy and converse request:
+    /// Default omits `think`, Disabled sends false, Enabled sends true.
+    #[test]
+    fn ollama_think_without_tools_follows_the_legacy_rule() {
+        for (mode, want) in [
+            (ThinkingMode::Default, None),
+            (ThinkingMode::Disabled, Some(false)),
+            (ThinkingMode::Enabled, Some(true)),
+        ] {
+            let r = ConverseRequest {
+                messages: vec![Message::user("hi")],
+                thinking: mode,
+                ..Default::default()
+            };
+            assert_eq!(ollama_think(&r), want, "{mode:?}");
+            let body = ollama_body("m", &r, ollama_think(&r), None, false);
+            match want {
+                None => assert!(body.get("think").is_none(), "{mode:?}"),
+                Some(v) => assert_eq!(body["think"], v, "{mode:?}"),
+            }
+            // Same request converted from the legacy type.
+            let legacy = ChatRequest {
+                messages: vec![ChatMessage::user("hi")],
+                temperature: None,
+                max_tokens: None,
+                thinking: mode,
+                format: None,
+                effort: None,
+            };
+            assert_eq!(ollama_think(&ConverseRequest::from(&legacy)), want);
+        }
     }
 }

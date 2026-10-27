@@ -102,6 +102,7 @@ impl LLMProvider for MockLLMProvider {
             tools: true,
             tool_choice_none: true,
             tool_choice_required: true,
+            tool_choice_required_thinking_off: true,
             strict_tools: true,
             max_strict_tools: 0,
             streaming: false,

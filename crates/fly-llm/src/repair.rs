@@ -21,8 +21,9 @@ pub enum TextToolCall {
     /// A usable call of a declared tool.
     Call { name: String, input: Value },
     /// Shaped like a tool call but unusable (bad JSON, unknown tool,
-    /// arguments not an object). Carries a short reason for the corrective
-    /// message — never the model's text itself.
+    /// arguments not an object). Carries a short, fixed-vocabulary reason
+    /// for the corrective message — never any of the model's text (not even
+    /// an invented tool name).
     Malformed { reason: String },
 }
 
@@ -69,8 +70,10 @@ pub fn classify(text: &str, tools: &[ToolSpec]) -> TextToolCall {
     };
     if !tools.iter().any(|t| t.name == name) {
         return TextToolCall::Malformed {
+            // Never echo the model's invented name: the reason ends up in
+            // `LlmError::ToolProtocol`, which may reach logs.
             reason: format!(
-                "there is no tool named {name:?}; available: {}",
+                "that tool name isn't one of the available tools ({})",
                 tools
                     .iter()
                     .map(|t| t.name.as_str())
@@ -246,9 +249,10 @@ mod tests {
                 "{t}"
             );
         }
-        // The reason names the real tools, not the model's text.
+        // The reason names the real tools, never the model's text.
         if let TextToolCall::Malformed { reason } = classify(cases[1], &tools()) {
             assert!(reason.contains("search_passages"), "{reason}");
+            assert!(!reason.contains("delete_everything"), "{reason}");
         }
     }
 }
