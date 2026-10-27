@@ -42,6 +42,7 @@ jobs:
   frontend:
     name: Frontend build (no secrets)
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -75,6 +76,8 @@ jobs:
     name: Bundle (${{ matrix.name }})
     needs: frontend
     runs-on: ${{ matrix.os }}
+    # A normal leg takes 15-25 min; notarization queues can add more.
+    timeout-minutes: 120
     # Gate the secret-bearing legs behind the `release` environment: configure
     # required reviewers on it and move the signing secrets into it (repo
     # Settings → Environments) so only approved runs can read them.
@@ -231,6 +234,35 @@ jobs:
           security delete-keychain "$kc"
           rm -f "$p12"
 
+      # One real, authenticated call to Apple's notary service before the
+      # compile: v2.3.0 failed at notarization with HTTP 403 (a developer
+      # agreement waiting to be accepted) and v1.7.0 with 401 (a bad
+      # app-specific password), each after a full build. `history` lists past
+      # submissions and submits nothing.
+      - name: Apple notary preflight
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if out=$(xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" --output-format json 2>&1); then
+            echo "Notary service accepted the credentials ($(jq '.history | length' <<<"$out" 2>/dev/null || echo '?') past submissions listed)."
+            exit 0
+          fi
+          echo "$out"
+          case "$out" in
+            *403*|*[Aa]greement*)
+              echo "::error::Apple's notary service refused the request (HTTP 403): a developer agreement is probably waiting to be accepted. Sign in to developer.apple.com as the Account Holder, accept it, then re-run." ;;
+            *401*|*[Uu]nauthorized*|*[Ii]nvalid*[Cc]redentials*)
+              echo "::error::Apple's notary service rejected the credentials (HTTP 401): check APPLE_ID, APPLE_TEAM_ID and the app-specific APPLE_PASSWORD (account.apple.com → Sign-In and Security → App-Specific Passwords)." ;;
+            *)
+              echo "::error::Apple notary preflight failed (see the output above). Notarization would fail after the build too." ;;
+          esac
+          exit 1
+
       # The second half of tauri.conf.json's beforeBuildCommand, run here
       # with no secrets in env (the frontend half ran in the `frontend` job).
       - name: Stage sidecar binaries
@@ -340,6 +372,7 @@ jobs:
     name: Publish updater manifest
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write # uploads latest.json to the release
     steps:
@@ -383,6 +416,7 @@ jobs:
   sbom:
     name: Generate SBOMs (no secrets)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -411,13 +445,18 @@ jobs:
           npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --package-lock-only --ignore-npm-errors \
             --output-file "$PWD/sbom/fly-on-the-wall-${GITHUB_REF_NAME}-npm-tooling.cdx.json" package.json
 
+      # The upstream prebuilt binary, checksum-verified by install-action's
+      # manifest: seconds, instead of compiling it with `cargo install`.
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-cyclonedx@0.5.9
+
       # cargo-cyclonedx reads `cargo metadata` (no compile, no build scripts)
       # and writes one <crate>.cdx.json per workspace member; collect them
       # into a single release asset name per crate.
       - name: Rust SBOMs (Cargo.lock)
         shell: bash
         run: |
-          cargo install cargo-cyclonedx --locked --version 0.5.9
           cargo cyclonedx --format json
           while IFS= read -r f; do
             cp "$f" "sbom/fly-on-the-wall-${GITHUB_REF_NAME}-cargo-$(basename "$f")"
@@ -442,6 +481,7 @@ jobs:
     name: Attach SBOMs + attest provenance
     needs: [updater-manifest, sbom]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write # attaches the SBOMs to the release
       id-token: write # Sigstore OIDC for the attestation signature
