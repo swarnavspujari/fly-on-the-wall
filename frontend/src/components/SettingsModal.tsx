@@ -2,6 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, Plus } from "lucide-react";
 import { api } from "../api";
+import { RESTART_REQUIRED_EVENT } from "../privacy";
 import { WHISPER_ENGINE_ID } from "../types";
 import type {
   AppInfo,
@@ -391,6 +392,19 @@ export default function SettingsModal({
   const overlayRef = useRef<HTMLDivElement>(null);
   useDialogFocus(overlayRef, true, { trap: true });
 
+  // After "Delete all my data" the app-level RestartRequired screen takes
+  // over; Settings closes so its focus trap can't hold the keyboard under it
+  // (nothing here is usable until the restart anyway).
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  });
+  useEffect(() => {
+    const close = () => closeRef.current();
+    window.addEventListener(RESTART_REQUIRED_EVENT, close);
+    return () => window.removeEventListener(RESTART_REQUIRED_EVENT, close);
+  }, []);
+
   // Deep link: once settings have loaded (the target row is rendered),
   // bring it into view a single time — not on every later refresh.
   useEffect(() => {
@@ -718,8 +732,11 @@ export default function SettingsModal({
   };
 
   /** The Claude model select applies at once (the key and endpoint fields
-   *  still need Save). The saved base URL is sent back unchanged. */
+   *  still need Save). The saved base URL is sent back unchanged. It holds
+   *  llmBusy like Save/Test, and the select is disabled while they run, so
+   *  this write can't land after an Endpoint save and undo it. */
   const saveClaudeModel = async (model: string) => {
+    if (llmBusy) return;
     const prev = llmModel;
     setLlmModel(model);
     if (!(await confirmCloudProvider("anthropic"))) {
@@ -727,6 +744,7 @@ export default function SettingsModal({
       return;
     }
     const info = llm?.providers.find((p) => p.id === "anthropic");
+    setLlmBusy(true);
     try {
       await api.setLlmSettings({
         provider: "anthropic",
@@ -745,6 +763,8 @@ export default function SettingsModal({
     } catch (e) {
       setLlmModel(prev);
       setLlmTest(String(e));
+    } finally {
+      setLlmBusy(false);
     }
   };
 
@@ -1646,6 +1666,7 @@ export default function SettingsModal({
                             <>
                               <Select
                                 aria-label="Runs on"
+                                disabled={llmBusy}
                                 style={{ width: 210, maxWidth: "100%" }}
                                 value={llmProvider}
                                 onChange={(e) => void pickProvider(e.target.value)}
@@ -1723,6 +1744,7 @@ export default function SettingsModal({
                           control={
                             <Select
                               aria-label="Claude model"
+                              disabled={llmBusy}
                               style={{ width: 260, maxWidth: "100%" }}
                               value={
                                 llmModel || provider?.default_model || ANTHROPIC_MODELS[0].value

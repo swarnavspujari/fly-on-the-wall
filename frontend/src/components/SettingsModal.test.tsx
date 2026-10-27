@@ -7,7 +7,9 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
+import { RESTART_REQUIRED_EVENT } from "../privacy";
 import type { Updater } from "../updater";
+import RestartRequired from "./RestartRequired";
 import SettingsModal from "./SettingsModal";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -354,6 +356,66 @@ describe("Settings overlay", () => {
     await click(byText("button", "Set up"));
     expect(host!.textContent).toContain("claude_desktop_config.json");
     expect(host!.textContent).toContain('"flyonthewall"');
+    // Windows (the mock's OS): the snippet carries the real sidecar path even
+    // though the config-file location is only spelled out on macOS.
+    expect(host!.textContent).toContain("flyonthewall-mcp.exe");
+    expect(host!.textContent).toContain("Settings › Developer › Edit Config");
+    expect(host!.textContent).not.toContain("Library/Application Support");
     expect(host!.textContent).toContain("including notes you keep local");
+  });
+
+  it("closes when 'Delete all my data' hands over to the restart screen", async () => {
+    const onClose = await open();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(RESTART_REQUIRED_EVENT, { detail: {} }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("locks the provider selects while a provider save is in flight", async () => {
+    let release: () => void = () => {};
+    const setLlm = vi
+      .spyOn(api, "setLlmSettings")
+      .mockImplementation(() => new Promise<void>((r) => (release = r)));
+    await open();
+    await click($('[aria-labelledby="settings-h-ai"] .fly-sgroup-more'));
+    await click(byText('[aria-labelledby="settings-h-ai"] button', "Save"));
+    expect($<HTMLSelectElement>('select[aria-label="Claude model"]')!.disabled).toBe(true);
+    expect($<HTMLSelectElement>('select[aria-label="Runs on"]')!.disabled).toBe(true);
+    // a model pick that slips through still can't send a second write
+    await choose($<HTMLSelectElement>('select[aria-label="Claude model"]')!, "claude-haiku-5-5");
+    expect(setLlm).toHaveBeenCalledTimes(1);
+    setLlm.mockRestore();
+    await act(async () => release());
+    await flush();
+  });
+});
+
+describe("RestartRequired", () => {
+  it("takes focus so keyboard users can reach Restart", async () => {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    act(() => root!.render(<RestartRequired />));
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(RESTART_REQUIRED_EVENT, {
+          detail: {
+            includeModels: false,
+            report: {
+              removed: 1,
+              failed: ["recordings/x"],
+              secrets_failed: [],
+              restart_required: true,
+              db_erased: true,
+              db_checkpointed: true,
+              notes: [],
+            },
+          },
+        }),
+      );
+    });
+    await flush();
+    expect(document.activeElement?.textContent).toBe("Restart now");
   });
 });

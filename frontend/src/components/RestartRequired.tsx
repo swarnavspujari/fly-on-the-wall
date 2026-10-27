@@ -9,7 +9,7 @@ import {
   type RestartRequiredDetail,
 } from "../privacy";
 import type { WipeReport } from "../types";
-import { Button } from "./ui";
+import { Button, useDialogFocus } from "./ui";
 
 /** Blocking full-window screen shown after "Delete all my data" until the
  *  app restarts: the data folder is half-deleted and a pending wipe marker
@@ -35,6 +35,10 @@ export default function RestartRequired() {
   }, []);
 
   const outcome = detail ? wipeOutcome(detail.report) : null;
+
+  // An alertdialog takes the keyboard: focus moves to its first button (or
+  // the dialog itself while a clean wipe auto-restarts) and Tab stays here.
+  useDialogFocus(dialogRef, !!outcome, { trap: true });
 
   // While shown, app-wide shortcuts (new note, record, Escape…) must not
   // reach the app underneath; only focus movement stays usable.
