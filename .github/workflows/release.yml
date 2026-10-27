@@ -54,7 +54,7 @@ jobs:
       # restored from another run is bytes this tag build didn't fetch.
       # (setup-node v4 caches only with an explicit `cache:` input; v5+ only
       # when package.json names a packageManager, which ours doesn't.)
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning]
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4.4.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: 22
 
@@ -151,7 +151,7 @@ jobs:
 
       # setup-node v4 caches only with an explicit `cache:` input (and v5+
       # only when package.json names a packageManager, which ours doesn't).
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning]
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4.4.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: 22
           # No dependency cache in the secret-bearing job: a cache restored
@@ -437,7 +437,7 @@ jobs:
           persist-credentials: false
 
       # No cache (see the build job's setup-node note).
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning]
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4.4.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: 22
 
