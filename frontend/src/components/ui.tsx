@@ -2,10 +2,11 @@ import type {
   ButtonHTMLAttributes,
   HTMLAttributes,
   InputHTMLAttributes,
+  KeyboardEvent as ReactKeyboardEvent,
   ReactNode,
   SelectHTMLAttributes,
 } from "react";
-import { useEffect, useId } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 /* ============================================================
    Fly on the Wall — shared primitives
@@ -14,6 +15,10 @@ import { useEffect, useId } from "react";
    (design-system/project/components/**). They are token-driven:
    every color, radius, font and shadow reads a var(--…) defined
    in index.css, so the primitives switch with data-theme for free.
+
+   UX wave 1 adds Switch, Segmented, SettingsGroup/SettingsRow,
+   Sheet, Notice/NoticeStack and the layered Escape stack
+   (useEscapeLayer) from the 2026-10 Settings / Ask handoff.
 
    Stateful styling (hover / focus-visible / :checked / ::placeholder
    / keyframes) lives in a single injected stylesheet — the same
@@ -169,6 +174,92 @@ const CSS = `
   transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
 .fly-modal-x:hover{background:var(--surface-3);color:var(--text)}
 .fly-modal-x:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+
+/* Switch — 36x22 pill, 18px knob, 160ms ease-out */
+.fly-switch{flex:none;display:inline-flex;align-items:center;width:36px;height:22px;padding:2px;border:0;
+  border-radius:var(--radius-pill);background:var(--line-strong);cursor:pointer;
+  transition:background-color var(--dur) var(--ease-out)}
+.fly-switch[aria-pressed="true"]{background:var(--primary)}
+.fly-switch:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.fly-switch:disabled{opacity:.5;cursor:not-allowed}
+.fly-switch-knob{display:block;width:18px;height:18px;border-radius:var(--radius-pill);background:var(--switch-knob);
+  box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform var(--dur) var(--ease-out)}
+.fly-switch[aria-pressed="true"] .fly-switch-knob{transform:translateX(14px)}
+
+/* Segmented */
+.fly-seg{display:inline-flex;flex:none;gap:2px;padding:3px;max-width:100%;border:1px solid var(--line);
+  border-radius:var(--radius-pill);background:var(--surface-2)}
+.fly-seg--full{display:flex;width:100%}
+.fly-seg-opt{flex:none;border:0;border-radius:var(--radius-pill);padding:5px 12px;background:transparent;color:var(--text-2);
+  font-family:var(--font-sans);font-size:12.5px;font-weight:var(--fw-semibold);line-height:1.35;white-space:nowrap;cursor:pointer;
+  transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.fly-seg--full .fly-seg-opt{flex:1}
+.fly-seg-opt:hover{color:var(--text)}
+.fly-seg-opt[aria-checked="true"]{background:var(--primary);color:var(--on-primary)}
+.fly-seg-opt:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.fly-seg-opt:disabled{opacity:.5;cursor:not-allowed}
+
+/* SettingsGroup / SettingsRow — one row pattern: title + helper left, control right */
+.fly-sgroup{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-2xl);overflow:hidden}
+.fly-sgroup-body > * + *{border-top:1px solid var(--line-2)}
+.fly-sgroup-adv{background:var(--surface-2);border-top:1px solid var(--line-2)}
+.fly-sgroup-more{display:block;width:100%;padding:10px 18px;border:0;border-top:1px solid var(--line-2);background:none;
+  text-align:left;font-family:var(--font-sans);font-size:12.5px;font-weight:var(--fw-semibold);color:var(--primary-text);cursor:pointer;
+  transition:background-color var(--dur-fast) var(--ease-out)}
+.fly-sgroup-more:hover{background:var(--surface-2)}
+.fly-sgroup-more:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--primary)}
+.fly-srow{padding:14px 18px}
+.fly-srow-main{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px}
+.fly-srow-text{flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:2px}
+.fly-srow-title{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0;font-family:var(--font-sans);font-size:14px;
+  font-weight:var(--fw-semibold);line-height:1.4;color:var(--text)}
+.fly-srow-helper{margin:0;font-family:var(--font-sans);font-size:12.5px;line-height:1.45;color:var(--text-2)}
+.fly-srow-helper--success{color:var(--success-text)}
+.fly-srow-helper--warning{color:var(--warning-text)}
+.fly-srow-helper--error{color:var(--error-text)}
+.fly-srow-helper--mono{font-family:var(--font-mono);font-size:11.5px;color:var(--text-3)}
+.fly-srow-control{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:8px;max-width:100%}
+.fly-srow-below{margin-top:12px}
+.fly-srow--danger .fly-srow-title{color:var(--error-text)}
+
+/* Sheet — panel over a region (bottom) or docked to its side (right) */
+.fly-sheet-scrim{position:absolute;inset:0;z-index:30;background:var(--overlay);animation:fly-fade-in var(--dur) var(--ease-out)}
+.fly-sheet{position:absolute;z-index:31;display:flex;flex-direction:column;background:var(--surface);color:var(--text);
+  border:1px solid var(--line);box-shadow:var(--shadow-lg);overflow:hidden;animation:fly-fade-up 200ms var(--ease-out)}
+.fly-sheet-scrim--fixed,.fly-sheet--fixed{position:fixed}
+.fly-sheet--bottom{left:0;right:0;bottom:0;max-height:min(72%,680px);border-bottom:0;
+  border-radius:var(--radius-3xl) var(--radius-3xl) 0 0}
+.fly-sheet--right{top:0;right:0;bottom:0;width:min(440px,100%);border-right:0;
+  border-radius:var(--radius-3xl) 0 0 var(--radius-3xl)}
+.fly-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line)}
+.fly-sheet-title{margin:0;font-family:var(--font-display);font-weight:var(--fw-bold);font-size:16px;color:var(--text)}
+.fly-sheet-body{flex:1;min-height:0;overflow-y:auto;padding:16px 18px}
+.fly-sheet-foot{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid var(--line)}
+
+/* NoticeStack + Notice */
+.fly-notices{position:fixed;z-index:50;bottom:48px;display:flex;flex-direction:column;gap:8px;width:384px;max-width:calc(100vw - 32px)}
+.fly-notices--bottom-right{right:16px}
+.fly-notices--bottom-left{left:16px}
+.fly-notices-more{align-self:flex-end;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--line);
+  border-radius:var(--radius-pill);background:var(--surface);color:var(--text-2);box-shadow:var(--shadow-sm);cursor:pointer;
+  font-family:var(--font-sans);font-size:12px;font-weight:var(--fw-semibold)}
+.fly-notices-more:hover{color:var(--text);border-color:var(--line-strong)}
+.fly-notices-more:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.fly-notice{display:flex;gap:10px;align-items:flex-start;padding:14px 16px;background:var(--surface);color:var(--text);
+  border:1px solid var(--line);border-radius:var(--radius-2xl);box-shadow:var(--shadow-lg);animation:fly-fade-up 200ms var(--ease-out)}
+.fly-notice-icon{flex:none;display:flex;margin-top:1px;color:var(--text-2)}
+.fly-notice--warning .fly-notice-icon{color:var(--warning-text)}
+.fly-notice--danger .fly-notice-icon{color:var(--error-text)}
+.fly-notice--success .fly-notice-icon{color:var(--success-text)}
+.fly-notice--primary .fly-notice-icon{color:var(--primary-text)}
+.fly-notice-main{flex:1;min-width:0}
+.fly-notice-title{margin:0;font-family:var(--font-sans);font-size:13.5px;font-weight:var(--fw-semibold);line-height:1.4}
+.fly-notice-body{margin:3px 0 0;font-size:12.5px;line-height:1.5;color:var(--text-2)}
+.fly-notice-steps{margin:8px 0 0;padding-left:18px;list-style:decimal;font-size:12.5px;line-height:1.5;color:var(--text)}
+.fly-notice-details{margin-top:8px;font-size:12px;color:var(--text-3)}
+.fly-notice-details summary{cursor:pointer;font-weight:var(--fw-semibold);color:var(--text-2)}
+.fly-notice-details-body{margin-top:6px;font-family:var(--font-mono);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.fly-notice-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 `;
 
 if (typeof document !== "undefined" && !document.getElementById("fly-ds-css")) {
@@ -709,6 +800,62 @@ export function CitationChip({
   );
 }
 
+/* ------------------------------------------------------------------ layers */
+
+/* Layered Escape: one document listener and a stack of open layers, so Esc
+   closes only the topmost one (Settings, then the Ask sheet, then a popover)
+   instead of every open layer at once. Layers stack in the order they open.
+   The listener runs in the bubble phase and skips events that were already
+   handled (defaultPrevented), so an inner control that uses Esc itself
+   (clearing a search field, closing a native picker) still gets first say. */
+
+interface EscapeLayer {
+  id: number;
+  onEscape: () => void;
+}
+
+const escapeLayers: EscapeLayer[] = [];
+let escapeSeq = 0;
+
+function onEscapeKey(e: KeyboardEvent) {
+  if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
+  const top = escapeLayers[escapeLayers.length - 1];
+  if (!top) return;
+  e.preventDefault();
+  top.onEscape();
+}
+
+/** Push an Escape layer; returns the function that removes it. */
+export function pushEscapeLayer(onEscape: () => void): () => void {
+  const layer = { id: ++escapeSeq, onEscape };
+  escapeLayers.push(layer);
+  if (escapeLayers.length === 1) document.addEventListener("keydown", onEscapeKey);
+  return () => {
+    const i = escapeLayers.findIndex((l) => l.id === layer.id);
+    if (i !== -1) escapeLayers.splice(i, 1);
+    if (escapeLayers.length === 0) document.removeEventListener("keydown", onEscapeKey);
+  };
+}
+
+/** Number of open Escape layers (for tests and debugging). */
+export function escapeLayerDepth(): number {
+  return escapeLayers.length;
+}
+
+/** Registers an Escape layer while `active`. The latest `onEscape` is always
+ *  called, without re-ordering the stack when the callback identity changes. */
+export function useEscapeLayer(onEscape: (() => void) | null | undefined, active = true) {
+  const latest = useRef(onEscape);
+  useLayoutEffect(() => {
+    latest.current = onEscape;
+  });
+  const enabled = active && !!onEscape;
+  useEffect(() => {
+    if (!enabled) return undefined;
+    return pushEscapeLayer(() => latest.current?.());
+  }, [enabled]);
+}
+
 interface ModalProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
   open?: boolean;
   onClose?: () => void;
@@ -719,7 +866,8 @@ interface ModalProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
   children?: ReactNode;
 }
 
-/** Overlay + card shell for dialogs (Settings, consent). Esc / click-outside close. */
+/** Overlay + card shell for dialogs (Settings, consent). Esc / click-outside close.
+ *  Esc goes through the layer stack, so it closes only the topmost layer. */
 export function Modal({
   open = true,
   onClose,
@@ -731,12 +879,7 @@ export function Modal({
   children,
   ...rest
 }: ModalProps) {
-  useEffect(() => {
-    if (!open) return undefined;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose && onClose();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useEscapeLayer(onClose, open);
 
   if (!open) return null;
   return (
@@ -772,6 +915,466 @@ export function Modal({
         <div className="fly-modal-body">{children}</div>
         {footer && <div className="fly-modal-foot">{footer}</div>}
       </div>
+    </div>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
+/* ------------------------------------------------------------------ toggles */
+
+interface SwitchProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onChange" | "value"> {
+  checked: boolean;
+  onChange?: (checked: boolean) => void;
+  /** Accessible name; the switch has no visible text of its own. */
+  label: string;
+}
+
+/** On/off switch (36x22 pill). A toggle button: `aria-pressed` carries the state. */
+export function Switch({
+  checked,
+  onChange,
+  label,
+  className = "",
+  onClick,
+  ...rest
+}: SwitchProps) {
+  return (
+    <button
+      type="button"
+      className={cx("fly-switch", className)}
+      aria-pressed={checked}
+      aria-label={label}
+      onClick={(e) => {
+        onClick?.(e);
+        if (!e.defaultPrevented) onChange?.(!checked);
+      }}
+      {...rest}
+    >
+      <span className="fly-switch-knob" aria-hidden="true" />
+    </button>
+  );
+}
+
+export interface SegmentedOption<T extends string = string> {
+  value: T;
+  label: ReactNode;
+  disabled?: boolean;
+  /** Native tooltip for the segment. */
+  title?: string;
+}
+
+interface SegmentedProps<T extends string> extends Omit<
+  HTMLAttributes<HTMLDivElement>,
+  "onChange"
+> {
+  value: T;
+  onChange: (value: T) => void;
+  options: SegmentedOption<T>[];
+  /** Accessible name for the group. */
+  label: string;
+  /** Stretch to the container width with equal segments. */
+  full?: boolean;
+  disabled?: boolean;
+}
+
+/** Pill track of mutually exclusive choices (a radio group). Arrow keys,
+ *  Home and End move the selection, like native radios. */
+export function Segmented<T extends string>({
+  value,
+  onChange,
+  options,
+  label,
+  full = false,
+  disabled = false,
+  className = "",
+  ...rest
+}: SegmentedProps<T>) {
+  const enabled = options.filter((o) => !o.disabled && !disabled);
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const keys = ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End"];
+    if (!keys.includes(e.key) || enabled.length === 0) return;
+    e.preventDefault();
+    const at = Math.max(
+      0,
+      enabled.findIndex((o) => o.value === value),
+    );
+    let next = at;
+    if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = enabled.length - 1;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp")
+      next = (at - 1 + enabled.length) % enabled.length;
+    else next = (at + 1) % enabled.length;
+    const target = enabled[next];
+    if (target.value !== value) onChange(target.value);
+    const buttons = e.currentTarget.querySelectorAll<HTMLButtonElement>("[data-value]");
+    for (const b of buttons) if (b.dataset.value === target.value) b.focus();
+  };
+  const selectedIsEnabled = enabled.some((o) => o.value === value);
+  return (
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className={cx("fly-seg", full && "fly-seg--full", className)}
+      onKeyDown={onKeyDown}
+      {...rest}
+    >
+      {options.map((o) => {
+        const on = o.value === value;
+        // Roving tab stop: the selected segment (or the first enabled one).
+        const tabbable = on || (!selectedIsEnabled && enabled[0]?.value === o.value);
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            data-value={o.value}
+            title={o.title}
+            disabled={disabled || o.disabled}
+            tabIndex={tabbable ? 0 : -1}
+            className="fly-seg-opt"
+            onClick={() => !on && onChange(o.value)}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ settings rows */
+
+interface SettingsGroupProps extends HTMLAttributes<HTMLDivElement> {
+  /** Advanced rows: shown on --surface-2 above a "More options" footer. */
+  advanced?: ReactNode;
+  /** Controlled open state of the advanced rows (omit for uncontrolled). */
+  expanded?: boolean;
+  defaultExpanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
+  moreLabel?: string;
+  fewerLabel?: string;
+}
+
+/** A settings card: rows separated by hairlines, plus an optional
+ *  "More options" / "Fewer options" footer that reveals advanced rows. */
+export function SettingsGroup({
+  advanced,
+  expanded,
+  defaultExpanded = false,
+  onExpandedChange,
+  moreLabel = "More options",
+  fewerLabel = "Fewer options",
+  className = "",
+  children,
+  ...rest
+}: SettingsGroupProps) {
+  const [innerOpen, setInnerOpen] = useState(defaultExpanded);
+  const open = expanded ?? innerOpen;
+  const advId = useId();
+  const hasAdvanced = advanced != null && advanced !== false;
+  const toggle = () => {
+    const next = !open;
+    if (expanded === undefined) setInnerOpen(next);
+    onExpandedChange?.(next);
+  };
+  return (
+    <div className={cx("fly-sgroup", className)} {...rest}>
+      <div className="fly-sgroup-body">{children}</div>
+      {hasAdvanced && open && (
+        <div id={advId} className="fly-sgroup-adv fly-sgroup-body">
+          {advanced}
+        </div>
+      )}
+      {hasAdvanced && (
+        <button
+          type="button"
+          className="fly-sgroup-more"
+          aria-expanded={open}
+          aria-controls={open ? advId : undefined}
+          onClick={toggle}
+        >
+          {open ? fewerLabel : moreLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
+interface SettingsRowProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
+  title: ReactNode;
+  /** One helper line under the title. */
+  helper?: ReactNode;
+  helperTone?: "default" | "success" | "warning" | "error" | "mono";
+  /** Shown next to the title (e.g. a cloud badge). */
+  badge?: ReactNode;
+  /** The control on the right. */
+  control?: ReactNode;
+  tone?: "default" | "danger";
+  /** Full-width content under the row (key fields, lists, confirmations). */
+  children?: ReactNode;
+}
+
+/** One settings row: title and helper on the left, the control on the right. */
+export function SettingsRow({
+  title,
+  helper,
+  helperTone = "default",
+  badge,
+  control,
+  tone = "default",
+  className = "",
+  children,
+  ...rest
+}: SettingsRowProps) {
+  const has = (n: ReactNode) => n != null && n !== false && n !== "";
+  return (
+    <div className={cx("fly-srow", tone === "danger" && "fly-srow--danger", className)} {...rest}>
+      <div className="fly-srow-main">
+        <div className="fly-srow-text">
+          <div className="fly-srow-title">
+            {title}
+            {has(badge) && badge}
+          </div>
+          {has(helper) && (
+            <div
+              className={cx(
+                "fly-srow-helper",
+                helperTone !== "default" && `fly-srow-helper--${helperTone}`,
+              )}
+            >
+              {helper}
+            </div>
+          )}
+        </div>
+        {has(control) && <div className="fly-srow-control">{control}</div>}
+      </div>
+      {has(children) && <div className="fly-srow-below">{children}</div>}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ sheet */
+
+interface SheetProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
+  open?: boolean;
+  onClose?: () => void;
+  title?: ReactNode;
+  footer?: ReactNode;
+  /** "bottom" slides over the region; "right" docks to its side. */
+  side?: "bottom" | "right";
+  /** Dim the region behind and mark the sheet aria-modal. */
+  modal?: boolean;
+  /** Position against the window instead of the nearest positioned ancestor. */
+  fixed?: boolean;
+  closeOnScrim?: boolean;
+}
+
+/** A panel over part of the screen (the Ask answer sheet). Esc closes it
+ *  through the layer stack. Place it inside a `position: relative` region. */
+export function Sheet({
+  open = true,
+  onClose,
+  title,
+  footer,
+  side = "bottom",
+  modal = false,
+  fixed = false,
+  closeOnScrim = true,
+  className = "",
+  children,
+  ...rest
+}: SheetProps) {
+  useEscapeLayer(onClose, open);
+  const titleId = useId();
+  if (!open) return null;
+  return (
+    <>
+      {modal && (
+        <div
+          className={cx("fly-sheet-scrim", fixed && "fly-sheet-scrim--fixed")}
+          onClick={closeOnScrim ? onClose : undefined}
+          aria-hidden="true"
+        />
+      )}
+      <div
+        role="dialog"
+        aria-modal={modal || undefined}
+        aria-labelledby={title && !rest["aria-label"] ? titleId : undefined}
+        className={cx("fly-sheet", `fly-sheet--${side}`, fixed && "fly-sheet--fixed", className)}
+        {...rest}
+      >
+        {(title || onClose) && (
+          <div className="fly-sheet-head">
+            {title ? (
+              <h2 id={titleId} className="fly-sheet-title">
+                {title}
+              </h2>
+            ) : (
+              <span />
+            )}
+            {onClose && (
+              <button type="button" className="fly-modal-x" onClick={onClose} aria-label="Close">
+                <CloseIcon />
+              </button>
+            )}
+          </div>
+        )}
+        <div className="fly-sheet-body">{children}</div>
+        {footer && <div className="fly-sheet-foot">{footer}</div>}
+      </div>
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ notices */
+
+interface NoticeProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
+  tone?: "neutral" | "primary" | "success" | "warning" | "danger";
+  icon?: ReactNode;
+  title: ReactNode;
+  /** Numbered fix steps, shown after the cause. */
+  steps?: ReactNode[];
+  /** Collapsible technical details (error text, paths). */
+  details?: ReactNode;
+  detailsLabel?: string;
+  actions?: ReactNode;
+  onDismiss?: () => void;
+  dismissLabel?: string;
+  /** The cause: one line of body text. */
+  children?: ReactNode;
+}
+
+/** One notice: cause, then numbered fix, then collapsible details. */
+export function Notice({
+  tone = "neutral",
+  icon,
+  title,
+  steps,
+  details,
+  detailsLabel = "Details",
+  actions,
+  onDismiss,
+  dismissLabel = "Dismiss",
+  className = "",
+  children,
+  ...rest
+}: NoticeProps) {
+  return (
+    <div
+      role={tone === "danger" ? "alert" : "status"}
+      className={cx("fly-notice", `fly-notice--${tone}`, className)}
+      {...rest}
+    >
+      {icon && (
+        <span className="fly-notice-icon" aria-hidden="true">
+          {icon}
+        </span>
+      )}
+      <div className="fly-notice-main">
+        <p className="fly-notice-title">{title}</p>
+        {children && <div className="fly-notice-body">{children}</div>}
+        {steps && steps.length > 0 && (
+          <ol className="fly-notice-steps">
+            {steps.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ol>
+        )}
+        {details && (
+          <details className="fly-notice-details">
+            <summary>{detailsLabel}</summary>
+            <div className="fly-notice-details-body">{details}</div>
+          </details>
+        )}
+        {actions && <div className="fly-notice-actions">{actions}</div>}
+      </div>
+      {onDismiss && (
+        <button type="button" className="fly-modal-x" onClick={onDismiss} aria-label={dismissLabel}>
+          <CloseIcon />
+        </button>
+      )}
+    </div>
+  );
+}
+
+export interface StackedNotice {
+  id: string;
+  /** Higher shows first (system audio > pipeline error > update). */
+  priority: number;
+  node: ReactNode;
+}
+
+/** Highest priority first; equal priorities keep their given order. */
+export function orderNotices<T extends { priority: number }>(notices: readonly T[]): T[] {
+  return notices
+    .map((n, i) => ({ n, i }))
+    .sort((a, b) => b.n.priority - a.n.priority || a.i - b.i)
+    .map(({ n }) => n);
+}
+
+interface NoticeStackProps extends HTMLAttributes<HTMLDivElement> {
+  notices: StackedNotice[];
+  /** How many notices show before "+N more". */
+  visible?: number;
+  placement?: "bottom-right" | "bottom-left";
+  label?: string;
+}
+
+/** One corner for every notice: the most important on top, the rest behind
+ *  a "+N more" toggle, so notices never overlap each other. */
+export function NoticeStack({
+  notices,
+  visible = 1,
+  placement = "bottom-right",
+  label = "Notifications",
+  className = "",
+  ...rest
+}: NoticeStackProps) {
+  const [expanded, setExpanded] = useState(false);
+  if (notices.length === 0) return null;
+  const ordered = orderNotices(notices);
+  const hidden = Math.max(0, ordered.length - visible);
+  const shown = expanded ? ordered : ordered.slice(0, visible);
+  return (
+    <div
+      role="region"
+      aria-label={label}
+      aria-live="polite"
+      className={cx("fly-notices", `fly-notices--${placement}`, className)}
+      {...rest}
+    >
+      {shown.map((n) => (
+        <div key={n.id} data-notice-id={n.id}>
+          {n.node}
+        </div>
+      ))}
+      {hidden > 0 && (
+        <button
+          type="button"
+          className="fly-notices-more"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((e) => !e)}
+        >
+          {expanded ? "Show fewer" : `+${hidden} more`}
+        </button>
+      )}
     </div>
   );
 }
