@@ -231,6 +231,20 @@ impl Storage {
         self.update_note_blocks(id, &blocks)
     }
 
+    /// Keep one block as the user's own text, unchanged ("Keep" on an AI
+    /// line with no source). An edit only reclaims when the text changes, so
+    /// this is the explicit form of the same rule.
+    pub fn keep_note_block(&self, id: &str, block_id: &str) -> Result<Note> {
+        let note = self.get_note(id)?;
+        let mut blocks = note.blocks;
+        blocks
+            .iter_mut()
+            .find(|b| b.id == block_id)
+            .ok_or_else(|| StorageError::NotFound(format!("block {block_id}")))?
+            .reclaim();
+        self.update_note_blocks(id, &blocks)
+    }
+
     pub fn move_note(&self, id: &str, folder_id: Option<&str>) -> Result<()> {
         let n = self.conn.execute(
             "UPDATE notes SET folder_id = ?1, updated_at = ?2 WHERE id = ?3",
@@ -498,6 +512,30 @@ mod tests {
         s.delete_note(&note.id).unwrap();
         assert!(s.get_note(&note.id).is_err());
         assert!(!mirror.exists());
+    }
+
+    #[test]
+    fn keep_and_remove_an_unsourced_ai_block() {
+        use fly_core::{BlockOrigin, NoteBlock};
+        let (_dir, s) = test_storage();
+        let note = s.create_note("Launch", None).unwrap();
+        let kept = NoteBlock::ai("Launch likely moves to May.", vec![]);
+        let dropped = NoteBlock::ai("Budget is final.", vec![]);
+        s.update_note_blocks(&note.id, &[kept.clone(), dropped.clone()])
+            .unwrap();
+
+        // Keep: same text, now the user's
+        let after = s.keep_note_block(&note.id, &kept.id).unwrap();
+        let b = after.blocks.iter().find(|b| b.id == kept.id).unwrap();
+        assert_eq!(b.origin, BlockOrigin::User);
+        assert_eq!(b.markdown, "Launch likely moves to May.");
+
+        // Remove = an edit to empty text, which drops the block
+        let after = s.edit_note_block(&note.id, &dropped.id, "").unwrap();
+        assert_eq!(after.blocks.len(), 1);
+        assert_eq!(after.blocks[0].id, kept.id);
+
+        assert!(s.keep_note_block(&note.id, "nope").is_err());
     }
 
     #[test]

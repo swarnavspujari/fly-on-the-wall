@@ -352,6 +352,22 @@ pub fn edit_note_block(
     Ok(note)
 }
 
+/// Keep one enhanced block as the user's own text, unchanged ("Keep" on an
+/// AI line with no source). Only its origin changes, so nothing to re-embed.
+#[tauri::command]
+pub fn keep_note_block(
+    state: State<'_, AppState>,
+    note_id: String,
+    block_id: String,
+) -> CmdResult<Note> {
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .keep_note_block(&note_id, &block_id)
+        .map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Polish transcript (LLM cleanup pass)
 // ---------------------------------------------------------------------------

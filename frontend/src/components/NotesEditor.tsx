@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import type { ReactNode } from "react";
 import { marked } from "marked";
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
@@ -115,9 +116,21 @@ interface Props {
   revision: number;
   onChange: (markdown: string) => void;
   placeholder?: string;
+  /** The selected template's sections, shown as ghost headings: what
+   *  Enhance will add to these notes. */
+  sections?: string[];
+  /** Shown above the notes, under the format bar (e.g. screen-clip tiles). */
+  header?: ReactNode;
 }
 
-export default function NotesEditor({ markdown, revision, onChange, placeholder }: Props) {
+export default function NotesEditor({
+  markdown,
+  revision,
+  onChange,
+  placeholder,
+  sections = [],
+  header,
+}: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<number | null>(null);
 
@@ -259,6 +272,25 @@ export default function NotesEditor({ markdown, revision, onChange, placeholder 
         </div>
       </div>
       <div className="mx-auto max-w-[var(--content-max)] px-6 pb-28 pt-5">
+        {sections.length > 0 && (
+          <div
+            className="print:hidden mb-4 flex flex-wrap items-center gap-1.5 text-[12px]"
+            style={{ color: "var(--text-3)" }}
+            data-testid="ghost-sections"
+          >
+            <span>Enhance will add</span>
+            {sections.map((s) => (
+              <span
+                key={s}
+                className="rounded-full border border-dashed px-2 py-0.5"
+                style={{ borderColor: "var(--line-strong)", color: "var(--text-2)" }}
+              >
+                {s}
+              </span>
+            ))}
+          </div>
+        )}
+        {header}
         <div
           ref={ref}
           className="fotw-notes"

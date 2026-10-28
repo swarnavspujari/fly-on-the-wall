@@ -175,7 +175,31 @@ const blocks = [
     origin: { kind: "user" },
     markdown: "Gut check: annual looks likely if legal signs off this week.",
   },
+  // An AI line with no source: the Enhanced view flags it with Keep / Remove.
+  {
+    id: "b5",
+    origin: { kind: "ai", source_segment_ids: [] as string[] },
+    markdown: "Acme expects to sign the annual contract by the end of the month.",
+  },
 ];
+
+// edit_note_block / keep_note_block change the blocks above for the session,
+// like the backend: an edit (or Keep) makes an AI block yours, and an edit to
+// empty text removes it. Other notes' blocks (b0 on the notes-only fixtures)
+// aren't stored, so those calls just return the note, as before.
+function editMockBlock(blockId: string, markdown: string | null): boolean {
+  const i = blocks.findIndex((b) => b.id === blockId);
+  if (i === -1) return false;
+  if (markdown === null || blocks[i].markdown !== markdown) {
+    blocks[i] = {
+      ...blocks[i],
+      origin: { kind: "user" },
+      markdown: markdown ?? blocks[i].markdown,
+    };
+  }
+  if (markdown !== null && markdown.trim() === "") blocks.splice(i, 1);
+  return true;
+}
 
 function note(id: string) {
   const m = noteMeta.find((n) => n.id === id) || noteMeta[0];
@@ -475,6 +499,20 @@ let templates = [
   { id: "tpl-standup", name: "Standup", system_prompt: "", structure_hint: "", built_in: true },
   { id: "tpl-interview", name: "Interview", system_prompt: "", structure_hint: "", built_in: true },
 ];
+// Section hints shaped like the built-ins' (crates/fly-storage/src/templates.rs),
+// so the Notes view's ghost headings have something to show.
+const MOCK_TEMPLATE_HINTS: Record<string, string> = {
+  "tpl-general": "## Summary\n## Key points\n## Decisions\n## Action items (owner — due)",
+  "tpl-1on1": "## Topics discussed\n## Feedback\n## Commitments\n## Follow-ups for next time",
+  "tpl-sales": "## Company & contact\n## Pain points\n## Budget & timeline\n## Next steps",
+  "tpl-standup": "## Per person\n### <name>\n- Did\n- Next\n- Blockers\n## Cross-team blockers",
+  "tpl-interview":
+    "## Candidate background\n## Strong signals\n## Concerns\n## Recommended follow-ups",
+};
+templates = templates.map((t) => ({
+  ...t,
+  structure_hint: t.structure_hint || MOCK_TEMPLATE_HINTS[t.id] || "",
+}));
 
 // fotwMockGpuBench = "gpu" | "cpu" | "failed" seeds a stored speed-test verdict.
 function mockGpuBench() {
@@ -798,6 +836,16 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     const i = noteMeta.findIndex((n) => n.id === args.id);
     if (i >= 0) noteMeta.splice(i, 1);
     return null;
+  }
+  // Block edits on the stored meeting blocks change them for the session (a
+  // fresh copy back, like an IPC payload); anything else falls through to the
+  // plain note reply in the switch below.
+  if (cmd === "edit_note_block" || cmd === "keep_note_block") {
+    const markdown = cmd === "keep_note_block" ? null : String(args.markdown ?? "");
+    if (editMockBlock(String(args.blockId), markdown)) {
+      return JSON.parse(JSON.stringify(note(String(args.noteId ?? "n1"))));
+    }
+    if (cmd === "keep_note_block") return note(String(args.noteId ?? "n1"));
   }
   switch (cmd) {
     case "ping":
