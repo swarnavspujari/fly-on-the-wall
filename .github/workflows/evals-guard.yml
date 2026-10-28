@@ -91,12 +91,24 @@ jobs:
           wfdir="$RUNNER_TEMP/pr-workflows"
           rm -rf "$wfdir"
           mkdir -p "$wfdir"
-          git ls-tree --name-only "$HEAD_SHA" -- .github/workflows/ | while IFS= read -r f; do
-            case "$f" in
-              .github/workflows/evals.yml | .github/workflows/evals-guard.yml) ;;
-              *.yml | *.yaml) git show "$HEAD_SHA:$f" >"$wfdir/$(basename "$f")" ;;
-            esac
-          done
+          # NUL-separated, unquoted names; anything we can't copy out is
+          # reported as an impostor (fail closed), never skipped.
+          unreadable="$RUNNER_TEMP/pr-workflows-unreadable.txt"
+          : >"$unreadable"
+          git -c core.quotePath=false ls-tree -z --name-only "$HEAD_SHA" -- .github/workflows/ |
+            while IFS= read -r -d '' f; do
+              case "$f" in
+                .github/workflows/evals.yml | .github/workflows/evals-guard.yml) ;;
+                *.yml | *.yaml)
+                  name=$(basename -- "$f")
+                  if [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] && git show "$HEAD_SHA:$f" >"$wfdir/$name"; then
+                    :
+                  else
+                    printf '%s: workflow file with an unusual name or unreadable content\n' "$f" >>"$unreadable"
+                  fi
+                  ;;
+              esac
+            done
           # YAML → JSON with whatever parser the runner has (none of them
           # loads code from the folder); the detector then needs only the
           # standard library.
@@ -164,7 +176,7 @@ jobs:
                       print(f"{name_of_file}: job {jid} (name: {name})")
           PY
           )
-          impostors=$(printf '%s\n%s' "$impostors" "$parsed" | sed '/^$/d')
+          impostors=$(printf '%s\n%s\n%s' "$impostors" "$parsed" "$(cat "$unreadable")" | sed '/^$/d')
 
           {
             echo "### Eval lock"
