@@ -245,6 +245,11 @@ test("Bash: writes, moves, deletes and redirects are denied", () => {
     "echo \"File.write('evals/x', 'x')\" | ruby -re",
     "echo \"open('evals/x', 'w').write('x')\" | python -Wc",
     "echo \"open('evals/x', 'w').write('x')\" | python -c",
+    // Inline flags count only before the script / `-` (in argument order).
+    "echo \"open('evals/x', 'w').write('x')\" | python -W -c -",
+    "echo \"open('evals/x', 'w').write('x')\" | python - -c x",
+    "echo \"require('fs').writeFileSync('evals/x', 'x')\" | node - -e x",
+    "echo \"rm evals/thresholds.toml\" | bash -s -c x",
     // Launchers whose options take values.
     "echo \"rm evals/thresholds.toml\" | sudo -u nobody bash",
     "echo \"rm evals/thresholds.toml\" | timeout -s KILL 5 bash",

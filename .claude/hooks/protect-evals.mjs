@@ -646,27 +646,47 @@ export function commandViolation(command, ctx = {}, depth = 0) {
       const rest = ws.slice(k + 1);
       const shell = SHELLS.has(v);
       if (!shell && !isInterpreter(v)) return null;
-      if (rest.some((x, j) => (shell ? SHELL_INLINE.test(x) : inlineFlag(v, x) && j + 1 < rest.length))) return null;
-      // The script argument, skipping options that take a value (-o x, +o x, -O x).
-      let script = null;
+      // One walk in argument order, as the program parses them: option
+      // values are skipped; the first inline-code flag (with code after
+      // it), `-`, `-s`, `--` or script word decides. Words after the
+      // script or `-` are the script's own arguments (`python - -c x`
+      // still reads stdin).
+      let reads = true; // no script at all: reads stdin
       for (let j = 0; j < rest.length; j++) {
+        const x = rest[j];
+        if (/^[0-9&]*(<|>)+\|?$/.test(x)) {
+          j++; // redirect operator and its target
+          continue;
+        }
+        if (/^[0-9&]*[<>]/.test(x)) continue;
         // Options that take a value: shells -o/-O/+o; interpreters
         // -r/-I/-W/-X/-C/-E/-M (ruby -r json, perl -M x, python -W x) and
         // --require / --import / --loader.
         const takesValue = shell
-          ? /^[-+][oO]$/.test(rest[j])
-          : /^(-[rIWXCEM]|--require|--import|--loader|--input-type)$/.test(rest[j]);
-        if (takesValue || /^[0-9&]*(<|>)+\|?$/.test(rest[j])) {
+          ? /^[-+][oO]$/.test(x)
+          : /^(-[rIWXCEM]|--require|--import|--loader|--input-type)$/.test(x);
+        if (takesValue) {
           j++;
           continue;
         }
-        if (/^[0-9&]*[<>]/.test(rest[j])) continue;
-        if (!/^[-+]/.test(rest[j])) {
-          script = rest[j];
+        if (shell ? SHELL_INLINE.test(x) : inlineFlag(v, x)) {
+          reads = j + 1 >= rest.length; // inline code needs a code word
+          break;
+        }
+        if (x === "-" || (shell && x === "-s")) {
+          reads = true;
+          break;
+        }
+        if (x === "--") {
+          const next = rest[j + 1];
+          reads = !next || next === "-";
+          break;
+        }
+        if (!/^[-+]/.test(x)) {
+          reads = false; // a script file
           break;
         }
       }
-      const reads = !script || script === "-" || rest.includes("-") || rest.includes("-s");
       return reads ? v : null;
     })
     .filter(Boolean);
