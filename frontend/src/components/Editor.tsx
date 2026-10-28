@@ -1498,7 +1498,8 @@ export default function Editor({
                   note={note}
                   onNoteChanged={onNoteChanged}
                   onZoom={zoom}
-                  transcripts={[cleanedTranscript, transcript]}
+                  transcript={transcript}
+                  enhancing={enhancing}
                 />
               </>
             )}
@@ -1517,7 +1518,7 @@ export default function Editor({
                   : "Write your notes. Enhance keeps your words and sorts them into sections."
               }
               sections={template ? templateSections(template.structure_hint) : []}
-              header={clipStrip(true)}
+              header={showNotes ? clipStrip(true) : null}
             />
           </div>
         </div>

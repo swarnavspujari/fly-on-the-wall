@@ -1,19 +1,22 @@
 import { useEffect, useId, useRef, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, ReactNode, RefObject } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Note, Transcript } from "../types";
 import { api } from "../api";
 import {
-  NO_SOURCE_TITLE,
+  REVIEW_COPY,
   blockTrust,
+  needsReview,
   sourceQuotes,
   trustLine,
+  trustSubline,
   trustSummary,
   type BlockTrust,
+  type CitedTranscript,
 } from "../enhancedTrust";
 import { fmtElapsed } from "./RecordingBar";
-import { Avatar, Button, CitationChip, EscapeLayerScope, speakerColor, useEscapeLayer } from "./ui";
+import { Avatar, Button, CitationChip, EscapeLayerScope, useEscapeLayer } from "./ui";
 import { SAFE_IMG, SafeLink } from "./markdownSafe";
 
 interface Props {
@@ -21,9 +24,17 @@ interface Props {
   onNoteChanged: (note: Note) => void;
   /** Zoom-in: select an AI block's source transcript segments (jumps to Transcript). */
   onZoom: (segmentIds: string[]) => void;
-  /** Transcripts to quote sources from, AI-cleaned first (same segment ids). */
-  transcripts?: (Transcript | null)[];
+  /** The raw transcript the editor has loaded (the selected recording). Used
+   *  when it is the one Enhance cited (`note.meeting_id`); otherwise that
+   *  one is fetched. */
+  transcript?: Transcript | null;
+  /** Enhance is running: its result replaces every block, so edits made now
+   *  would be silently undone. */
+  enhancing?: boolean;
 }
+
+/** How long a removed line can be brought back before it is deleted. */
+export const REMOVE_UNDO_MS = 5000;
 
 /* Markdown → design-language mapping shared by every block: headings become
    uppercase violet mini-headings, bullets become 5px violet dots. */
@@ -65,26 +76,33 @@ const MD_COMPONENTS: Components = {
 };
 
 /** What each provenance looks like; the legend draws the same swatches. */
-const TRUST_STYLE: Record<
-  BlockTrust,
-  { label: string; card: CSSProperties; swatch: CSSProperties }
-> = {
-  user: {
-    label: "You",
-    card: { borderLeft: "2px solid transparent" },
-    swatch: { border: "1px solid var(--line-strong)" },
-  },
+const WARN_CARD: CSSProperties = {
+  background: "var(--warning-soft)",
+  borderLeft: "2px solid var(--warning)",
+};
+const NEUTRAL_CARD: CSSProperties = {
+  background: "var(--surface-2)",
+  borderLeft: "2px solid var(--line-strong)",
+};
+const TRUST_STYLE: Record<BlockTrust, { label: string; card: CSSProperties }> = {
+  user: { label: "You", card: { borderLeft: "2px solid transparent" } },
   sourced: {
     label: "AI, sourced",
     card: { background: "var(--primary-soft)", borderLeft: "2px solid var(--primary-border)" },
-    swatch: { background: "var(--primary-soft)", border: "1px solid var(--primary-border)" },
   },
-  unsourced: {
-    label: "AI, no source",
-    card: { background: "var(--warning-soft)", borderLeft: "2px solid var(--warning)" },
-    swatch: { background: "var(--warning-soft)", border: "1px solid var(--warning)" },
-  },
+  unsourced: { label: "AI, no source", card: WARN_CARD },
+  missing: { label: "AI, source not found", card: WARN_CARD },
+  notes: { label: "Written by AI from your notes", card: NEUTRAL_CARD },
+  pending: { label: "AI", card: NEUTRAL_CARD },
 };
+const SWATCH: Record<"user" | "sourced" | "check" | "notes", CSSProperties> = {
+  user: { border: "1px solid var(--line-strong)" },
+  sourced: { background: "var(--primary-soft)", border: "1px solid var(--primary-border)" },
+  check: { background: "var(--warning-soft)", border: "1px solid var(--warning)" },
+  notes: { background: "var(--surface-2)", border: "1px solid var(--line-strong)" },
+};
+
+const isSelfSpeaker = (key: string) => key === "mic" || key === "you" || key === "self";
 
 function Markdown({ children }: { children: string }) {
   return (
@@ -94,34 +112,87 @@ function Markdown({ children }: { children: string }) {
   );
 }
 
+/** The raw transcript Enhance cited: the loaded one when it is the note's
+ *  meeting, else fetched. "checking" until known, so nothing is downgraded
+ *  (or called notes-only) on a guess. */
+function useCitedTranscript(meetingId: string | null, loaded: Transcript | null): CitedTranscript {
+  const matches = !!meetingId && !!loaded && loaded.meeting_id === meetingId;
+  const [fetched, setFetched] = useState<{ meetingId: string; t: Transcript | null } | null>(null);
+  useEffect(() => {
+    if (!meetingId || matches) return undefined;
+    let live = true;
+    api
+      .getTranscript(meetingId)
+      .then((t) => live && setFetched({ meetingId, t }))
+      .catch(() => {}); // stays "checking": claim nothing
+    return () => {
+      live = false;
+    };
+  }, [meetingId, matches]);
+  if (!meetingId) return { state: "none" };
+  if (matches) return { state: "ready", transcript: loaded! };
+  if (fetched?.meetingId === meetingId) {
+    return fetched.t ? { state: "ready", transcript: fetched.t } : { state: "none" };
+  }
+  return { state: "checking" };
+}
+
 /** One legend for the whole document instead of a label on every block. */
-function TrustLegend({ note }: { note: Note }) {
+function TrustLegend({
+  note,
+  cited,
+  legendRef,
+}: {
+  note: Note;
+  cited: CitedTranscript;
+  legendRef: RefObject<HTMLDivElement | null>;
+}) {
+  const summary = trustSummary(note.blocks, cited);
+  const items: [keyof typeof SWATCH, string][] =
+    cited.state === "none"
+      ? [
+          ["user", "You"],
+          ["notes", "AI, from your notes"],
+          ...(summary.sourced > 0
+            ? [["sourced", "AI, sourced"] as [keyof typeof SWATCH, string]]
+            : []),
+        ]
+      : [
+          ["user", "You"],
+          ["sourced", "AI, sourced"],
+          ["check", "AI, no source"],
+        ];
   return (
     <div
-      className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-[14px] border border-line px-4 py-3"
+      ref={legendRef}
+      tabIndex={-1}
+      data-testid="trust-legend"
+      className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-[14px] border border-line px-4 py-3 outline-none focus-visible:shadow-[var(--focus-ring)]"
       style={{ background: "var(--surface)" }}
     >
       <div className="min-w-0">
-        <div className="text-[13px] font-semibold text-text">
-          {trustLine(trustSummary(note.blocks))}
+        <div className="text-[13px] font-semibold text-text" aria-live="polite">
+          {trustLine(summary, cited)}
         </div>
-        <div className="print:hidden text-[12px]" style={{ color: "var(--text-3)" }}>
-          Your notes and the transcript, merged. Hover a source to see the quote.
-        </div>
+        {summary.ai > 0 && (
+          <div className="print:hidden text-[12px]" style={{ color: "var(--text-3)" }}>
+            {trustSubline(summary, cited)}
+          </div>
+        )}
       </div>
       <ul
         aria-label="Legend"
         className="ml-auto flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[12px]"
         style={{ color: "var(--text-3)" }}
       >
-        {(["user", "sourced", "unsourced"] as const).map((k) => (
+        {items.map(([k, label]) => (
           <li key={k} className="inline-flex items-center gap-1.5">
             <span
               aria-hidden="true"
               className="h-2.5 w-2.5 flex-none rounded-[3px]"
-              style={TRUST_STYLE[k].swatch}
+              style={SWATCH[k]}
             />
-            {TRUST_STYLE[k].label}
+            {label}
           </li>
         ))}
       </ul>
@@ -129,19 +200,23 @@ function TrustLegend({ note }: { note: Note }) {
   );
 }
 
-/** The citation chip: hover or focus previews the cited lines; a click
- *  opens them in the transcript (as before). */
+/** The citation chip: hover or focus previews the cited lines (the raw
+ *  transcript text Enhance read); a click opens them in the transcript. */
 function SourceChip({
   ids,
-  transcripts,
+  transcript,
   onZoom,
 }: {
   ids: string[];
-  transcripts: (Transcript | null)[];
+  /** The transcript Enhance cited, when loaded (null: can't quote yet). */
+  transcript: Transcript | null;
   onZoom: (segmentIds: string[]) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement>(null);
   const hideTimer = useRef<number | null>(null);
+  // Set while Esc hands focus back to the chip, so that focus doesn't reopen it.
+  const quietFocus = useRef(false);
   useEffect(
     () => () => {
       if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
@@ -149,7 +224,15 @@ function SourceChip({
     [],
   );
   const previewId = useId();
-  const depth = useEscapeLayer(() => setOpen(false), open);
+  const depth = useEscapeLayer(() => {
+    setOpen(false);
+    const wrap = wrapRef.current;
+    if (wrap && wrap.contains(document.activeElement)) {
+      quietFocus.current = true;
+      wrap.querySelector<HTMLElement>(".fly-cite")?.focus();
+      quietFocus.current = false;
+    }
+  }, open);
   const show = () => {
     if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
     hideTimer.current = null;
@@ -159,16 +242,19 @@ function SourceChip({
     if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
     hideTimer.current = window.setTimeout(() => setOpen(false), 150);
   };
-  const { found, missing } = open ? sourceQuotes(ids, transcripts) : { found: [], missing: 0 };
+  const { found, missing } = open ? sourceQuotes(ids, transcript) : { found: [], missing: 0 };
   const shown = found.slice(0, 3);
   const more = found.length - shown.length;
 
   return (
     <span
+      ref={wrapRef}
       className="relative flex-none"
       onMouseEnter={show}
       onMouseLeave={hideSoon}
-      onFocus={show}
+      onFocus={() => {
+        if (!quietFocus.current) show();
+      }}
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) hideSoon();
       }}
@@ -195,36 +281,48 @@ function SourceChip({
           }}
         >
           <EscapeLayerScope depth={depth}>
-            {shown.map((q) => (
-              <div key={q.id} className="flex flex-col gap-1">
-                <div className="flex items-center gap-2">
-                  <Avatar
-                    name={q.speaker}
-                    color={speakerColor(q.speakerKey, q.speakerIndex)}
-                    shape="circle"
-                    size="xs"
-                  />
-                  <span className="text-[12.5px] font-semibold text-text">{q.speaker}</span>
-                  <span className="font-mono text-[11px]" style={{ color: "var(--text-3)" }}>
-                    {fmtElapsed(q.startMs)}
+            {transcript === null ? (
+              <span className="text-[12px]" style={{ color: "var(--text-3)" }}>
+                Loading the transcript…
+              </span>
+            ) : (
+              <>
+                {shown.map((q) => (
+                  <div key={q.id} className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <Avatar
+                        name={q.speaker}
+                        self={isSelfSpeaker(q.speakerKey)}
+                        index={q.speakerIndex}
+                        shape="circle"
+                        size="xs"
+                      />
+                      <span className="text-[12.5px] font-semibold text-text">{q.speaker}</span>
+                      <span className="font-mono text-[11px]" style={{ color: "var(--text-3)" }}>
+                        {fmtElapsed(q.startMs)}
+                      </span>
+                    </div>
+                    <span
+                      className="text-[13.5px] leading-[1.55]"
+                      style={{ color: "var(--text-2)" }}
+                    >
+                      “{q.text}”
+                    </span>
+                  </div>
+                ))}
+                {more > 0 && (
+                  <span className="text-[12px]" style={{ color: "var(--text-3)" }}>
+                    +{more} more {more === 1 ? "line" : "lines"}
                   </span>
-                </div>
-                <span className="text-[13.5px] leading-[1.55]" style={{ color: "var(--text-2)" }}>
-                  “{q.text}”
-                </span>
-              </div>
-            ))}
-            {more > 0 && (
-              <span className="text-[12px]" style={{ color: "var(--text-3)" }}>
-                +{more} more {more === 1 ? "line" : "lines"}
-              </span>
-            )}
-            {missing > 0 && (
-              <span className="text-[12px]" style={{ color: "var(--text-3)" }}>
-                {found.length === 0
-                  ? "These lines aren't in the transcript shown now. It may have been re-transcribed."
-                  : `${missing} cited ${missing === 1 ? "line isn't" : "lines aren't"} in the transcript shown now.`}
-              </span>
+                )}
+                {missing > 0 && (
+                  <span className="text-[12px]" style={{ color: "var(--text-3)" }}>
+                    {found.length === 0
+                      ? "These lines aren't in the current transcript. It may have been re-transcribed."
+                      : `${missing} cited ${missing === 1 ? "line isn't" : "lines aren't"} in the current transcript.`}
+                  </span>
+                )}
+              </>
             )}
             <button
               type="button"
@@ -246,30 +344,149 @@ function SourceChip({
 
 /** The enhanced document: provenance-colored blocks under one legend. Your
  *  text is plain ink; sourced AI text sits on violet-soft with a citation
- *  chip; AI text with no source sits on warning-soft with Keep / Remove, no
- *  hover needed. Editing or keeping an AI block makes it your text. */
-export default function EnhancedDoc({ note, onNoteChanged, onZoom, transcripts = [] }: Props) {
+ *  chip; AI text with no source (or a source no longer in the transcript)
+ *  sits on warning-soft with Keep / Remove, no hover needed. With no
+ *  transcript at all, AI text was written from your notes and is shown
+ *  neutral, without a warning. Editing or keeping an AI block makes it
+ *  your text. */
+export default function EnhancedDoc({
+  note,
+  onNoteChanged,
+  onZoom,
+  transcript = null,
+  enhancing = false,
+}: Props) {
+  const cited = useCitedTranscript(note.meeting_id, transcript);
+  const citedTranscript = cited.state === "ready" ? cited.transcript : null;
   const [editing, setEditing] = useState<{ id: string; markdown: string } | null>(null);
   const [saving, setSaving] = useState(false);
   // The block a Keep / Remove is running on, and the last failure.
   const [pending, setPending] = useState<string | null>(null);
   const [failed, setFailed] = useState<{ id: string; message: string } | null>(null);
+  // Remove is deferred: the line hides behind "Removed · Undo" and is only
+  // deleted when the timer runs out. A note switch or leaving the view
+  // cancels it; nothing is deleted without the full wait.
+  const [removing, setRemoving] = useState<{
+    noteId: string;
+    id: string;
+    phase: "undo" | "saving";
+  } | null>(null);
+  const removeTimer = useRef<number | null>(null);
+  const noteRef = useRef(note);
+  useEffect(() => {
+    noteRef.current = note;
+  });
+  useEffect(
+    () => () => {
+      // Note switch or unmount: cancel, never delete early.
+      if (removeTimer.current !== null) window.clearTimeout(removeTimer.current);
+      removeTimer.current = null;
+      setRemoving(null);
+    },
+    [note.id],
+  );
+  const activeRemove = removing && removing.noteId === note.id ? removing : null;
 
-  const run = async (blockId: string, action: () => Promise<Note>, what: string) => {
+  // Focus never drops to the page: after Keep it moves to the next line to
+  // check, else the legend. After Remove it sits on Undo (in place, so the
+  // view doesn't jump away from it) and moves on the same way once the line
+  // is really gone. After Undo it returns to the restored line.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const legendRef = useRef<HTMLDivElement>(null);
+  const [focusPlan, setFocusPlan] = useState<
+    | { kind: "next"; after: string; later: string[] }
+    | { kind: "undo"; id: string }
+    | { kind: "block"; id: string }
+    | null
+  >(null);
+  /** The "next" plan for a line: remembers what came after it. */
+  const nextAfter = (blockId: string) => {
+    const ids = noteRef.current.blocks.map((b) => b.id);
+    return { kind: "next" as const, after: blockId, later: ids.slice(ids.indexOf(blockId) + 1) };
+  };
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!focusPlan || !root) return;
+    const keeps = [...root.querySelectorAll<HTMLElement>("[data-review-keep]")];
+    if (focusPlan.kind === "undo") {
+      const el = root.querySelector<HTMLElement>(`[data-undo-for="${focusPlan.id}"]`);
+      if (!el) return; // not rendered yet
+      el.focus();
+    } else if (focusPlan.kind === "block") {
+      const el = keeps.find((k) => k.dataset.reviewKeep === focusPlan.id);
+      if (!el) return;
+      el.focus();
+    } else {
+      // Wait until the acted-on line has left the review list.
+      if (keeps.some((k) => k.dataset.reviewKeep === focusPlan.after)) return;
+      const next =
+        keeps.find((k) => focusPlan.later.includes(k.dataset.reviewKeep ?? "")) ?? keeps[0] ?? null;
+      (next ?? legendRef.current)?.focus();
+    }
+    setFocusPlan(null);
+  }, [focusPlan, note]);
+
+  const keep = async (blockId: string) => {
     setPending(blockId);
     setFailed(null);
+    const plan = nextAfter(blockId);
     try {
-      onNoteChanged(await action());
+      onNoteChanged(await api.keepNoteBlock(note.id, blockId));
+      setFocusPlan(plan);
     } catch (e) {
       console.error(e);
-      setFailed({ id: blockId, message: `Couldn't ${what} this line. Try again. (${String(e)})` });
+      setFailed({ id: blockId, message: `Couldn't keep this line. Try again. (${String(e)})` });
     } finally {
       setPending(null);
     }
   };
 
+  const commitRemove = (noteId: string, blockId: string) => {
+    removeTimer.current = null;
+    const current = noteRef.current;
+    if (current.id !== noteId || !current.blocks.some((b) => b.id === blockId)) {
+      setRemoving(null); // the note moved on (switched, or re-enhanced)
+      return;
+    }
+    // Undo is about to go: if it had focus, move on to the next line now.
+    const undoHadFocus =
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement.dataset.undoFor === blockId;
+    if (undoHadFocus) setFocusPlan(nextAfter(blockId));
+    setRemoving({ noteId, id: blockId, phase: "saving" });
+    api
+      .editNoteBlock(noteId, blockId, "")
+      .then((updated) => onNoteChanged(updated))
+      .catch((e) => {
+        console.error(e);
+        setFailed({ id: blockId, message: `Couldn't remove this line. Try again. (${String(e)})` });
+      })
+      .finally(() => setRemoving((r) => (r?.id === blockId ? null : r)));
+  };
+
+  const startRemove = (blockId: string) => {
+    setFailed(null);
+    // A second Remove finishes the first one now.
+    if (activeRemove?.phase === "undo" && removeTimer.current !== null) {
+      window.clearTimeout(removeTimer.current);
+      commitRemove(activeRemove.noteId, activeRemove.id);
+    }
+    const noteId = note.id;
+    setRemoving({ noteId, id: blockId, phase: "undo" });
+    removeTimer.current = window.setTimeout(() => commitRemove(noteId, blockId), REMOVE_UNDO_MS);
+    setFocusPlan({ kind: "undo", id: blockId });
+  };
+
+  const undoRemove = () => {
+    if (removeTimer.current !== null) window.clearTimeout(removeTimer.current);
+    removeTimer.current = null;
+    const id = activeRemove?.id;
+    setRemoving(null);
+    if (id) setFocusPlan({ kind: "block", id });
+  };
+
   const saveEdit = async () => {
-    if (!editing) return;
+    if (!editing || enhancing) return;
     setSaving(true);
     try {
       const updated = await api.editNoteBlock(note.id, editing.id, editing.markdown);
@@ -282,23 +499,49 @@ export default function EnhancedDoc({ note, onNoteChanged, onZoom, transcripts =
     }
   };
 
+  const lockedTitle = enhancing ? "Wait for Enhance to finish" : undefined;
+
   return (
-    <div>
-      <TrustLegend note={note} />
+    <div ref={rootRef}>
+      <TrustLegend note={note} cited={cited} legendRef={legendRef} />
 
       {note.blocks.map((b) => {
-        const trust = blockTrust(b.origin);
+        const trust = blockTrust(b.origin, cited);
         const sources = b.origin.kind === "ai" ? b.origin.source_segment_ids : [];
-        const busy = pending === b.id;
+        const busy = pending === b.id || enhancing;
+        const review = needsReview(trust) ? REVIEW_COPY[trust as "unsourced" | "missing"] : null;
+
+        if (activeRemove?.id === b.id) {
+          return (
+            <div
+              key={b.id}
+              role="status"
+              data-testid="removed-line"
+              className="print:hidden mb-3.5 flex items-center gap-2 rounded-lg border border-dashed border-line px-4 py-2 text-[13px]"
+              style={{ color: "var(--text-2)" }}
+            >
+              <span className="mr-auto">
+                {activeRemove.phase === "undo" ? "Removed" : "Removing…"}
+              </span>
+              {activeRemove.phase === "undo" && (
+                <Button variant="ghost" size="xs" onClick={undoRemove} data-undo-for={b.id}>
+                  Undo
+                </Button>
+              )}
+            </div>
+          );
+        }
+
         let body: ReactNode = <Markdown>{b.markdown}</Markdown>;
         if (trust === "sourced") {
           body = (
             <div className="flex items-start gap-2.5">
               <div className="min-w-0 flex-1">{body}</div>
-              <SourceChip ids={sources} transcripts={transcripts} onZoom={onZoom} />
+              <SourceChip ids={sources} transcript={citedTranscript} onZoom={onZoom} />
             </div>
           );
         }
+        const whyId = `why-${b.id}`;
         return (
           <div key={b.id} className="group mb-3.5" data-trust={trust}>
             {editing?.id === b.id ? (
@@ -308,7 +551,11 @@ export default function EnhancedDoc({ note, onNoteChanged, onZoom, transcripts =
                   value={editing.markdown}
                   onChange={(e) => setEditing({ id: b.id, markdown: e.target.value })}
                   onKeyDown={(e) => {
-                    if (e.key === "Escape") setEditing(null);
+                    if (e.key === "Escape") {
+                      // Claim Esc so the layer stack doesn't also close a sheet.
+                      e.preventDefault();
+                      setEditing(null);
+                    }
                     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void saveEdit();
                   }}
                   rows={Math.max(3, editing.markdown.split("\n").length + 1)}
@@ -326,7 +573,8 @@ export default function EnhancedDoc({ note, onNoteChanged, onZoom, transcripts =
                     variant="primary"
                     size="xs"
                     onClick={() => void saveEdit()}
-                    disabled={saving}
+                    disabled={saving || enhancing}
+                    title={lockedTitle}
                   >
                     {saving ? "Saving…" : "Save (Ctrl+Enter)"}
                   </Button>
@@ -349,24 +597,24 @@ export default function EnhancedDoc({ note, onNoteChanged, onZoom, transcripts =
               >
                 <span className="sr-only">{TRUST_STYLE[trust].label}: </span>
                 {body}
-                {trust === "unsourced" && (
+                {review && (
                   <div className="mt-1.5 flex flex-wrap items-center gap-2">
                     <span
-                      className="mr-auto text-[12px] font-medium"
+                      id={whyId}
+                      className="mr-auto min-w-0 flex-1 text-[12px]"
                       style={{ color: "var(--warning-text)" }}
-                      title={NO_SOURCE_TITLE}
                     >
-                      No source · check it before you keep it
+                      <strong className="font-semibold">{review.label}</strong> · {review.why}
                     </span>
                     <span className="print:hidden flex items-center gap-1.5">
                       <Button
                         variant="outline"
                         size="xs"
                         disabled={busy}
-                        title="Keep this line as your own text"
-                        onClick={() =>
-                          void run(b.id, () => api.keepNoteBlock(note.id, b.id), "keep")
-                        }
+                        data-review-keep={b.id}
+                        aria-describedby={whyId}
+                        title={lockedTitle ?? "Keep this line as your own text"}
+                        onClick={() => void keep(b.id)}
                       >
                         Keep
                       </Button>
@@ -374,10 +622,9 @@ export default function EnhancedDoc({ note, onNoteChanged, onZoom, transcripts =
                         variant="ghost"
                         size="xs"
                         disabled={busy}
-                        title="Remove this line from your notes"
-                        onClick={() =>
-                          void run(b.id, () => api.editNoteBlock(note.id, b.id, ""), "remove")
-                        }
+                        aria-describedby={whyId}
+                        title={lockedTitle ?? "Remove this line from your notes"}
+                        onClick={() => startRemove(b.id)}
                       >
                         Remove
                       </Button>
@@ -393,17 +640,19 @@ export default function EnhancedDoc({ note, onNoteChanged, onZoom, transcripts =
                     {failed.message}
                   </div>
                 )}
-                <div
-                  className="print:hidden mt-1 hidden items-center gap-2 text-[11px] group-focus-within:flex group-hover:flex"
-                  style={{ color: "var(--text-3)" }}
-                >
-                  <button
-                    className="cursor-pointer font-semibold hover:text-text"
-                    onClick={() => setEditing({ id: b.id, markdown: b.markdown })}
+                {!enhancing && (
+                  <div
+                    className="print:hidden mt-1 hidden items-center gap-2 text-[11px] group-focus-within:flex group-hover:flex"
+                    style={{ color: "var(--text-3)" }}
                   >
-                    Edit
-                  </button>
-                </div>
+                    <button
+                      className="cursor-pointer font-semibold hover:text-text"
+                      onClick={() => setEditing({ id: b.id, markdown: b.markdown })}
+                    >
+                      Edit
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -178,10 +178,11 @@ const blocks = [
 
 // edit_note_block / keep_note_block change the blocks above for the session,
 // like the backend: an edit (or Keep) makes an AI block yours, and an edit to
-// empty text removes it.
-function editMockBlock(blockId: string, markdown: string | null) {
+// empty text removes it. Other notes' blocks (b0 on the notes-only fixtures)
+// aren't stored, so those calls just return the note, as before.
+function editMockBlock(blockId: string, markdown: string | null): boolean {
   const i = blocks.findIndex((b) => b.id === blockId);
-  if (i === -1) throw new Error(`block ${blockId} not found`);
+  if (i === -1) return false;
   if (markdown === null || blocks[i].markdown !== markdown) {
     blocks[i] = {
       ...blocks[i],
@@ -190,6 +191,7 @@ function editMockBlock(blockId: string, markdown: string | null) {
     };
   }
   if (markdown !== null && markdown.trim() === "") blocks.splice(i, 1);
+  return true;
 }
 
 function note(id: string) {
@@ -826,6 +828,16 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     if (i >= 0) noteMeta.splice(i, 1);
     return null;
   }
+  // Block edits on the stored meeting blocks change them for the session (a
+  // fresh copy back, like an IPC payload); anything else falls through to the
+  // plain note reply in the switch below.
+  if (cmd === "edit_note_block" || cmd === "keep_note_block") {
+    const markdown = cmd === "keep_note_block" ? null : String(args.markdown ?? "");
+    if (editMockBlock(String(args.blockId), markdown)) {
+      return JSON.parse(JSON.stringify(note(String(args.noteId ?? "n1"))));
+    }
+    if (cmd === "keep_note_block") return note(String(args.noteId ?? "n1"));
+  }
   switch (cmd) {
     case "ping":
       return "pong";
@@ -870,17 +882,9 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return note("n3");
     case "update_note_title":
     case "update_note_scratchpad":
+    case "edit_note_block":
     case "enhance_note":
       return note(String(args.id ?? args.noteId ?? "n1"));
-    case "edit_note_block":
-    case "keep_note_block": {
-      editMockBlock(
-        String(args.blockId),
-        cmd === "keep_note_block" ? null : String(args.markdown ?? ""),
-      );
-      // a fresh copy, like an IPC payload (the blocks above stay the store)
-      return JSON.parse(JSON.stringify(note(String(args.noteId ?? "n1"))));
-    }
     case "get_meeting_for_note":
       return meeting(String(args.noteId));
     case "get_meetings_for_note": {
