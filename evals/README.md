@@ -32,7 +32,7 @@ These rules come from spec §4.2 "Evals" and §4.2a items 1, 2, 5, 13 and 14
 
 | Layer | What | Where |
 |---|---|---|
-| 1. Agent hook | A Claude Code `PreToolUse` hook denies agent edits, writes, moves, deletes and redirects into the protected paths. A guardrail, not a security boundary: a determined program can still write files. | `.claude/settings.json`, `.claude/hooks/protect-evals.mjs` |
+| 1. Agent hook | A Claude Code `PreToolUse` hook denies agent edits, writes, moves, deletes and redirects into the protected paths (file tools, Bash and PowerShell, nested shells, `cd`, git checkout/restore/rm, `cargo fmt -p fly-evals`), and any attempt to set `disableAllHooks`. Reads and runs stay allowed. A guardrail, not a security boundary: a determined program can still write files. Tested by `node --test .claude/hooks/protect-evals.test.mjs` (also in `evals-run`). | `.claude/settings.json`, `.claude/hooks/protect-evals.mjs` |
 | 2. CI lock | `evals-guard` (`pull_request_target`, so it always runs from `main`) hashes the protected paths at the PR head and compares the hash to the repository variable `EVALS_LOCK_SHA256`, which only the user sets. It never runs PR code. Job: `evals-lock`. | `.github/workflows/evals-guard.yml` |
 | 3. Review | The coordinating session never merges an eval change without the user's explicit yes. | process |
 
@@ -77,6 +77,7 @@ evals/
     ask_contract/      scenarios, adversarial model scripts, recorded replays
   baselines/           committed results the runner compares against
   runner/              the fly-evals crate (the scorer)
+  lock-hash.sh         prints the lock hash of a revision (EVALS_LOCK_SHA256)
 ```
 
 The scorer is under `evals/` on purpose: changing how a metric is computed is
