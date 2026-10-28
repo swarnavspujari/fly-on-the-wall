@@ -1,0 +1,149 @@
+name: Evals
+
+# Runs the CI system evals, `fly-evals --suite ci` (evals/README.md), with
+# no secrets. Job name: evals-run. It fails when a required suite misses a
+# gate in evals/thresholds.toml or regresses past evals/baselines/.
+#
+# The job always runs, so it can be a required check. It builds and runs
+# the evals only when the PR (or push) touches what they measure: evals/,
+# the crates the scorer links (fly-context, fly-llm, fly-storage, fly-core),
+# an Ask harness crate (crates/fly-ask*), the workspace manifests or this
+# file. Otherwise it passes in seconds.
+#
+# Before running, it checks the scorer can't be swapped or edited from
+# outside evals/ (this file and evals/ are locked by evals-guard.yml):
+#   * fly-evals must resolve to evals/runner/Cargo.toml, with no [patch] or
+#     [replace] in the root manifest and no .cargo/config;
+#   * production code must not read the eval files (a tripwire: an answer
+#     key read at run time would game every metric);
+#   * nothing under evals/ may change during the build or the run.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  evals-run:
+    name: evals-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      # Depth 2: on pull_request HEAD is GitHub's merge commit, so
+      # HEAD^1..HEAD is exactly what the PR changes.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Decide whether the evals need to run
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          decide() {
+            echo "run=$1" >>"$GITHUB_OUTPUT"
+            echo "evals needed: $1"
+            exit 0
+          }
+          case "$EVENT" in
+            pull_request) range=(HEAD^1 HEAD) ;;
+            push)
+              if [[ "$BEFORE" =~ ^0*$ ]] || ! git fetch --quiet --depth=1 --no-tags origin "$BEFORE"; then
+                decide true
+              fi
+              range=("$BEFORE" HEAD)
+              ;;
+            *) decide true ;;
+          esac
+          files=$(git -c core.quotePath=false diff --name-only --no-renames "${range[@]}" --)
+          printf 'Changed files:\n%s\n' "$files"
+          if grep -qE '^(evals/|crates/fly-(context|llm|storage|core)/|crates/fly-ask[^/]*/|Cargo\.(toml|lock)$|rust-toolchain|\.cargo/|\.github/workflows/evals\.yml$)' <<<"$files"; then
+            decide true
+          fi
+          decide false
+
+      - name: Nothing to evaluate
+        if: steps.gate.outputs.run != 'true'
+        run: echo "No change to evals/ or the crates it measures; the evals were not run." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the scorer is the one under evals/
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          if grep -nE '^[[:space:]]*\[(patch|replace)([.\]]|$)' Cargo.toml; then
+            echo "::error::Cargo.toml has a [patch] or [replace] section, which could swap what the scorer links. Not allowed while evals run."
+            exit 1
+          fi
+          if compgen -G ".cargo/config*" >/dev/null || compgen -G "evals/runner/.cargo/*" >/dev/null; then
+            echo "::error::A .cargo/config could redirect the scorer's build. Not allowed while evals run."
+            exit 1
+          fi
+          manifests=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "fly-evals") | .manifest_path')
+          if [ "$manifests" != "$GITHUB_WORKSPACE/evals/runner/Cargo.toml" ]; then
+            echo "::error::fly-evals must be the single package at evals/runner/Cargo.toml (got: $manifests)."
+            exit 1
+          fi
+          # Production code must never read the answer key.
+          if git grep -nE 'evals/(fixtures|suites|baselines)|questions\.toml|keep_local_probes|scenarios\.toml|thresholds\.toml' -- 'crates/*/src/**' 'src-tauri/src/**' 'frontend/src/**'; then
+            echo "::error::Production code references the eval files above. The evals would be gamed; remove the reference."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: steps.gate.outputs.run == 'true'
+        with:
+          toolchain: stable
+
+      # Only main writes the cache; PRs restore main's (as in ci.yml).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.gate.outputs.run == 'true'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build the scorer
+        if: steps.gate.outputs.run == 'true'
+        run: cargo build -p fly-evals --locked
+
+      - name: Check the build left evals/ untouched
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          if [ -n "$(git status --porcelain -- evals/ .github/workflows/evals.yml)" ]; then
+            git status --porcelain -- evals/ .github/workflows/evals.yml
+            echo "::error::Something changed the eval files during the build."
+            exit 1
+          fi
+
+      - name: Run the CI evals
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set +e
+          ./target/debug/fly-evals --suite ci
+          code=$?
+          set -e
+          if [ -f target/evals/summary.md ]; then
+            cat target/evals/summary.md >>"$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -n "$(git status --porcelain -- evals/)" ]; then
+            git status --porcelain -- evals/
+            echo "::error::Something changed the eval files during the run."
+            exit 1
+          fi
+          exit "$code"

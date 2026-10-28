@@ -1,0 +1,98 @@
+name: Evals lock
+
+# The CI half of the eval lock (evals/README.md, "How it's enforced").
+# Evals are immutable to AI coding agents; only the user changes them.
+#
+# `pull_request_target` runs THIS file as it is on the base branch (main),
+# so a pull request can't change the check that judges it. The job hashes
+# the protected paths at the PR head and compares the hash with the
+# repository variable EVALS_LOCK_SHA256, which only the user sets:
+#
+#   evals/**   .github/workflows/evals.yml   .github/workflows/evals-guard.yml
+#   .claude/settings.json   .claude/hooks/**
+#
+# The hash is the SHA-256 of `git ls-tree -r` over those paths (mode, type,
+# blob id, path), sorted: blob ids make it independent of line endings.
+# evals/lock-hash.sh computes the same value locally.
+#
+# It never executes PR code. The PR head is checked out only so its git
+# objects can be read with `git ls-tree` and `git diff --name-only`; nothing
+# from it is built, sourced or run, credentials aren't persisted, and the
+# token is read-only. The only PR-derived values used are the head and base
+# commit SHAs, passed through env.
+#
+# Fails when the hash differs from the variable, or the variable is unset.
+# The computed hash is always printed to the job summary so the user can
+# copy it after reviewing an eval change. Job name: evals-lock.
+on:
+  # zizmor: ignore[dangerous-triggers] -- read-only lock check: it hashes the PR head's protected paths with git ls-tree and never builds or runs PR code (see the header).
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions: {}
+
+concurrency:
+  group: evals-lock-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  evals-lock:
+    name: evals-lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Compare the lock hash
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED: ${{ vars.EVALS_LOCK_SHA256 }}
+        run: |
+          set -euo pipefail
+          paths=(evals .github/workflows/evals.yml .github/workflows/evals-guard.yml .claude/settings.json .claude/hooks)
+          hash=$(git ls-tree -r --full-tree "$HEAD_SHA" -- "${paths[@]}" | LC_ALL=C sort | sha256sum | cut -d' ' -f1)
+          echo "Lock hash at $HEAD_SHA: $hash"
+
+          # Which protected files this PR changes (diagnostics only; the
+          # base commit's objects are fetched anonymously, the repo is public).
+          changed=""
+          if git fetch --quiet --depth=1 --no-tags origin "$BASE_SHA" 2>/dev/null; then
+            changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- "${paths[@]}" || true)
+          fi
+
+          {
+            echo "### Eval lock"
+            echo
+            echo "Lock hash at \`$HEAD_SHA\`:"
+            echo
+            echo '```'
+            echo "$hash"
+            echo '```'
+            if [ -n "$changed" ]; then
+              echo
+              echo "Protected files this PR changes:"
+              echo
+              echo '```'
+              echo "$changed"
+              echo '```'
+            fi
+            echo
+            echo "Only the user changes evals (evals/README.md, \"Changing an eval\"). To accept this version, set the repository variable \`EVALS_LOCK_SHA256\` to the hash above (Settings → Secrets and variables → Actions → Variables) and re-run this job."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$EXPECTED" ]; then
+            echo "::error title=Eval lock::EVALS_LOCK_SHA256 is not set. The user sets it to the hash in this job's summary."
+            exit 1
+          fi
+          if [ "$hash" != "$EXPECTED" ]; then
+            echo "::error title=Eval lock::The protected eval files differ from the locked version (expected $EXPECTED, got $hash). Only the user changes evals; see this job's summary."
+            exit 1
+          fi
+          echo "Eval lock matches."
