@@ -60,6 +60,9 @@ export default function ImportQueue({
   const [clicked, setClicked] = useState(false);
   // conversion markers from import:progress ("converting" until "converted")
   const [converting, setConverting] = useState<string | null>(null);
+  // files whose conversion failed during this run (file id -> cause); the
+  // rest of the batch carries on, and the returned queue keeps the causes
+  const [failedLive, setFailedLive] = useState<Record<string, string>>({});
   const dragIdx = useRef<number | null>(null);
 
   // Re-sync the local (reorderable) list whenever the backend hands back a
@@ -67,6 +70,7 @@ export default function ImportQueue({
   useEffect(() => {
     setFiles(staged.files);
     setClicked(false);
+    setFailedLive({});
   }, [staged]);
 
   useEffect(() => {
@@ -74,6 +78,10 @@ export default function ImportQueue({
       const p = e.payload;
       if (p.meeting_id !== staged.meeting_id) return;
       setConverting(p.stage === "converting" ? p.file_id : null);
+      if (p.stage === "failed") {
+        const cause = p.error ?? "Its audio couldn't be converted.";
+        setFailedLive((m) => ({ ...m, [p.file_id]: cause }));
+      }
     });
     return () => {
       void un.then((f) => f());
@@ -82,11 +90,26 @@ export default function ImportQueue({
 
   const running = staged.started || clicked;
   const idle = !running;
-  const supported = files.filter((f) => !f.error);
+  // A conversion failure belongs to its file: while a run is going only this
+  // run's failures count (an earlier cause is being retried); when idle the
+  // queue shows the causes the last run left behind.
+  const failure = (f: ImportFile): string | null =>
+    running ? (failedLive[f.id] ?? null) : (f.convert_error ?? failedLive[f.id] ?? null);
+  const supported = files.filter((f) => !f.error && !failure(f));
+  const failed = files.filter((f) => !f.error && failure(f));
 
+  // Transcribe goes ahead without files that failed to convert (the backend
+  // drops them from the queue, as it does any file left out of the order).
   const start = () => {
     setClicked(true);
+    setFiles((fs) => fs.filter((f) => f.error || !failure(f)));
     onTranscribe(supported.map((f) => f.id));
+  };
+  // Retry runs the whole queue again, failed files included: finished
+  // conversions are reused, so only the failed ones are converted again.
+  const retry = () => {
+    setClicked(true);
+    onTranscribe(files.filter((f) => !f.error).map((f) => f.id));
   };
 
   const removeFile = (id: string) => setFiles((fs) => fs.filter((f) => f.id !== id));
@@ -122,18 +145,25 @@ export default function ImportQueue({
     }
   }
 
+  const failedNote =
+    supported.length === 0
+      ? `${failed.length === 1 ? "The file" : `All ${failed.length} files`} couldn't be converted. See why below, then retry.`
+      : `${failed.length} file${failed.length === 1 ? "" : "s"} couldn't be converted. Retry, or transcribe the other ${supported.length === 1 ? "file" : `${supported.length} files`} without ${failed.length === 1 ? "it" : "them"}.`;
   const subtitle = pipelineError
     ? briefError(pipelineError)
-    : idle
-      ? "Files are transcribed in this order — drag to reorder, then hit Transcribe."
-      : pipeStage === "transcribing"
-        ? (rollingStatus(supported, staged.boundaries_ms, pipeDetail) ??
-          RUNNING_LABELS.transcribing)
-        : ((pipeStage && RUNNING_LABELS[pipeStage]) ??
-          (converting != null ? "Preparing audio…" : "Starting…"));
+    : idle && failed.length > 0
+      ? failedNote
+      : idle
+        ? "Files are transcribed in this order — drag to reorder, then hit Transcribe."
+        : pipeStage === "transcribing"
+          ? (rollingStatus(supported, staged.boundaries_ms, pipeDetail) ??
+            RUNNING_LABELS.transcribing)
+          : ((pipeStage && RUNNING_LABELS[pipeStage]) ??
+            (converting != null ? "Preparing audio…" : "Starting…"));
 
   // 1-based position among the transcribable rows (error rows show "!")
-  const rowNumber = (i: number) => files.slice(0, i + 1).filter((f) => !f.error).length;
+  const rowNumber = (i: number) =>
+    files.slice(0, i + 1).filter((f) => !f.error && !failure(f)).length;
 
   return (
     <div
@@ -145,7 +175,12 @@ export default function ImportQueue({
           <div className="text-[13.5px] font-bold text-text">Imported media</div>
           <div
             className="mt-0.5 text-[12px]"
-            style={{ color: pipelineError ? "var(--error-text)" : "var(--text-3)" }}
+            style={{
+              color:
+                pipelineError || (idle && failed.length > 0)
+                  ? "var(--error-text)"
+                  : "var(--text-3)",
+            }}
           >
             {subtitle}
           </div>
@@ -179,13 +214,15 @@ export default function ImportQueue({
       </div>
       <div>
         {files.map((f, i) => {
-          const st = f.error ? null : statuses[f.id];
+          const cause = f.error ? null : failure(f);
+          const bad = f.error != null || cause != null;
+          const st = bad ? null : statuses[f.id];
           const n = rowNumber(i);
           const Icon = f.kind === "video" ? Monitor : Mic;
           return (
             <div
               key={f.id}
-              draggable={idle && !f.error}
+              draggable={idle && !bad}
               onDragStart={(e) => {
                 dragIdx.current = i;
                 e.dataTransfer.effectAllowed = "move";
@@ -198,44 +235,60 @@ export default function ImportQueue({
                 if (idle) onDragOverRow(i);
               }}
               className={`flex items-center gap-2.5 bg-surface px-4 py-2.5 ${i ? "border-t border-line" : ""}`}
-              style={{ cursor: idle && !f.error ? "grab" : "default", opacity: f.error ? 0.92 : 1 }}
+              style={{ cursor: idle && !bad ? "grab" : "default", opacity: bad ? 0.92 : 1 }}
             >
-              {idle && !f.error ? (
+              {idle && !bad ? (
                 <GripVertical size={14} strokeWidth={1.75} className="flex-none text-text-3" />
               ) : (
                 <span className="w-3.5 flex-none" />
               )}
               <span
                 className="w-5 flex-none text-center text-[12px] font-bold tabular-nums"
-                style={{ color: f.error ? "var(--error-text)" : "var(--text-3)" }}
+                style={{ color: bad ? "var(--error-text)" : "var(--text-3)" }}
               >
-                {f.error ? "!" : n}
+                {bad ? "!" : n}
               </span>
               <Icon
                 size={15}
                 strokeWidth={1.75}
                 className="flex-none"
-                style={{ color: f.error ? "var(--error-text)" : "var(--text-3)" }}
+                style={{ color: bad ? "var(--error-text)" : "var(--text-3)" }}
               />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px] font-semibold text-text">{f.file_name}</div>
-                {f.error ? (
+                {f.error || cause ? (
                   <div className="mt-px text-[11.5px]" style={{ color: "var(--error-text)" }}>
-                    {f.error}
+                    {f.error ?? cause}
                   </div>
                 ) : (
                   <div className="mt-px text-[11.5px] text-text-3">{fmtSize(f.size)}</div>
                 )}
               </div>
-              {f.error && idle && (
+              {cause && idle && (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  title="Try converting this file again, then transcribe the queue"
+                  onClick={retry}
+                >
+                  Retry
+                </Button>
+              )}
+              {bad && idle && (
                 <Button
                   variant="ghost"
                   size="xs"
                   title="Remove file"
+                  aria-label={`Remove ${f.file_name}`}
                   onClick={() => removeFile(f.id)}
                 >
                   <X size={13} strokeWidth={2} />
                 </Button>
+              )}
+              {cause && running && (
+                <span className="text-[12px] font-semibold" style={{ color: "var(--error-text)" }}>
+                  Couldn&apos;t convert
+                </span>
               )}
               {st === "waiting" && <span className="text-[12px] text-text-3">Waiting</span>}
               {st === "preparing" && (

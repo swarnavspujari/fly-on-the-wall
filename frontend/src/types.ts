@@ -386,6 +386,9 @@ export interface ImportFile {
   /** Source copy inside the data dir (null for unsupported files). */
   rel_path: string | null;
   error: string | null;
+  /** Why this file's audio couldn't be converted on the last Transcribe
+   *  (the file stays staged, so Retry can try it again). */
+  convert_error?: string | null;
 }
 
 /** A note created from imported media that hasn't been transcribed yet. */
@@ -405,7 +408,9 @@ export interface ImportStaged {
 export interface ImportProgress {
   meeting_id: string;
   file_id: string;
-  stage: "converting" | "converted";
+  stage: "converting" | "converted" | "failed";
+  /** With "failed": this file's cause (the rest of the batch carries on). */
+  error?: string | null;
 }
 
 export interface AudioDevice {
