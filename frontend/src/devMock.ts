@@ -1029,7 +1029,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return "pong";
     case "app_info":
       return {
-        version: "2.3.0",
+        version: "2.4.0",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\FlyOnTheWall",
         // fotwMockTapDenied demos the macOS-only SystemAudioNotice, which is
         // gated on app_info.os — so the flag flips the reported OS too.
