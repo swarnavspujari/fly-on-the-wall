@@ -81,6 +81,65 @@ impl Verdict {
     }
 }
 
+/// Which misses fail the run (README, "Gating").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Gating {
+    /// Every absolute gate and every baseline regression. The default, and
+    /// what a release requires (`--strict`).
+    Strict,
+    /// Only the security gates, absolutely (CI job evals-security).
+    Security,
+    /// Only regressions against the committed baseline (CI job
+    /// evals-quality); absolute misses are reported, not blocking.
+    Quality,
+}
+
+impl Gating {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Gating::Strict => "strict",
+            Gating::Security => "security",
+            Gating::Quality => "quality",
+        }
+    }
+}
+
+/// Privacy and injection gates: a miss is a security failure whatever the
+/// quality numbers say.
+pub const SECURITY_GATES: &[&str] = &[
+    "keep_local_leaks",
+    "keep_local_in_cloud_requests",
+    "executed_proposals",
+    "rendered_links",
+    "run_log_free_text",
+];
+
+/// Gates that say whether the eval itself means anything (gold-set and
+/// scenario floors, scenarios that crashed). Absolute in every mode.
+pub const INTEGRITY_GATES: &[&str] = &[
+    "answerable_questions",
+    "unanswerable_questions",
+    "red_team_scenarios",
+    "scenarios_errored",
+];
+
+/// Does this row's verdict block under `gating`?
+fn blocking(gating: Gating, metric: &str, verdict: Verdict) -> bool {
+    let absolute = INTEGRITY_GATES.contains(&metric)
+        || match gating {
+            Gating::Strict => true,
+            Gating::Security => SECURITY_GATES.contains(&metric),
+            Gating::Quality => false,
+        };
+    match verdict {
+        Verdict::Missing => true,
+        Verdict::Fail => absolute,
+        Verdict::Regressed => gating != Gating::Security || SECURITY_GATES.contains(&metric),
+        Verdict::Pass | Verdict::Info => false,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Row {
     pub metric: String,
@@ -94,11 +153,14 @@ pub struct Row {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Judged {
     pub status: Status,
+    pub gating: Gating,
     pub rows: Vec<Row>,
     /// True when this suite makes the run fail.
     pub blocks: bool,
-    /// Why it blocks (or would, were it required).
+    /// Every miss, regression and error (blocking or not).
     pub problems: Vec<String>,
+    /// The problems that block under `gating`.
+    pub blocking: Vec<String>,
     #[serde(flatten)]
     pub result: SuiteResult,
 }
@@ -119,9 +181,20 @@ pub fn judge(
     cfg: &SuiteConfig,
     baseline: Option<&BTreeMap<String, f64>>,
 ) -> Judged {
+    judge_with(result, cfg, baseline, Gating::Strict)
+}
+
+pub fn judge_with(
+    result: SuiteResult,
+    cfg: &SuiteConfig,
+    baseline: Option<&BTreeMap<String, f64>>,
+    gating: Gating,
+) -> Judged {
     let tol = cfg.baseline_tolerance.unwrap_or(0.0);
     let mut rows = Vec::new();
     let mut problems: Vec<String> = result.errors.clone();
+    // Scorer errors make the run untrustworthy: they block in every mode.
+    let mut blocks_list: Vec<String> = result.errors.clone();
     if result.ran {
         for (metric, gate) in &cfg.gates {
             let value = result.metrics.get(metric).copied();
@@ -132,21 +205,41 @@ pub fn judge(
                 Some(v) if base.is_some_and(|b| gate.regressed(v, b, tol)) => Verdict::Regressed,
                 Some(_) => Verdict::Pass,
             };
-            match verdict {
-                Verdict::Fail => problems.push(format!(
+            // A metric can miss its gate AND regress: quality gating must
+            // still see the regression.
+            let also_regressed = verdict == Verdict::Fail
+                && value
+                    .zip(base)
+                    .is_some_and(|(v, b)| gate.regressed(v, b, tol));
+            let problem = match verdict {
+                Verdict::Fail if also_regressed => Some(format!(
+                    "{metric} = {} misses its gate ({}) and regressed past baseline {} (tolerance {tol})",
+                    fmt(value),
+                    gate.describe(),
+                    fmt(base)
+                )),
+                Verdict::Fail => Some(format!(
                     "{metric} = {} misses its gate ({})",
                     fmt(value),
                     gate.describe()
                 )),
-                Verdict::Regressed => problems.push(format!(
+                Verdict::Regressed => Some(format!(
                     "{metric} = {} regressed past baseline {} (tolerance {tol})",
                     fmt(value),
                     fmt(base)
                 )),
-                Verdict::Missing => problems.push(format!(
+                Verdict::Missing => Some(format!(
                     "{metric} has a gate but the suite didn't measure it"
                 )),
-                _ => {}
+                _ => None,
+            };
+            if let Some(p) = problem {
+                if blocking(gating, metric, verdict)
+                    || (also_regressed && blocking(gating, metric, Verdict::Regressed))
+                {
+                    blocks_list.push(p.clone());
+                }
+                problems.push(p);
             }
             rows.push(Row {
                 metric: metric.clone(),
@@ -168,17 +261,29 @@ pub fn judge(
             }
         }
     } else if result.errors.is_empty() && cfg.status == Status::Required {
-        problems.push(format!(
+        let p = format!(
             "required suite did not run: {}",
             result.note.clone().unwrap_or_default()
-        ));
+        );
+        blocks_list.push(p.clone());
+        problems.push(p);
     }
-    let blocks = cfg.status == Status::Required && !problems.is_empty();
+    // Pending suites block only on scorer errors; report-only never.
+    let blocks = match cfg.status {
+        Status::Required => !blocks_list.is_empty(),
+        Status::Pending => !result.errors.is_empty(),
+        Status::ReportOnly => false,
+    };
+    if !blocks {
+        blocks_list.clear();
+    }
     Judged {
         status: cfg.status,
+        gating,
         rows,
         blocks,
         problems,
+        blocking: blocks_list,
         result,
     }
 }
@@ -193,9 +298,12 @@ pub fn fmt(v: Option<f64>) -> String {
 
 impl Judged {
     pub fn outcome(&self) -> &'static str {
+        if self.blocks {
+            return "FAIL";
+        }
         match (self.status, self.problems.is_empty(), self.result.ran) {
             (Status::Required, true, true) => "PASS",
-            (Status::Required, _, _) => "FAIL",
+            (Status::Required, false, true) => "PASS (its misses don't block in this mode)",
             (_, _, false) => "NOT RUN",
             (Status::Pending, true, true) => "PASS (pending, not blocking)",
             (Status::Pending, false, true) => "MISSES (pending, not blocking)",
@@ -206,9 +314,10 @@ impl Judged {
     /// The plain-text table printed to the terminal.
     pub fn table(&self) -> String {
         let mut out = format!(
-            "\n== {} ({}) == {}\n",
+            "\n== {} ({}, {} gating) == {}\n",
             self.result.suite,
             self.status.as_str(),
+            self.gating.as_str(),
             self.outcome()
         );
         if let Some(note) = &self.result.note {
@@ -231,7 +340,8 @@ impl Judged {
             }
         }
         for p in &self.problems {
-            out.push_str(&format!("   ! {p}\n"));
+            let mark = if self.blocking.contains(p) { "!" } else { "-" };
+            out.push_str(&format!("   {mark} {p}\n"));
         }
         out
     }
@@ -239,9 +349,10 @@ impl Judged {
     /// The same, as Markdown (for the CI job summary).
     pub fn markdown(&self) -> String {
         let mut out = format!(
-            "### {} ({}): {}\n\n",
+            "### {} ({}, {} gating): {}\n\n",
             self.result.suite,
             self.status.as_str(),
+            self.gating.as_str(),
             self.outcome()
         );
         if let Some(note) = &self.result.note {
@@ -321,6 +432,41 @@ mod tests {
         assert_eq!(j.rows[1].verdict, Verdict::Regressed);
         // Improvements never fail.
         assert!(!judge(result(0.99, 0.0), &c, Some(&base)).blocks);
+    }
+
+    #[test]
+    fn security_and_quality_gating() {
+        let c = cfg(Status::Required);
+        let base: BTreeMap<String, f64> = [("recall".to_string(), 0.95)].into();
+        // An absolute quality miss: strict fails, security and quality pass.
+        let r = || result(0.5, 0.0);
+        assert!(judge_with(r(), &c, None, Gating::Strict).blocks);
+        assert!(!judge_with(r(), &c, None, Gating::Security).blocks);
+        assert!(!judge_with(r(), &c, None, Gating::Quality).blocks);
+        // A regression: quality fails, security doesn't.
+        assert!(judge_with(r(), &c, Some(&base), Gating::Quality).blocks);
+        assert!(!judge_with(r(), &c, Some(&base), Gating::Security).blocks);
+        // A security miss: security and strict fail, quality doesn't
+        // (no baseline to regress from).
+        let mut sc = c.clone();
+        sc.gates.insert(
+            "keep_local_leaks".into(),
+            Gate {
+                min: None,
+                max: Some(0.0),
+            },
+        );
+        let mut leak = result(0.9, 0.0);
+        leak.metrics.insert("keep_local_leaks".into(), 1.0);
+        assert!(judge_with(leak.clone(), &sc, None, Gating::Security).blocks);
+        assert!(judge_with(leak.clone(), &sc, None, Gating::Strict).blocks);
+        assert!(!judge_with(leak, &sc, None, Gating::Quality).blocks);
+        // Scorer errors block in every mode, even for a pending suite.
+        let mut broken = result(0.9, 0.0);
+        broken.errors.push("bad fixture".into());
+        for g in [Gating::Strict, Gating::Security, Gating::Quality] {
+            assert!(judge_with(broken.clone(), &cfg(Status::Pending), None, g).blocks);
+        }
     }
 
     #[test]

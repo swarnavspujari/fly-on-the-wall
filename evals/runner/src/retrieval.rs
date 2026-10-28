@@ -137,6 +137,27 @@ impl GoldSet {
                     q.id
                 );
             }
+            // The gold answer must pass the claim check against the segments
+            // the `auto` script cites for it (the first of each requirement).
+            let cited: Vec<&crate::corpus::Segment> = q
+                .must_cite
+                .iter()
+                .filter_map(|r| corpus.segment(r.ids()[0]))
+                .collect();
+            let sources: Vec<crate::claims::Source<'_>> = cited
+                .iter()
+                .map(|s| crate::claims::Source {
+                    text: &s.text,
+                    speaker: &s.speaker,
+                })
+                .collect();
+            let missing = crate::claims::unsupported(&q.answer, &sources);
+            ensure!(
+                missing.is_empty(),
+                "{}: the gold answer fails its own claim check ({})",
+                q.id,
+                missing.join(", ")
+            );
             ensure!(
                 q.keep_local == all_keep_local,
                 "{}: keep_local must be {} (where its must-cite segments live)",
@@ -280,13 +301,45 @@ struct Scored {
     rank: Option<usize>,
 }
 
+/// How note passages (the user's own notes, which carry no segment ids)
+/// count. Undecided (README, "Open questions"): today they never satisfy a
+/// must-cite requirement, yet each one takes one of the 8 slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotePolicy {
+    /// Never relevant: the scoring every committed number uses.
+    Ignore,
+    /// Prepared, not used: a note passage of a meeting that holds a
+    /// must-cite segment counts as relevant for MRR's first-hit rank (not
+    /// for recall or coverage, which stay segment-based).
+    RankByMeeting,
+}
+
+/// The policy the suite scores with. Changing it is a locked change.
+pub const NOTE_POLICY: NotePolicy = NotePolicy::Ignore;
+
 fn score(q: &Answerable, passages: &[fly_context::Passage]) -> Scored {
+    score_with(q, passages, NOTE_POLICY, &BTreeSet::new())
+}
+
+/// `must_meetings`: database ids of the meetings holding must-cite segments
+/// (used only by [`NotePolicy::RankByMeeting`]).
+fn score_with(
+    q: &Answerable,
+    passages: &[fly_context::Passage],
+    policy: NotePolicy,
+    must_meetings: &BTreeSet<String>,
+) -> Scored {
     let top = &passages[..passages.len().min(K)];
     let mut all = BTreeSet::new();
     let mut rank = None;
     for (i, p) in top.iter().enumerate() {
         let segs: BTreeSet<String> = p.segments.iter().map(|s| s.id.clone()).collect();
-        if rank.is_none() && q.must_cite.iter().any(|r| r.met_by(&segs)) {
+        let note_hit = policy == NotePolicy::RankByMeeting
+            && p.source == fly_context::PassageSource::Note
+            && p.meeting_id
+                .as_ref()
+                .is_some_and(|m| must_meetings.contains(m));
+        if rank.is_none() && (note_hit || q.must_cite.iter().any(|r| r.met_by(&segs))) {
             rank = Some(i + 1);
         }
         all.extend(segs);

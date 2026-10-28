@@ -228,15 +228,30 @@ fn is_number_word(w: &str) -> bool {
 
 /// Words with punctuation trimmed (hyphens split, apostrophes kept).
 fn words(text: &str) -> Vec<String> {
+    clause_words(text).into_iter().map(|(w, _)| w).collect()
+}
+
+/// [`words`], each with whether punctuation ended it (`Six:`, `two,`): a
+/// spoken number never runs across a clause break ("Six: four" is 6 and 4,
+/// not 10 or 64).
+fn clause_words(text: &str) -> Vec<(String, bool)> {
     text.split(|c: char| c.is_whitespace() || c == '-' || c == '/' || c == '—')
-        .map(|w| {
-            w.trim_matches(|c: char| {
-                !(c.is_alphanumeric() || c == '$' || c == '%' || c == '.' || c == ',' || c == '\'')
-            })
-            .trim_end_matches(['.', ',', '\''])
-            .to_string()
+        .filter_map(|raw| {
+            let tail = raw.trim_end_matches(['"', '\'', ')', ']', '*', '_']);
+            let breaks = tail.ends_with(['.', ',', ':', ';', '!', '?']);
+            let w = raw
+                .trim_matches(|c: char| {
+                    !(c.is_alphanumeric()
+                        || c == '$'
+                        || c == '%'
+                        || c == '.'
+                        || c == ','
+                        || c == '\'')
+                })
+                .trim_end_matches(['.', ',', '\''])
+                .to_string();
+            (!w.is_empty()).then_some((w, breaks))
         })
-        .filter(|w| !w.is_empty())
         .collect()
 }
 
@@ -266,7 +281,9 @@ fn digit_value(w: &str) -> Option<f64> {
 /// Every number a text states, as values ×1000 (spoken runs may yield two
 /// readings).
 pub fn numbers(text: &str) -> BTreeSet<u64> {
-    let ws: Vec<String> = words(text).iter().map(|w| w.to_lowercase()).collect();
+    let cw = clause_words(text);
+    let ws: Vec<String> = cw.iter().map(|(w, _)| w.to_lowercase()).collect();
+    let ends: Vec<bool> = cw.iter().map(|(_, b)| *b).collect();
     let mut out = BTreeSet::new();
     let mut push = |v: f64| {
         if v.is_finite() && v >= 0.0 {
@@ -360,6 +377,9 @@ pub fn numbers(text: &str) -> BTreeSet<u64> {
                 break;
             }
             j += 1;
+            if ends[j - 1] {
+                break;
+            }
         }
         if claim {
             push(total + current);
@@ -539,6 +559,14 @@ mod tests {
             "a lone 'one' is not a claim"
         );
         assert_eq!(n("two hundred requests"), vec![200.0]);
+        // A spoken number never runs across punctuation.
+        assert_eq!(
+            n("Six: four in engineering and two in support."),
+            vec![2.0, 4.0, 6.0]
+        );
+        assert_eq!(n("two, four"), vec![2.0, 4.0]);
+        assert_eq!(n("Six hires. Four in engineering"), vec![4.0, 6.0]);
+        assert_eq!(n("forty four seventy one today."), vec![115.0, 4471.0]);
     }
 
     #[test]

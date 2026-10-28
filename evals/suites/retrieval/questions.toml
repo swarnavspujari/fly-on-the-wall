@@ -130,9 +130,9 @@ category = ["decisions", "near_duplicate"]
 [[answerable]]
 id = "q14"
 question = "How much does the Starter tier cost per technician?"
-must_cite = ["m07-04"]
-evidence = ["nineteen dollars"]
-answer = "Nineteen dollars per technician per month."
+must_cite = ["m07-04", "m07-07"]
+evidence = ["nineteen dollars", "Starter"]
+answer = "Starter is nineteen dollars per technician per month."
 category = ["numbers", "near_duplicate"]
 
 [[answerable]]
@@ -182,7 +182,7 @@ id = "q20"
 question = "What discount did Colm ask for on the renewal?"
 must_cite = ["m04-06"]
 evidence = ["fifteen percent"]
-answer = "Fifteen percent off, on a one-year term."
+answer = "Colm asked for fifteen percent off."
 category = ["numbers", "names"]
 
 [[answerable]]
@@ -232,7 +232,7 @@ id = "q26"
 question = "Who did we decide to hire as support lead?"
 must_cite = ["m06-10"]
 evidence = ["offer to Nadia"]
-answer = "Nadia Ferreira."
+answer = "Nadia."
 category = ["decisions", "names"]
 
 [[answerable]]
@@ -272,9 +272,9 @@ category = ["decisions"]
 [[answerable]]
 id = "q31"
 question = "What are the action items from the outage review?"
-must_cite = ["m08-11", "m08-13", "m08-15"]
-evidence = ["thirty days", "October sixteenth", "status page"]
-answer = "Odette adds certificate expiry alerts thirty days ahead, Jun automates certificate renewal by October sixteenth, and Hana writes the status page post."
+must_cite = ["m08-11", "m08-13", "m08-15", "m08-18", "m08-09"]
+evidence = ["thirty days", "October sixteenth", "status page", "team calendar", "Elena"]
+answer = "Odette adds certificate expiry alerts thirty days ahead, Jun automates certificate renewal by October sixteenth and puts the on-call schedule in the team calendar, Hana writes the status page post, and you tell Elena that Harrowgate was affected."
 category = ["action_items", "decisions_vs_actions"]
 
 [[answerable]]

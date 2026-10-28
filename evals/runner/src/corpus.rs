@@ -450,18 +450,53 @@ impl Db {
     /// The database contents an Ask must never change: every note's
     /// scratchpad and blocks and every meeting's items (JSON, stable order).
     pub fn snapshot(&self) -> Result<String> {
+        // Everything an Ask could plausibly write: each fixture meeting's
+        // note (title, folder, scratchpad, blocks, timestamps), meeting row
+        // (title, time, attendees, confirmation), raw and cleaned
+        // transcripts (segments and speakers), items and keep-local flags,
+        // plus the folder tree and the full note and meeting lists (so a
+        // new row shows up too).
         let mut parts = Vec::new();
         for (fixture, mid) in &self.meeting_ids {
-            let note = self.storage.get_note(&self.note_ids[fixture])?;
+            let note_id = &self.note_ids[fixture];
             let mut items = self.storage.get_meeting_items(mid)?;
             items.sort_by(|a, b| a.id.cmp(&b.id));
             parts.push(serde_json::json!({
                 "meeting": fixture,
-                "scratchpad": note.scratchpad,
-                "blocks": note.blocks,
+                "note": self.storage.get_note(note_id)?,
+                "row": self.storage.get_meeting(mid)?,
+                "transcript": self.storage.get_transcript(mid)?,
+                "cleaned": self.storage.get_cleaned_transcript(mid)?,
                 "items": items,
+                "note_keep_local": self.storage.note_keep_local(note_id),
+                "meeting_keep_local": self.storage.meeting_keep_local(mid),
             }));
         }
+        let mut folders = self.storage.list_folders()?;
+        folders.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut meetings: Vec<String> = self
+            .storage
+            .list_meetings(None, usize::MAX >> 1)?
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        meetings.sort();
+        let mut notes: Vec<String> = self
+            .storage
+            .list_notes_in_folder(None)?
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        for f in &folders {
+            notes.extend(
+                self.storage
+                    .list_notes_in_folder(Some(&f.id))?
+                    .into_iter()
+                    .map(|n| n.id),
+            );
+        }
+        notes.sort();
+        parts.push(serde_json::json!({ "folders": folders, "meetings": meetings, "notes": notes }));
         Ok(serde_json::to_string(&parts)?)
     }
 }

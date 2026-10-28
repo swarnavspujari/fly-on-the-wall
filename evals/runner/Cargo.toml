@@ -1,8 +1,8 @@
 [package]
 name = "fly-evals"
 version.workspace = true
-edition.workspace = true
-license.workspace = true
+edition = "2021"
+license = "MIT"
 publish = false
 description = "Fly on the Wall system evals: retrieval, Ask contract and local benchmarks (immutable to AI agents; see evals/README.md)"
 
@@ -10,16 +10,22 @@ description = "Fly on the Wall system evals: retrieval, Ask contract and local b
 # talks to the app only through public crate APIs. It never constructs a
 # real LLM provider (build_provider stays the only constructor): the Ask
 # contract runs against a request-recording mock.
+#
+# Dependencies are pinned here, not inherited from the root
+# [workspace.dependencies], so the root manifest (which the eval lock
+# doesn't cover) can't redirect what the scorer links. evals.yml also checks
+# that every package in this crate's graph is one of the five path crates
+# below or comes from crates.io.
 [dependencies]
-fly-core.workspace = true
-fly-storage.workspace = true
+fly-core = { path = "../../crates/fly-core" }
+fly-storage = { path = "../../crates/fly-storage" }
 fly-context = { path = "../../crates/fly-context" }
-fly-llm.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-chrono.workspace = true
-anyhow.workspace = true
-async-trait.workspace = true
-tokio.workspace = true
+fly-llm = { path = "../../crates/fly-llm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "time"] }
 toml = "1"
 tempfile = "3"
