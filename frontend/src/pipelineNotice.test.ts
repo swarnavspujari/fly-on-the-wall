@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { briefError, selectPipelineNotice } from "./pipelineNotice";
+import { briefError, pipelineFailureCopy, selectPipelineNotice } from "./pipelineNotice";
 
 /** Real error shapes from the backend (models.rs / pipeline.rs / Groq). */
 const ENGINE_ERR =
@@ -102,5 +102,93 @@ describe("briefError", () => {
     expect(briefError("checksum mismatch (expected a, got b)")).toBe(
       "checksum mismatch (expected a, got b)",
     );
+  });
+});
+
+describe("pipelineFailureCopy (notice stack, note not open)", () => {
+  const base = {
+    error: ENGINE_ERR,
+    os: "windows",
+    engineManaged: true,
+    noteTitle: "Acme renewal",
+    hadTranscript: false,
+  } as const;
+
+  it("first transcription: names the note, the recording is safe, ends at Try again", () => {
+    const c = pipelineFailureCopy({ ...base, kind: "generic", error: "boom" });
+    expect(c.title).toBe("Transcription didn’t finish");
+    expect(c.cause).toBe("“Acme renewal” wasn’t transcribed. The recording is saved.");
+    expect(c.steps).toEqual(["Choose Try again."]);
+    expect(c.details).toBe("boom");
+  });
+
+  it("falls back to a generic subject when the note isn't known", () => {
+    const c = pipelineFailureCopy({ ...base, kind: "generic", error: "boom", noteTitle: null });
+    expect(c.cause.startsWith("A recording wasn’t transcribed.")).toBe(true);
+  });
+
+  it("a re-run (re-transcribe or re-analyze speakers) never says 'wasn't transcribed'", () => {
+    const c = pipelineFailureCopy({ ...base, kind: "generic", error: "boom", hadTranscript: true });
+    expect(c.title).toBe("Processing didn’t finish");
+    expect(c.cause).toBe("“Acme renewal” didn’t finish processing. Its transcript is unchanged.");
+    expect(c.steps).toEqual(["Open the note and run it again from its transcript."]);
+    expect(JSON.stringify(c)).not.toMatch(/wasn’t transcribed|Try again/);
+  });
+
+  it("unknown history keeps both possibilities", () => {
+    const c = pipelineFailureCopy({ ...base, kind: "generic", error: "x", hadTranscript: null });
+    expect(c.cause).toContain("The recording and any transcript are kept.");
+    expect(c.steps).toEqual(["Open the note and run it again from its transcript."]);
+  });
+
+  it("engine missing with a managed download → install in Settings, then Try again", () => {
+    const c = pipelineFailureCopy({ ...base, kind: "engine-missing" });
+    expect(c.title).toBe("Transcription engine isn’t installed");
+    expect(c.steps).toEqual(["Install the engine in Settings › Transcripts.", "Choose Try again."]);
+  });
+
+  it("engine missing per OS when there's no managed download", () => {
+    const mac = pipelineFailureCopy({
+      ...base,
+      kind: "engine-missing",
+      os: "macos",
+      engineManaged: false,
+    });
+    expect(mac.steps[0]).toBe("In Terminal, run: brew install whisper-cpp");
+    const linux = pipelineFailureCopy({
+      ...base,
+      kind: "engine-missing",
+      os: "linux",
+      engineManaged: false,
+    });
+    expect(linux.steps[0]).toMatch(/package manager/);
+    expect(linux.steps.join(" ")).not.toMatch(/brew/);
+    const win = pipelineFailureCopy({ ...base, kind: "engine-missing", engineManaged: false });
+    expect(win.steps[0]).toBe("Set up the engine in Settings › Transcripts.");
+    for (const c of [mac, linux, win]) expect(c.steps[1]).toBe("Choose Try again.");
+  });
+
+  it("download failure: check the connection, then retry", () => {
+    const first = pipelineFailureCopy({ ...base, kind: "download-failed", error: DOWNLOAD_ERR });
+    expect(first.title).toBe("Model download didn’t finish");
+    expect(first.steps).toEqual(["Check that you’re online.", "Choose Try again."]);
+    // a re-analysis can need a model download too
+    const rerun = pipelineFailureCopy({
+      ...base,
+      kind: "download-failed",
+      error: DOWNLOAD_ERR,
+      hadTranscript: true,
+    });
+    expect(rerun.cause).toContain("Its transcript is unchanged.");
+    expect(rerun.steps[1]).toBe("Open the note and run it again from its transcript.");
+  });
+
+  it("details are briefed: no signed CDN URLs", () => {
+    const c = pipelineFailureCopy({
+      ...base,
+      kind: "download-failed",
+      error: "download failed: https://cdn-lfs.huggingface.co/x?X-Amz-Signature=abc (status 403)",
+    });
+    expect(c.details).toBe("download failed: (status 403)");
   });
 });

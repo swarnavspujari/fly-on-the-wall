@@ -165,12 +165,13 @@ recording bar with the ink "system output muted" strip), the `Editor` cluster (`
 `TranscriptPanel` + `EnhancedDoc` + `AskPanel` + `LivePane`: the Granola single content region + floating
 Notes⇄Transcript⇄Enhanced switcher, transcript waveform + inline speaker rename, Enhanced blocks with a
 `CitationChip`, ephemeral Ask), `FirstRunNotice` (consent Modal), `SettingsModal` (Simple/Technical +
-Appearance + tiers + providers + models + calendars + MCP). `UpdateBanner` is minor and still on aliases.
+Appearance + tiers + providers + models + calendars + MCP). `UpdateBanner` moved onto `Notice` in the
+app `NoticeStack` (v2.4 PR 1.3), so no component uses the legacy aliases now.
 
 - Settings › Appearance is wired to `useTheme().setTheme`; `theme.ts` is now a **shared store**
   (`useSyncExternalStore`) so every consumer stays in sync (the sidebar wordmark variant updates live).
 - Restyled screens migrated off the legacy aliases; the alias/keyframe/`Btn`/`ModalShell` shims remain
-  only for the few holdouts (e.g. `UpdateBanner`) — trim them once nothing references them.
+  only for the few holdouts — trim them once nothing references them.
 
 ### Dev-only mock backend (`src/devMock.ts`)
 

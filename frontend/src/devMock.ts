@@ -27,6 +27,9 @@
                                      configured model not downloaded
      fotwMockGpuBench = "gpu" | "cpu" | "failed" → a stored GPU speed-test
                                      verdict (Settings "Use the graphics card")
+     fotwMockUpdate = "available" | "fail" → the startup update check (5 s
+                                     after load) finds v2.4.0; Update now hangs
+                                     in "Downloading", or fails
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -1144,6 +1147,20 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         volume: "C:",
       };
     }
+    // Updater plugin (notice stack QA). fotwMockUpdate = "available" → the
+    // startup check (5 s after launch) finds v2.4.0 and Update now hangs in
+    // "Downloading"; "fail" → the download fails ("Update didn't install").
+    // Unset → no update (the plugin's null).
+    case "plugin:updater|check": {
+      const u = mockFlag("fotwMockUpdate");
+      return u === "available" || u === "fail"
+        ? { rid: 1, currentVersion: "2.3.0", version: "2.4.0", date: null, body: "", rawJson: {} }
+        : null;
+    }
+    case "plugin:updater|download":
+      return mockFlag("fotwMockUpdate") === "fail"
+        ? Promise.reject(new Error("download failed: connection reset by peer"))
+        : new Promise(() => {});
     default:
       return null;
   }
