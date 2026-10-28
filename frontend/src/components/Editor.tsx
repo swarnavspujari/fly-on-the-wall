@@ -40,6 +40,7 @@ import {
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import { PRIVACY_CHANGED_EVENT, isKeptLocal, keepLocalTitle } from "../privacy";
+import { templateSections } from "../enhancedTrust";
 import { fmtElapsed } from "./RecordingBar";
 import { Button, Modal, SectionLabel } from "./ui";
 import AttendeeEditor from "./AttendeeEditor";
@@ -306,10 +307,14 @@ function VideoStrip({
   videos,
   thumbFor,
   onOpen,
+  compact = false,
 }: {
   videos: Attachment[];
   thumbFor: (att: Attachment) => string | null;
   onOpen: (att: Attachment) => void;
+  /** A single clip shows as a small tile instead of full width (Notes and
+   *  Enhanced views, where the note itself comes first). */
+  compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   if (videos.length === 0) return null;
@@ -320,7 +325,7 @@ function VideoStrip({
         <VideoTile
           key={videos[0].id}
           att={videos[0]}
-          big
+          big={!compact}
           thumbSrc={thumbFor(videos[0])}
           onOpen={onOpen}
         />
@@ -1232,6 +1237,13 @@ export default function Editor({
   const showTranscript = !pendingImport && view === "transcript" && hasMeeting;
   const showEnhanced = !pendingImport && view === "enhanced" && enhanced;
   const showNotes = !pendingImport && !showTranscript && !showEnhanced;
+  // Screen clips show in every view: full width in Transcript, small tiles
+  // above the notes in Notes and Enhanced.
+  const clipStrip = (compact: boolean) =>
+    videos.length > 0 ? (
+      <VideoStrip videos={videos} thumbFor={videoThumbSrc} onOpen={openVideo} compact={compact} />
+    ) : null;
+  const template = templates.find((t) => t.id === templateId) ?? templates[0];
 
   return (
     <div className="flex h-full min-w-0 flex-1">
@@ -1456,9 +1468,7 @@ export default function Editor({
                     onFallback={playAudio}
                   />
                 )}
-                {videos.length > 0 && (
-                  <VideoStrip videos={videos} thumbFor={videoThumbSrc} onOpen={openVideo} />
-                )}
+                {clipStrip(false)}
                 <TranscriptPanel
                   meeting={meeting}
                   transcript={transcript}
@@ -1482,7 +1492,15 @@ export default function Editor({
 
             {/* Enhanced view */}
             {showEnhanced && (
-              <EnhancedDoc note={note} onNoteChanged={onNoteChanged} onZoom={zoom} />
+              <>
+                {clipStrip(true)}
+                <EnhancedDoc
+                  note={note}
+                  onNoteChanged={onNoteChanged}
+                  onZoom={zoom}
+                  transcripts={[cleanedTranscript, transcript]}
+                />
+              </>
             )}
           </div>
 
@@ -1493,7 +1511,13 @@ export default function Editor({
               markdown={scratchpad}
               revision={notesRev}
               onChange={onNotesChange}
-              placeholder="Write your notes… they'll merge with the transcript when you enhance."
+              placeholder={
+                hasMeeting
+                  ? "Write what matters to you. Enhance keeps your words and fills in the rest from the transcript."
+                  : "Write your notes. Enhance keeps your words and sorts them into sections."
+              }
+              sections={template ? templateSections(template.structure_hint) : []}
+              header={clipStrip(true)}
             />
           </div>
         </div>

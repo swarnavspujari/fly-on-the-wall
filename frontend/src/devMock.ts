@@ -168,7 +168,29 @@ const blocks = [
     origin: { kind: "user" },
     markdown: "Gut check: annual looks likely if legal signs off this week.",
   },
+  // An AI line with no source: the Enhanced view flags it with Keep / Remove.
+  {
+    id: "b5",
+    origin: { kind: "ai", source_segment_ids: [] as string[] },
+    markdown: "Acme expects to sign the annual contract by the end of the month.",
+  },
 ];
+
+// edit_note_block / keep_note_block change the blocks above for the session,
+// like the backend: an edit (or Keep) makes an AI block yours, and an edit to
+// empty text removes it.
+function editMockBlock(blockId: string, markdown: string | null) {
+  const i = blocks.findIndex((b) => b.id === blockId);
+  if (i === -1) throw new Error(`block ${blockId} not found`);
+  if (markdown === null || blocks[i].markdown !== markdown) {
+    blocks[i] = {
+      ...blocks[i],
+      origin: { kind: "user" },
+      markdown: markdown ?? blocks[i].markdown,
+    };
+  }
+  if (markdown !== null && markdown.trim() === "") blocks.splice(i, 1);
+}
 
 function note(id: string) {
   const m = noteMeta.find((n) => n.id === id) || noteMeta[0];
@@ -468,6 +490,20 @@ let templates = [
   { id: "tpl-standup", name: "Standup", system_prompt: "", structure_hint: "", built_in: true },
   { id: "tpl-interview", name: "Interview", system_prompt: "", structure_hint: "", built_in: true },
 ];
+// Section hints shaped like the built-ins' (crates/fly-storage/src/templates.rs),
+// so the Notes view's ghost headings have something to show.
+const MOCK_TEMPLATE_HINTS: Record<string, string> = {
+  "tpl-general": "## Summary\n## Key points\n## Decisions\n## Action items (owner — due)",
+  "tpl-1on1": "## Topics discussed\n## Feedback\n## Commitments\n## Follow-ups for next time",
+  "tpl-sales": "## Company & contact\n## Pain points\n## Budget & timeline\n## Next steps",
+  "tpl-standup": "## Per person\n### <name>\n- Did\n- Next\n- Blockers\n## Cross-team blockers",
+  "tpl-interview":
+    "## Candidate background\n## Strong signals\n## Concerns\n## Recommended follow-ups",
+};
+templates = templates.map((t) => ({
+  ...t,
+  structure_hint: t.structure_hint || MOCK_TEMPLATE_HINTS[t.id] || "",
+}));
 
 // fotwMockGpuBench = "gpu" | "cpu" | "failed" seeds a stored speed-test verdict.
 function mockGpuBench() {
@@ -834,9 +870,17 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return note("n3");
     case "update_note_title":
     case "update_note_scratchpad":
-    case "edit_note_block":
     case "enhance_note":
       return note(String(args.id ?? args.noteId ?? "n1"));
+    case "edit_note_block":
+    case "keep_note_block": {
+      editMockBlock(
+        String(args.blockId),
+        cmd === "keep_note_block" ? null : String(args.markdown ?? ""),
+      );
+      // a fresh copy, like an IPC payload (the blocks above stay the store)
+      return JSON.parse(JSON.stringify(note(String(args.noteId ?? "n1"))));
+    }
     case "get_meeting_for_note":
       return meeting(String(args.noteId));
     case "get_meetings_for_note": {

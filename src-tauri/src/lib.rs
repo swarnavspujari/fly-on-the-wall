@@ -238,6 +238,7 @@ pub fn run() {
             llm_commands::enhance_note,
             llm_commands::polish_transcript,
             llm_commands::edit_note_block,
+            llm_commands::keep_note_block,
             llm_commands::ask_meeting,
             llm_commands::list_templates,
             llm_commands::save_template,

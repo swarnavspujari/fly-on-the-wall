@@ -237,4 +237,9 @@ export const api = {
   deleteAllData: (includeModels: boolean, confirmation: string) =>
     invoke<WipeReport>("delete_all_data", { includeModels, confirmation }),
   diskEncryptionStatus: () => invoke<DiskEncryption>("disk_encryption_status"),
+
+  /** "Keep" an enhanced block as your own text, unchanged (an AI line with no
+   *  source becomes yours). To remove one, edit it to empty text. */
+  keepNoteBlock: (noteId: string, blockId: string) =>
+    invoke<Note>("keep_note_block", { noteId, blockId }),
 };

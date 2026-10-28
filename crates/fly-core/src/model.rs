@@ -60,8 +60,15 @@ impl NoteBlock {
         let new_markdown = new_markdown.into();
         if self.markdown != new_markdown {
             self.markdown = new_markdown;
-            self.origin = BlockOrigin::User;
+            self.reclaim();
         }
+    }
+
+    /// The user keeps this block as their own words without changing it
+    /// ("Keep" on an AI line that has no source): the same reclaim an edit
+    /// does, so its transcript sourcing is dropped and the text is untouched.
+    pub fn reclaim(&mut self) {
+        self.origin = BlockOrigin::User;
     }
 }
 
@@ -571,6 +578,14 @@ mod tests {
         let mut b = NoteBlock::ai("same text", vec!["seg-1".into()]);
         b.apply_edit("same text");
         assert!(matches!(b.origin, BlockOrigin::Ai { .. }));
+    }
+
+    #[test]
+    fn reclaim_keeps_text_and_makes_it_user() {
+        let mut b = NoteBlock::ai("launch likely moves to May", vec![]);
+        b.reclaim();
+        assert_eq!(b.origin, BlockOrigin::User);
+        assert_eq!(b.markdown, "launch likely moves to May");
     }
 
     #[test]
