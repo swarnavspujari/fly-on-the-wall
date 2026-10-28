@@ -20,7 +20,7 @@ describe("describeAskError", () => {
       "This note is kept local",
     ],
     [
-      "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama)",
+      "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama).",
       "openai",
       "OpenAI isn't confirmed yet",
     ],
@@ -93,7 +93,7 @@ describe("describeAskError", () => {
 
   it("offers a consent button for 'isn't confirmed', and only there", () => {
     const consent = describeAskError(
-      "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama)",
+      "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama).",
       "openai",
     );
     expect(consent.action).toBe("consent");

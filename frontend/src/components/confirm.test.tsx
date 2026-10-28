@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
-import { ConfirmProvider, useConfirm, type ConfirmFn } from "./confirm";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CONFIRM_CLICK_GUARD_MS, ConfirmProvider, useConfirm, type ConfirmFn } from "./confirm";
 import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
 import { Modal } from "./ui";
 
@@ -126,6 +126,39 @@ describe("useConfirm", () => {
     await question({ title: "T?", confirmLabel: "Go", message: "First.\n\nSecond." });
     const paras = [...confirmDialog()!.querySelectorAll("p")].map((p) => p.textContent);
     expect(paras).toEqual(["First.", "Second."]);
+  });
+
+  it("ignores a mouse click on yes right as it opens, and a double click", async () => {
+    render();
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000);
+    try {
+      const answer = await question({ title: "Switch to Claude?", confirmLabel: "Switch" });
+      const yes = confirmChoice(true);
+      const mouse = (detail: number) =>
+        act(async () => {
+          yes.dispatchEvent(new MouseEvent("click", { bubbles: true, detail }));
+        });
+      await mouse(1); // the tail of the click that opened it
+      expect(answer()).toBeUndefined();
+      now.mockReturnValue(1000 + CONFIRM_CLICK_GUARD_MS + 1);
+      await mouse(2); // second click of a double click
+      expect(answer()).toBeUndefined();
+      await mouse(1);
+      expect(answer()).toBe(true);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("the same question asked again while it's open is one dialog with one answer", async () => {
+    render();
+    const first = await question(DELETE);
+    const second = await question(DELETE); // a double click on the delete X
+    expect(document.querySelectorAll('[data-testid="confirm-dialog"]')).toHaveLength(1);
+    await act(async () => confirmChoice(true).click());
+    await flush();
+    expect([first(), second()]).toEqual([true, true]);
+    expect(confirmDialog()).toBeNull();
   });
 
   it("asks one question at a time, in order", async () => {

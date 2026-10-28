@@ -44,6 +44,9 @@
      fotwMockConsentReset = "1"    → no cloud consent recorded (as after the
                                      v2.4 reset): the launch check asks for
                                      Anthropic, the saved provider
+     fotwMockConsentSkips = "1"    → the backend skipped m1's cleanup and
+                                     action items for missing consent (the
+                                     notice with "Review and allow")
      fotwMockAskError = keep_local | consent | no_key | auth | ollama_missing |
                         ollama_down | model_missing | offline | timeout |
                         rate_limit | server | other → ask_meeting fails with
@@ -790,8 +793,16 @@ const mockFlag = (k: string) =>
 // user already accepted Anthropic (the configured provider), so picking
 // OpenAI or NVIDIA NIM shows the cloud-consent confirm. fotwMockConsentReset
 // starts with none, as the v2.4 consent reset leaves it.
-const mockUiSettings: Record<string, string> =
+const initialUiSettings = (): Record<string, string> =>
   mockFlag("fotwMockConsentReset") === "1" ? {} : { "consent.cloud_llm.anthropic": "true" };
+const mockUiSettings: Record<string, string> = initialUiSettings();
+
+/** Tests: put the get/set_app_setting store back to its starting state, so a
+ *  consent one test gives can't leak into the next. */
+export function resetMockAppSettings() {
+  for (const k of Object.keys(mockUiSettings)) delete mockUiSettings[k];
+  Object.assign(mockUiSettings, initialUiSettings());
+}
 const mockLocalFolders = new Set<string>();
 const mockPrivacy: Record<
   string,
@@ -846,7 +857,7 @@ const MOCK_ASK_ERRORS: Record<string, string> = {
   keep_local:
     'this note is set to "Keep local", so it isn\'t sent to anthropic. Switch the AI provider to Ollama (runs on this device) in Settings, or turn off Keep local for this note',
   consent:
-    "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama)",
+    "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama).",
   no_key: "no API key stored for openai — add one in Settings",
   auth: "authentication failed — check the API key",
   ollama_missing:
@@ -879,13 +890,44 @@ function mockAsk(args: Record<string, unknown>): Promise<string> {
   let error = forced ? (MOCK_ASK_ERRORS[forced] ?? MOCK_ASK_ERRORS.other) : null;
   if (!error && info && !info.is_local) {
     if (keptLocal) error = MOCK_ASK_ERRORS.keep_local.replace("anthropic", provider);
-    else if (mockUiSettings[`consent.cloud_llm.${provider}`] !== "true")
-      error = MOCK_ASK_ERRORS.consent.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
+    else if (mockConsentRefusal()) error = mockConsentRefusal();
     else if (!info.has_key) error = MOCK_ASK_ERRORS.no_key.replace("openai", provider);
   }
   return new Promise((resolve, reject) =>
     setTimeout(() => (error ? reject(error) : resolve(MOCK_ASK_ANSWER)), 700),
   );
+}
+
+/** build_provider's missing-consent refusal for the saved provider, or null
+ *  (local, or allowed). Enhance, Test and backfill check it, like Ask. */
+function mockConsentRefusal(): string | null {
+  const provider = llmSettings.provider;
+  const info = llmSettings.providers.find((p) => p.id === provider);
+  if (!info || info.is_local || mockUiSettings[`consent.cloud_llm.${provider}`] === "true") {
+    return null;
+  }
+  return MOCK_ASK_ERRORS.consent.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
+}
+
+/* ---- consent skips ---- */
+// Meetings whose cleanup / action items the backend skipped for missing
+// consent. fotwMockConsentSkips = "1" starts with m1 skipped, so the notice
+// shows; retry_consent_skipped replays the "polishing" → done events.
+let mockConsentSkips: string[] = mockFlag("fotwMockConsentSkips") === "1" ? ["m1"] : [];
+function mockRetryConsentSkipped(): number {
+  const ids = mockConsentSkips;
+  mockConsentSkips = [];
+  ids.forEach((id, i) => {
+    setTimeout(() => {
+      const base = { meeting_id: id, detail: null, error: null };
+      mockEmit("pipeline:progress", { ...base, stage: "polishing", done: false });
+      setTimeout(() => {
+        mockEmit("pipeline:progress", { ...base, stage: null, done: true });
+        mockEmit("llm:consent-skips", mockConsentSkips);
+      }, 900);
+    }, i * 1200);
+  });
+  return ids.length;
 }
 
 /* ---- command router ---- */
@@ -952,8 +994,12 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "update_note_title":
     case "update_note_scratchpad":
     case "edit_note_block":
-    case "enhance_note":
       return note(String(args.id ?? args.noteId ?? "n1"));
+    case "enhance_note": {
+      const refused = mockConsentRefusal();
+      if (refused) throw refused;
+      return note(String(args.id ?? args.noteId ?? "n1"));
+    }
     case "get_meeting_for_note":
       return meeting(String(args.noteId));
     case "get_meetings_for_note": {
@@ -1159,8 +1205,15 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mcpSnippet;
     case "ask_meeting":
       return mockAsk(args);
-    case "test_llm_connection":
+    case "test_llm_connection": {
+      const refused = mockConsentRefusal();
+      if (refused) throw refused;
       return `Connected to ${llmSettings.provider}. It answered in 0.8 s.`;
+    }
+    case "consent_skipped_meetings":
+      return [...mockConsentSkips];
+    case "retry_consent_skipped":
+      return mockRetryConsentSkipped();
     case "ollama_status": {
       const o = ollamaState();
       return {
@@ -1230,8 +1283,10 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mockBackfillPending;
     case "backfill_meeting_items": {
       const processed = mockBackfillPending;
+      const refused = mockConsentRefusal();
+      if (refused) return { processed, extracted: 0, failed: processed, first_error: refused };
       mockBackfillPending = 0;
-      return { processed, extracted: processed * 4, failed: 0 };
+      return { processed, extracted: processed * 4, failed: 0, first_error: null };
     }
     case "get_meeting_privacy":
       return meetingPrivacy(String(args.meetingId));

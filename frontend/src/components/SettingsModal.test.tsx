@@ -2,7 +2,7 @@
 // Drives the real Settings overlay against the dev mock backend (devMock.ts),
 // the same stub used for port-1420 QA. The mock is stateful per module, so
 // tests that change settings restore them.
-import "../devMock";
+import { resetMockAppSettings } from "../devMock";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -112,6 +112,8 @@ beforeAll(() => {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // consent given in one test must not leak into the next (module state)
+  resetMockAppSettings();
 });
 
 afterEach(() => {
@@ -119,7 +121,14 @@ afterEach(() => {
   host?.remove();
   root = null;
   host = null;
+  localStorage.removeItem("fotwMockConsentReset");
 });
+
+/** Start with no cloud consent at all, as after the v2.4 reset. */
+function withoutConsent() {
+  localStorage.setItem("fotwMockConsentReset", "1");
+  resetMockAppSettings();
+}
 
 describe("Settings overlay", () => {
   it("shows the seven sections, the data tiles and the real data folder", async () => {
@@ -353,11 +362,11 @@ describe("Settings overlay", () => {
   });
 
   it("a cloud provider without a saved key says so", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     await open();
     const runsOn = $<HTMLSelectElement>('select[aria-label="Runs on"]')!;
     expect(host!.textContent).not.toContain("No key saved yet");
     await choose(runsOn, "openai");
+    await answer(true); // consent first (nothing leaks in from other tests)
     expect(host!.textContent).toContain("No key saved yet");
     await choose(runsOn, "anthropic");
   });
@@ -474,5 +483,107 @@ describe("Recording › Remind me to tell people", () => {
     await open();
     await type($<HTMLInputElement>("input[type=search]")!, "remind");
     expect(headings()).toEqual(["Recording"]);
+  });
+});
+
+describe("Settings › asking again for cloud consent", () => {
+  // The refusal text sends people to "Settings › Ask and Enhance and click
+  // Test"; Save, the Claude model and the backfill send content too.
+  const consent = () => api.getAppSetting("consent.cloud_llm.anthropic");
+
+  it("Test asks first: Cancel sends nothing, allow saves consent and tests", async () => {
+    withoutConsent();
+    const setLlm = vi.spyOn(api, "setLlmSettings");
+    const test = vi.spyOn(api, "testLlmConnection");
+    await open();
+    await click(byText("button", "Test"));
+    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
+    await answer(false);
+    expect(await consent()).toBeNull();
+    expect(setLlm).not.toHaveBeenCalled();
+    expect(test).not.toHaveBeenCalled();
+
+    await click(byText("button", "Test"));
+    await answer(true);
+    expect(await consent()).toBe("true");
+    expect(setLlm).toHaveBeenCalledTimes(1);
+    expect(test).toHaveBeenCalledTimes(1);
+    expect(host!.textContent).toContain("Connected to anthropic");
+  });
+
+  it("saving a key asks first, and Cancel saves nothing", async () => {
+    withoutConsent();
+    const setLlm = vi.spyOn(api, "setLlmSettings");
+    await open();
+    await type($<HTMLInputElement>("input[type=password]")!, "sk-test-key");
+    await click(byText("button", "Update"));
+    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
+    await answer(false);
+    expect(await consent()).toBeNull();
+    expect(setLlm).not.toHaveBeenCalled();
+    expect(host!.textContent).toContain("Not saved. Cloud processing wasn't confirmed.");
+
+    await click(byText("button", "Update"));
+    await answer(true);
+    expect(await consent()).toBe("true");
+    expect(setLlm).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "anthropic", api_key: "sk-test-key" }),
+    );
+  });
+
+  it("the Claude model select asks first, and Cancel keeps the model", async () => {
+    withoutConsent();
+    const setLlm = vi.spyOn(api, "setLlmSettings");
+    await open();
+    const model = $<HTMLSelectElement>('select[aria-label="Claude model"]')!;
+    const before = model.value;
+    await choose(model, "claude-haiku-5-5");
+    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
+    await answer(false);
+    expect(await consent()).toBeNull();
+    expect(setLlm).not.toHaveBeenCalled();
+    expect(model.value).toBe(before);
+
+    await choose(model, "claude-haiku-5-5");
+    await answer(true);
+    expect(await consent()).toBe("true");
+    expect(setLlm).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "anthropic", model: "claude-haiku-5-5" }),
+    );
+  });
+
+  it("indexing older meetings asks first, and Cancel extracts nothing", async () => {
+    withoutConsent();
+    vi.spyOn(api, "pendingBackfillCount").mockResolvedValue(3);
+    const backfill = vi.spyOn(api, "backfillMeetingItems");
+    await open();
+    const index = () => $$("button").find((b) => b.textContent?.startsWith("Index ")) ?? null;
+    await click(index());
+    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
+    await answer(false);
+    expect(backfill).not.toHaveBeenCalled();
+    expect(host!.textContent).toContain(
+      "Nothing was extracted. Cloud processing wasn't confirmed.",
+    );
+
+    await click(index());
+    await answer(true);
+    expect(await consent()).toBe("true");
+    expect(backfill).toHaveBeenCalledTimes(1);
+  });
+
+  it("says why when every meeting failed to index", async () => {
+    vi.spyOn(api, "pendingBackfillCount").mockResolvedValue(3);
+    vi.spyOn(api, "backfillMeetingItems").mockResolvedValue({
+      processed: 3,
+      extracted: 0,
+      failed: 3,
+      first_error: "no API key stored for anthropic — add one in Settings",
+    });
+    await open();
+    await click($$("button").find((b) => b.textContent?.startsWith("Index ")) ?? null);
+    expect(host!.textContent).toContain(
+      "Couldn't extract from 3 meeting(s). no API key stored for anthropic — add one in Settings",
+    );
   });
 });

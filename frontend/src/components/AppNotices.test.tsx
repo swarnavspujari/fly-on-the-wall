@@ -2,10 +2,23 @@
 import { act } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "../api";
+import type { LlmSettings } from "../types";
 import type { Updater, UpdatePhase } from "../updater";
 import type { PipelineFailure } from "../pipelineFailures";
 import AppNotices from "./AppNotices";
+import { ConfirmProvider } from "./confirm";
+import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
+
+// Backend events: keep each handler so a test can fire one.
+const eventHandlers: Record<string, (e: { payload: unknown }) => void> = {};
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (event: string, handler: (e: { payload: unknown }) => void) => {
+    eventHandlers[event] = handler;
+    return () => delete eventHandlers[event];
+  }),
+}));
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -15,10 +28,55 @@ function render(ui: ReactNode) {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
-  act(() => root.render(ui));
+  act(() => root.render(<ConfirmProvider>{ui}</ConfirmProvider>));
   mounted.push({ root, host });
-  return { host, rerender: (next: ReactNode) => act(() => root.render(next)) };
+  return {
+    host,
+    rerender: (next: ReactNode) =>
+      act(() => root.render(<ConfirmProvider>{next}</ConfirmProvider>)),
+  };
 }
+
+// The consent-skips notice reads these; by default nothing was skipped.
+let skipped: string[];
+let consents: Record<string, string>;
+let llm: LlmSettings;
+beforeEach(() => {
+  skipped = [];
+  consents = {};
+  llm = {
+    provider: "anthropic",
+    providers: [
+      {
+        id: "ollama",
+        default_model: "llama3.1",
+        is_local: true,
+        has_key: true,
+        model: null,
+        base_url: null,
+      },
+      {
+        id: "anthropic",
+        default_model: "claude-sonnet-5-5",
+        is_local: false,
+        has_key: true,
+        model: null,
+        base_url: null,
+      },
+    ],
+  };
+  vi.spyOn(api, "consentSkippedMeetings").mockImplementation(async () => [...skipped]);
+  vi.spyOn(api, "retryConsentSkipped").mockImplementation(async () => {
+    const n = skipped.length;
+    skipped = [];
+    return n;
+  });
+  vi.spyOn(api, "getLlmSettings").mockImplementation(async () => structuredClone(llm));
+  vi.spyOn(api, "getAppSetting").mockImplementation(async (k) => consents[k] ?? null);
+  vi.spyOn(api, "setAppSetting").mockImplementation(async (k, v) => {
+    consents[k] = v;
+  });
+});
 
 afterEach(() => {
   for (const { root, host } of mounted) {
@@ -26,7 +84,12 @@ afterEach(() => {
     host.remove();
   }
   mounted = [];
+  vi.restoreAllMocks();
 });
+
+const flush = async () => {
+  for (let i = 0; i < 5; i++) await act(async () => {});
+};
 
 const click = (el: Element | null | undefined) => {
   if (!el) throw new Error("element not found");
@@ -298,5 +361,63 @@ describe("AppNotices", () => {
       );
       expect(shownIds(host)).toEqual([]);
     });
+  });
+});
+
+describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
+  const notice = (host: HTMLElement) =>
+    [...host.querySelectorAll<HTMLElement>(".fly-notice")].find((n) =>
+      n.textContent?.includes("Transcript cleanup and action items were skipped"),
+    );
+
+  it("names who needs the OK; Cancel runs nothing, yes allows and runs them", async () => {
+    skipped = ["m1", "m2"];
+    const { host } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(notice(host)!.textContent).toContain(
+      "Anthropic needs your OK before it gets meeting content, so 2 meetings kept the raw transcript and got no action items.",
+    );
+    click(button(host, "Review and allow"));
+    await flush();
+    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
+    await act(async () => confirmChoice(false).click());
+    await flush();
+    expect(consents["consent.cloud_llm.anthropic"]).toBeUndefined();
+    expect(api.retryConsentSkipped).not.toHaveBeenCalled();
+    expect(notice(host)).toBeDefined();
+
+    click(button(host, "Review and allow"));
+    await flush();
+    await act(async () => confirmChoice(true).click());
+    await flush();
+    expect(consents["consent.cloud_llm.anthropic"]).toBe("true");
+    expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
+    expect(notice(host)).toBeUndefined();
+  });
+
+  it("once allowed (or local), it just offers to run them", async () => {
+    skipped = ["m1"];
+    consents["consent.cloud_llm.anthropic"] = "true";
+    const { host } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(notice(host)!.textContent).toContain("1 meeting kept the raw transcript");
+    click(button(host, "Run them now"));
+    await flush();
+    expect(confirmDialog()).toBeNull();
+    expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows the backend's list, waits out a recording, and Dismiss hides it", async () => {
+    const { host, rerender } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(notice(host)).toBeUndefined();
+    act(() => eventHandlers["llm:consent-skips"]({ payload: ["m3"] }));
+    await flush();
+    expect(notice(host)).toBeDefined();
+    rerender(<AppNotices {...props({ recordingActive: true })} />);
+    expect(notice(host)).toBeUndefined();
+    rerender(<AppNotices {...props()} />);
+    click(button(host, "Dismiss"));
+    expect(notice(host)).toBeUndefined();
   });
 });

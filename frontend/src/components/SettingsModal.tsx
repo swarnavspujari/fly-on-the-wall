@@ -550,6 +550,12 @@ export default function SettingsModal({
   };
 
   const runBackfill = async () => {
+    // Backfill sends transcripts to the saved provider: same consent as Test
+    // and Save (the backend refuses without it anyway).
+    if (!(await confirmCloudProvider(llm?.provider ?? llmProvider))) {
+      setBackfillMsg("Nothing was extracted. Cloud processing wasn't confirmed.");
+      return;
+    }
     setBackfillBusy(true);
     setBackfillMsg(null);
     try {
@@ -557,7 +563,10 @@ export default function SettingsModal({
       setBackfillMsg(
         r.processed === 0
           ? "All meetings are already extracted."
-          : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
+          : r.failed === r.processed && r.first_error
+            ? // every meeting failed the same way: say why
+              `Couldn't extract from ${r.processed} meeting(s). ${r.first_error}`
+            : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
               (r.failed ? `, ${r.failed} failed` : "") +
               ".",
       );

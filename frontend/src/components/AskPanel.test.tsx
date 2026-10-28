@@ -161,7 +161,7 @@ const answer = async (yes: boolean) => {
   await flush();
 };
 const CONSENT_REFUSED =
-  "Anthropic isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama)";
+  "Anthropic isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama).";
 
 describe("Ask composer and sheet", () => {
   it("opens on a click, not on focus, and leaves focus in the composer", async () => {
@@ -422,6 +422,23 @@ describe("Runs on", () => {
       "Ask, Enhance, transcript cleanup and action items now run on OpenAI.",
     );
     expect(sheet()!.textContent).toContain("No API key for OpenAI yet");
+  });
+
+  it("Esc on its consent question answers only the question; the sheet stays, focus goes back", async () => {
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    act(() => runsOn().focus());
+    await flush();
+    choose(runsOn(), "openai");
+    await flush();
+    expect(confirmTitle()).toBe("Use OpenAI for Ask and Enhance?");
+    key(document.activeElement!, "Escape");
+    await flush();
+    expect(confirmDialog()).toBeNull();
+    expect(sheet()).not.toBeNull();
+    expect(document.activeElement).toBe(runsOn());
+    expect(consents["consent.cloud_llm.openai"]).toBeUndefined();
+    expect(api.setLlmSettings).not.toHaveBeenCalled();
   });
 
   it("switches to this computer without asking", async () => {

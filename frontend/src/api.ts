@@ -163,11 +163,18 @@ export const api = {
   getLlmSettings: () => invoke<LlmSettings>("get_llm_settings"),
   setLlmSettings: (update: LlmSettingsUpdate) => invoke<void>("set_llm_settings", { update }),
   testLlmConnection: () => invoke<string>("test_llm_connection"),
+  // Meetings whose cleanup / action items were skipped for missing cloud
+  // consent this session (updates arrive as "llm:consent-skips"), and the
+  // re-run once the provider is allowed (background; returns how many).
+  consentSkippedMeetings: () => invoke<string[]>("consent_skipped_meetings"),
+  retryConsentSkipped: () => invoke<number>("retry_consent_skipped"),
   // structured item extraction (decisions / action items / figures …)
   extractMeetingItems: (meetingId: string) =>
     invoke<number>("extract_meeting_items", { meetingId }),
   backfillMeetingItems: () =>
-    invoke<{ processed: number; extracted: number; failed: number }>("backfill_meeting_items"),
+    invoke<{ processed: number; extracted: number; failed: number; first_error: string | null }>(
+      "backfill_meeting_items",
+    ),
   pendingBackfillCount: () => invoke<number>("pending_backfill_count"),
 
   // managed Ollama (local AI provider)

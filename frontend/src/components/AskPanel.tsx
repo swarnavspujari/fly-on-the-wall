@@ -87,6 +87,8 @@ export interface AskChat {
    *  question and before Runs on writes, so a change made in Settings is
    *  never undone from a stale copy. */
   llm: LlmSettings | null;
+  /** After a Runs on write: show `next`, and ignore any re-read that started
+   *  before it. */
   setLlm: (next: LlmSettings) => void;
   refreshLlm: () => Promise<LlmSettings | null>;
   /** The answer sheet's id (the composer's aria-controls). */
@@ -125,14 +127,22 @@ export function useAskChat(noteId: string): AskChat {
     setAnnouncement("");
   }, [noteId]);
 
+  // Bumped by every Runs on write: a re-read that started before the last
+  // write is older than what we already show, so it isn't applied.
+  const writes = useRef(0);
   const refreshLlm = useCallback(async () => {
+    const at = writes.current;
     try {
       const s = await api.getLlmSettings();
-      setLlm(s);
+      if (writes.current === at) setLlm(s);
       return s;
     } catch {
       return null;
     }
+  }, []);
+  const setLlmAfterWrite = useCallback((next: LlmSettings) => {
+    writes.current += 1;
+    setLlm(next);
   }, []);
 
   const send = (text: string) => {
@@ -194,7 +204,7 @@ export function useAskChat(noteId: string): AskChat {
     dismissError: () => setError(null),
     markInserted: (i) => setInserted((s) => new Set(s).add(i)),
     llm,
-    setLlm,
+    setLlm: setLlmAfterWrite,
     refreshLlm,
     sheetId,
     announcement,
@@ -407,7 +417,7 @@ function RunsOn({
           `Switch Ask, Enhance, transcript cleanup and action items to ` +
           `${providerLabel("anthropic")} with ${modelLabel(model)}?`,
         confirmLabel: "Switch",
-        cancelLabel: `Keep ${providerLabel(fresh.provider)}`,
+        cancelLabel: "Keep current setting",
       }))
     ) {
       setMessage({ text: `Kept ${providerLabel(fresh.provider)}.`, tone: "info" });

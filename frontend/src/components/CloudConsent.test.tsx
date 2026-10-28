@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { act, StrictMode } from "react";
+import { act, StrictMode, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { LlmSettings } from "../types";
-import { CloudConsentOnLaunch } from "./CloudConsent";
+import { CloudConsentOnLaunch, useCloudConsent } from "./CloudConsent";
 import { ConfirmProvider } from "./confirm";
 import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
 
@@ -122,5 +122,58 @@ describe("cloud consent at launch", () => {
     await launch();
     expect(confirmDialog()).toBeNull();
     expect(api.setAppSetting).not.toHaveBeenCalled();
+  });
+});
+
+describe("useCloudConsent", () => {
+  let ask: ReturnType<typeof useCloudConsent>;
+  function Grab() {
+    const fn = useCloudConsent();
+    useEffect(() => {
+      ask = fn;
+    }, [fn]);
+    return null;
+  }
+  async function mount() {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    act(() =>
+      root!.render(
+        <ConfirmProvider>
+          <Grab />
+        </ConfirmProvider>,
+      ),
+    );
+    await flush();
+  }
+
+  it("refuses a provider it doesn't know, without asking", async () => {
+    await mount();
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await ask(saved.providers, "someday-cloud");
+    });
+    expect(result).toBe(false);
+    expect(confirmDialog()).toBeNull();
+    expect(api.setAppSetting).not.toHaveBeenCalled();
+  });
+
+  it("asks once per provider: a second ask while it's open waits for the same answer", async () => {
+    await mount();
+    const results: boolean[] = [];
+    await act(async () => {
+      void ask(saved.providers, "anthropic").then((ok) => results.push(ok));
+      void ask(saved.providers, "anthropic", { intro: "From the launch check." }).then((ok) =>
+        results.push(ok),
+      );
+    });
+    await flush();
+    expect(document.querySelectorAll('[data-testid="confirm-dialog"]')).toHaveLength(1);
+    await act(async () => confirmChoice(true).click());
+    await flush();
+    expect(results).toEqual([true, true]);
+    expect(api.setAppSetting).toHaveBeenCalledTimes(1);
+    expect(confirmDialog()).toBeNull();
   });
 });

@@ -247,6 +247,8 @@ pub fn run() {
             llm_commands::get_llm_settings,
             llm_commands::set_llm_settings,
             llm_commands::test_llm_connection,
+            llm_commands::consent_skipped_meetings,
+            llm_commands::retry_consent_skipped,
             extraction::extract_meeting_items,
             extraction::backfill_meeting_items,
             extraction::pending_backfill_count,

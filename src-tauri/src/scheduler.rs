@@ -169,14 +169,7 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 Tick::Completed(meeting_id) => {
                     // fresh transcript → new chunks for the semantic index
                     state.embed_notify.notify_one();
-                    polish_after_transcribe(&state, &on_stage, &meeting_id).await;
-                    // Structured item extraction rides the same best-effort
-                    // train: enrichment only, never blocks or fails the job.
-                    let _ = tokio::time::timeout(
-                        POLISH_TIMEOUT,
-                        crate::extraction::extract_after_transcribe(&state, &meeting_id),
-                    )
-                    .await;
+                    ai_pass(&app, &state, &on_stage, &meeting_id).await;
                     emit_final(&on_stage, &meeting_id, None)
                 }
                 Tick::Retrying {
@@ -205,6 +198,70 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             }
         }
     });
+}
+
+/// The best-effort AI pass after a transcription: cleanup, then structured
+/// item extraction. Enrichment only, it never blocks or fails the job. A
+/// meeting either step skipped for missing cloud consent is remembered
+/// (`AppState::consent_skipped`); the current list goes out as
+/// `llm:consent-skips` so the app's notice can offer to run them.
+async fn ai_pass<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    on_stage: StageSink<'_>,
+    meeting_id: &str,
+) {
+    // This run decides it afresh; a refusal below puts it back.
+    state.consent_skipped.lock().unwrap().remove(meeting_id);
+    polish_after_transcribe(state, on_stage, meeting_id).await;
+    let _ = tokio::time::timeout(
+        POLISH_TIMEOUT,
+        crate::extraction::extract_after_transcribe(state, meeting_id),
+    )
+    .await;
+    let skipped: Vec<String> = state
+        .consent_skipped
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    let _ = app.emit("llm:consent-skips", skipped);
+}
+
+/// Run the AI pass again for every meeting it skipped for missing consent
+/// (the user has just allowed the provider). In the background, one meeting
+/// at a time, with the same "polishing" marker and final event as after a
+/// transcription, so an open note shows the cleaned transcript when it lands.
+/// Returns how many meetings it took on.
+pub fn retry_consent_skipped<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> usize {
+    let ids: Vec<String> = {
+        let state = app.state::<AppState>();
+        let mut skipped = state.consent_skipped.lock().unwrap();
+        std::mem::take(&mut *skipped).into_iter().collect()
+    };
+    let count = ids.len();
+    if count == 0 {
+        return 0;
+    }
+    tauri::async_runtime::spawn(async move {
+        let on_stage = stage_emitter(&app);
+        let state = app.state::<AppState>();
+        for meeting_id in ids {
+            // Being transcribed again right now: that run brings its own pass.
+            if state
+                .pipeline_stage
+                .lock()
+                .unwrap()
+                .contains_key(&meeting_id)
+            {
+                continue;
+            }
+            ai_pass(&app, &state, &on_stage, &meeting_id).await;
+            emit_final(&on_stage, &meeting_id, None);
+        }
+    });
+    count
 }
 
 /// Stop transcription work for a meeting. A pipeline that is actually
@@ -310,6 +367,7 @@ async fn polish_after_transcribe(state: &AppState, on_stage: StageSink<'_>, meet
             "transcript cleanup done"
         ),
         Ok(Err(e)) => {
+            crate::llm_commands::record_consent_skip(state, meeting_id, &e);
             tracing::info!(meeting_id, error = %e, "transcript cleanup skipped (raw transcript stands)")
         }
         Err(_) => {
