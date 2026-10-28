@@ -57,11 +57,16 @@ async function boot(flags: Record<string, string> = {}, setup?: () => Promise<vo
   };
   await setup?.();
   const { default: App } = await import("./App");
+  const { ConfirmProvider } = await import("./components/confirm");
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
   await act(async () => {
-    root!.render(<App />);
+    root!.render(
+      <ConfirmProvider>
+        <App />
+      </ConfirmProvider>,
+    );
   });
   await settle(50);
 }

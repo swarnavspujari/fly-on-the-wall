@@ -13,6 +13,7 @@ export const NOTICE_PRIORITY = {
   appError: 4,
   systemAudio: 3,
   pipeline: 2,
+  consentSkips: 1.5,
   update: 1,
 } as const;
 
@@ -78,6 +79,30 @@ export function appErrorCopy(error: string): NoticeCopy {
     detailsLabel: "Details",
     details: brief === error.trim() ? null : error,
   };
+}
+
+/** Background transcript cleanup and action items were refused for
+ *  `count` meetings because the cloud provider had no recorded consent
+ *  (llm_commands.rs record_consent_skip). `vendor` is who needs the OK, or
+ *  null when the saved provider no longer does (allowed meanwhile, or now
+ *  local): then the fix is only to run them. */
+export function consentSkipsCopy(
+  count: number,
+  vendor: string | null,
+): { title: string; cause: string; action: string } {
+  const meetings = count === 1 ? "1 meeting" : `${count} meetings`;
+  const kept = `${meetings} kept the raw transcript and got no action items`;
+  return vendor
+    ? {
+        title: "Transcript cleanup and action items were skipped",
+        cause: `${vendor} needs your OK before it gets meeting content, so ${kept}.`,
+        action: "Review and allow",
+      }
+    : {
+        title: "Transcript cleanup and action items were skipped",
+        cause: `${kept}. You can run them now.`,
+        action: "Run them now",
+      };
 }
 
 /** Phases the update notice is shown in. "error" only when the download or

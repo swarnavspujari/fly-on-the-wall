@@ -3,7 +3,8 @@ import {
   CLAUDE_MODELS,
   QUICK_PROMPTS,
   RUNS_ON_HELPER,
-  cloudConsentMessage,
+  cloudConsentCopy,
+  cloudConsentLaunchIntro,
   describeAskError,
   providerName,
   runsOnPlace,
@@ -19,7 +20,7 @@ describe("describeAskError", () => {
       "This note is kept local",
     ],
     [
-      "confirm that meeting content may be sent to openai: open Settings → AI provider and select it again",
+      "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama).",
       "openai",
       "OpenAI isn't confirmed yet",
     ],
@@ -92,7 +93,7 @@ describe("describeAskError", () => {
 
   it("offers a consent button for 'isn't confirmed', and only there", () => {
     const consent = describeAskError(
-      "confirm that meeting content may be sent to openai: open Settings → AI provider and select it again",
+      "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama).",
       "openai",
     );
     expect(consent.action).toBe("consent");
@@ -166,11 +167,20 @@ describe("Ask copy", () => {
   });
 
   it("discloses what a cloud provider receives, like Settings does", () => {
-    const m = cloudConsentMessage("OpenAI");
-    expect(m).toMatch(/^Use OpenAI for Ask and Enhance\?/);
-    expect(m).toContain("full meeting transcripts will be sent to OpenAI");
-    expect(m).toContain("transcript cleanup and action items");
-    expect(m).toContain("notes you keep local");
+    const c = cloudConsentCopy("OpenAI");
+    expect(c.title).toBe("Use OpenAI for Ask and Enhance?");
+    expect(c.confirmLabel).toBe("Use OpenAI");
+    expect(c.message).toContain("full meeting transcripts will be sent to OpenAI");
+    expect(c.message).toContain("transcript cleanup and action items");
+    expect(c.message).toContain("notes you keep local");
+    expect(c.message).toContain("This computer (Ollama)");
+  });
+
+  it("says why the launch check asks, and what waits until you allow it", () => {
+    const intro = cloudConsentLaunchIntro("Anthropic");
+    expect(intro).toContain("set to Anthropic");
+    expect(intro).toContain("nothing is sent there until you allow it");
+    expect(intro).toContain("transcript cleanup and action items");
   });
 
   it("offers the Claude models Settings offers, recommended first", () => {

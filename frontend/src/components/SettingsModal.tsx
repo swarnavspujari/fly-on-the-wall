@@ -32,6 +32,9 @@ import {
   EscapeLayerScope,
 } from "./ui";
 import { useTheme } from "../theme";
+import { briefError } from "../pipelineNotice";
+import { useCloudConsent } from "./CloudConsent";
+import { useConfirm } from "./confirm";
 import PrivacySection from "./PrivacySection";
 import RemindNoticeRow from "./RemindNoticeRow";
 import type { Updater } from "../updater";
@@ -233,12 +236,17 @@ export default function SettingsModal({
   const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
   const [backfillBusy, setBackfillBusy] = useState(false);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+  // The backend's own words when every meeting failed (muted, under the message)
+  const [backfillDetail, setBackfillDetail] = useState<string | null>(null);
   // null = count not loaded yet (generic label until it arrives)
   const [backfillPending, setBackfillPending] = useState<number | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
 
   // Appearance control (System / Light / Dark) — wired to the shared theme hook.
   const { theme, setTheme } = useTheme();
+
+  const confirm = useConfirm();
+  const askCloudConsent = useCloudConsent();
 
   // LLM provider state
   const [llm, setLlm] = useState<LlmSettings | null>(null);
@@ -545,17 +553,30 @@ export default function SettingsModal({
   };
 
   const runBackfill = async () => {
+    // Backfill sends transcripts to the saved provider: same consent as Test
+    // and Save (the backend refuses without it anyway).
+    if (!(await confirmCloudProvider(llm?.provider ?? llmProvider))) {
+      setBackfillMsg("Nothing was extracted. Cloud processing wasn't confirmed.");
+      return;
+    }
     setBackfillBusy(true);
     setBackfillMsg(null);
+    setBackfillDetail(null);
     try {
       const r = await api.backfillMeetingItems();
+      const allFailed = r.processed > 0 && r.failed === r.processed && !!r.first_error;
       setBackfillMsg(
         r.processed === 0
           ? "All meetings are already extracted."
-          : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
+          : allFailed
+            ? `Couldn't index ${r.processed === 1 ? "the meeting" : `any of the ${r.processed} meetings`}. ` +
+              "Check Ask and Enhance in Settings, then try again."
+            : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
               (r.failed ? `, ${r.failed} failed` : "") +
               ".",
       );
+      // every meeting failed the same way: show why, briefly
+      if (allFailed) setBackfillDetail(briefError(r.first_error!, 200));
     } catch (e) {
       setBackfillMsg(String(e));
     } finally {
@@ -619,7 +640,13 @@ export default function SettingsModal({
   };
 
   const deleteOllamaModel = async (model: string) => {
-    if (!confirm(`Delete the model "${model}" from this computer?`)) return;
+    const ok = await confirm({
+      title: `Delete ${model}?`,
+      message: "It's removed from this computer. You can download it again later.",
+      confirmLabel: "Delete model",
+      tone: "danger",
+    });
+    if (!ok) return;
     setOllamaMsg(null);
     try {
       await api.ollamaDelete(model);
@@ -634,28 +661,8 @@ export default function SettingsModal({
 
   /** One-time disclosure before a cloud provider first receives meeting
    *  content: who processes it and what is sent. Accepted per provider. */
-  const confirmCloudProvider = async (provider: string): Promise<boolean> => {
-    const info = llm?.providers.find((p) => p.id === provider);
-    if (!info || info.is_local) return true;
-    const key = `consent.cloud_llm.${provider}`;
-    try {
-      if ((await api.getAppSetting(key)) === "true") return true;
-    } catch {
-      /* fall through to asking */
-    }
-    const vendor = providerVendor(provider);
-    const ok = confirm(
-      `Use ${vendor} for Ask and Enhance?\n\n` +
-        `Your notes and full meeting transcripts will be sent to ${vendor} for processing ` +
-        `whenever you run Enhance or Ask, and automatically for transcript cleanup and ` +
-        `action items after each transcription. Their data-retention terms apply (see their ` +
-        `privacy / data-usage policy).\n\n` +
-        `Recordings themselves stay on this computer, and so do notes you keep local. ` +
-        `Choose This computer (Ollama) to keep everything local.`,
-    );
-    if (ok) await api.setAppSetting(key, "true").catch(() => {});
-    return ok;
-  };
+  const confirmCloudProvider = (provider: string): Promise<boolean> =>
+    askCloudConsent(llm?.providers ?? [], provider);
 
   const pickProvider = async (id: string) => {
     // Disclose cloud processing before the provider is persisted (picking
@@ -2112,6 +2119,14 @@ export default function SettingsModal({
                       {backfillMsg && (
                         <p role="status" className="text-text-2" style={SMALL}>
                           {backfillMsg}
+                          {backfillDetail && (
+                            <span
+                              className="text-text-3"
+                              style={{ display: "block", marginTop: 2 }}
+                            >
+                              {backfillDetail}
+                            </span>
+                          )}
                         </p>
                       )}
                     </SettingsRow>

@@ -313,11 +313,14 @@ pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<usize,
 pub async fn extract_after_transcribe(state: &AppState, meeting_id: &str) {
     match run_extraction(state, meeting_id).await {
         Ok(n) => tracing::info!(meeting_id, items = n, "post-transcription extraction done"),
-        Err(e) => tracing::warn!(
-            meeting_id,
-            error = %e,
-            "post-transcription extraction skipped (transcript stands without items)"
-        ),
+        Err(e) => {
+            crate::llm_commands::record_consent_skip(state, meeting_id, &e);
+            tracing::warn!(
+                meeting_id,
+                error = %e,
+                "post-transcription extraction skipped (transcript stands without items)"
+            )
+        }
     }
 }
 
@@ -335,10 +338,13 @@ pub struct BackfillResult {
     pub processed: usize,
     pub extracted: usize,
     pub failed: usize,
+    /// The first failure's text, so Settings can say why when every
+    /// meeting failed (no provider, no consent, no key…).
+    pub first_error: Option<String>,
 }
 
 /// On-demand backfill: run extraction for every transcribed meeting that has
-/// none yet (oldest first). Stops early only on provider-setup failure.
+/// none yet (oldest first).
 #[tauri::command]
 pub async fn backfill_meeting_items(state: State<'_, AppState>) -> CmdResult<BackfillResult> {
     let pending = {
@@ -351,6 +357,7 @@ pub async fn backfill_meeting_items(state: State<'_, AppState>) -> CmdResult<Bac
         processed: 0,
         extracted: 0,
         failed: 0,
+        first_error: None,
     };
     for meeting_id in pending {
         result.processed += 1;
@@ -359,6 +366,7 @@ pub async fn backfill_meeting_items(state: State<'_, AppState>) -> CmdResult<Bac
             Err(e) => {
                 tracing::warn!(meeting_id, error = %e, "backfill extraction failed");
                 result.failed += 1;
+                result.first_error.get_or_insert(e);
             }
         }
     }

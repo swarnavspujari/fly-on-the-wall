@@ -9,6 +9,7 @@ import Home from "./Home";
 import NoteList from "./NoteList";
 import PrivacyPill from "./PrivacyPill";
 import UndoToast from "./UndoToast";
+import { confirmDialog } from "./confirmTesting";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -263,15 +264,13 @@ describe("NoteList", () => {
     expect(chips).toEqual(["Enhanced", "Ready to enhance", "Queued"]);
   });
 
-  it("delete asks no confirm(): the Undo toast covers it", () => {
-    const confirmSpy = vi.spyOn(window, "confirm");
+  it("delete asks nothing: the Undo toast covers it", () => {
     const p = listProps();
     const host = render(<NoteList {...p} />);
     click(host.querySelector('[aria-label="Delete note “Board prep”"]'));
     expect(p.onDeleteNote).toHaveBeenCalledWith("n3");
-    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(confirmDialog()).toBeNull();
     expect(p.onOpenNote).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
   });
 
   it("the trash is in the tab order (invisible until hover or focus), not display:none", () => {

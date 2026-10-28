@@ -111,7 +111,8 @@ pub fn run() {
             {
                 let storage = app_state.storage.lock().unwrap();
                 llm_commands::migrate_anthropic_model(&storage);
-                llm_commands::grandfather_cloud_consent(&storage);
+                // Consents recorded while the prompt couldn't show are void.
+                llm_commands::reset_unseen_cloud_consent(&storage);
                 privacy::record_pending_wipe(&storage);
             }
             privacy::spawn_disk_encryption_check(app_state.data_dir.clone());
@@ -247,6 +248,8 @@ pub fn run() {
             llm_commands::get_llm_settings,
             llm_commands::set_llm_settings,
             llm_commands::test_llm_connection,
+            llm_commands::consent_skipped_meetings,
+            llm_commands::retry_consent_skipped,
             extraction::extract_meeting_items,
             extraction::backfill_meeting_items,
             extraction::pending_backfill_count,
