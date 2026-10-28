@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { briefError, selectPipelineNotice } from "./pipelineNotice";
+import { briefError, pipelineFailureCopy, selectPipelineNotice } from "./pipelineNotice";
 
 /** Real error shapes from the backend (models.rs / pipeline.rs / Groq). */
 const ENGINE_ERR =
@@ -102,5 +102,70 @@ describe("briefError", () => {
     expect(briefError("checksum mismatch (expected a, got b)")).toBe(
       "checksum mismatch (expected a, got b)",
     );
+  });
+});
+
+describe("pipelineFailureCopy (notice stack, note not open)", () => {
+  const base = {
+    error: ENGINE_ERR,
+    os: "windows",
+    engineManaged: true,
+    noteTitle: "Acme renewal",
+  } as const;
+
+  it("names the note and says the recording is safe", () => {
+    const c = pipelineFailureCopy({ ...base, kind: "generic", error: "boom" });
+    expect(c.title).toBe("Transcription didn’t finish");
+    expect(c.cause).toBe("“Acme renewal” wasn’t transcribed. The recording is saved.");
+    expect(c.details).toBe("boom");
+  });
+
+  it("falls back to a generic subject when the note isn't known", () => {
+    const c = pipelineFailureCopy({ ...base, kind: "generic", error: "boom", noteTitle: null });
+    expect(c.cause.startsWith("A recording wasn’t transcribed.")).toBe(true);
+  });
+
+  it("engine missing with a managed download → the note's Install engine button", () => {
+    const c = pipelineFailureCopy({ ...base, kind: "engine-missing" });
+    expect(c.title).toBe("Transcription engine isn’t installed");
+    expect(c.steps[0]).toBe("Open the note and choose Install engine.");
+  });
+
+  it("engine missing per OS when there's no managed download", () => {
+    const mac = pipelineFailureCopy({
+      ...base,
+      kind: "engine-missing",
+      os: "macos",
+      engineManaged: false,
+    });
+    expect(mac.steps[0]).toBe("In Terminal, run: brew install whisper-cpp");
+    const linux = pipelineFailureCopy({
+      ...base,
+      kind: "engine-missing",
+      os: "linux",
+      engineManaged: false,
+    });
+    expect(linux.steps[0]).toMatch(/package manager/);
+    expect(linux.steps.join(" ")).not.toMatch(/brew/);
+    const win = pipelineFailureCopy({ ...base, kind: "engine-missing", engineManaged: false });
+    expect(win.steps[0]).toBe("Set up the engine in Settings › Transcripts.");
+    for (const c of [mac, linux, win]) {
+      expect(c.steps[1]).toBe("Open the note and choose Transcribe recording.");
+    }
+  });
+
+  it("download failure: check the connection, then retry from the note", () => {
+    const c = pipelineFailureCopy({ ...base, kind: "download-failed", error: DOWNLOAD_ERR });
+    expect(c.title).toBe("Model download didn’t finish");
+    expect(c.steps).toEqual(["Check that you’re online.", "Open the note and choose Try again."]);
+  });
+
+  it("details are briefed: no signed CDN URLs", () => {
+    const c = pipelineFailureCopy({
+      ...base,
+      kind: "download-failed",
+      error: "download failed: https://cdn-lfs.huggingface.co/x?X-Amz-Signature=abc (status 403)",
+    });
+    expect(c.details).toBe("download failed: (status 403)");
   });
 });

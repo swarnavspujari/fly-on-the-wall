@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { PanelLeft, X } from "lucide-react";
+import { PanelLeft } from "lucide-react";
 import { api } from "./api";
 import { pickInProgressEvent, seedFromEvent } from "./calendarMatch";
 import { WHISPER_ENGINE_ID } from "./types";
@@ -31,8 +31,7 @@ import Editor from "./components/Editor";
 import RecordingBar from "./components/RecordingBar";
 import SettingsModal from "./components/SettingsModal";
 import FirstRunNotice from "./components/FirstRunNotice";
-import UpdateBanner from "./components/UpdateBanner";
-import SystemAudioNotice from "./components/SystemAudioNotice";
+import AppNotices, { type PipelineFailure } from "./components/AppNotices";
 import RestartRequired from "./components/RestartRequired";
 import { useUpdater } from "./updater";
 
@@ -70,6 +69,14 @@ export default function App() {
   const [pipeStage, setPipeStage] = useState<string | null>(null);
   const [pipeDetail, setPipeDetail] = useState<string | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
+  // Transcriptions that failed while their note wasn't open — shown in the
+  // notice stack until dismissed or the note is opened (which hands the
+  // error to its inline notice). The open note's own failure stays inline.
+  const [pipelineFailures, setPipelineFailures] = useState<PipelineFailure[]>([]);
+  const pipelineFailuresRef = useRef<PipelineFailure[]>([]);
+  useEffect(() => {
+    pipelineFailuresRef.current = pipelineFailures;
+  }, [pipelineFailures]);
   // Staged (untranscribed) media import for the open note's meeting — while
   // set, the editor shows the import queue instead of the note content.
   const [importStaged, setImportStaged] = useState<ImportStaged | null>(null);
@@ -149,6 +156,11 @@ export default function App() {
   useEffect(() => {
     importStagedRef.current = importStaged;
   }, [importStaged]);
+  // The listed notes, so a failure for a note that isn't open can name it.
+  const notesRef = useRef<NoteSummary[]>(notes);
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
 
   const refreshFolders = useCallback(async () => {
     setFolders(await api.listFolders());
@@ -270,9 +282,44 @@ export default function App() {
 
   // pipeline + model download progress events
   useEffect(() => {
+    // A run for a note that isn't open: a failure goes to the notice stack
+    // (it used to be dropped); any later event for that meeting (a retry
+    // starting, success, cancel) clears it.
+    const trackBackgroundRun = (p: PipelineProgress) => {
+      const drop = () =>
+        setPipelineFailures((list) => list.filter((f) => f.meetingId !== p.meeting_id));
+      if (!(p.done && p.error && p.stage !== "cancelled")) {
+        if (pipelineFailuresRef.current.some((f) => f.meetingId === p.meeting_id)) drop();
+        return;
+      }
+      const error = p.error;
+      const add = (owner: NoteSummary | undefined) =>
+        setPipelineFailures((list) => [
+          ...list.filter((f) => f.meetingId !== p.meeting_id),
+          {
+            meetingId: p.meeting_id,
+            noteId: owner?.id ?? null,
+            noteTitle: owner?.title ?? null,
+            error,
+          },
+        ]);
+      const known = notesRef.current.find((n) => n.meeting_id === p.meeting_id);
+      if (known) {
+        add(known);
+      } else {
+        // Not in the current folder view: look it up in the recent list.
+        api
+          .listRecentNotes(200)
+          .then((all) => add(all.find((n) => n.meeting_id === p.meeting_id)))
+          .catch(() => add(undefined));
+      }
+    };
     const unPipeline = listen<PipelineProgress>("pipeline:progress", (e) => {
       const p = e.payload;
-      if (p.meeting_id !== openMeetingIdRef.current) return;
+      if (p.meeting_id !== openMeetingIdRef.current) {
+        trackBackgroundRun(p);
+        return;
+      }
       // Cancelled is terminal but neither success nor failure: clear the
       // progress UI and drop a staged import queue back to idle (the backend
       // reset its `started` flag).
@@ -404,7 +451,15 @@ export default function App() {
     setNoteMeetings(meetings);
     const meeting = meetings[0] ?? null; // newest is the primary
     setOpenMeeting(meeting);
-    setPipelineError(null);
+    // A failure the stack was holding for this meeting moves to the note's
+    // inline notice, which has the fix buttons (install, retry, Settings).
+    const held = meeting
+      ? pipelineFailuresRef.current.find((f) => f.meetingId === meeting.id)
+      : undefined;
+    if (held) {
+      setPipelineFailures((list) => list.filter((f) => f.meetingId !== held.meetingId));
+    }
+    setPipelineError(held?.error ?? null);
     setPipeDetail(null);
     if (meeting) {
       const [raw, cleaned, stage, staged] = await Promise.all([
@@ -443,6 +498,7 @@ export default function App() {
 
   const deleteNote = async (id: string) => {
     await api.deleteNote(id);
+    setPipelineFailures((list) => list.filter((f) => f.noteId !== id));
     if (openNote?.id === id) {
       openSeq.current++;
       setOpenNote(null);
@@ -868,32 +924,34 @@ export default function App() {
           </div>
         </div>
       )}
-      {error && (
-        <div
-          className="print:hidden fixed bottom-4 left-4 z-50 flex w-80 items-start gap-2.5 rounded-2xl border border-line bg-error-soft px-4 py-3 text-[13px] leading-relaxed text-error-text"
-          style={{ boxShadow: "var(--shadow-lg)" }}
-          role="alert"
-        >
-          <span className="min-w-0 flex-1 break-words">⚠ {error}</span>
-          <button
-            onClick={() => setError(null)}
-            title="Dismiss"
-            aria-label="Dismiss error"
-            className="flex-none cursor-pointer rounded p-0.5 opacity-70 hover:opacity-100"
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-      )}
-      {!recordingActive && <UpdateBanner updater={updater} />}
+      {/* One corner for every app-wide notice (system audio > errors >
+          update), replacing three separately anchored cards that overlapped. */}
+      <AppNotices
+        os={info?.os ?? null}
+        recordingActive={recordingActive}
+        systemAudioBlocked={tapDenied}
+        onOpenPrivacySettings={() => void api.openPrivacySettings().catch(console.error)}
+        onDismissSystemAudio={() => setTapDenied(false)}
+        appError={error}
+        onDismissAppError={() => setError(null)}
+        pipelineFailures={pipelineFailures}
+        engine={engine}
+        onOpenFailedNote={(f) => {
+          if (!f.noteId) return;
+          setDrawerOpen(false);
+          void openNoteById(f.noteId);
+        }}
+        onDismissPipelineFailure={(meetingId) =>
+          setPipelineFailures((list) => list.filter((f) => f.meetingId !== meetingId))
+        }
+        onOpenEngineSettings={() => {
+          setSettingsFocus("engine");
+          setShowSettings(true);
+        }}
+        updater={updater}
+      />
       {/* after "Delete all my data": blocks the app until it restarts */}
       <RestartRequired />
-      {tapDenied && !recordingActive && (
-        <SystemAudioNotice
-          onOpenSettings={() => void api.openPrivacySettings().catch(console.error)}
-          onDismiss={() => setTapDenied(false)}
-        />
-      )}
       {showFirstRun && (
         <FirstRunNotice
           onAccept={() => {

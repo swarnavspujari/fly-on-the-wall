@@ -1,5 +1,7 @@
-/** Pure notice-selection + error-briefing logic for the transcript panel's
- *  pipeline errors. Kept free of React so it can be unit-tested directly. */
+/** Pure notice-selection + error-briefing logic for pipeline errors: the
+ *  transcript panel's inline notices and the app notice stack's copy for
+ *  failures of notes that aren't open. Kept free of React so it can be
+ *  unit-tested directly. */
 
 export type PipelineNoticeKind = "none" | "engine-missing" | "download-failed" | "generic";
 
@@ -67,4 +69,77 @@ export function selectPipelineNotice({
   }
   if (isDownload) return { kind: "download-failed", installError: null };
   return { kind: "generic", installError: null };
+}
+
+export interface PipelineFailureCopyInput {
+  kind: Exclude<PipelineNoticeKind, "none">;
+  /** Raw pipeline error (briefed into the details). */
+  error: string;
+  /** AppInfo.os: "windows" | "macos" | "linux"; null before it loads. */
+  os: string | null;
+  /** A managed engine download exists for this OS; null until known. */
+  engineManaged: boolean | null;
+  /** Title of the failed recording's note, when the list knows it. */
+  noteTitle: string | null;
+}
+
+export interface PipelineFailureCopy {
+  title: string;
+  cause: string;
+  steps: string[];
+  detailsLabel: string;
+  details: string;
+}
+
+/** Copy for a transcription that failed while its note wasn't open (the
+ *  open note shows the inline, actionable notice instead). Opening the note
+ *  moves the failure there, so the steps point at its buttons. */
+export function pipelineFailureCopy({
+  kind,
+  error,
+  os,
+  engineManaged,
+  noteTitle,
+}: PipelineFailureCopyInput): PipelineFailureCopy {
+  const what = noteTitle ? `“${noteTitle}” wasn’t transcribed.` : "A recording wasn’t transcribed.";
+  const transcribe = "Open the note and choose Transcribe recording.";
+  const details = briefError(error);
+  if (kind === "engine-missing") {
+    let steps: string[];
+    if (engineManaged !== false) {
+      steps = ["Open the note and choose Install engine.", "Transcribe the recording."];
+    } else if (os === "macos") {
+      steps = ["In Terminal, run: brew install whisper-cpp", transcribe];
+    } else if (os === "linux") {
+      steps = [
+        "Install whisper.cpp from your package manager, or build it from source.",
+        transcribe,
+      ];
+    } else {
+      steps = ["Set up the engine in Settings › Transcripts.", transcribe];
+    }
+    return {
+      title: "Transcription engine isn’t installed",
+      cause: `${what} The recording is saved, but the engine that transcribes it is missing.`,
+      steps,
+      detailsLabel: "Details",
+      details,
+    };
+  }
+  if (kind === "download-failed") {
+    return {
+      title: "Model download didn’t finish",
+      cause: `${what} The speech model didn’t download, so transcription couldn’t start.`,
+      steps: ["Check that you’re online.", "Open the note and choose Try again."],
+      detailsLabel: "Details",
+      details,
+    };
+  }
+  return {
+    title: "Transcription didn’t finish",
+    cause: `${what} The recording is saved.`,
+    steps: ["Open the note and transcribe it again."],
+    detailsLabel: "Details",
+    details,
+  };
 }
