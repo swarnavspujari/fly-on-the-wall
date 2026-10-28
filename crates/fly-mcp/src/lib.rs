@@ -1785,6 +1785,67 @@ mod tests {
         assert!(text.contains(&ids[2]));
     }
 
+    /// `list_recent`'s text is a contract for MCP clients. The app's list
+    /// status columns on `NoteSummary` (transcript, enhanced doc, recording,
+    /// job) must not leak into it: pin the exact output with all of them set.
+    #[test]
+    fn list_recent_text_is_pinned_and_omits_app_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let note = storage.create_note("Budget sync", None).unwrap();
+        let meeting = storage
+            .create_meeting("Budget sync", &note.id, &[])
+            .unwrap();
+        storage
+            .end_meeting(
+                &meeting.id,
+                &fly_core::RecordingRef {
+                    mic_path: Some("recordings/b/recording.mic.wav".into()),
+                    system_path: None,
+                    mixed_path: None,
+                    playback_path: None,
+                    duration_ms: 1_000,
+                },
+            )
+            .unwrap();
+        storage
+            .save_transcript(&fly_core::Transcript {
+                meeting_id: meeting.id.clone(),
+                language: None,
+                engine: "whisper.cpp".into(),
+                segments: vec![],
+                speakers: vec![],
+            })
+            .unwrap();
+        storage
+            .update_note_blocks(&note.id, &[fly_core::NoteBlock::user("Decided")])
+            .unwrap();
+        storage.enqueue_transcription(&meeting.id).unwrap();
+        storage
+            .mark_transcription_failed(&meeting.id, 1, "boom")
+            .unwrap();
+        let row = storage.list_recent_notes(1).unwrap().remove(0);
+        assert!(row.has_transcript && row.has_enhanced_doc && row.has_recording);
+        assert_eq!(row.job_status.as_deref(), Some("failed"));
+
+        let server = Server::new(storage);
+        let text = tool_text(&server, "list_recent", json!({"limit": 10}));
+        assert_eq!(
+            text,
+            format!(
+                "Recent notes:
+- Budget sync (note_id: {}, updated {}, meeting_id: {})
+",
+                note.id,
+                row.updated_at.to_rfc3339(),
+                meeting.id
+            )
+        );
+        for leaked in ["has_", "enhanced", "job", "failed", "recording"] {
+            assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+        }
+    }
+
     #[test]
     fn list_recent_paginates_with_cursor() {
         let (_d, server, _m0, _m1) = server_with_series();

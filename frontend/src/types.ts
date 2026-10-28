@@ -44,6 +44,16 @@ export interface NoteSummary {
   /** When the note's meeting happened (started_at), else the note's
    * created_at — list order and the date shown in rows. */
   happened_at: string;
+  /* List status (read-only, computed by the query). Optional: summaries
+   * cached in localStorage before these existed lack them. */
+  /** The note's meeting has a transcript. */
+  has_transcript?: boolean;
+  /** An enhanced doc exists (any blocks, including AI blocks the user kept). */
+  has_enhanced_doc?: boolean;
+  /** The meeting's audio is on disk (not removed by retention). */
+  has_recording?: boolean;
+  /** Transcription job: "queued" | "running" | "done" | "failed"; null = none. */
+  job_status?: string | null;
 }
 
 export interface SearchHit {
