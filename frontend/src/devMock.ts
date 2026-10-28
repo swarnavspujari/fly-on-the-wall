@@ -321,7 +321,10 @@ let mockImportDone = false;
 let mockImportRunning = false;
 /** A run that gave up keeps its cause, like the backend's parked job row
  *  (read back by pipeline_failure); Retry (transcribe_meeting) clears it. */
-const mockPipelineFailures: Record<string, string> = {};
+const mockPipelineFailures: Record<string, string> = {
+  // the seeded "Failed" note (n5): its parked job's cause
+  m5: "whisper-cli exited with status 3221225477",
+};
 const MOCK_PIPELINE_FAILURE =
   "speaker detection failed: failed to launch sherpa-onnx (The filename or extension is too long. (os error 206))";
 
@@ -339,10 +342,10 @@ function importStage() {
     files: [
       {
         id: "if-1",
-        file_name: "Fuel Bid Meeting 2026-07-09.mp3",
+        file_name: "Planning Sync 2026-01-15.mp3",
         size: 18_400_000,
         kind: "audio",
-        rel_path: "recordings/imp/Fuel Bid Meeting 2026-07-09.mp3",
+        rel_path: "recordings/imp/Planning Sync 2026-01-15.mp3",
         error: null,
       },
       {
@@ -368,7 +371,7 @@ function importStage() {
   if (!noteMeta.some((n) => n.id === IMPORT_NOTE_ID)) {
     noteMeta.unshift({
       id: IMPORT_NOTE_ID,
-      title: "Fuel Bid Meeting 2026-07-09",
+      title: "Planning Sync 2026-01-15",
       folder_id: null,
       meeting_id: IMPORT_MEETING_ID,
       updated_at: nowIso(),
@@ -442,7 +445,8 @@ function importTranscribe(order: string[]) {
   }
   at((t += 500), () => pipe("diarizing"));
   // fotwMockImportPipelineFail: gives up here, as a sherpa launch failure
-  // does (permanent, so no retries); the queue stays started
+  // ends (the backend tries it three times first; the mock skips to the
+  // end); the queue stays started
   if (mockFlag("fotwMockImportPipelineFail") === "1") {
     at((t += 1200), () => {
       mockImportRunning = false;
@@ -492,8 +496,10 @@ function mockImportRetry() {
 }
 
 function mockCancelTranscription(meetingId: string) {
-  if (meetingId !== IMPORT_MEETING_ID || !mockImport || mockImportRunning) return null;
-  mockImport = { ...mockImport, started: false };
+  if (meetingId === IMPORT_MEETING_ID && mockImportRunning) return null;
+  if (meetingId === IMPORT_MEETING_ID && mockImport) mockImport = { ...mockImport, started: false };
+  // like the backend: a parked failure goes with the run it belongs to
+  delete mockPipelineFailures[meetingId];
   window.setTimeout(
     () =>
       mockEmit("pipeline:progress", {
@@ -993,6 +999,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "move_folder":
     case "delete_folder":
     case "move_note":
+      return null;
     case "cancel_transcription":
       return mockCancelTranscription(String(args.meetingId));
     case "pipeline_failure":

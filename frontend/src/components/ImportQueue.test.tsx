@@ -176,12 +176,30 @@ describe("ImportQueue per-file failures", () => {
       pipelineError: "speaker detection failed: failed to launch sherpa-onnx",
       onRetry,
     });
-    expect(host!.textContent).toContain("failed to launch sherpa-onnx");
+    // plain words first; the engine's own text is the muted detail
+    expect(host!.textContent).toContain(
+      "Transcription didn't finish. Retry picks up where it stopped.",
+    );
+    expect(host!.querySelector(".text-text-3")?.textContent).toContain(
+      "failed to launch sherpa-onnx",
+    );
     expect(host!.textContent).not.toContain("Starting…");
     // the files aren't waiting on anything: the run is over until Retry
     expect(host!.textContent).not.toContain("Waiting");
     expect(button("Cancel")).toBeNull();
     await click(button("Retry"));
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("an idle queue isn't a failed run: Transcribe only, whatever failure is stored", async () => {
+    // e.g. the old workaround (Cancel, then reopen) left the queue idle with
+    // the job still parked as failed
+    await mount(staged([file("a"), file("b")]), {
+      pipelineError: "speaker detection failed: failed to launch sherpa-onnx",
+    });
+    expect(button("Transcribe 2 files")).not.toBeNull();
+    expect(button("Retry")).toBeNull();
+    expect(host!.textContent).not.toContain("didn't finish");
+    expect(host!.textContent).not.toContain("sherpa-onnx");
   });
 });

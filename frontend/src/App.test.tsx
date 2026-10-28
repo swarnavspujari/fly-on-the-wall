@@ -331,7 +331,7 @@ describe("App: an import whose run failed after Transcribe", () => {
   async function reopenImport() {
     await click(rowFor("Design weekly — notes"));
     await settle(100);
-    await click(rowFor("Fuel Bid Meeting 2026-07-09"));
+    await click(rowFor("Planning Sync 2026-01-15"));
     await settle(100);
   }
 
@@ -375,11 +375,12 @@ describe("App: an import whose run failed after Transcribe", () => {
 describe("App: a recording whose transcription failed", () => {
   it("says why when you open the note later, not just 'Transcribe recording'", async () => {
     const WHY = "whisper-cli exited with status 3221225477";
+    const URL = "https://example.invalid/log?sig=0123456789abcdef";
     await boot({ fotwMockNoTranscript: "1" });
     // the run gave up while another note was open (or before a restart)
     override = (cmd, args) =>
       cmd === "pipeline_failure"
-        ? Promise.resolve(args.meetingId === "m1" ? WHY : null)
+        ? Promise.resolve(args.meetingId === "m1" ? `${WHY} (log: ${URL})` : null)
         : undefined;
     await click(rowFor("Acme — renewal review"));
     await settle(100);
@@ -389,5 +390,84 @@ describe("App: a recording whose transcription failed", () => {
     await click(tab);
     expect(button("Transcribe recording")).toBeDefined();
     expect(host!.textContent).toContain(WHY);
+    // briefed like every other failure: no signed URLs
+    expect(host!.textContent).not.toContain(URL);
+  });
+});
+
+describe("App: a failure stays with its own meeting", () => {
+  it("never carries over to a new note or the recording made in it", async () => {
+    const WHY = "whisper-cli exited with status 3221225477";
+    await boot({ fotwMockNoTranscript: "1" });
+    let recorded = false;
+    override = (cmd, args) => {
+      if (cmd === "pipeline_failure") return Promise.resolve(args.meetingId === "m1" ? WHY : null);
+      if (cmd === "start_recording") recorded = true;
+      // the new note (the mock's create_note is n3) gets its own fresh meeting
+      if (cmd === "get_meetings_for_note" && args.noteId === "n3" && recorded) {
+        return Promise.resolve([
+          {
+            id: "m-new",
+            title: "Design weekly — notes",
+            note_id: "n3",
+            attendees: [],
+            attendees_confirmed: false,
+            started_at: new Date().toISOString(),
+            ended_at: null,
+            recording: { mic_path: null, system_path: null, mixed_path: "mix.wav", duration_ms: 1 },
+          },
+        ]);
+      }
+      return undefined;
+    };
+    const transcriptTab = () =>
+      Array.from(host!.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Transcript"),
+      );
+    await click(rowFor("Acme — renewal review"));
+    await settle(100);
+    await click(transcriptTab());
+    expect(host!.textContent).toContain(WHY);
+
+    await click(host!.querySelector('button[title="New note"]'));
+    await settle(100);
+    await click(button("Record"));
+    await settle(100);
+    await click(transcriptTab());
+    // the new meeting's panel renders, without the other meeting's failure
+    expect(button("Transcribe recording")).toBeDefined();
+    expect(host!.textContent).not.toContain(WHY);
+  });
+});
+
+describe("App: opening a note while its run reports", () => {
+  it("a live failure isn't overwritten by the open's older read", async () => {
+    const LIVE = "speaker detection failed: the diarizer crashed";
+    await boot({ fotwMockNoTranscript: "1" });
+    // hold the open's stage and failure reads until after the live event
+    const held: (() => void)[] = [];
+    override = (cmd, args) =>
+      (cmd === "pipeline_failure" || cmd === "pipeline_stage") && args.meetingId === "m1"
+        ? new Promise((resolve) => held.push(() => resolve(null)))
+        : undefined;
+    await click(rowFor("Acme — renewal review"));
+    await act(async () => {
+      w().fotwMockEmit!("pipeline:progress", {
+        meeting_id: "m1",
+        stage: "error",
+        detail: null,
+        done: true,
+        error: LIVE,
+      });
+    });
+    await act(async () => {
+      for (const release of held) release();
+    });
+    await settle(100);
+    const tab = Array.from(host!.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Transcript"),
+    );
+    await click(tab);
+    expect(host!.textContent).toContain(LIVE);
   });
 });

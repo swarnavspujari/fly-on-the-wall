@@ -353,10 +353,13 @@ pub(crate) fn reset_staged_started(state: &AppState, meeting_id: &str) {
 /// drops back to idle, then whatever is in flight stops: a running pipeline
 /// unwinds at its next batch boundary and the worker emits "cancelled"; a
 /// queued job is removed and "cancelled" is emitted on the spot. With
-/// nothing queued or running (the run already gave up, or was never
-/// enqueued) a parked failure is dropped with the run it belongs to, and
-/// "cancelled" is emitted here, so the queue never waits on an event that
-/// can't come.
+/// nothing queued or running (a queue left started with no job, e.g. an
+/// enqueue that never happened) "cancelled" is emitted here, so the queue
+/// never waits on an event that can't come.
+///
+/// Dropping a parked failure is defensive: the queue hides Cancel once a run
+/// has failed (it offers Retry), but if Cancel arrives anyway, the failure
+/// goes with the run it belongs to, so the list stops saying "Failed".
 pub(crate) fn cancel_staged_transcription(
     state: &AppState,
     on_stage: crate::pipeline::StageSink<'_>,
@@ -366,13 +369,18 @@ pub(crate) fn cancel_staged_transcription(
     if scheduler::cancel(state, on_stage, meeting_id)? {
         return Ok(());
     }
-    if scheduler::last_failure(state, meeting_id).is_some() {
-        state
-            .storage
-            .lock()
-            .unwrap()
-            .delete_transcription_job(meeting_id)
-            .map_err(|e| e.to_string())?;
+    {
+        // checked and deleted under one lock: only a job still parked as failed
+        let storage = state.storage.lock().unwrap();
+        let parked = storage
+            .transcription_job(meeting_id)
+            .map_err(|e| e.to_string())?
+            .is_some_and(|j| j.status == fly_storage::JOB_FAILED);
+        if parked {
+            storage
+                .delete_transcription_job(meeting_id)
+                .map_err(|e| e.to_string())?;
+        }
     }
     scheduler::emit_cancelled(on_stage, meeting_id);
     Ok(())
@@ -1231,6 +1239,26 @@ mod tests {
 
         // Retry re-enqueues: the job is queued again and the failure clears
         scheduler::enqueue(&state, &quiet, &meeting_id).unwrap();
+        assert_eq!(scheduler::last_failure(&state, &meeting_id), None);
+    }
+
+    /// An automatic retry is not a failure: while the job waits for its next
+    /// attempt it's queued again (with the error noted), so nothing reads it
+    /// as failed, and the queue keeps showing a run in progress.
+    #[test]
+    fn an_automatic_retry_never_reads_as_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let meeting_id = started_import(&state);
+        let quiet = |_: crate::pipeline::PipelineProgress| {};
+        scheduler::enqueue(&state, &quiet, &meeting_id).unwrap();
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .requeue_transcription(&meeting_id, 1, "boom")
+            .unwrap();
+
         assert_eq!(scheduler::last_failure(&state, &meeting_id), None);
     }
 

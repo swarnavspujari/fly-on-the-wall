@@ -90,6 +90,10 @@ export default function ImportQueue({
 
   const running = staged.started || clicked;
   const idle = !running;
+  // A failure belongs to a run in progress. An idle queue (after Cancel, or a
+  // job left parked as failed) is edited and transcribed afresh, never
+  // retried underneath a queue that looks idle.
+  const runError = running ? pipelineError : null;
   // A conversion failure belongs to its file: while a run is going only this
   // run's failures count (an earlier cause is being retried); when idle the
   // queue shows the causes the last run left behind.
@@ -132,7 +136,7 @@ export default function ImportQueue({
   let statuses: Record<string, ImportFileStatus> = {};
   let activePct: number | null = null;
   // a run that gave up has no per-file progress: the header says why
-  if (running && !pipelineError) {
+  if (running && !runError) {
     if (afterAsr) {
       for (const f of supported) statuses[f.id] = "done";
     } else if (pipeStage === "transcribing") {
@@ -156,8 +160,8 @@ export default function ImportQueue({
     supported.length === 0
       ? `${noneConverted} See why below, then retry.`
       : `${failed.length} file${failed.length === 1 ? "" : "s"} couldn't be converted. Retry, or transcribe the other ${supported.length === 1 ? "file" : `${supported.length} files`} without ${failed.length === 1 ? "it" : "them"}.`;
-  const subtitle = pipelineError
-    ? briefError(pipelineError)
+  const subtitle = runError
+    ? "Transcription didn't finish. Retry picks up where it stopped."
     : idle && failed.length > 0
       ? failedNote
       : idle
@@ -184,13 +188,14 @@ export default function ImportQueue({
             className="mt-0.5 text-[12px]"
             style={{
               color:
-                pipelineError || (idle && failed.length > 0)
-                  ? "var(--error-text)"
-                  : "var(--text-3)",
+                runError || (idle && failed.length > 0) ? "var(--error-text)" : "var(--text-3)",
             }}
           >
             {subtitle}
           </div>
+          {runError && (
+            <div className="mt-0.5 text-[11.5px] text-text-3">{briefError(runError)}</div>
+          )}
         </div>
         <div className="flex flex-none items-center gap-2">
           {idle && failed.length > 0 && (
@@ -214,12 +219,12 @@ export default function ImportQueue({
               Transcribe{supported.length > 1 ? ` ${supported.length} files` : ""}
             </Button>
           )}
-          {pipelineError && (
+          {runError && (
             <Button variant="primary" size="sm" onClick={onRetry} title="Try transcribing again">
               Retry
             </Button>
           )}
-          {running && !pipelineError && !afterAsr && (
+          {running && !runError && !afterAsr && (
             <Button
               variant="ghost"
               size="sm"
