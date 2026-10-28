@@ -376,10 +376,23 @@ function RunsOn({
     }
   };
 
+  // A pick writes over the saved provider, so it needs the saved settings as
+  // they are now; if they can't be read, nothing is written.
+  const readFresh = async () => {
+    const fresh = await chat.refreshLlm();
+    if (!fresh) {
+      setMessage({
+        text: "Couldn't read your current provider, so nothing changed.",
+        tone: "error",
+      });
+    }
+    return fresh;
+  };
+
   const pickProvider = async (id: string) => {
     setMessage(null);
-    const fresh = (await chat.refreshLlm()) ?? llm;
-    if (fresh.provider === id) return;
+    const fresh = await readFresh();
+    if (!fresh || fresh.provider === id) return;
     if (!(await confirmCloudProvider(fresh, id))) {
       setMessage({ text: "Kept your current provider. Nothing was sent anywhere.", tone: "info" });
       return;
@@ -390,7 +403,8 @@ function RunsOn({
 
   const pickClaudeModel = async (model: string) => {
     setMessage(null);
-    const fresh = (await chat.refreshLlm()) ?? llm;
+    const fresh = await readFresh();
+    if (!fresh) return;
     // Picking a model never switches the provider behind your back: if
     // Settings moved off Anthropic meanwhile, the select now shows that, and
     // switching back is a question.
@@ -570,7 +584,7 @@ export function AskSheet({
   // "Isn't confirmed yet": ask for consent here, then ask the question again.
   const allowAndRetry = async () => {
     if (!error) return;
-    const fresh = (await chat.refreshLlm()) ?? chat.llm;
+    const fresh = await chat.refreshLlm();
     if (fresh && (await confirmCloudProvider(fresh, error.provider))) chat.retry();
     inputRef.current?.focus();
   };
@@ -584,6 +598,8 @@ export function AskSheet({
       restoreFocus="inside"
       id={chat.sheetId}
       aria-label={what}
+      // Back from Settings with the sheet left open: re-read Runs on.
+      onPointerEnter={() => void refreshLlm()}
       data-testid="ask-sheet"
       className={
         pinned ? "fly-ask-sheet fly-ask-sheet--pinned print:hidden" : "fly-ask-sheet print:hidden"

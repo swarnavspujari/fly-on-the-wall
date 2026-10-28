@@ -465,6 +465,35 @@ describe("Runs on", () => {
     expect(runsOn().value).toBe("anthropic");
   });
 
+  it("writes nothing when it can't re-read what's saved", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    vi.mocked(api.getLlmSettings).mockRejectedValue("database is locked");
+    choose(runsOn(), "ollama");
+    await flush();
+    choose(model()!, "claude-haiku-5-5");
+    await flush();
+    expect(api.setLlmSettings).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(sheet()!.textContent).toContain(
+      "Couldn't read your current provider, so nothing changed.",
+    );
+    expect(runsOn().value).toBe("anthropic");
+  });
+
+  it("re-reads the provider when the pointer comes back to the sheet", async () => {
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    expect(runsOn().value).toBe("anthropic");
+    saved.provider = "ollama"; // changed in Settings with the sheet open
+    act(() => {
+      sheet()!.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    });
+    await flush();
+    expect(runsOn().value).toBe("ollama");
+  });
+
   it("is disabled while a question is running", async () => {
     vi.spyOn(api, "askMeeting").mockReturnValue(new Promise(() => {}));
     render(<Harness noteId="n1" />);

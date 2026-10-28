@@ -238,7 +238,9 @@ function urlHost(url: string): string | null {
   }
 }
 
-/** Mirrors llm_commands.rs `is_loopback_url`: localhost or a loopback IP. */
+/** Mirrors llm_commands.rs `is_loopback_url`: localhost or a loopback IP
+ *  (127.0.0.0/8 or ::1). URL parsing normalizes IPv4 hosts to dotted quads
+ *  ("127.1" → "127.0.0.1"), so a name like 127.example.com isn't one. */
 export function isLoopbackUrl(url: string): boolean {
   let host: string;
   try {
@@ -247,7 +249,7 @@ export function isLoopbackUrl(url: string): boolean {
     return false;
   }
   host = host.replace(/^\[|\]$/g, "");
-  return host === "localhost" || /^127\./.test(host) || host === "::1";
+  return host === "localhost" || /^127(\.\d{1,3}){3}$/.test(host) || host === "::1";
 }
 
 export interface PrivacyUse {

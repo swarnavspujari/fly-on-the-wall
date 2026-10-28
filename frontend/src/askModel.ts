@@ -3,6 +3,7 @@
    the one backend path, `ask_meeting` → `build_provider`, which enforces
    cloud consent and Keep local; nothing here is a second LLM path. */
 
+import { isLoopbackUrl } from "./homeModel";
 import { providerVendor } from "./settingsModel";
 
 /** The prompts offered before the first question. */
@@ -151,20 +152,6 @@ export function describeAskError(error: unknown, providerId: string): AskErrorVi
     return view("The answer came back empty", "Try again, or try another model.");
   }
   return view("Ask couldn't answer", "Try again. If it keeps failing, the details below may help.");
-}
-
-/** Mirrors llm_commands.rs `is_loopback_url` (localhost or a loopback IP),
- *  the same rule as Home's privacy pill (homeModel.isLoopbackUrl in #94;
- *  share one copy once both have landed). */
-export function isLoopbackUrl(url: string): boolean {
-  let host: string;
-  try {
-    host = new URL(url).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  host = host.replace(/^\[|\]$/g, "");
-  return host === "localhost" || /^127\./.test(host) || host === "::1";
 }
 
 /** Where a provider runs, for Runs on: this computer (a loopback Ollama),

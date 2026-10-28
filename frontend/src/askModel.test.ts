@@ -5,7 +5,6 @@ import {
   RUNS_ON_HELPER,
   cloudConsentMessage,
   describeAskError,
-  isLoopbackUrl,
   providerName,
   runsOnPlace,
   runsOnSwitched,
@@ -121,17 +120,7 @@ describe("describeAskError", () => {
 });
 
 describe("Runs on helpers", () => {
-  it.each([
-    ["http://localhost:11434", true],
-    ["http://127.0.0.1:1234", true],
-    ["http://[::1]:8080", true],
-    ["http://192.168.1.2:11434", false],
-    ["https://api.openai.com", false],
-    ["garbage", false],
-  ])("isLoopbackUrl(%s) → %s", (url, loop) => {
-    expect(isLoopbackUrl(url)).toBe(loop);
-  });
-
+  // The loopback rule itself is Home's (homeModel.test.ts).
   it("says where a provider runs, in the privacy pill's words", () => {
     expect(runsOnPlace({ id: "ollama", is_local: true, base_url: null })).toEqual({
       kind: "local",
@@ -143,6 +132,9 @@ describe("Runs on helpers", () => {
     expect(
       runsOnPlace({ id: "ollama", is_local: true, base_url: "http://192.168.1.20:11434" }),
     ).toEqual({ kind: "remote", label: "Off this computer · 192.168.1.20:11434" });
+    expect(
+      runsOnPlace({ id: "ollama", is_local: true, base_url: "http://127.example.com:11434" }).kind,
+    ).toBe("remote");
     expect(runsOnPlace({ id: "anthropic", is_local: false, base_url: null })).toEqual({
       kind: "cloud",
       label: "Anthropic",

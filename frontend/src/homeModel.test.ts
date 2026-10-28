@@ -433,6 +433,10 @@ describe("isLoopbackUrl", () => {
     ["http://localhost:11434", true],
     ["http://127.0.0.1:1234", true],
     ["http://[::1]:8080", true],
+    ["http://127.1:11434", true], // normalized to 127.0.0.1
+    ["http://127.5.6.7", true],
+    ["http://127.example.com:11434", false],
+    ["http://127.0.0.1.nip.io", false],
     ["http://192.168.1.2:11434", false],
     ["https://api.openai.com", false],
     ["garbage", false],
