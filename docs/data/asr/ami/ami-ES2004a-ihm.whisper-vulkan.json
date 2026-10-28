@@ -1,0 +1,102 @@
+{
+  "asr_secs": 61.0064304,
+  "audio_secs": 1049.354,
+  "config": {
+    "align": "word",
+    "asr_model": "ggml-large-v3-turbo-q5_0",
+    "cluster_threshold": 0.95,
+    "dedup_window_ms": null,
+    "dust_floor_ms": 15000,
+    "dust_fraction": 0.05,
+    "embedding": "campplus.onnx (pinned)",
+    "engine": "whisper",
+    "gpu": true,
+    "max_secs": null,
+    "mode": "pipeline",
+    "normalizer": "english-v1",
+    "num_speakers": null,
+    "start_secs": null,
+    "variant": "whisper-vulkan",
+    "vbx": true
+  },
+  "fixture": "ami-ES2004a-ihm",
+  "kind": "ami-ihm",
+  "loops": {
+    "by_channel": {
+      "mic": 0,
+      "mixed": 0,
+      "system": 0
+    },
+    "count": 0,
+    "max_reps": 0,
+    "words_collapsed": 0
+  },
+  "pipeline_secs": 241.7491547,
+  "reference": {
+    "attribution_error": 0.07359705611775529,
+    "diarization": {
+      "der_collar_0": {
+        "confusion": 0.04599032907228298,
+        "der": 0.4209500172029983,
+        "false_alarm": 0.15267636504076276,
+        "miss": 0.22228332308995258,
+        "ref_speech_s": 1020.171
+      },
+      "der_collar_250": {
+        "confusion": 0.033590004519705084,
+        "der": 0.35743241931771863,
+        "false_alarm": 0.17241149835155542,
+        "miss": 0.15143091644645812,
+        "ref_speech_s": 721.286
+      },
+      "hyp_clusters": 4,
+      "mapping_collar_250": {
+        "ref_0": "spk_2",
+        "ref_1": "spk_0",
+        "ref_2": "spk_1",
+        "ref_3": "spk_3"
+      },
+      "ref_speakers": 4
+    },
+    "normalizer": "english-v1",
+    "ref_words": 2691,
+    "sa_wer_merged": 0.25938312894834636,
+    "wer_merged": 0.19992567818654775,
+    "wer_system_vs_all": 0.19992567818654775
+  },
+  "resources": {
+    "machine_cpu_avg_pct": 37.29587488285515,
+    "peak_rss_mb": {
+      "sherpa": 257.66015625,
+      "whisper": 445.375
+    },
+    "peak_rss_self_mb": 159.4765625,
+    "samples": 601
+  },
+  "rtf": 0.05813713046312302,
+  "speed_x_realtime": 17.200711353208433,
+  "structure": {
+    "dup_rate_reffree": null,
+    "expected_far_end_speakers": null,
+    "far_end_minority_share": null
+  },
+  "transcript": {
+    "segments": 69,
+    "speaker_keys": 5,
+    "speaker_seconds": {
+      "spk_0": 408.5,
+      "spk_1": 251.5,
+      "spk_2": 99.6,
+      "spk_3": 136.7,
+      "spk_unknown": 53.0
+    },
+    "speakers_listed": 5,
+    "system_speakers": 4,
+    "words_mic": 0,
+    "words_system": 2130,
+    "words_total": 2130,
+    "worst_reps_mic": 1,
+    "worst_reps_system": 3
+  },
+  "transcript_engine": "whisper.cpp-vulkan"
+}

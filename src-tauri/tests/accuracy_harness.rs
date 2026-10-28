@@ -47,6 +47,45 @@
 //! shows up as a git diff. FLYONTHEWALL_HARNESS_FIXTURE=name labels the
 //! fixture inside the file.
 //!
+//! Engines side by side (v2.5 PR 2.1/2.2). FLYONTHEWALL_HARNESS_ENGINE=
+//! whisper|parakeet picks the engine for a pipeline run (parakeet = the
+//! internal `asr.engine` flag; whisper stays the fallback below it), with
+//! FLYONTHEWALL_HARNESS_DEDUP_WINDOW_MS to override the cross-talk dedup
+//! window and FLYONTHEWALL_HARNESS_PARAKEET_VULKAN=1 (with _GPU=1) to try
+//! parakeet-cli on the Vulkan build. Every pipeline run also reports ASR
+//! speed (×realtime), peak sidecar RSS, machine CPU load during the run,
+//! hallucination loops the guard collapsed, and reference-free structure
+//! metrics. Scoring uses an English normalizer (numerals, contractions,
+//! hyphens; see accuracy_harness/normalize.rs) — FLYONTHEWALL_HARNESS_NORMALIZE=0
+//! reproduces the pre-normalizer numbers.
+//!
+//! Corpus mode: run every item of a LOCAL manifest (shape:
+//! docs/data/asr/corpus.example.json — the real one names meetings, never
+//! commit it) for each engine, write one results JSON per run, then print
+//! the comparison table + ship gates:
+//!   FLYONTHEWALL_HARNESS_CORPUS=path\to\corpus.json \
+//!   FLYONTHEWALL_HARNESS_ENGINES=whisper,parakeet \
+//!   FLYONTHEWALL_HARNESS_OUT_DIR=path\outside\repo   # optional
+//!   FLYONTHEWALL_HARNESS_ONLY=fixture-a,fixture-b     # optional
+//!     cargo test -p fly-app --release --test accuracy_harness -- --ignored --nocapture
+//! Compare mode (table + gates over existing result JSONs, no runs):
+//!   FLYONTHEWALL_HARNESS_COMPARE=path\to\results-dir
+//! A manifest may also name a `teams_dir` (Teams videos + their .vtt,
+//! paired by title prefix; audio extracted once into `cache_dir`), and any
+//! item may score one window (`start_secs` + `max_secs`). With two engines,
+//! each non-whisper run also gets an `agreement` block: its transcript
+//! scored with the whisper transcript as the reference (WER + DER of one
+//! against the other) — for meetings with no human reference.
+//!
+//! Gold excerpt export (the user hand-corrects draft.txt into gold.txt;
+//! a gold.txt in `[mm:ss] Speaker: text` lines is then a normal reference,
+//! `[inaudible]` lines excluded from scoring on both sides):
+//!   FLYONTHEWALL_HARNESS_GOLD_EXPORT=path\to\recording-folder \
+//!   FLYONTHEWALL_HARNESS_GOLD_START=12:00 FLYONTHEWALL_HARNESS_GOLD_SECS=900 \
+//!   FLYONTHEWALL_HARNESS_GOLD_OUT=path\to\corpus\gold\<meeting> \
+//!   FLYONTHEWALL_HARNESS_ENGINE=parakeet          # the draft's engine
+//!     cargo test -p fly-app --release --test accuracy_harness -- --ignored --nocapture
+//!
 //! Cloud-reference mode (diagnostic only, no local pipeline): transcribe the
 //! mic and system channels with Groq to separate model quality from audio
 //! quality. The key comes from the environment ONLY — never a file/setting:
@@ -59,6 +98,13 @@ use std::path::{Path, PathBuf};
 
 use fly_core::repeat::loop_token;
 use fly_core::{RecordingRef, SpeakerTurn, Transcript};
+
+#[path = "accuracy_harness/corpus_extra.rs"]
+mod corpus_extra;
+#[path = "accuracy_harness/normalize.rs"]
+mod normalize;
+#[path = "accuracy_harness/run_stats.rs"]
+mod run_stats;
 
 /// One reportable repetition run: `reps` consecutive occurrences of an
 /// `n`-word phrase starting at `start_ms`.
@@ -196,34 +242,30 @@ fn report(t: &Transcript) -> serde_json::Value {
 // Reference scoring (vs a Fathom .txt export)
 // ---------------------------------------------------------------------------
 
-/// Unambiguous non-lexical fillers dropped from BOTH the reference and the
-/// hypothesis token streams. The human-verified reference dropped its "um"s,
-/// so without this the ASR's fillers score as insertions and the WER is
-/// meaningless. Kept deliberately narrow (never a content word) — a bare "a"
-/// or "so" is a real word and must survive.
-fn is_filler(tok: &str) -> bool {
-    matches!(tok, "um" | "uh" | "mm" | "mhm" | "hmm" | "erm")
+/// Scoring normalizer switch: the English normalizer (normalize.rs) by
+/// default; FLYONTHEWALL_HARNESS_NORMALIZE=0 restores the original
+/// tokenizer, which reproduces numbers recorded before PR 2.1. Both strip
+/// non-lexical fillers from reference AND hypothesis (the human-verified
+/// reference dropped its "um"s).
+fn normalize_on() -> bool {
+    std::env::var("FLYONTHEWALL_HARNESS_NORMALIZE").map_or(true, |v| v != "0")
 }
 
-/// Split into lowercase alphanumeric tokens (apostrophes dropped, other
-/// punctuation splits): "back-to-back" → [back, to, back], "It's" → [its].
-/// Non-lexical fillers (see `is_filler`) are stripped so both sides score
-/// against the same filler-free vocabulary.
+fn normalizer_name() -> &'static str {
+    if normalize_on() {
+        "english-v1"
+    } else {
+        "legacy"
+    }
+}
+
+/// Text → scoring tokens (reference utterances).
 fn tokenize(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() {
-            cur.push(c.to_ascii_lowercase());
-        } else if c != '\'' && !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-        }
+    if normalize_on() {
+        normalize::normalize(s)
+    } else {
+        normalize::legacy_tokenize(s)
     }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out.retain(|t| !is_filler(t));
-    out
 }
 
 /// One timed reference utterance. Only Teams .vtt references carry end
@@ -243,6 +285,9 @@ struct Reference {
     tokens: Vec<(String, usize)>,
     /// Timed utterances (empty when the reference has no end timestamps).
     turns: Vec<RefTurn>,
+    /// Time spans excluded from scoring on both sides (gold `[inaudible]`
+    /// lines): hypothesis words starting inside one are dropped.
+    exclude: Vec<(u64, u64)>,
 }
 
 fn parse_mmss(s: &str) -> Option<u64> {
@@ -317,6 +362,7 @@ fn parse_fathom_reference(path: &str) -> Reference {
         speakers,
         tokens,
         turns: Vec::new(),
+        exclude: Vec::new(),
     }
 }
 
@@ -412,13 +458,19 @@ fn parse_teams_vtt_reference(path: &str) -> Reference {
         speakers,
         tokens,
         turns,
+        exclude: Vec::new(),
     }
 }
 
 /// Reference format dispatch: Teams .vtt by extension, else Fathom .txt.
 fn parse_reference(path: &str) -> Reference {
     if path.to_ascii_lowercase().ends_with(".vtt") {
-        parse_teams_vtt_reference(path)
+        return parse_teams_vtt_reference(path);
+    }
+    let raw = std::fs::read_to_string(path).expect("read reference transcript");
+    if corpus_extra::looks_like_gold(&raw) {
+        // hand-corrected gold excerpt: "[mm:ss] Speaker: text" lines
+        corpus_extra::parse_gold(&raw, tokenize)
     } else {
         parse_fathom_reference(path)
     }
@@ -431,21 +483,34 @@ struct HypWord {
     key: String,
 }
 
+/// Hypothesis tokens. Each segment's words are normalized as ONE stream so
+/// multi-word forms merge ("twenty" "five" → "25"); every token keeps the
+/// start time of the word it came from. Stable sort: tokens of one word
+/// stay in order.
 fn hyp_words(t: &Transcript, keep: impl Fn(&str) -> bool) -> Vec<HypWord> {
-    let mut out: Vec<HypWord> = t
-        .segments
-        .iter()
-        .filter(|s| keep(&s.speaker_key))
-        .flat_map(|s| {
-            s.words.iter().flat_map(|w| {
-                tokenize(&w.text).into_iter().map(|tok| HypWord {
+    let mut out: Vec<HypWord> = Vec::new();
+    for s in t.segments.iter().filter(|s| keep(&s.speaker_key)) {
+        if normalize_on() {
+            let texts: Vec<&str> = s.words.iter().map(|w| w.text.as_str()).collect();
+            for (tok, i) in normalize::normalize_stream(&texts) {
+                out.push(HypWord {
                     tok,
-                    start_ms: w.start_ms,
+                    start_ms: s.words[i].start_ms,
                     key: s.speaker_key.clone(),
-                })
-            })
-        })
-        .collect();
+                });
+            }
+        } else {
+            for w in &s.words {
+                for tok in normalize::legacy_tokenize(&w.text) {
+                    out.push(HypWord {
+                        tok,
+                        start_ms: w.start_ms,
+                        key: s.speaker_key.clone(),
+                    });
+                }
+            }
+        }
+    }
     out.sort_by_key(|w| w.start_ms);
     out
 }
@@ -587,8 +652,8 @@ fn match_map(ref_tokens: &[(String, usize)], hyp: &[HypWord]) -> Vec<Option<usiz
 /// override, else the ref speaker whose words are best covered by the mic
 /// channel (best-effort — echo makes both sides match the mic, so prefer the
 /// explicit override on echo-suspect recordings).
-fn detect_self(reference: &Reference, mic: &[HypWord]) -> usize {
-    if let Ok(hint) = std::env::var("FLYONTHEWALL_HARNESS_REF_SELF") {
+fn detect_self(reference: &Reference, mic: &[HypWord], hint: Option<&str>) -> usize {
+    if let Some(hint) = hint {
         let hint = hint.to_ascii_lowercase();
         if let Some(idx) = reference
             .speakers
@@ -900,15 +965,40 @@ fn score_diarization(
 
 /// Full reference scoring block: per-channel WER, merged + speaker-attributed
 /// WER, attribution error, cross-talk duplication, per-channel bleed.
-fn score_against_reference(t: &Transcript, ref_path: &str) -> serde_json::Value {
-    let reference = parse_reference(ref_path);
-    let mic = hyp_words(t, |k| k == "mic");
-    let system = hyp_words(t, |k| k != "mic");
-    let merged = hyp_words(t, |_| true);
+fn score_against_reference(
+    t: &Transcript,
+    ref_path: &str,
+    ref_self: Option<&str>,
+) -> serde_json::Value {
+    score_with_reference(t, &parse_reference(ref_path), ref_path, ref_self)
+}
+
+/// Full reference scoring against an already-parsed reference (a file, or
+/// another engine's transcript for engine-vs-engine agreement).
+fn score_with_reference(
+    t: &Transcript,
+    reference: &Reference,
+    ref_path: &str,
+    ref_self: Option<&str>,
+) -> serde_json::Value {
+    let scored = |keep: &dyn Fn(&str) -> bool| -> Vec<HypWord> {
+        hyp_words(t, keep)
+            .into_iter()
+            .filter(|w| {
+                !reference
+                    .exclude
+                    .iter()
+                    .any(|(a, b)| w.start_ms >= *a && w.start_ms < *b)
+            })
+            .collect()
+    };
+    let mic = scored(&|k| k == "mic");
+    let system = scored(&|k| k != "mic");
+    let merged = scored(&|_| true);
 
     // Mixed/import transcripts have no mic channel: the "you"-vs-others
     // splits, bleed, and cross-talk metrics are meaningless there — skipped.
-    let self_idx = (!mic.is_empty()).then(|| detect_self(&reference, &mic));
+    let self_idx = (!mic.is_empty()).then(|| detect_self(reference, &mic, ref_self));
     let ref_you: Vec<(String, usize)> = reference
         .tokens
         .iter()
@@ -1093,9 +1183,10 @@ fn score_against_reference(t: &Transcript, ref_path: &str) -> serde_json::Value 
     m.insert("wer_merged".into(), serde_json::json!(merged_wer.wer()));
     m.insert("sa_wer_merged".into(), serde_json::json!(sa_wer));
     m.insert("attribution_error".into(), serde_json::json!(attr_err));
+    m.insert("normalizer".into(), serde_json::json!(normalizer_name()));
 
     // ---- diarization: DER over the attributed segment spans ----
-    if let Some(d) = score_diarization(&reference, &transcript_turns(t), "attributed") {
+    if let Some(d) = score_diarization(reference, &transcript_turns(t), "attributed") {
         m.insert("diarization".into(), d);
     }
 
@@ -1107,7 +1198,10 @@ fn score_against_reference(t: &Transcript, ref_path: &str) -> serde_json::Value 
 fn maybe_score_reference(t: &Transcript) -> Option<serde_json::Value> {
     std::env::var("FLYONTHEWALL_HARNESS_REFERENCE")
         .ok()
-        .map(|ref_path| score_against_reference(t, &ref_path))
+        .map(|ref_path| {
+            let ref_self = std::env::var("FLYONTHEWALL_HARNESS_REF_SELF").ok();
+            score_against_reference(t, &ref_path, ref_self.as_deref())
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1365,17 +1459,28 @@ fn link_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// Copy a recording channel into the meeting dir, trimmed to `max_secs`.
-fn stage_channel(src: &Path, dst: &Path, max_secs: Option<u64>) -> Result<u64, String> {
-    match max_secs {
-        None => {
+fn stage_channel(
+    src: &Path,
+    dst: &Path,
+    start_secs: Option<u64>,
+    max_secs: Option<u64>,
+) -> Result<u64, String> {
+    match (start_secs.filter(|s| *s > 0), max_secs) {
+        (None, None) => {
             std::fs::copy(src, dst).map_err(|e| e.to_string())?;
             let (samples, rate) = fly_audio::mix::read_wav_mono(dst).map_err(|e| e.to_string())?;
             Ok(samples.len() as u64 * 1000 / rate as u64)
         }
-        Some(secs) => {
+        (start, secs) => {
+            // a window [start, start + secs): the staged copy begins at the
+            // window, so every transcript time is relative to its start
             let (samples, rate) = fly_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
-            let take = (secs * rate as u64).min(samples.len() as u64) as usize;
-            fly_audio::mix::write_wav_mono_16(dst, &samples[..take], rate)
+            let from = (start.unwrap_or(0) * rate as u64).min(samples.len() as u64) as usize;
+            let take = secs
+                .map(|s| (s * rate as u64) as usize)
+                .unwrap_or(usize::MAX)
+                .min(samples.len() - from);
+            fly_audio::mix::write_wav_mono_16(dst, &samples[from..from + take], rate)
                 .map_err(|e| e.to_string())?;
             Ok(take as u64 * 1000 / rate as u64)
         }
@@ -1741,13 +1846,26 @@ fn diarize_only(wav: &str) {
 #[test]
 #[ignore = "offline accuracy harness; needs artifacts + a recording, see file docs"]
 fn accuracy_harness() {
-    // surface pipeline logs (e.g. collapsed-loop warnings) on stderr
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "fly_app_lib=debug,fly_asr=debug".into()),
-        )
-        .try_init();
+    // surface pipeline logs on stderr + count collapsed hallucination loops
+    run_stats::init_tracing();
+
+    // ---- compare mode: table + gates over existing result JSONs ----
+    if let Ok(dir) = std::env::var("FLYONTHEWALL_HARNESS_COMPARE") {
+        compare_results(Path::new(&dir));
+        return;
+    }
+
+    // ---- gold excerpt export: draft.txt + clip.m4a for one window ----
+    if let Ok(rec_dir) = std::env::var("FLYONTHEWALL_HARNESS_GOLD_EXPORT") {
+        gold_export(&rec_dir);
+        return;
+    }
+
+    // ---- corpus mode: every manifest item × every engine ----
+    if let Ok(manifest) = std::env::var("FLYONTHEWALL_HARNESS_CORPUS") {
+        run_corpus(&manifest);
+        return;
+    }
 
     // ---- score-only mode: metrics for an exported transcript JSON ----
     if let Ok(json_path) = std::env::var("FLYONTHEWALL_HARNESS_SCORE_JSON") {
@@ -1770,7 +1888,9 @@ fn accuracy_harness() {
     }
 
     let Ok(rec_dir) = std::env::var("FLYONTHEWALL_HARNESS_DIR") else {
-        eprintln!("SKIP: set FLYONTHEWALL_HARNESS_DIR, FLYONTHEWALL_HARNESS_SCORE_JSON, or FLYONTHEWALL_HARNESS_DIARIZE_WAV");
+        eprintln!(
+            "SKIP: set FLYONTHEWALL_HARNESS_DIR, _CORPUS, _COMPARE, _SCORE_JSON, or _DIARIZE_WAV"
+        );
         return;
     };
     let rec_dir = std::path::PathBuf::from(rec_dir);
@@ -1783,8 +1903,6 @@ fn accuracy_harness() {
         "FLYONTHEWALL_HARNESS_DIR needs recording.mic.wav + recording.system.wav, or a recording.mixed.wav"
     );
 
-    let model = std::env::var("FLYONTHEWALL_HARNESS_MODEL")
-        .unwrap_or_else(|_| "ggml-large-v3-turbo-q5_0".into());
     let max_secs = std::env::var("FLYONTHEWALL_HARNESS_MAX_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
@@ -1806,29 +1924,158 @@ fn accuracy_harness() {
         return;
     }
 
+    // ---- one pipeline run (engine + knobs from the environment) ----
+    let run = RunOpts::from_env();
+    let Some(out) = run_pipeline(&rec_dir, &run) else {
+        return; // SKIP already printed
+    };
+    // keep the produced transcript for spot-checking against the audio
+    if let Ok(path) = std::env::var("FLYONTHEWALL_HARNESS_OUT_JSON") {
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&out.transcript).unwrap(),
+        )
+        .unwrap();
+        eprintln!("transcript written to {path}");
+    }
+    let mut results = run_results(
+        &run,
+        &out,
+        env_parse("FLYONTHEWALL_HARNESS_EXPECTED_FAR_END"),
+    );
+    if let Some(r) = maybe_score_reference(&out.transcript) {
+        results.insert("reference".into(), r);
+    }
+    write_results(results);
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline runs: one engine variant over one recording folder
+// ---------------------------------------------------------------------------
+
+/// What one pipeline run uses. Everything else is the shipped default.
+#[derive(Clone)]
+struct RunOpts {
+    /// Whisper model id (also the GPU-verdict key and the fallback model).
+    model: String,
+    /// "whisper" (shipped) or "parakeet" (internal `asr.engine` flag).
+    engine: String,
+    /// FLYONTHEWALL_HARNESS_GPU value: None/"0" = CPU, "bench" = real
+    /// benchmark, anything else = Vulkan forced.
+    gpu: Option<String>,
+    max_secs: Option<u64>,
+    /// Window start (seconds into the recording); with `max_secs` this
+    /// transcribes one excerpt, times relative to its start (gold excerpt).
+    start_secs: Option<u64>,
+    /// Cross-talk dedup window override (`asr.xtalk_window_ms`); None = shipped.
+    dedup_window_ms: Option<u64>,
+    /// Put the CPU zip's parakeet-cli into the (temp copy of the) Vulkan
+    /// build — the published Vulkan zip doesn't carry one yet.
+    parakeet_vulkan: bool,
+}
+
+impl RunOpts {
+    fn from_env() -> Self {
+        Self {
+            model: std::env::var("FLYONTHEWALL_HARNESS_MODEL")
+                .unwrap_or_else(|_| "ggml-large-v3-turbo-q5_0".into()),
+            engine: std::env::var("FLYONTHEWALL_HARNESS_ENGINE")
+                .unwrap_or_else(|_| "whisper".into()),
+            gpu: std::env::var("FLYONTHEWALL_HARNESS_GPU")
+                .ok()
+                .filter(|v| !v.is_empty() && v != "0"),
+            max_secs: env_parse("FLYONTHEWALL_HARNESS_MAX_SECS"),
+            start_secs: std::env::var("FLYONTHEWALL_HARNESS_START")
+                .ok()
+                .and_then(|v| parse_secs(&v)),
+            dedup_window_ms: env_parse("FLYONTHEWALL_HARNESS_DEDUP_WINDOW_MS"),
+            parakeet_vulkan: std::env::var("FLYONTHEWALL_HARNESS_PARAKEET_VULKAN")
+                .is_ok_and(|v| !v.is_empty() && v != "0"),
+        }
+    }
+
+    fn gpu_on(&self) -> bool {
+        self.gpu.is_some()
+    }
+
+    /// Stable label for result files and the summary table, e.g.
+    /// "parakeet-vulkan" or "whisper-cpu-xtalk700".
+    fn variant(&self) -> String {
+        let mut v = format!(
+            "{}-{}",
+            self.engine,
+            if self.gpu_on() { "vulkan" } else { "cpu" }
+        );
+        if let Some(w) = self.dedup_window_ms {
+            v.push_str(&format!("-xtalk{w}"));
+        }
+        v
+    }
+}
+
+struct RunOutput {
+    transcript: Transcript,
+    pipeline_secs: f64,
+    asr_secs: Option<f64>,
+    audio_secs: f64,
+    resources: run_stats::ResourceStats,
+    loops: Vec<run_stats::LoopEvent>,
+}
+
+/// Run the REAL pipeline over a recording folder with `run`'s engine and
+/// knobs, on a throwaway data dir whose artifacts are hardlinked from the
+/// real one. `None` = a needed artifact is missing (SKIP already printed).
+fn run_pipeline(rec_dir: &Path, run: &RunOpts) -> Option<RunOutput> {
+    let mic_src = rec_dir.join("recording.mic.wav");
+    let sys_src = rec_dir.join("recording.system.wav");
+    let mixed_src = rec_dir.join("recording.mixed.wav");
+    let per_channel = mic_src.exists() && sys_src.exists();
+    assert!(
+        per_channel || mixed_src.exists(),
+        "{} needs recording.mic.wav + recording.system.wav, or a recording.mixed.wav",
+        rec_dir.display()
+    );
+    if let Ok(v) = std::env::var(fly_app_lib::pipeline::ENGINE_ENV_VAR) {
+        if v != run.engine {
+            eprintln!(
+                "WARNING: {}={v} is set and overrides this run's engine ({})",
+                fly_app_lib::pipeline::ENGINE_ENV_VAR,
+                run.engine
+            );
+        }
+    }
+    let model = &run.model;
+
     // ---- artifacts: resolved via the models registry, hardlinked from the
     // real data dir like the golden E2E; missing → skip, not panic ----
     let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
-    if diarizer_paths(&real_data).is_none() {
-        return; // SKIP already printed
-    }
+    diarizer_paths(&real_data)?;
     if !fly_app_lib::models::tool_installed(
         &real_data,
         fly_app_lib::models::WHISPER_ENGINE_ID,
         fly_app_lib::models::WHISPER_CLI_NAMES,
     ) {
         eprintln!("SKIP: whisper engine not installed (no managed artifact, nothing on PATH)");
-        return;
+        return None;
     }
-    let model_rel = fly_app_lib::models::artifact(&model)
-        .map(|a| a.probe_rel.to_string())
-        .unwrap_or_else(|| format!("models/asr/{model}.bin"));
-    if !real_data.join(&model_rel).exists() {
-        eprintln!(
-            "SKIP: ASR model not installed: {}",
-            real_data.join(&model_rel).display()
-        );
-        return;
+    let model_rel = |id: &str| {
+        fly_app_lib::models::artifact(id)
+            .or_else(|| fly_app_lib::models::engine_artifact(id))
+            .map(|a| a.probe_rel.to_string())
+            .unwrap_or_else(|| format!("models/asr/{id}.bin"))
+    };
+    let mut weights = vec![model_rel(model)];
+    if run.engine == "parakeet" {
+        weights.push(model_rel(fly_app_lib::models::PARAKEET_MODEL_ID));
+    }
+    for rel in &weights {
+        if !real_data.join(rel).exists() {
+            eprintln!(
+                "SKIP: model not installed: {}",
+                real_data.join(rel).display()
+            );
+            return None;
+        }
     }
 
     let tmp = tempfile::tempdir().unwrap();
@@ -1842,24 +2089,48 @@ fn accuracy_harness() {
         }
     }
     // GPU modes need the Vulkan build in place (no download inside the test)
-    let gpu = std::env::var("FLYONTHEWALL_HARNESS_GPU").is_ok_and(|v| !v.is_empty() && v != "0");
-    if gpu {
-        match fly_app_lib::models::artifact("whisper-bin-vulkan") {
+    let vulkan = fly_app_lib::models::artifact("whisper-bin-vulkan");
+    if run.gpu_on() {
+        match vulkan {
             Some(a) if real_data.join(a.probe_rel).exists() => link_subs.push(a.dest_rel),
             _ => {
                 eprintln!(
                     "SKIP: FLYONTHEWALL_HARNESS_GPU set but whisper-bin-vulkan is not installed"
                 );
-                return;
+                return None;
             }
         }
     }
     for sub in link_subs {
         link_tree(&real_data.join(sub), &data_dir.join(sub)).unwrap();
     }
-    let model_dst = data_dir.join(&model_rel);
-    std::fs::create_dir_all(model_dst.parent().expect("model path has a parent")).unwrap();
-    std::fs::hard_link(real_data.join(&model_rel), &model_dst).unwrap();
+    for rel in &weights {
+        let dst = data_dir.join(rel);
+        std::fs::create_dir_all(dst.parent().expect("model path has a parent")).unwrap();
+        std::fs::hard_link(real_data.join(rel), &dst).unwrap();
+    }
+    if run.engine == "parakeet" && run.gpu_on() && run.parakeet_vulkan {
+        // Experiment: the CPU zip's parakeet-cli is the same commit as the
+        // Vulkan build's parakeet.dll/ggml; beside them it loads Vulkan.
+        let cpu_cli = fly_app_lib::models::artifact("whisper-bin")
+            .map(|a| data_dir.join(a.probe_rel))
+            .and_then(|exe| fly_app_lib::models::parakeet_cli_beside(&exe));
+        let vk_dir = vulkan
+            .map(|a| data_dir.join(a.probe_rel))
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        match (cpu_cli, vk_dir) {
+            (Some(cli), Some(dir)) => {
+                let dst = dir.join(fly_app_lib::models::PARAKEET_CLI_NAME);
+                if !dst.exists() {
+                    std::fs::copy(&cli, &dst).unwrap();
+                }
+            }
+            _ => {
+                eprintln!("SKIP: no parakeet-cli to place in the Vulkan build");
+                return None;
+            }
+        }
+    }
 
     let state = fly_app_lib::state::AppState::init_with(
         data_dir.clone(),
@@ -1867,20 +2138,31 @@ fn accuracy_harness() {
     )
     .unwrap();
 
-    let meeting_id = {
+    let (meeting_id, audio_ms) = {
         let storage = state.storage.lock().unwrap();
         storage.set_setting("asr.tier", "light").unwrap();
-        storage.set_setting("asr.model_id", &model).unwrap();
+        storage.set_setting("asr.model_id", model).unwrap();
+        storage
+            .set_setting(fly_app_lib::pipeline::ENGINE_SETTING_KEY, &run.engine)
+            .unwrap();
+        if let Some(w) = run.dedup_window_ms {
+            storage
+                .set_setting(
+                    fly_app_lib::pipeline::XTALK_WINDOW_SETTING_KEY,
+                    &w.to_string(),
+                )
+                .unwrap();
+        }
         // Deterministic engine selection: CPU by default. FLYONTHEWALL_HARNESS_GPU=1
         // forces the Vulkan build (verdict pre-seeded so no benchmark runs;
         // pick the GPU with GGML_VK_VISIBLE_DEVICES). FLYONTHEWALL_HARNESS_GPU=bench
         // enables GPU with NO verdict, exercising the real in-pipeline
         // benchmark + gate exactly as a user's machine would.
-        match std::env::var("FLYONTHEWALL_HARNESS_GPU").ok().as_deref() {
+        match run.gpu.as_deref() {
             Some("bench") => {
                 storage.set_setting("asr.use_gpu", "true").unwrap();
             }
-            Some(v) if !v.is_empty() && v != "0" => {
+            Some(_) => {
                 storage.set_setting("asr.use_gpu", "true").unwrap();
                 storage
                     .set_setting(
@@ -1891,7 +2173,7 @@ fn accuracy_harness() {
                     )
                     .unwrap();
             }
-            _ => {
+            None => {
                 storage.set_setting("asr.use_gpu", "false").unwrap();
             }
         }
@@ -1901,11 +2183,22 @@ fn accuracy_harness() {
             .unwrap();
         let meet_dir = data_dir.join("recordings").join(&meeting.id);
         std::fs::create_dir_all(&meet_dir).unwrap();
+        let max_secs = run.max_secs;
         let recording = if per_channel {
-            let dur_mic =
-                stage_channel(&mic_src, &meet_dir.join("recording.mic.wav"), max_secs).unwrap();
-            let dur_sys =
-                stage_channel(&sys_src, &meet_dir.join("recording.system.wav"), max_secs).unwrap();
+            let dur_mic = stage_channel(
+                &mic_src,
+                &meet_dir.join("recording.mic.wav"),
+                run.start_secs,
+                max_secs,
+            )
+            .unwrap();
+            let dur_sys = stage_channel(
+                &sys_src,
+                &meet_dir.join("recording.system.wav"),
+                run.start_secs,
+                max_secs,
+            )
+            .unwrap();
             RecordingRef {
                 mic_path: Some(format!("recordings/{}/recording.mic.wav", meeting.id)),
                 system_path: Some(format!("recordings/{}/recording.system.wav", meeting.id)),
@@ -1915,8 +2208,13 @@ fn accuracy_harness() {
             }
         } else {
             // single mixed track — the import path: the whole track is diarized
-            let dur =
-                stage_channel(&mixed_src, &meet_dir.join("recording.mixed.wav"), max_secs).unwrap();
+            let dur = stage_channel(
+                &mixed_src,
+                &meet_dir.join("recording.mixed.wav"),
+                run.start_secs,
+                max_secs,
+            )
+            .unwrap();
             RecordingRef {
                 mic_path: None,
                 system_path: None,
@@ -1925,12 +2223,16 @@ fn accuracy_harness() {
                 duration_ms: dur,
             }
         };
+        let audio_ms = recording.duration_ms;
         storage.end_meeting(&meeting.id, &recording).unwrap();
-        meeting.id
+        (meeting.id, audio_ms)
     };
 
+    run_stats::take_loops(); // nothing from an earlier run may leak in
+    let clock = run_stats::StageClock::default();
     let started = std::time::Instant::now();
     let on_stage = |p: fly_app_lib::pipeline::PipelineProgress| {
+        clock.observe(&p.stage);
         eprintln!(
             "[{:>6.1}s] stage: {} {}",
             started.elapsed().as_secs_f32(),
@@ -1939,6 +2241,7 @@ fn accuracy_harness() {
         )
     };
     let on_model = |p: fly_app_lib::models::ModelProgress| eprintln!("model: {}", p.stage);
+    let sampler = run_stats::Sampler::start();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let transcript = runtime
         .block_on(fly_app_lib::pipeline::run_with(
@@ -1949,26 +2252,701 @@ fn accuracy_harness() {
         ))
         .expect("pipeline should succeed");
     let pipeline_secs = started.elapsed().as_secs_f64();
-    eprintln!("pipeline took {pipeline_secs:.1}s");
+    let resources = sampler.finish();
+    let loops = run_stats::take_loops();
+    eprintln!(
+        "pipeline took {pipeline_secs:.1}s (engine recorded: {})",
+        transcript.engine
+    );
+    Some(RunOutput {
+        transcript,
+        pipeline_secs,
+        asr_secs: clock.asr_secs(),
+        audio_secs: audio_ms as f64 / 1000.0,
+        resources,
+        loops,
+    })
+}
 
-    // keep the produced transcript for spot-checking against the audio
-    if let Ok(out) = std::env::var("FLYONTHEWALL_HARNESS_OUT_JSON") {
-        std::fs::write(&out, serde_json::to_string_pretty(&transcript).unwrap()).unwrap();
-        eprintln!("transcript written to {out}");
-    }
-
+/// The run-level part of a results file: config + speed + memory + loops +
+/// transcript structure. Reference scoring is added by the caller.
+fn run_results(
+    run: &RunOpts,
+    out: &RunOutput,
+    expected_far_end: Option<usize>,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut results = serde_json::Map::new();
     let mut config = config_json("pipeline", false);
-    config["asr_model"] = serde_json::json!(model);
-    config["gpu"] = serde_json::json!(gpu);
-    config["max_secs"] = serde_json::json!(max_secs);
-    results.insert("config".into(), config);
-    results.insert("pipeline_secs".into(), serde_json::json!(pipeline_secs));
-    results.insert("transcript".into(), report(&transcript));
-    if let Some(r) = maybe_score_reference(&transcript) {
-        results.insert("reference".into(), r);
+    // the weights that decoded: Parakeet's own model when it led (the
+    // whisper model is then only the fallback tier)
+    if run.engine == "parakeet" {
+        config["asr_model"] = serde_json::json!(fly_app_lib::models::PARAKEET_MODEL_ID);
+        config["fallback_model"] = serde_json::json!(run.model);
+    } else {
+        config["asr_model"] = serde_json::json!(run.model);
     }
-    write_results(results);
+    config["engine"] = serde_json::json!(run.engine);
+    config["variant"] = serde_json::json!(run.variant());
+    config["gpu"] = serde_json::json!(run.gpu_on());
+    config["max_secs"] = serde_json::json!(run.max_secs);
+    config["start_secs"] = serde_json::json!(run.start_secs);
+    config["dedup_window_ms"] = serde_json::json!(run.dedup_window_ms);
+    config["normalizer"] = serde_json::json!(normalizer_name());
+    results.insert("config".into(), config);
+    // what the pipeline itself recorded (engine:model for Parakeet), which
+    // also proves no silent fallback to another engine happened
+    results.insert(
+        "transcript_engine".into(),
+        serde_json::json!(out.transcript.engine),
+    );
+    results.insert("pipeline_secs".into(), serde_json::json!(out.pipeline_secs));
+    results.insert("audio_secs".into(), serde_json::json!(out.audio_secs));
+    results.insert("asr_secs".into(), serde_json::json!(out.asr_secs));
+    let speed = out
+        .asr_secs
+        .filter(|s| *s > 0.0)
+        .map(|s| out.audio_secs / s);
+    results.insert("speed_x_realtime".into(), serde_json::json!(speed));
+    results.insert(
+        "rtf".into(),
+        serde_json::json!(out.asr_secs.map(|s| s / out.audio_secs.max(f64::EPSILON))),
+    );
+    eprintln!(
+        "speed: ASR {:.1}s for {:.1}s of audio = {} realtime; machine CPU avg {:.0}%; peak RSS {:?} MB (harness {:.0} MB)",
+        out.asr_secs.unwrap_or(f64::NAN),
+        out.audio_secs,
+        speed.map(|s| format!("{s:.1}×")).unwrap_or_else(|| "?".into()),
+        out.resources.machine_cpu_avg_pct,
+        out.resources.peak_rss_mb,
+        out.resources.peak_rss_self_mb
+    );
+    results.insert(
+        "resources".into(),
+        serde_json::to_value(&out.resources).unwrap(),
+    );
+    let loops = run_stats::loops_json(&out.loops);
+    eprintln!("hallucination loops collapsed by the guard: {loops}");
+    results.insert("loops".into(), loops);
+    results.insert("transcript".into(), report(&out.transcript));
+    results.insert(
+        "structure".into(),
+        structure_json(&out.transcript, expected_far_end),
+    );
+    results
+}
+
+/// Reference-free structure metrics (see run_stats).
+fn structure_json(t: &Transcript, expected_far_end: Option<usize>) -> serde_json::Value {
+    let dup = run_stats::reffree_dup_rate(t, 500);
+    let minority = expected_far_end.and_then(|n| run_stats::far_end_minority_share(t, n));
+    eprintln!(
+        "structure: cross-channel dup (ref-free, 500ms) {}; far-end minority share {}",
+        dup.map(|d| format!("{:.1}%", d * 100.0))
+            .unwrap_or_else(|| "n/a".into()),
+        minority
+            .map(|m| format!("{:.1}%", m * 100.0))
+            .unwrap_or_else(|| "n/a".into()),
+    );
+    serde_json::json!({
+        "dup_rate_reffree": dup,
+        "expected_far_end_speakers": expected_far_end,
+        "far_end_minority_share": minority,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Corpus mode: every manifest item × every engine, then the gates
+// ---------------------------------------------------------------------------
+
+/// Local-only corpus manifest (never committed: it names real meetings).
+/// docs/data/asr/corpus.example.json shows the shape.
+#[derive(serde::Deserialize)]
+struct Corpus {
+    items: Vec<CorpusItem>,
+    /// Where per-run result JSONs land (default: `results/` beside the
+    /// manifest). Keep it outside the repo; copy the metric files you want
+    /// to commit into docs/data/asr/.
+    #[serde(default)]
+    out_dir: Option<String>,
+    /// A folder of Teams recordings + their `.vtt` transcripts, paired by
+    /// title prefix and picked up automatically (relative reference: Teams'
+    /// own ASR; its speaker names drive DER). Items are named teams-01…
+    /// in title order so no meeting title reaches a results file.
+    #[serde(default)]
+    teams_dir: Option<String>,
+    /// Where derived audio (16 kHz extracts) is cached; default
+    /// `<out_dir>/cache`. Originals are only ever read.
+    #[serde(default)]
+    cache_dir: Option<String>,
+    /// Free-text provenance/attribution (e.g. AMI's CC-BY-4.0 notice).
+    #[serde(default)]
+    #[allow(dead_code)]
+    attribution: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CorpusItem {
+    /// Stable fixture name (no personal names — it ends up in committed JSON).
+    name: String,
+    /// Recording folder (recording.mic.wav + recording.system.wav, or a
+    /// recording.mixed.wav).
+    dir: String,
+    /// Fathom/human .txt or Teams .vtt reference. None = structure-only
+    /// fixture (gates attribution + loops, not WER).
+    #[serde(default)]
+    reference: Option<String>,
+    /// Substring of the reference speaker who is "You".
+    #[serde(default)]
+    ref_self: Option<String>,
+    /// Known far-end speaker count (enables the minority-share metric).
+    #[serde(default)]
+    expected_far_end_speakers: Option<usize>,
+    #[serde(default)]
+    max_secs: Option<u64>,
+    /// Window start in seconds (gold excerpts score one window).
+    #[serde(default)]
+    start_secs: Option<u64>,
+    #[serde(default)]
+    skip: bool,
+    /// Free-text kind tag shown in the table ("ami-sdm", "teams", …).
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+fn run_corpus(manifest: &str) {
+    let manifest_path = Path::new(manifest);
+    let corpus: Corpus = serde_json::from_str(
+        &std::fs::read_to_string(manifest_path).expect("read corpus manifest"),
+    )
+    .expect("parse corpus manifest");
+    let out_dir = std::env::var("FLYONTHEWALL_HARNESS_OUT_DIR")
+        .ok()
+        .or(corpus.out_dir.clone())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            manifest_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("results")
+        });
+    refuse_inside_repo(&out_dir, "corpus out_dir (results + optional transcripts)");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let engines: Vec<String> = std::env::var("FLYONTHEWALL_HARNESS_ENGINES")
+        .unwrap_or_else(|_| "whisper".into())
+        .split(',')
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty())
+        .collect();
+    let only: Option<Vec<String>> = std::env::var("FLYONTHEWALL_HARNESS_ONLY")
+        .ok()
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+    let keep_transcripts = std::env::var("FLYONTHEWALL_HARNESS_KEEP_TRANSCRIPTS")
+        .is_ok_and(|v| !v.is_empty() && v != "0");
+
+    let mut items: Vec<CorpusItem> = corpus.items;
+    if let Some(teams_dir) = &corpus.teams_dir {
+        let cache: PathBuf = corpus
+            .cache_dir
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| out_dir.join("cache"));
+        refuse_inside_repo(&cache, "corpus cache_dir (extracted meeting audio)");
+        let ffmpeg = ffmpeg_path();
+        for (i, m) in corpus_extra::discover_teams(Path::new(teams_dir))
+            .into_iter()
+            .enumerate()
+        {
+            let name = format!("teams-{:02}", i + 1);
+            eprintln!("teams: {name} = {}", m.title);
+            match corpus_extra::extract_mixed(&ffmpeg, &m.media, &cache.join(&name)) {
+                Ok(wav) => items.push(CorpusItem {
+                    name,
+                    dir: wav.parent().unwrap().to_string_lossy().into_owned(),
+                    reference: Some(m.vtt.to_string_lossy().into_owned()),
+                    ref_self: None,
+                    expected_far_end_speakers: None,
+                    max_secs: None,
+                    start_secs: None,
+                    skip: false,
+                    kind: Some("teams".into()),
+                }),
+                Err(e) => eprintln!("SKIP {name}: {e}"),
+            }
+        }
+    }
+
+    for item in &items {
+        if item.skip || only.as_ref().is_some_and(|o| !o.contains(&item.name)) {
+            continue;
+        }
+        // engine → (variant, transcript) for engine-vs-engine agreement
+        let mut done: Vec<(RunOpts, Transcript, PathBuf)> = Vec::new();
+        for engine in &engines {
+            let mut run = RunOpts::from_env();
+            run.engine = engine.clone();
+            run.max_secs = item.max_secs.or(run.max_secs);
+            run.start_secs = item.start_secs.or(run.start_secs);
+            eprintln!("\n===== {} × {} =====", item.name, run.variant());
+            let Some(out) = run_pipeline(Path::new(&item.dir), &run) else {
+                continue;
+            };
+            let mut results = run_results(&run, &out, item.expected_far_end_speakers);
+            results.insert("kind".into(), serde_json::json!(item.kind));
+            if let Some(reference) = &item.reference {
+                results.insert(
+                    "reference".into(),
+                    score_against_reference(&out.transcript, reference, item.ref_self.as_deref()),
+                );
+            }
+            let mut all = serde_json::Map::new();
+            all.insert("fixture".into(), serde_json::json!(item.name));
+            all.extend(results);
+            let path = out_dir.join(format!("{}.{}.json", item.name, run.variant()));
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&serde_json::Value::Object(all)).unwrap() + "\n",
+            )
+            .unwrap();
+            eprintln!("results written to {}", path.display());
+            done.push((run.clone(), out.transcript.clone(), path.clone()));
+            if keep_transcripts {
+                // meeting content: stays in the local out_dir, never committed
+                let tdir = out_dir.join("transcripts");
+                std::fs::create_dir_all(&tdir).unwrap();
+                std::fs::write(
+                    tdir.join(format!("{}.{}.transcript.json", item.name, run.variant())),
+                    serde_json::to_string_pretty(&out.transcript).unwrap(),
+                )
+                .unwrap();
+            }
+        }
+        // whisper may have run in an earlier invocation: reuse its kept
+        // transcript (FLYONTHEWALL_HARNESS_KEEP_TRANSCRIPTS) for agreement
+        if !done.iter().any(|(r, _, _)| r.engine == "whisper") {
+            for gpu in [Some("1".to_string()), None] {
+                let mut base = RunOpts::from_env();
+                base.engine = "whisper".into();
+                base.gpu = gpu;
+                let kept = out_dir.join("transcripts").join(format!(
+                    "{}.{}.transcript.json",
+                    item.name,
+                    base.variant()
+                ));
+                if let Some(t) = std::fs::read_to_string(&kept)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Transcript>(&raw).ok())
+                {
+                    done.push((base, t, PathBuf::new()));
+                }
+            }
+        }
+        add_agreement(&done);
+    }
+    compare_results(&out_dir);
+}
+
+/// Engine-vs-engine agreement: score each non-whisper run against the
+/// whisper run of the same item (same device class when there is one) as
+/// if whisper's transcript were the reference, and add it to that run's
+/// results file. Meaningful on meetings with no human reference: low
+/// disagreement + better reference-backed scores elsewhere = safe swap.
+fn add_agreement(done: &[(RunOpts, Transcript, PathBuf)]) {
+    for (run, t, path) in done.iter().filter(|(r, _, _)| r.engine != "whisper") {
+        let Some((base_run, base_t, _)) = done
+            .iter()
+            .filter(|(r, _, _)| r.engine == "whisper")
+            .min_by_key(|(r, _, _)| r.gpu_on() != run.gpu_on())
+        else {
+            continue;
+        };
+        eprintln!(
+            "\n-- agreement: {} scored against {} --",
+            run.variant(),
+            base_run.variant()
+        );
+        let reference =
+            corpus_extra::reference_from_transcript(base_t, normalize::normalize_stream);
+        let ref_self = base_t
+            .segments
+            .iter()
+            .any(|s| s.speaker_key == "mic")
+            .then_some("mic");
+        let mut agreement = score_with_reference(t, &reference, &base_run.variant(), ref_self);
+        agreement["baseline"] = serde_json::json!(base_run.variant());
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        v["agreement"] = agreement;
+        std::fs::write(path, serde_json::to_string_pretty(&v).unwrap() + "\n").unwrap();
+    }
+}
+
+/// Meeting audio, transcripts and full results never land in the git
+/// working tree: refuse (panic with the reason) any write target inside
+/// it. Stronger than a .gitignore rule, which one `git add -f` defeats.
+/// A relative path counts as relative to the test's CWD (`src-tauri`).
+fn refuse_inside_repo(target: &Path, what: &str) {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri has a parent")
+        .to_path_buf();
+    assert!(
+        !path_is_inside(target, &repo),
+        "refusing to write the {what} inside the repo working tree ({}): point it outside the repo",
+        target.display()
+    );
+}
+
+/// `target` (existing or not) is `root` or below it. Compares absolute,
+/// lexically normalized paths case-insensitively (Windows), resolving the
+/// longest existing prefix so symlinked/short-name spellings still match.
+fn path_is_inside(target: &Path, root: &Path) -> bool {
+    let absolute = |p: &Path| -> PathBuf {
+        let p = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap().join(p)
+        };
+        // canonicalize the deepest existing ancestor, re-append the rest
+        let mut existing = p.clone();
+        let mut rest: Vec<std::ffi::OsString> = Vec::new();
+        while !existing.exists() {
+            match (existing.file_name(), existing.parent()) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name.to_os_string());
+                    existing = parent.to_path_buf();
+                }
+                _ => break,
+            }
+        }
+        let mut out = std::fs::canonicalize(&existing).unwrap_or(existing);
+        for name in rest.iter().rev() {
+            out.push(name);
+        }
+        let mut norm = PathBuf::new();
+        for c in out.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    norm.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => norm.push(other),
+            }
+        }
+        norm
+    };
+    let (t, r) = (absolute(target), absolute(root));
+    let lower = |p: &Path| p.to_string_lossy().to_lowercase().replace('\\', "/");
+    let (t, r) = (lower(&t), lower(&r));
+    t == r || t.starts_with(&format!("{}/", r.trim_end_matches('/')))
+}
+
+/// ffmpeg for audio extraction/encoding: the app's managed copy in the real
+/// data dir (read-only use), else whatever is on PATH.
+fn ffmpeg_path() -> PathBuf {
+    let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
+    fly_app_lib::models::artifact("ffmpeg")
+        .and_then(|a| fly_app_lib::models::installed_path(&real_data, a))
+        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+}
+
+/// "mm:ss", "h:mm:ss" or plain seconds.
+fn parse_secs(v: &str) -> Option<u64> {
+    let v = v.trim();
+    if v.contains(':') {
+        parse_mmss(v).map(|ms| ms / 1000)
+    } else {
+        v.parse().ok()
+    }
+}
+
+/// Gold excerpt export: transcribe one window of a recording with the
+/// chosen engine and write `draft.txt` (the user corrects it into
+/// `gold.txt`) + `clip.m4a` (the same window, for listening) into the gold
+/// folder. Reads the recording only; writes only into the out dir.
+fn gold_export(rec_dir: &str) {
+    let out =
+        PathBuf::from(std::env::var("FLYONTHEWALL_HARNESS_GOLD_OUT").expect(
+            "gold export needs FLYONTHEWALL_HARNESS_GOLD_OUT (e.g. corpus\\gold\\<meeting>)",
+        ));
+    let start = std::env::var("FLYONTHEWALL_HARNESS_GOLD_START")
+        .ok()
+        .and_then(|v| parse_secs(&v))
+        .expect("gold export needs FLYONTHEWALL_HARNESS_GOLD_START (mm:ss or seconds)");
+    let secs: u64 = env_parse("FLYONTHEWALL_HARNESS_GOLD_SECS").unwrap_or(900);
+    refuse_inside_repo(&out, "gold out dir (meeting audio + transcript draft)");
+    std::fs::create_dir_all(&out).unwrap();
+    for f in ["draft.txt", "clip.m4a"] {
+        assert!(
+            !out.join(f).exists(),
+            "{} already exists — refusing to overwrite a draft the user may be editing",
+            out.join(f).display()
+        );
+    }
+    let rec = Path::new(rec_dir);
+    let mut run = RunOpts::from_env();
+    run.start_secs = Some(start);
+    run.max_secs = Some(secs);
+    let Some(res) = run_pipeline(rec, &run) else {
+        return;
+    };
+    let meeting = rec
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let draft = corpus_extra::render_draft(&res.transcript, &meeting, start, secs);
+    std::fs::write(out.join("draft.txt"), draft).unwrap();
+    // listening clip: the playback mix when the recording has one
+    let src = [
+        "recording.playback.wav",
+        "recording.mixed.wav",
+        "recording.mic.wav",
+    ]
+    .iter()
+    .map(|f| rec.join(f))
+    .find(|p| p.exists())
+    .expect("recording has no audio to clip");
+    corpus_extra::export_clip(&ffmpeg_path(), &src, start, secs, &out.join("clip.m4a")).unwrap();
+    // the manifest entry that scores this excerpt once gold.txt exists
+    let item = serde_json::json!({
+        "name": format!("gold-{}", out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        "dir": rec_dir,
+        "start_secs": start,
+        "max_secs": secs,
+        "reference": out.join("gold.txt").to_string_lossy(),
+        "kind": "gold",
+    });
+    std::fs::write(
+        out.join("manifest-item.json"),
+        serde_json::to_string_pretty(&item).unwrap() + "\n",
+    )
+    .unwrap();
+    eprintln!(
+        "gold draft written to {} (engine {}); add manifest-item.json to the corpus once gold.txt is saved",
+        out.display(),
+        res.transcript.engine
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Compare mode: summary table + ship gates over a directory of result JSONs
+// ---------------------------------------------------------------------------
+
+/// One row of the comparison, pulled out of a results JSON.
+#[derive(Debug, serde::Serialize)]
+struct Row {
+    fixture: String,
+    variant: String,
+    engine: String,
+    gpu: bool,
+    wer: Option<f64>,
+    sa_wer: Option<f64>,
+    attribution_error: Option<f64>,
+    dup_windowed: Option<f64>,
+    dup_reffree: Option<f64>,
+    der_250: Option<f64>,
+    far_end_minority: Option<f64>,
+    speed_x_realtime: Option<f64>,
+    asr_secs: Option<f64>,
+    peak_sidecar_rss_mb: Option<f64>,
+    loops: Option<u64>,
+    machine_cpu_avg_pct: Option<f64>,
+    /// vs the whisper run of the same item (engine-vs-engine agreement)
+    agree_wer: Option<f64>,
+    agree_der_250: Option<f64>,
+    kind: Option<String>,
+}
+
+fn row_from(v: &serde_json::Value) -> Option<Row> {
+    let f = |p: &str| v.pointer(p).and_then(|x| x.as_f64());
+    Some(Row {
+        fixture: v.get("fixture")?.as_str()?.to_string(),
+        variant: v.pointer("/config/variant")?.as_str()?.to_string(),
+        engine: v.pointer("/config/engine")?.as_str()?.to_string(),
+        gpu: v
+            .pointer("/config/gpu")
+            .and_then(|g| g.as_bool())
+            .unwrap_or(false),
+        wer: f("/reference/wer_merged"),
+        sa_wer: f("/reference/sa_wer_merged"),
+        attribution_error: f("/reference/attribution_error"),
+        dup_windowed: f("/reference/xtalk_dup_windowed"),
+        dup_reffree: f("/structure/dup_rate_reffree"),
+        der_250: f("/reference/diarization/der_collar_250/der"),
+        far_end_minority: f("/structure/far_end_minority_share"),
+        speed_x_realtime: f("/speed_x_realtime"),
+        asr_secs: f("/asr_secs"),
+        peak_sidecar_rss_mb: v
+            .pointer("/resources/peak_rss_mb")
+            .and_then(|m| m.as_object())
+            .and_then(|m| {
+                m.iter()
+                    .filter(|(k, _)| *k != "sherpa")
+                    .filter_map(|(_, x)| x.as_f64())
+                    .reduce(f64::max)
+            }),
+        loops: v.pointer("/loops/count").and_then(|x| x.as_u64()),
+        machine_cpu_avg_pct: f("/resources/machine_cpu_avg_pct"),
+        agree_wer: f("/agreement/wer_merged"),
+        agree_der_250: f("/agreement/diarization/der_collar_250/der"),
+        kind: v.get("kind").and_then(|k| k.as_str()).map(str::to_string),
+    })
+}
+
+/// Ship gates from spec §4.1 that this harness can measure. "Live first
+/// partial ≤ 2 s" and "CPU ≤ 25 % during a call" belong to the live path
+/// (not in this PR) and are reported as not measured.
+const MIN_CPU_SPEED_X: f64 = 5.0;
+
+fn compare_results(dir: &Path) {
+    let mut rows: Vec<Row> = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read results dir").flatten() {
+        let p = entry.path();
+        if p.extension().is_some_and(|e| e == "json")
+            && p.file_name().is_some_and(|n| n != "summary.json")
+        {
+            if let Some(row) = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .as_ref()
+                .and_then(row_from)
+            {
+                rows.push(row);
+            }
+        }
+    }
+    rows.sort_by(|a, b| (&a.fixture, &a.variant).cmp(&(&b.fixture, &b.variant)));
+    let pct = |x: Option<f64>| x.map(|v| format!("{:.1}", v * 100.0)).unwrap_or("-".into());
+    let num = |x: Option<f64>, d: usize| x.map(|v| format!("{v:.d$}")).unwrap_or("-".into());
+    eprintln!("\n== ASR comparison ({}) ==", dir.display());
+    eprintln!(
+        "{:<26} {:<24} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7} {:>7} {:>8} {:>5} {:>5} {:>7} {:>7}",
+        "fixture",
+        "variant",
+        "WER%",
+        "SAWER%",
+        "attr%",
+        "dup%",
+        "DER%",
+        "minor%",
+        "speed×",
+        "asr_s",
+        "RSS_MB",
+        "loops",
+        "cpu%",
+        "agrWER%",
+        "agrDER%"
+    );
+    for r in &rows {
+        eprintln!(
+            "{:<26} {:<24} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7} {:>7} {:>8} {:>5} {:>5} {:>7} {:>7}",
+            r.fixture,
+            r.variant,
+            pct(r.wer),
+            pct(r.sa_wer),
+            pct(r.attribution_error),
+            pct(r.dup_windowed.or(r.dup_reffree)),
+            pct(r.der_250),
+            pct(r.far_end_minority),
+            num(r.speed_x_realtime, 1),
+            num(r.asr_secs, 0),
+            num(r.peak_sidecar_rss_mb, 0),
+            r.loops.map(|l| l.to_string()).unwrap_or("-".into()),
+            num(r.machine_cpu_avg_pct, 0),
+            pct(r.agree_wer),
+            pct(r.agree_der_250),
+        );
+    }
+
+    // gates: each non-whisper variant vs the whisper run of the same fixture
+    // on the same device class (CPU vs CPU, Vulkan vs Vulkan), else any
+    // whisper run of that fixture
+    let mut gates = Vec::new();
+    for cand in rows.iter().filter(|r| r.engine != "whisper") {
+        let base = rows
+            .iter()
+            .filter(|b| b.fixture == cand.fixture && b.engine == "whisper")
+            .min_by_key(|b| (b.gpu != cand.gpu, b.variant.len()));
+        let Some(base) = base else { continue };
+        let mut checks: Vec<(String, Option<bool>, String)> = Vec::new();
+        let le = |c: Option<f64>, b: Option<f64>| match (c, b) {
+            (Some(c), Some(b)) => Some(c <= b + 1e-9),
+            _ => None,
+        };
+        checks.push((
+            "no WER regression".into(),
+            le(cand.wer, base.wer),
+            format!("{} vs {}", pct(cand.wer), pct(base.wer)),
+        ));
+        checks.push((
+            "SA-WER ≤ baseline".into(),
+            le(cand.sa_wer, base.sa_wer),
+            format!("{} vs {}", pct(cand.sa_wer), pct(base.sa_wer)),
+        ));
+        if cand.wer.is_none() {
+            // structure-only fixture: attribution + loops
+            checks.push((
+                "far-end attribution ≤ baseline".into(),
+                le(cand.far_end_minority, base.far_end_minority),
+                format!(
+                    "{} vs {}",
+                    pct(cand.far_end_minority),
+                    pct(base.far_end_minority)
+                ),
+            ));
+        }
+        checks.push((
+            "loops ≤ baseline".into(),
+            match (cand.loops, base.loops) {
+                (Some(c), Some(b)) => Some(c <= b),
+                _ => None,
+            },
+            format!(
+                "{} vs {}",
+                cand.loops.map(|l| l.to_string()).unwrap_or("-".into()),
+                base.loops.map(|l| l.to_string()).unwrap_or("-".into())
+            ),
+        ));
+        if !cand.gpu {
+            checks.push((
+                format!("≥ {MIN_CPU_SPEED_X}× realtime on CPU"),
+                cand.speed_x_realtime.map(|s| s >= MIN_CPU_SPEED_X),
+                format!(
+                    "{}× (cpu avg {}%)",
+                    num(cand.speed_x_realtime, 1),
+                    num(cand.machine_cpu_avg_pct, 0)
+                ),
+            ));
+        }
+        eprintln!(
+            "\ngates: {} {} vs {}",
+            cand.fixture, cand.variant, base.variant
+        );
+        for (name, ok, detail) in &checks {
+            let mark = match ok {
+                Some(true) => "PASS",
+                Some(false) => "FAIL",
+                None => "n/a ",
+            };
+            eprintln!("  [{mark}] {name}: {detail}");
+            gates.push(serde_json::json!({
+                "fixture": cand.fixture,
+                "variant": cand.variant,
+                "baseline": base.variant,
+                "gate": name,
+                "pass": ok,
+                "detail": detail,
+            }));
+        }
+    }
+    eprintln!(
+        "\nnot measured here (live path, later PR): live first partial ≤ 2 s; CPU ≤ 25 % during a call"
+    );
+    let summary = serde_json::json!({ "rows": rows, "gates": gates });
+    std::fs::write(
+        dir.join("summary.json"),
+        serde_json::to_string_pretty(&summary).unwrap() + "\n",
+    )
+    .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -1978,6 +2956,24 @@ fn accuracy_harness() {
 #[cfg(test)]
 mod der_tests {
     use super::*;
+
+    #[test]
+    fn write_targets_inside_the_repo_are_detected() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        assert!(path_is_inside(&repo.join("docs/data/asr/results"), repo));
+        assert!(path_is_inside(repo, repo));
+        // relative paths resolve against the CWD (inside the repo in tests)
+        assert!(path_is_inside(Path::new("results"), repo));
+        assert!(path_is_inside(
+            &repo.join("src-tauri").join("..").join("x"),
+            repo
+        ));
+        let outside = std::env::temp_dir().join("fotw-harness-out");
+        assert!(!path_is_inside(&outside, repo));
+        // a sibling whose name merely starts with the repo's name
+        let sibling = PathBuf::from(format!("{}-other", repo.display()));
+        assert!(!path_is_inside(&sibling, repo));
+    }
 
     fn turn(key: &str, start_ms: u64, end_ms: u64) -> SpeakerTurn {
         SpeakerTurn {
@@ -2030,7 +3026,17 @@ abc/2-0
         let toks: Vec<&str> = r.tokens.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(
             toks,
-            vec!["hello", "there", "this", "continues", "hi", "ada", "all"]
+            // "&amp;" decodes to "&", which the scoring normalizer reads as "and"
+            vec![
+                "hello",
+                "there",
+                "this",
+                "continues",
+                "hi",
+                "ada",
+                "and",
+                "all"
+            ]
         );
     }
 
