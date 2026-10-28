@@ -145,9 +145,15 @@ export default function ImportQueue({
     }
   }
 
+  const noneConverted =
+    failed.length === 1
+      ? "The file couldn't be converted."
+      : failed.length === 2
+        ? "Neither file could be converted."
+        : `None of the ${failed.length} files could be converted.`;
   const failedNote =
     supported.length === 0
-      ? `${failed.length === 1 ? "The file" : `All ${failed.length} files`} couldn't be converted. See why below, then retry.`
+      ? `${noneConverted} See why below, then retry.`
       : `${failed.length} file${failed.length === 1 ? "" : "s"} couldn't be converted. Retry, or transcribe the other ${supported.length === 1 ? "file" : `${supported.length} files`} without ${failed.length === 1 ? "it" : "them"}.`;
   const subtitle = pipelineError
     ? briefError(pipelineError)
@@ -185,32 +191,44 @@ export default function ImportQueue({
             {subtitle}
           </div>
         </div>
-        {idle && (
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={start}
-            disabled={supported.length === 0}
-            title="Transcribe the files above, top to bottom"
-          >
-            Transcribe{supported.length > 1 ? ` ${supported.length} files` : ""}
-          </Button>
-        )}
-        {pipelineError && (
-          <Button variant="primary" size="sm" onClick={onRetry} title="Try transcribing again">
-            Retry
-          </Button>
-        )}
-        {running && !pipelineError && !afterAsr && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onCancel}
-            title="Stop transcribing — finished parts are kept and resume next time"
-          >
-            Cancel
-          </Button>
-        )}
+        <div className="flex flex-none items-center gap-2">
+          {idle && failed.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={retry}
+              title={`Convert the failed ${failed.length === 1 ? "file" : "files"} again, then transcribe the whole queue`}
+            >
+              {failed.length === 1 ? "Retry failed file" : "Retry failed files"}
+            </Button>
+          )}
+          {idle && (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={start}
+              disabled={supported.length === 0}
+              title="Transcribe the files above, top to bottom"
+            >
+              Transcribe{supported.length > 1 ? ` ${supported.length} files` : ""}
+            </Button>
+          )}
+          {pipelineError && (
+            <Button variant="primary" size="sm" onClick={onRetry} title="Try transcribing again">
+              Retry
+            </Button>
+          )}
+          {running && !pipelineError && !afterAsr && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onCancel}
+              title="Stop transcribing — finished parts are kept and resume next time"
+            >
+              Cancel
+            </Button>
+          )}
+        </div>
       </div>
       <div>
         {files.map((f, i) => {
@@ -264,16 +282,6 @@ export default function ImportQueue({
                   <div className="mt-px text-[11.5px] text-text-3">{fmtSize(f.size)}</div>
                 )}
               </div>
-              {cause && idle && (
-                <Button
-                  variant="outline"
-                  size="xs"
-                  title="Try converting this file again, then transcribe the queue"
-                  onClick={retry}
-                >
-                  Retry
-                </Button>
-              )}
               {bad && idle && (
                 <Button
                   variant="ghost"

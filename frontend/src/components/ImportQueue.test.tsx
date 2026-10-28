@@ -83,7 +83,9 @@ describe("ImportQueue per-file failures", () => {
   it("shows the failed file's own cause and a Retry, and counts only the rest", async () => {
     await mount(staged([file("a"), file("b", { convert_error: CAUSE }), file("c")]));
     expect(host!.textContent).toContain(CAUSE);
-    expect(button("Retry")).not.toBeNull();
+    // one Retry for the queue, not one per row that secretly retries them all
+    expect(button("Retry failed file")).not.toBeNull();
+    expect(button("Retry")).toBeNull();
     expect(button("Transcribe 2 files")).not.toBeNull();
     expect(host!.textContent).toContain("1 file couldn't be converted");
   });
@@ -92,7 +94,7 @@ describe("ImportQueue per-file failures", () => {
     const onTranscribe = await mount(
       staged([file("a"), file("b", { convert_error: CAUSE }), file("c")]),
     );
-    await click(button("Retry"));
+    await click(button("Retry failed file"));
     expect(onTranscribe).toHaveBeenCalledWith(["a", "b", "c"]);
   });
 
@@ -110,15 +112,36 @@ describe("ImportQueue per-file failures", () => {
     );
     await click(host!.querySelector('button[aria-label="Remove b.mp4"]'));
     expect(host!.textContent).not.toContain(CAUSE);
-    expect(button("Retry")).toBeNull();
+    expect(button("Retry failed file")).toBeNull();
     await click(button("Transcribe 2 files"));
     expect(onTranscribe).toHaveBeenCalledWith(["a", "c"]);
   });
 
-  it("with every file failed there's nothing to transcribe, but each can be retried", async () => {
+  it("with every file failed there's nothing to transcribe, but they can be retried", async () => {
     await mount(staged([file("a", { convert_error: CAUSE })]));
     expect(button("Transcribe")?.disabled).toBe(true);
-    expect(button("Retry")).not.toBeNull();
+    expect(button("Retry failed file")).not.toBeNull();
+    expect(host!.textContent).toContain("The file couldn't be converted");
+  });
+
+  it("words the counts naturally", async () => {
+    await mount(staged([file("a", { convert_error: CAUSE }), file("b", { convert_error: CAUSE })]));
+    expect(host!.textContent).toContain("Neither file could be converted");
+    expect(button("Retry failed files")).not.toBeNull();
+    if (root) act(() => root!.unmount());
+    host?.remove();
+    await mount(
+      staged([
+        file("a", { convert_error: CAUSE }),
+        file("b", { convert_error: CAUSE }),
+        file("c", { convert_error: CAUSE }),
+      ]),
+    );
+    expect(host!.textContent).toContain("None of the 3 files could be converted");
+    if (root) act(() => root!.unmount());
+    host?.remove();
+    await mount(staged([file("a"), file("b", { convert_error: CAUSE })]));
+    expect(host!.textContent).toContain("transcribe the other file without it");
   });
 
   it("marks a file the moment its conversion fails while the rest carry on", async () => {
@@ -139,7 +162,7 @@ describe("ImportQueue per-file failures", () => {
     const onTranscribe = await mount(
       staged([file("a"), file("x", { rel_path: null, error: "Not an audio or video file" })]),
     );
-    expect(button("Retry")).toBeNull();
+    expect(button("Retry failed file")).toBeNull();
     await click(button("Transcribe"));
     expect(onTranscribe).toHaveBeenCalledWith(["a"]);
   });
