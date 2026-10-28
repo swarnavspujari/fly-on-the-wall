@@ -263,8 +263,17 @@ function stripBodies(command) {
         body.push(lines[i]);
         i++;
       }
+      // The body's reader: the command holding `<<`, unless the line pipes
+      // into a shell, interpreter or runner (`cat <<EOF | bash`), which
+      // then runs it.
+      const verbsOnLine = segments(line).map((s) => {
+        const ws = words(s);
+        return verbOf(ws[skipPrefixes(ws)] || "");
+      });
+      const runner = verbsOnLine.find((v) => SHELLS.has(v) || isInterpreter(v) || ["xargs", "iex", "invoke-expression", "eval", "source", "."].includes(v));
       const owner = segments(line.slice(0, h.at)).pop() || "";
-      bodies.push({ owner: verbOf(words(owner)[skipPrefixes(words(owner))] || ""), body: body.join("\n") });
+      const ownerVerb = verbOf(words(owner)[skipPrefixes(words(owner))] || "");
+      bodies.push({ owner: runner && runner !== ownerVerb ? runner : ownerVerb, body: body.join("\n") });
     }
   }
   return { text: out.join("\n"), bodies };
@@ -484,6 +493,13 @@ function trustRootViolation(cmd) {
   if (/\bgh\b(?:[^\n;|&]*\s)?pr\s+merge\b[^\n;|&]*--admin\b/i.test(cmd)) {
     return "an admin merge (gh pr merge --admin)";
   }
+  // GraphQL mutations on rulesets, branch protection or variables.
+  if (
+    /\bgraphql\b/i.test(cmd) &&
+    /(branchProtectionRule|repositoryRuleset|ruleset|bypass|actionsVariable|updateRepository)/i.test(cmd)
+  ) {
+    return "a GraphQL call on rulesets, branch protection or variables";
+  }
   return null;
 }
 
@@ -522,6 +538,48 @@ export function commandViolation(command, ctx = {}, depth = 0) {
       if (why) return why;
     } else if (isInterpreter(b.owner) && WRITE_API.test(b.body) && (mentions(b.body) || here())) {
       return `${b.owner} code that writes a protected path`;
+    }
+  }
+  // A shell or interpreter reading stdin (`echo "rm evals/x" | bash`,
+  // `cat x.py | python -`) runs what the other segments feed it.
+  const segs = segments(text);
+  const stdinReaders = segs
+    .map((s) => {
+      const ws = words(s);
+      const k = skipPrefixes(ws);
+      const v = verbOf(ws[k] || "");
+      const rest = ws.slice(k + 1);
+      const scriptArg = rest.find((x) => !/^-/.test(x));
+      const reads = (SHELLS.has(v) || isInterpreter(v)) && (!scriptArg || scriptArg === "-" || rest.includes("-") || rest.includes("-s"));
+      const hasC = rest.some((x) => /^(-c|-lc|-ic|-e|-command|\/c|\/k)$/i.test(x));
+      return reads && !hasC ? v : null;
+    })
+    .filter(Boolean);
+  if (stdinReaders.length) {
+    if (stdinReaders.some(isInterpreter) && WRITE_API.test(command) && (anyMention || here())) {
+      return "code piped into an interpreter that writes a protected path";
+    }
+    if (stdinReaders.some((v) => SHELLS.has(v))) {
+      for (const s of segs) {
+        const ws = words(s);
+        const k = skipPrefixes(ws);
+        const v = verbOf(ws[k] || "");
+        // What a feeder prints: its quoted arguments, or a file it cats.
+        const fed =
+          v === "cat" || v === "type" || v === "get-content" || v === "gc"
+            ? ws.slice(k + 1).filter((x) => !/^-/.test(x)).map((f) => {
+                try {
+                  return readFileSync(path.resolve(vctx.cwd, nativePath(expand(f, vctx))), "utf8");
+                } catch {
+                  return "";
+                }
+              })
+            : ws.slice(k + 1);
+        for (const piece of fed) {
+          const why = commandViolation(piece.replace(/\\n/g, "\n"), vctx, depth + 1);
+          if (why) return why;
+        }
+      }
     }
   }
   // $(...) and backticks run commands of their own.

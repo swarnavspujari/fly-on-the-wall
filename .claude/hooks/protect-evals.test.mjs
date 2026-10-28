@@ -119,7 +119,11 @@ test("trust roots: the lock variable, rulesets, branch protection, admin merges"
     "gh pr merge 103 --admin --squash",
     "echo $EVALS_LOCK_SHA256",
   ]);
-  allows(["gh pr merge 103 --squash", "gh variable list", "gh pr view 103", "gh api repos/o/r/pulls/103"]);
+  denies([
+    "gh api graphql -f query='mutation { updateBranchProtectionRule(input: {}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { deleteRepositoryRuleset(input: {}) { clientMutationId } }'",
+  ]);
+  allows(["gh pr merge 103 --squash", "gh variable list", "gh pr view 103", "gh api repos/o/r/pulls/103", "gh api graphql -f query='{ viewer { login } }'"]);
 });
 
 test("patches: git apply / git am / patch of protected paths", () => {
@@ -213,6 +217,12 @@ test("Bash: writes, moves, deletes and redirects are denied", () => {
     "bash <<'EOF'\nrm evals/thresholds.toml\nEOF",
     "python3 - <<'EOF'\nopen('evals/thresholds.toml', 'w').write('x')\nEOF",
     "cat > evals/thresholds.toml <<'EOF'\nschema = 2\nEOF",
+    // Fed to a shell or interpreter through a pipe.
+    "cat <<'EOF' | bash\nrm evals/thresholds.toml\nEOF",
+    "echo \"rm evals/thresholds.toml\" | bash",
+    "printf 'rm -rf evals\\n' | sh -s",
+    "echo \"open('evals/x', 'w').write('x')\" | python -",
+    "cat <<'EOF' | python3\nopen('evals/thresholds.toml', 'w').write('x')\nEOF",
   ]);
   // Already inside a protected folder: relative writes are denied.
   assert.ok(bash("echo x > a.txt", at("evals")));
@@ -257,6 +267,9 @@ test("Bash: reads, quoted text, heredoc bodies and unrelated work are allowed", 
     "echo hi > /tmp/x",
     "cat > /tmp/notes.md <<'EOF'\nrm -rf evals\necho x > evals/thresholds.toml\nEOF",
     "rm $UNSET_VAR/x",
+    "echo hello | bash",
+    "cat README.md | python -c 'import sys; print(len(sys.stdin.read()))'",
+    "cat <<'EOF' | bash\necho hi\nEOF",
   ]);
 });
 
