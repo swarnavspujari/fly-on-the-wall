@@ -390,6 +390,11 @@ impl Db {
         })
     }
 
+    /// A second, fresh connection to the same database (cold-start timing).
+    pub fn reopen(&self) -> Result<Storage> {
+        Ok(Storage::open(self._dir.path())?)
+    }
+
     /// Fixture meeting id for a database meeting id.
     pub fn fixture_of(&self, meeting_id: &str) -> Option<&str> {
         self.meeting_ids
