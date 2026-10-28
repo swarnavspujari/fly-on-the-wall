@@ -3,8 +3,6 @@ import {
   CLAUDE_MODELS,
   QUICK_PROMPTS,
   RUNS_ON_HELPER,
-  cloudConsentCopy,
-  cloudConsentLaunchIntro,
   describeAskError,
   providerName,
   runsOnPlace,
@@ -164,23 +162,6 @@ describe("Ask copy", () => {
     expect(providerName("ollama")).toBe("Ollama");
     expect(providerName("anthropic")).toBe("Anthropic");
     expect(providerName("nim")).toBe("NVIDIA");
-  });
-
-  it("discloses what a cloud provider receives, like Settings does", () => {
-    const c = cloudConsentCopy("OpenAI");
-    expect(c.title).toBe("Use OpenAI for Ask and Enhance?");
-    expect(c.confirmLabel).toBe("Use OpenAI");
-    expect(c.message).toContain("full meeting transcripts will be sent to OpenAI");
-    expect(c.message).toContain("transcript cleanup and action items");
-    expect(c.message).toContain("notes you keep local");
-    expect(c.message).toContain("This computer (Ollama)");
-  });
-
-  it("says why the launch check asks, and what waits until you allow it", () => {
-    const intro = cloudConsentLaunchIntro("Anthropic");
-    expect(intro).toContain("set to Anthropic");
-    expect(intro).toContain("nothing is sent there until you allow it");
-    expect(intro).toContain("transcript cleanup and action items");
   });
 
   it("offers the Claude models Settings offers, recommended first", () => {

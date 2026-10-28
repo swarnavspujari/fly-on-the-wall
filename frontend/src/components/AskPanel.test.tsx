@@ -6,6 +6,7 @@ import { api } from "../api";
 import type { LlmSettings } from "../types";
 import { AskComposer, AskSheet, useAskChat } from "./AskPanel";
 import { ConfirmProvider } from "./confirm";
+import { answerConsent, consentRequest, holdConsentRequests } from "./cloudConsentTesting";
 import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -118,8 +119,14 @@ beforeEach(() => {
     );
   });
   vi.spyOn(api, "getAppSetting").mockImplementation(async (k) => consents[k] ?? null);
+  // as in the backend, consent can't be set from here: request_cloud_consent
+  // records it
   vi.spyOn(api, "setAppSetting").mockImplementation(async (k, v) => {
+    if (k.startsWith("consent.cloud_llm.")) throw "can't be changed from the app UI";
     consents[k] = v;
+  });
+  holdConsentRequests((p) => {
+    consents[`consent.cloud_llm.${p}`] = "true";
   });
 });
 
@@ -158,6 +165,11 @@ const openSheet = async () => {
 };
 const answer = async (yes: boolean) => {
   act(() => confirmChoice(yes).click());
+  await flush();
+};
+/** Answer the (native) cloud-consent dialog. */
+const consent = async (yes: boolean) => {
+  await act(async () => answerConsent(yes));
   await flush();
 };
 const CONSENT_REFUSED =
@@ -312,16 +324,16 @@ describe("Ask composer and sheet", () => {
     // Cancel writes nothing and doesn't ask the question again
     act(() => button("Review and allow Anthropic")!.click());
     await flush();
-    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
+    expect(consentRequest()).toEqual({ provider: "anthropic", atLaunch: false });
     expect(consents["consent.cloud_llm.anthropic"]).toBeUndefined();
-    await answer(false);
-    expect(confirmDialog()).toBeNull();
+    await consent(false);
+    expect(consentRequest()).toBeNull();
     expect(consents["consent.cloud_llm.anthropic"]).toBeUndefined();
     expect(ask).toHaveBeenCalledTimes(1);
     // Allow: consent is saved, then the question goes again
     act(() => button("Review and allow Anthropic")!.click());
     await flush();
-    await answer(true);
+    await consent(true);
     expect(consents["consent.cloud_llm.anthropic"]).toBe("true");
     expect(ask).toHaveBeenCalledTimes(2);
     expect(sheet()!.textContent).toContain("Answer after consent.");
@@ -395,13 +407,10 @@ describe("Runs on", () => {
     choose(runsOn(), "openai");
     await flush();
     // it waits for the answer: nothing is saved while the question is open
-    expect(confirmTitle()).toBe("Use OpenAI for Ask and Enhance?");
-    expect(confirmDialog()!.textContent).toContain(
-      "full meeting transcripts will be sent to OpenAI",
-    );
+    expect(consentRequest()).toEqual({ provider: "openai", atLaunch: false });
     expect(consents["consent.cloud_llm.openai"]).toBeUndefined();
     expect(api.setLlmSettings).not.toHaveBeenCalled();
-    await answer(false);
+    await consent(false);
     expect(consents["consent.cloud_llm.openai"]).toBeUndefined();
     expect(api.setLlmSettings).not.toHaveBeenCalled();
     expect(runsOn().value).toBe("anthropic");
@@ -409,7 +418,7 @@ describe("Runs on", () => {
 
     choose(runsOn(), "openai");
     await flush();
-    await answer(true);
+    await consent(true);
     expect(api.setLlmSettings).toHaveBeenCalledWith({
       provider: "openai",
       model: null,
@@ -424,17 +433,16 @@ describe("Runs on", () => {
     expect(sheet()!.textContent).toContain("No API key for OpenAI yet");
   });
 
-  it("Esc on its consent question answers only the question; the sheet stays, focus goes back", async () => {
+  it("declining its consent question keeps the sheet open, with focus where it was", async () => {
     render(<Harness noteId="n1" />);
     await openSheet();
     act(() => runsOn().focus());
     await flush();
     choose(runsOn(), "openai");
     await flush();
-    expect(confirmTitle()).toBe("Use OpenAI for Ask and Enhance?");
-    key(document.activeElement!, "Escape");
-    await flush();
-    expect(confirmDialog()).toBeNull();
+    expect(consentRequest()).toEqual({ provider: "openai", atLaunch: false });
+    await consent(false);
+    expect(consentRequest()).toBeNull();
     expect(sheet()).not.toBeNull();
     expect(document.activeElement).toBe(runsOn());
     expect(consents["consent.cloud_llm.openai"]).toBeUndefined();
@@ -447,6 +455,7 @@ describe("Runs on", () => {
     choose(runsOn(), "ollama");
     await flush();
     expect(confirmDialog()).toBeNull();
+    expect(api.requestCloudConsent).not.toHaveBeenCalled();
     expect(api.setLlmSettings).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "ollama" }),
     );
@@ -492,8 +501,8 @@ describe("Runs on", () => {
     await openSheet();
     choose(model()!, "claude-haiku-5-5");
     await flush();
-    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
-    await answer(false);
+    expect(consentRequest()).toEqual({ provider: "anthropic", atLaunch: false });
+    await consent(false);
     expect(consents["consent.cloud_llm.anthropic"]).toBeUndefined();
     expect(api.setLlmSettings).not.toHaveBeenCalled();
     expect(model()!.value).toBe("claude-sonnet-5-5");

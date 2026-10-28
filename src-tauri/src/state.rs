@@ -48,6 +48,9 @@ pub struct AppState {
     /// the app's notice offers to run them once the user allows the provider
     /// (`llm_commands::retry_consent_skipped`).
     pub consent_skipped: Mutex<std::collections::BTreeSet<String>>,
+    /// Held while the native cloud-consent dialog is open, so requests show
+    /// one dialog at a time (`llm_commands::request_cloud_consent`).
+    pub consent_prompt: tokio::sync::Mutex<()>,
     /// Nudges the embedding worker after a content write (embeddings.rs).
     /// The worker also polls, so a missed nudge only delays indexing.
     pub embed_notify: tokio::sync::Notify,
@@ -90,6 +93,7 @@ impl AppState {
             ollama: Mutex::new(None),
             live_status: Mutex::new(None),
             consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
+            consent_prompt: tokio::sync::Mutex::new(()),
             embed_notify: tokio::sync::Notify::new(),
         })
     }

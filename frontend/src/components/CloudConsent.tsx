@@ -1,81 +1,72 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, LLM_SETTINGS_CHANGED_EVENT } from "../api";
-import { cloudConsentCopy, cloudConsentLaunchIntro, providerName } from "../askModel";
+import { providerName } from "../askModel";
 import type { LlmProviderInfo } from "../types";
-import { useConfirm } from "./confirm";
 
 /* Cloud consent: the one place the app asks before a cloud provider first
    gets meeting content. Settings, Ask's Runs on, the launch check and the
    skipped-cleanup notice all use it. The backend (llm_commands.rs
    build_provider) refuses cloud calls without `consent.cloud_llm.<id>` =
-   "true", and this is the only code that writes that value, only after an
-   explicit yes. */
+   "true". Only the backend writes that value: `request_cloud_consent` asks
+   in a native dialog, with the disclosure in its own words, and records an
+   explicit yes. The webview can read the value but can't set it, so no
+   script can skip the disclosure. */
 
 export const cloudConsentKey = (id: string) => `consent.cloud_llm.${id}`;
 
 export interface CloudConsentOptions {
-  /** A first paragraph before the disclosure (the launch check's reason). */
-  intro?: string;
-  cancelLabel?: string;
+  /** The launch check: the dialog first says why it's asking unprompted,
+   *  and declines with "Not now". */
+  atLaunch?: boolean;
 }
 
 /* One question per provider at a time: a second ask for the same provider
    (the launch check and Ask's "Review and allow", a double click) waits for
-   the first answer instead of queueing a second dialog. */
+   the first answer instead of asking again. The backend also shows one
+   dialog at a time. */
 const inFlight = new Map<string, Promise<boolean>>();
 
-/** Returns `ask(providers, id)`: true when the provider is local, already
- *  allowed, or you allow it now. Consent is saved only on that yes; if
- *  saving fails it returns false, since the backend would refuse anyway. An
- *  id that isn't in `providers` is refused without asking. */
+/** True when the provider is local, already allowed, or you allow it now in
+ *  the native dialog. An id that isn't in `providers` is refused without
+ *  asking; so is any failure, since the backend would refuse anyway. */
+function askCloudConsent(
+  providers: readonly LlmProviderInfo[],
+  id: string,
+  { atLaunch = false }: CloudConsentOptions = {},
+): Promise<boolean> {
+  const info = providers.find((p) => p.id === id);
+  if (!info) return Promise.resolve(false);
+  if (info.is_local) return Promise.resolve(true);
+  const pending = inFlight.get(id);
+  if (pending) return pending;
+  const asking = (async () => {
+    try {
+      if ((await api.getAppSetting(cloudConsentKey(id))) === "true") return true;
+    } catch {
+      /* fall through to asking */
+    }
+    try {
+      const allowed = await api.requestCloudConsent(id, atLaunch);
+      if (allowed) window.dispatchEvent(new Event(LLM_SETTINGS_CHANGED_EVENT));
+      return allowed;
+    } catch {
+      return false;
+    }
+  })().finally(() => inFlight.delete(id));
+  inFlight.set(id, asking);
+  return asking;
+}
+
+/** Returns `ask(providers, id, options?)` (see askCloudConsent). */
 export function useCloudConsent() {
-  const confirm = useConfirm();
-  return useCallback(
-    (
-      providers: readonly LlmProviderInfo[],
-      id: string,
-      { intro, cancelLabel }: CloudConsentOptions = {},
-    ): Promise<boolean> => {
-      const info = providers.find((p) => p.id === id);
-      if (!info) return Promise.resolve(false);
-      if (info.is_local) return Promise.resolve(true);
-      const pending = inFlight.get(id);
-      if (pending) return pending;
-      const key = cloudConsentKey(id);
-      const asking = (async () => {
-        try {
-          if ((await api.getAppSetting(key)) === "true") return true;
-        } catch {
-          /* fall through to asking */
-        }
-        const copy = cloudConsentCopy(providerName(id));
-        const ok = await confirm({
-          title: copy.title,
-          message: intro ? `${intro}\n\n${copy.message}` : copy.message,
-          confirmLabel: copy.confirmLabel,
-          cancelLabel,
-        });
-        if (!ok) return false;
-        try {
-          await api.setAppSetting(key, "true");
-          window.dispatchEvent(new Event(LLM_SETTINGS_CHANGED_EVENT));
-          return true;
-        } catch {
-          return false;
-        }
-      })().finally(() => inFlight.delete(id));
-      inFlight.set(id, asking);
-      return asking;
-    },
-    [confirm],
-  );
+  return askCloudConsent;
 }
 
 /** At launch, if the saved provider is a cloud one you haven't allowed, ask
- *  once (in-app, with the disclosure). Launch is the one moment before every
- *  LLM use, including the cleanup and action items that run by themselves
- *  after a transcription, where there's no click to ask on. "Not now" saves
+ *  once (with the disclosure). Launch is the one moment before every LLM
+ *  use, including the cleanup and action items that run by themselves after
+ *  a transcription, where there's no click to ask on. "Not now" saves
  *  nothing: the backend keeps refusing, and Settings › Ask and Enhance (Test),
  *  Ask's "Review and allow" and the skipped-cleanup notice can ask later. */
 export function CloudConsentOnLaunch() {
@@ -87,10 +78,7 @@ export function CloudConsentOnLaunch() {
     void (async () => {
       try {
         const s = await api.getLlmSettings();
-        await ask(s.providers, s.provider, {
-          intro: cloudConsentLaunchIntro(providerName(s.provider)),
-          cancelLabel: "Not now",
-        });
+        await ask(s.providers, s.provider, { atLaunch: true });
       } catch {
         /* settings unreadable: nothing is sent without consent anyway */
       }
