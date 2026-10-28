@@ -30,6 +30,10 @@
      fotwMockUpdate = "available" | "fail" → the startup update check (5 s
                                      after load) finds v2.4.0; Update now hangs
                                      in "Downloading", or fails
+     fotwMockImportFail = "1"      → the first Transcribe of a staged import
+                                     can't convert screen-walkthrough.mp4:
+                                     that row shows its cause, the others
+                                     convert; "Retry failed file" succeeds
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -336,6 +340,8 @@ function importStage() {
 function importTranscribe(order: string[]) {
   if (!mockImport) throw new Error("no staged import for this meeting");
   if (mockImport.started) return mockImport;
+  const convertFailure = mockImportConvertFailure(order);
+  if (convertFailure) return convertFailure;
   const files = order
     .map((id) => mockImport?.files.find((f) => f.id === id))
     .filter((f): f is MockImportFile => f != null && f.error == null);
@@ -1182,6 +1188,54 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     default:
       return null;
   }
+}
+
+/* ---- import: one file fails to convert (fotwMockImportFail) ----
+   Mirrors import_transcribe's per-file attribution: every file in the order
+   is converted, the bad one emits import:progress "failed" with its cause,
+   and the call resolves with the queue back at idle (started: false) so the
+   row shows its cause and the queue offers Retry. Fails once per page load. */
+let mockImportFailedOnce = false;
+const MOCK_CONVERT_CAUSE = "This file looks damaged or incomplete, so its audio can't be read.";
+function mockImportConvertFailure(order: string[]) {
+  if (!mockImport || mockImportFailedOnce || mockFlag("fotwMockImportFail") !== "1") return null;
+  if (!order.includes("if-2")) return null;
+  mockImportFailedOnce = true;
+  const current = mockImport;
+  const files = order
+    .map((id) => current.files.find((f) => f.id === id))
+    .filter((f): f is MockImportFile => f != null && f.error == null)
+    .map((f) => ({ ...f, convert_error: f.id === "if-2" ? MOCK_CONVERT_CAUSE : null }));
+  return new Promise((resolve) => {
+    let t = 200;
+    for (const f of files) {
+      const id = f.id;
+      window.setTimeout(
+        () =>
+          mockEmit("import:progress", {
+            meeting_id: IMPORT_MEETING_ID,
+            file_id: id,
+            stage: "converting",
+          }),
+        t,
+      );
+      t += 900;
+      window.setTimeout(
+        () =>
+          mockEmit("import:progress", {
+            meeting_id: IMPORT_MEETING_ID,
+            file_id: id,
+            stage: id === "if-2" ? "failed" : "converted",
+            error: id === "if-2" ? MOCK_CONVERT_CAUSE : null,
+          }),
+        t,
+      );
+    }
+    window.setTimeout(() => {
+      mockImport = { ...current, files, boundaries_ms: [], started: false };
+      resolve(mockImport);
+    }, t + 400);
+  });
 }
 
 function installDevMock() {

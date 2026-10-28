@@ -41,6 +41,10 @@ pub struct ImportFile {
     /// Source copy inside the data dir (None for unsupported files).
     pub rel_path: Option<String>,
     pub error: Option<String>,
+    /// Why this file's audio couldn't be converted on the last Transcribe.
+    /// Unlike `error`, the file stays staged so Retry can try it again.
+    #[serde(default)]
+    pub convert_error: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -62,8 +66,250 @@ pub struct ImportStaged {
 struct ImportProgress {
     meeting_id: String,
     file_id: String,
-    /// "converting" | "converted"
+    /// "converting" | "converted" | "failed"
     stage: String,
+    /// With "failed": this file's cause. The rest of the batch carries on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// "Not an audio or video file…", naming exactly what the file picker
+/// accepts so the copy can't drift from the list (spec §3.6: the old copy
+/// listed MOV as supported and then called it "not supported").
+fn unsupported_file_message() -> String {
+    let formats: Vec<String> = AUDIO_EXTS
+        .iter()
+        .chain(VIDEO_EXTS)
+        .map(|e| match *e {
+            "webm" => "WebM".to_string(),
+            other => other.to_ascii_uppercase(),
+        })
+        .collect();
+    format!(
+        "Not an audio or video file this app imports ({}).",
+        formats.join(", ")
+    )
+}
+
+/// Where a staged file's 16 kHz intermediate lives in the meeting's scratch
+/// dir. Keyed by file id, so a conversion finished on an earlier run is found
+/// again whatever the order.
+fn intermediate_path(scratch: &Path, file_id: &str) -> PathBuf {
+    scratch.join(format!("import-{file_id}.16k.wav"))
+}
+
+/// Why ffmpeg couldn't convert a file.
+#[derive(Debug)]
+enum FfmpegError {
+    /// No usable ffmpeg (it couldn't be fetched or started). Every file would
+    /// fail the same way, so this fails the whole batch.
+    Unavailable(String),
+    /// ffmpeg ran and rejected this file: its stderr.
+    Failed(String),
+}
+
+/// The ffmpeg step, behind a trait so tests can stand in for the sidecar.
+trait Ffmpeg {
+    fn convert(
+        &mut self,
+        src: &Path,
+        dst: &Path,
+    ) -> impl std::future::Future<Output = Result<(), FfmpegError>> + Send;
+}
+
+/// What one file's conversion came to, when it didn't work.
+enum ConvertFailure {
+    /// Nothing else in the batch can get past this either (no ffmpeg, an
+    /// unwritable folder).
+    Batch(String),
+    /// This file only: its cause, in words for the import queue.
+    File(String),
+}
+
+const MISSING_COPY: &str =
+    "The imported copy of this file is missing. Remove it and import it again.";
+
+/// ffmpeg's stderr → one sentence about this file. Never says the format is
+/// "not supported": every extension in the picker is one ffmpeg reads, so a
+/// failure is about this file's contents.
+fn describe_ffmpeg_failure(stderr: &str) -> String {
+    let s = stderr.to_ascii_lowercase();
+    if s.contains("does not contain any stream") || s.contains("matches no streams") {
+        "This file has no audio track.".into()
+    } else if s.contains("moov atom not found")
+        || s.contains("invalid data found")
+        || s.contains("could not find codec parameters")
+        || s.contains("end of file")
+    {
+        "This file looks damaged or incomplete, so its audio can't be read.".into()
+    } else if (s.contains("decoder") && s.contains("not found"))
+        || s.contains("unknown decoder")
+        || s.contains("unsupported codec")
+    {
+        "Its audio uses a codec this app can't decode. Export it again as MP4 or M4A and import that file.".into()
+    } else {
+        let last = stderr
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && *l != "Conversion failed!");
+        match last {
+            Some(l) => format!(
+                "Its audio couldn't be converted (ffmpeg: {}).",
+                l.chars().take(160).collect::<String>()
+            ),
+            None => "Its audio couldn't be converted.".into(),
+        }
+    }
+}
+
+/// Convert one staged file to a 16 kHz mono WAV at `dst`: pure Rust for PCM
+/// WAV, ffmpeg otherwise.
+async fn convert_one(
+    src: &Path,
+    dst: &Path,
+    ffmpeg: &mut impl Ffmpeg,
+) -> Result<(), ConvertFailure> {
+    if !src.exists() {
+        return Err(ConvertFailure::File(MISSING_COPY.into()));
+    }
+    let is_wav = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
+    if is_wav {
+        // exotic wav encodings (e.g. float64, ADPCM) fall through to ffmpeg
+        if let Ok((samples, rate)) = fly_audio::mix::read_wav_mono(src) {
+            let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
+            return fly_audio::mix::write_wav_mono_16(dst, &resampled, 16_000).map_err(|e| {
+                ConvertFailure::Batch(format!("Couldn't write converted audio: {e}"))
+            });
+        }
+    }
+    match ffmpeg.convert(src, dst).await {
+        Ok(()) => Ok(()),
+        Err(FfmpegError::Unavailable(e)) => Err(ConvertFailure::Batch(e)),
+        Err(FfmpegError::Failed(stderr)) => {
+            let tail: String = {
+                let chars: Vec<char> = stderr.chars().collect();
+                chars[chars.len().saturating_sub(400)..].iter().collect()
+            };
+            tracing::warn!(stderr = %tail, "import: ffmpeg couldn't convert a file");
+            Err(ConvertFailure::File(describe_ffmpeg_failure(&stderr)))
+        }
+    }
+}
+
+/// Normalize each staged file, in order, to its own 16 kHz mono intermediate
+/// in `scratch` (the meeting's scratch dir, never the meeting folder). A file
+/// that can't be converted, or whose conversion can't be saved, gets its
+/// cause in `convert_error` and the others carry on (spec §3.6); a
+/// conversion finished on an earlier run is reused, so Retry only redoes the
+/// failures. Returns the ready intermediates in order. Fails the whole batch
+/// only for what no file could get past: no ffmpeg, or a folder it can't
+/// write to. Tauri-free so tests can drive it with a synthetic batch.
+async fn normalize_files(
+    files: &mut [ImportFile],
+    data_dir: &Path,
+    scratch: &Path,
+    ffmpeg: &mut impl Ffmpeg,
+    emit: &mut impl FnMut(&str, &str, Option<&str>),
+) -> CmdResult<Vec<PathBuf>> {
+    let mut ready = Vec::with_capacity(files.len());
+    for f in files.iter_mut() {
+        f.convert_error = None;
+        emit(&f.id, "converting", None);
+        let dst = intermediate_path(scratch, &f.id);
+        if !dst.is_file() {
+            let src = f
+                .rel_path
+                .as_ref()
+                .map(|rel| data_dir.join(rel))
+                .unwrap_or_default();
+            // written under a temporary name and renamed when complete, so a
+            // half-written file is never mistaken for a finished one
+            let part = scratch.join(format!("import-{}.part.wav", f.id));
+            let outcome = match convert_one(&src, &part, ffmpeg).await {
+                // a fresh file is often held for a moment by a virus scanner
+                // or the indexer: wait that out, and if it never clears it's
+                // still only this file's problem
+                Ok(()) => fly_storage::rename_with_retry(&part, &dst).map_err(|e| {
+                    tracing::warn!(error = %e, "import: couldn't save a converted file");
+                    ConvertFailure::File(format!(
+                        "Couldn't save its converted audio ({e}). Retry in a moment."
+                    ))
+                }),
+                Err(failure) => Err(failure),
+            };
+            if let Err(failure) = outcome {
+                let _ = std::fs::remove_file(&part);
+                match failure {
+                    ConvertFailure::Batch(e) => return Err(e),
+                    ConvertFailure::File(cause) => {
+                        emit(&f.id, "failed", Some(&cause));
+                        f.convert_error = Some(cause);
+                        continue;
+                    }
+                }
+            }
+        }
+        emit(&f.id, "converted", None);
+        ready.push(dst);
+    }
+    Ok(ready)
+}
+
+/// The real ffmpeg: the bundled sidecar (fetched on first use) or one on PATH.
+struct SidecarFfmpeg<'a> {
+    app: &'a tauri::AppHandle,
+    data_dir: &'a Path,
+    exe: Option<PathBuf>,
+}
+
+impl Ffmpeg for SidecarFfmpeg<'_> {
+    async fn convert(&mut self, src: &Path, dst: &Path) -> Result<(), FfmpegError> {
+        let exe = match &self.exe {
+            Some(exe) => exe.clone(),
+            None => {
+                let on_model = {
+                    let app = self.app.clone();
+                    move |p: models::ModelProgress| {
+                        let _ = app.emit("model:progress", p);
+                    }
+                };
+                let exe = models::ensure_tool(
+                    &on_model,
+                    self.data_dir,
+                    "ffmpeg",
+                    &["ffmpeg"],
+                    "install ffmpeg (macOS: brew install ffmpeg)",
+                )
+                .await
+                .map_err(FfmpegError::Unavailable)?;
+                self.exe = Some(exe.clone());
+                exe
+            }
+        };
+        let mut cmd = tokio::process::Command::new(exe);
+        cmd.arg("-i")
+            .arg(src)
+            .args(["-hide_banner", "-ac", "1", "-ar", "16000", "-vn", "-y"])
+            .arg(dst);
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x0800_0000);
+        }
+        let out = cmd
+            .output()
+            .await
+            .map_err(|e| FfmpegError::Unavailable(format!("Couldn't run ffmpeg: {e}")))?;
+        if !out.status.success() {
+            return Err(FfmpegError::Failed(
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn load_staged(state: &AppState, meeting_id: &str) -> CmdResult<Option<ImportStaged>> {
@@ -220,10 +466,7 @@ pub async fn import_stage(
         let supported = AUDIO_EXTS.contains(&ext.as_str()) || VIDEO_EXTS.contains(&ext.as_str());
 
         let (rel_path, error) = if !supported {
-            (
-                None,
-                Some("Unsupported file type — audio or video only".to_string()),
-            )
+            (None, Some(unsupported_file_message()))
         } else {
             let copy = rec_dir.join(copy_name(&rec_dir, &file_name));
             match std::fs::copy(src, &copy) {
@@ -245,6 +488,7 @@ pub async fn import_stage(
             kind: kind.to_string(),
             rel_path,
             error,
+            convert_error: None,
         });
     }
 
@@ -311,7 +555,10 @@ fn concat_16k(sources: &[PathBuf], dst: &Path, gap_ms: u64) -> CmdResult<(u64, V
 
 /// Normalize the staged files in `order`, join them into the meeting's mixed
 /// track, and queue the standard pipeline. Files omitted from `order`
-/// (removed rows, unsupported files) are dropped and their copies deleted.
+/// (removed rows, unsupported files) leave the queue, and their copies are
+/// deleted once the new queue is saved. If any file can't be converted, the
+/// others still convert, and the queue comes back idle with each cause on
+/// its own file instead of transcribing.
 #[tauri::command]
 pub async fn import_transcribe(
     app: tauri::AppHandle,
@@ -321,28 +568,30 @@ pub async fn import_transcribe(
 ) -> CmdResult<ImportStaged> {
     let _busy = crate::privacy::ImportGuard::enter();
     let Some(staged) = load_staged(&state, &meeting_id)? else {
-        return Err("no staged import for this meeting".into());
+        return Err("No staged import for this meeting".into());
     };
     if staged.started {
         return Ok(staged); // double-click / re-invoke guard
     }
 
-    // apply the user's order; drop (and clean up) everything else
-    let files: Vec<ImportFile> = order
+    // apply the user's order. A file whose conversion failed last time is
+    // kept when it's in the order (Retry) and dropped like any other row
+    // when it isn't.
+    let mut files: Vec<ImportFile> = order
         .iter()
         .filter_map(|id| staged.files.iter().find(|f| &f.id == id).cloned())
         .filter(|f| f.rel_path.is_some() && f.error.is_none())
         .collect();
-    for f in &staged.files {
-        let kept = files.iter().any(|k| k.id == f.id);
-        if !kept {
-            if let Some(rel) = &f.rel_path {
-                let _ = std::fs::remove_file(state.data_dir.join(rel));
-            }
-        }
-    }
+    // Everything else leaves the queue. Its copies are deleted only after
+    // the new queue is saved, so a run that stops before then loses nothing.
+    let dropped: Vec<ImportFile> = staged
+        .files
+        .iter()
+        .filter(|f| !files.iter().any(|k| k.id == f.id))
+        .cloned()
+        .collect();
     if files.is_empty() {
-        return Err("nothing to transcribe — no supported files in the queue".into());
+        return Err("Nothing to transcribe: no supported files in the queue".into());
     }
 
     let rec_dir = state
@@ -350,50 +599,63 @@ pub async fn import_transcribe(
         .join(files[0].rel_path.as_ref().unwrap())
         .parent()
         .map(Path::to_path_buf)
-        .ok_or("staged file has no parent folder")?;
+        .ok_or("Staged file has no parent folder")?;
+    // conversions go to the meeting's scratch dir (machine-local, keyed by
+    // meeting id), never the meeting folder: the startup sweep keeps it while
+    // the import is unfinished, and deleting the meeting removes it
+    let scratch = fly_storage::scratch::prepare_meeting_scratch(&state.data_dir, &meeting_id, None)
+        .map_err(|e| format!("Couldn't prepare a folder for the converted audio: {e}"))?;
 
-    let emit = |file_id: &str, stage: &str| {
+    let mut emit = |file_id: &str, stage: &str, error: Option<&str>| {
         let _ = app.emit(
             "import:progress",
             ImportProgress {
                 meeting_id: meeting_id.clone(),
                 file_id: file_id.to_string(),
                 stage: stage.to_string(),
+                error: error.map(str::to_string),
             },
         );
     };
 
-    // normalize each file to its own 16 kHz mono intermediate (pure Rust for
-    // PCM wav; ffmpeg otherwise), in the user's order
-    let mut intermediates: Vec<PathBuf> = Vec::new();
-    for (i, f) in files.iter().enumerate() {
-        emit(&f.id, "converting");
-        let src = state.data_dir.join(f.rel_path.as_ref().unwrap());
-        let dst = rec_dir.join(format!("import-{i:02}.16k.wav"));
-        let ext = src
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let converted = if ext == "wav" {
-            match fly_audio::mix::read_wav_mono(&src) {
-                Ok((samples, rate)) => {
-                    let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
-                    fly_audio::mix::write_wav_mono_16(&dst, &resampled, 16_000)
-                        .map_err(|e| e.to_string())?;
-                    true
-                }
-                // exotic wav encodings (e.g. float64, ADPCM) fall through to ffmpeg
-                Err(_) => false,
-            }
-        } else {
-            false
+    // normalize each file to its own 16 kHz mono intermediate, in the
+    // user's order; a file that fails is attributed and the rest carry on
+    let mut ffmpeg = SidecarFfmpeg {
+        app: &app,
+        data_dir: &state.data_dir,
+        exe: None,
+    };
+    let intermediates = normalize_files(
+        &mut files,
+        &state.data_dir,
+        &scratch,
+        &mut ffmpeg,
+        &mut emit,
+    )
+    .await?;
+
+    // Deleting the note while its files converted purges the manifest and
+    // the staged copies: never write the queue back for a meeting that's gone.
+    if load_staged(&state, &meeting_id)?.is_none() {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return Err("This import was deleted while its files were converting".into());
+    }
+
+    // Stop before transcribing if any file failed: the batch becomes ONE
+    // transcript, so a file skipped now couldn't be added to it later. The
+    // queue goes back to idle with each cause on its file; finished
+    // conversions stay in scratch, so Retry (or Transcribe without the
+    // failed file) doesn't redo them.
+    if files.iter().any(|f| f.convert_error.is_some()) {
+        let paused = ImportStaged {
+            files,
+            boundaries_ms: Vec::new(),
+            started: false,
+            ..staged
         };
-        if !converted {
-            convert_with_ffmpeg(&app, &state, &src, &dst).await?;
-        }
-        intermediates.push(dst);
-        emit(&f.id, "converted");
+        save_staged(&state, &paused)?;
+        drop_staged_files(&state.data_dir, &scratch, &dropped);
+        return Ok(paused);
     }
 
     // join into the one mixed track the pipeline transcribes
@@ -439,6 +701,7 @@ pub async fn import_transcribe(
         ..staged
     };
     save_staged(&state, &staged)?;
+    drop_staged_files(&state.data_dir, &scratch, &dropped);
 
     // same pipeline as a live recording (single-track: diarize whole file),
     // queued so an active recording is never contended with
@@ -446,48 +709,15 @@ pub async fn import_transcribe(
     Ok(staged)
 }
 
-async fn convert_with_ffmpeg(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    src: &std::path::Path,
-    dst: &std::path::Path,
-) -> CmdResult<()> {
-    let on_model = {
-        let app = app.clone();
-        move |p: models::ModelProgress| {
-            let _ = app.emit("model:progress", p);
+/// Delete what files that left the queue had on disk: the staged copy and
+/// any finished conversion. Only after the queue without them is saved.
+fn drop_staged_files(data_dir: &Path, scratch: &Path, dropped: &[ImportFile]) {
+    for f in dropped {
+        let _ = std::fs::remove_file(intermediate_path(scratch, &f.id));
+        if let Some(rel) = &f.rel_path {
+            let _ = std::fs::remove_file(data_dir.join(rel));
         }
-    };
-    let ffmpeg = models::ensure_tool(
-        &on_model,
-        &state.data_dir,
-        "ffmpeg",
-        &["ffmpeg"],
-        "install ffmpeg (macOS: brew install ffmpeg)",
-    )
-    .await?;
-
-    let mut cmd = tokio::process::Command::new(ffmpeg);
-    cmd.arg("-i")
-        .arg(src)
-        .args(["-ac", "1", "-ar", "16000", "-vn", "-y"])
-        .arg(dst);
-    #[cfg(windows)]
-    {
-        cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd
-        .output()
-        .await
-        .map_err(|e| format!("failed to run ffmpeg: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!(
-            "ffmpeg conversion failed: {}",
-            stderr.chars().take(400).collect::<String>()
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -529,6 +759,340 @@ mod tests {
         let (total, bounds) = concat_16k(&[a], &dst, 1000).unwrap();
         assert_eq!(total, 2000);
         assert_eq!(bounds, vec![2000]);
+    }
+
+    /// Stand-in for the ffmpeg sidecar. A file whose name is in `fail_for`
+    /// fails the way a real ffmpeg does: it starts writing the output, then
+    /// exits with `stderr`. Any other file gets a short valid 16 kHz WAV.
+    struct FakeFfmpeg {
+        fail_for: Vec<&'static str>,
+        stderr: &'static str,
+        unavailable: bool,
+        calls: Vec<String>,
+    }
+
+    impl FakeFfmpeg {
+        fn failing_for(names: &[&'static str], stderr: &'static str) -> Self {
+            Self {
+                fail_for: names.to_vec(),
+                stderr,
+                unavailable: false,
+                calls: Vec::new(),
+            }
+        }
+        fn working() -> Self {
+            Self::failing_for(&[], "")
+        }
+    }
+
+    impl Ffmpeg for FakeFfmpeg {
+        async fn convert(&mut self, src: &Path, dst: &Path) -> Result<(), FfmpegError> {
+            let name = src.file_name().unwrap().to_string_lossy().into_owned();
+            self.calls.push(name.clone());
+            if self.unavailable {
+                return Err(FfmpegError::Unavailable("ffmpeg isn't installed".into()));
+            }
+            if self.fail_for.contains(&name.as_str()) {
+                std::fs::write(dst, b"RIFF....WAVEfmt half-written").unwrap();
+                return Err(FfmpegError::Failed(self.stderr.to_string()));
+            }
+            write_16k_wav(dst, 1.0);
+            Ok(())
+        }
+    }
+
+    /// A staged batch in a temp data dir: real WAVs plus synthetic bad files
+    /// (garbage bytes). No real media. Conversions go to the meeting's
+    /// scratch dir, as in the app.
+    struct Batch {
+        dir: tempfile::TempDir,
+        rec_dir: PathBuf,
+        scratch: PathBuf,
+        files: Vec<ImportFile>,
+    }
+
+    fn batch(entries: &[(&str, &str, Option<f32>)]) -> Batch {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_dir = "recordings/2026/2026-10/imported";
+        let rec_dir = dir.path().join(rel_dir);
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let scratch =
+            fly_storage::scratch::prepare_meeting_scratch(dir.path(), "m-import", None).unwrap();
+        let files = entries
+            .iter()
+            .map(|(id, name, secs)| {
+                let path = rec_dir.join(name);
+                match secs {
+                    // a real recording at 48 kHz, so the WAV path resamples
+                    Some(s) => {
+                        let n = (s * 48_000.0) as usize;
+                        let samples: Vec<f32> = (0..n).map(|i| (i as f32 * 0.01).sin()).collect();
+                        fly_audio::mix::write_wav_mono_16(&path, &samples, 48_000).unwrap();
+                    }
+                    None => std::fs::write(&path, b"not media, just bytes").unwrap(),
+                }
+                ImportFile {
+                    id: id.to_string(),
+                    file_name: name.to_string(),
+                    size: 0,
+                    kind: if name.ends_with(".mov") {
+                        "video"
+                    } else {
+                        "audio"
+                    }
+                    .to_string(),
+                    rel_path: Some(format!("{rel_dir}/{name}")),
+                    error: None,
+                    convert_error: None,
+                }
+            })
+            .collect();
+        Batch {
+            dir,
+            rec_dir,
+            scratch,
+            files,
+        }
+    }
+
+    fn part_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".part"))
+            .collect()
+    }
+
+    type Events = Vec<(String, String, Option<String>)>;
+
+    fn recorder(events: &mut Events) -> impl FnMut(&str, &str, Option<&str>) + '_ {
+        |id, stage, err| events.push((id.into(), stage.into(), err.map(str::to_string)))
+    }
+
+    const MOOV_MISSING: &str = "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] moov atom not found\n\
+         clip.mov: Invalid data found when processing input\n";
+
+    #[tokio::test]
+    async fn a_bad_file_is_attributed_to_itself_and_the_rest_still_convert() {
+        let mut b = batch(&[
+            ("a", "intro.wav", Some(1.0)),
+            ("b", "clip.mov", None),
+            ("c", "outro.wav", Some(2.0)),
+            ("d", "good.mov", None),
+        ]);
+        let mut ffmpeg = FakeFfmpeg::failing_for(&["clip.mov"], MOOV_MISSING);
+        let mut events = Events::new();
+        let ready = normalize_files(
+            &mut b.files,
+            b.dir.path(),
+            &b.scratch,
+            &mut ffmpeg,
+            &mut recorder(&mut events),
+        )
+        .await
+        .expect("one bad file must not fail the batch");
+
+        // the good files converted, in order, to 16 kHz
+        assert_eq!(
+            ready,
+            ["a", "c", "d"].map(|id| intermediate_path(&b.scratch, id))
+        );
+        for p in &ready {
+            let (_, rate) = fly_audio::mix::read_wav_mono(p).unwrap();
+            assert_eq!(rate, 16_000);
+        }
+        // the bad one carries its own cause; the others carry none
+        let cause = b.files[1]
+            .convert_error
+            .clone()
+            .expect("cause on the bad file");
+        assert!(cause.contains("damaged or incomplete"), "{cause}");
+        // a listed format never reads as "not supported"
+        assert!(!cause.to_lowercase().contains("not supported"), "{cause}");
+        for i in [0, 2, 3] {
+            assert_eq!(b.files[i].convert_error, None);
+        }
+        // the bad file stays staged so Retry can try it again
+        assert!(b.files[1].rel_path.is_some());
+        assert!(b.files[1].error.is_none());
+        // only the non-WAVs went to ffmpeg, and the bad one's half-written
+        // output is gone, not mistaken for a finished conversion
+        assert_eq!(ffmpeg.calls, vec!["clip.mov", "good.mov"]);
+        assert!(!intermediate_path(&b.scratch, "b").exists());
+        assert!(
+            part_files(&b.scratch).is_empty(),
+            "{:?}",
+            part_files(&b.scratch)
+        );
+        // nothing derived lands in the meeting folder
+        assert!(part_files(&b.rec_dir).is_empty());
+        assert!(!intermediate_path(&b.rec_dir, "a").exists());
+        // the queue hears about the failure as it happens
+        assert!(events.contains(&("b".into(), "failed".into(), Some(cause.clone()))));
+        assert!(events.contains(&("c".into(), "converted".into(), None)));
+    }
+
+    #[tokio::test]
+    async fn a_garbage_wav_falls_back_to_ffmpeg_and_is_attributed() {
+        let mut b = batch(&[("a", "broken.wav", None), ("b", "fine.wav", Some(1.0))]);
+        let mut ffmpeg = FakeFfmpeg::failing_for(
+            &["broken.wav"],
+            "broken.wav: Invalid data found when processing input\nConversion failed!\n",
+        );
+        let mut events = Events::new();
+        let ready = normalize_files(
+            &mut b.files,
+            b.dir.path(),
+            &b.scratch,
+            &mut ffmpeg,
+            &mut recorder(&mut events),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ready, vec![intermediate_path(&b.scratch, "b")]);
+        assert_eq!(ffmpeg.calls, vec!["broken.wav"]);
+        assert!(b.files[0].convert_error.is_some());
+        assert!(b.files[1].convert_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn no_ffmpeg_at_all_is_the_batchs_problem_not_a_files() {
+        let mut b = batch(&[("a", "clip.mov", None), ("b", "fine.wav", Some(1.0))]);
+        let mut ffmpeg = FakeFfmpeg::working();
+        ffmpeg.unavailable = true;
+        let mut events = Events::new();
+        let err = normalize_files(
+            &mut b.files,
+            b.dir.path(),
+            &b.scratch,
+            &mut ffmpeg,
+            &mut recorder(&mut events),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("ffmpeg"), "{err}");
+        assert!(b.files.iter().all(|f| f.convert_error.is_none()));
+    }
+
+    #[tokio::test]
+    async fn retry_reuses_finished_conversions_and_redoes_only_the_failure() {
+        let mut b = batch(&[
+            ("a", "good.mov", None),
+            ("b", "clip.mov", None),
+            ("c", "intro.wav", Some(1.0)),
+        ]);
+        let mut events = Events::new();
+        let mut run1 = FakeFfmpeg::failing_for(&["clip.mov"], MOOV_MISSING);
+        normalize_files(
+            &mut b.files,
+            b.dir.path(),
+            &b.scratch,
+            &mut run1,
+            &mut recorder(&mut events),
+        )
+        .await
+        .unwrap();
+        assert_eq!(run1.calls, vec!["good.mov", "clip.mov"]);
+        assert!(b.files[1].convert_error.is_some());
+
+        // the file is fixed (say ffmpeg was updated): run 2 converts only it;
+        // good.mov's finished conversion is reused, not redone
+        let mut run2 = FakeFfmpeg::working();
+        let ready = normalize_files(
+            &mut b.files,
+            b.dir.path(),
+            &b.scratch,
+            &mut run2,
+            &mut recorder(&mut events),
+        )
+        .await
+        .unwrap();
+        assert_eq!(run2.calls, vec!["clip.mov"]);
+        assert_eq!(
+            ready,
+            ["a", "b", "c"].map(|id| intermediate_path(&b.scratch, id))
+        );
+        assert!(b.files.iter().all(|f| f.convert_error.is_none()));
+    }
+
+    #[tokio::test]
+    async fn a_conversion_that_cant_be_saved_is_that_files_failure() {
+        let mut b = batch(&[("a", "good.mov", None), ("b", "intro.wav", Some(1.0))]);
+        // something in the way of the finished name (a folder): the rename
+        // fails for good, which must not fail the batch
+        std::fs::create_dir_all(intermediate_path(&b.scratch, "a")).unwrap();
+        let mut ffmpeg = FakeFfmpeg::working();
+        let mut events = Events::new();
+        let ready = normalize_files(
+            &mut b.files,
+            b.dir.path(),
+            &b.scratch,
+            &mut ffmpeg,
+            &mut recorder(&mut events),
+        )
+        .await
+        .expect("a file that can't be saved fails alone");
+        assert_eq!(ready, vec![intermediate_path(&b.scratch, "b")]);
+        let cause = b.files[0].convert_error.clone().expect("cause on a");
+        assert!(cause.contains("Couldn't save"), "{cause}");
+        assert!(b.files[1].convert_error.is_none());
+        assert!(part_files(&b.scratch).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_missing_staged_copy_is_attributed_without_running_ffmpeg() {
+        let mut b = batch(&[("a", "clip.mov", None), ("b", "fine.wav", Some(1.0))]);
+        std::fs::remove_file(b.rec_dir.join("clip.mov")).unwrap();
+        let mut ffmpeg = FakeFfmpeg::working();
+        let mut events = Events::new();
+        let ready = normalize_files(
+            &mut b.files,
+            b.dir.path(),
+            &b.scratch,
+            &mut ffmpeg,
+            &mut recorder(&mut events),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ready.len(), 1);
+        assert!(ffmpeg.calls.is_empty());
+        assert!(b.files[0]
+            .convert_error
+            .as_deref()
+            .unwrap()
+            .contains("missing"));
+    }
+
+    #[test]
+    fn ffmpeg_failures_read_as_causes_not_as_unsupported_formats() {
+        let no_audio = describe_ffmpeg_failure(
+            "Output #0, wav, to 'x.wav':\nOutput file #0 does not contain any stream\n",
+        );
+        assert!(no_audio.contains("no audio track"), "{no_audio}");
+        let no_audio_map = describe_ffmpeg_failure("Stream map '0:a' matches no streams.\n");
+        assert!(no_audio_map.contains("no audio track"), "{no_audio_map}");
+        let damaged = describe_ffmpeg_failure(MOOV_MISSING);
+        assert!(damaged.contains("damaged or incomplete"), "{damaged}");
+        let codec =
+            describe_ffmpeg_failure("Decoder (codec none) not found for input stream #0:1\n");
+        assert!(codec.contains("codec"), "{codec}");
+        // unknown errors keep ffmpeg's own last line, minus the boilerplate
+        let other = describe_ffmpeg_failure("something odd happened\nConversion failed!\n");
+        assert!(other.contains("something odd happened"), "{other}");
+        assert!(!other.contains("Conversion failed!"), "{other}");
+        for cause in [no_audio, damaged, codec, other] {
+            assert!(!cause.to_lowercase().contains("not supported"), "{cause}");
+        }
+    }
+
+    #[test]
+    fn the_unsupported_message_lists_the_formats_the_picker_accepts() {
+        let msg = unsupported_file_message();
+        for ext in AUDIO_EXTS.iter().chain(VIDEO_EXTS) {
+            assert!(msg.to_lowercase().contains(ext), "{msg} should list {ext}");
+        }
+        assert!(msg.contains("MOV"));
     }
 
     #[test]

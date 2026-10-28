@@ -119,6 +119,37 @@ fn write_atomic_with(
     }
 }
 
+/// Rename `from` over `to`, retrying while another process's open handle
+/// blocks it (the same patience as the mirror writes, about 1.5 s). For
+/// callers that stage their own temp file, like media import's converted
+/// audio. Unlike [`write_atomic`] there's no in-place fallback: the error
+/// comes back, and removing `from` is the caller's call. Blocks the thread
+/// while it waits.
+pub fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
+    rename_with_retry_using(from, to, |a, b| std::fs::rename(a, b), RENAME_RETRY)
+}
+
+fn rename_with_retry_using(
+    from: &Path,
+    to: &Path,
+    mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
+    retry: RetryPolicy,
+) -> io::Result<()> {
+    let mut backoff = retry.first_backoff;
+    let mut attempt = 1;
+    loop {
+        match rename(from, to) {
+            // (a directory in the way is not a lock — nothing to wait out)
+            Err(e) if is_transient_lock(&e) && !to.is_dir() && attempt < retry.attempts.max(1) => {
+                attempt += 1;
+                std::thread::sleep(backoff);
+                backoff = backoff.saturating_mul(2);
+            }
+            other => return other,
+        }
+    }
+}
+
 /// `<dir>/.<name>.<pid><n>.tmp` next to the target. The leading dot and
 /// `.tmp` suffix keep it out of every scan that matches mirror names
 /// (`*.md`, `recording.manifest.json`, …).
@@ -356,6 +387,73 @@ mod tests {
         assert!(calls.get() > 1, "the held target really blocked the rename");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
         assert_eq!(entries(dir.path()), vec!["note.json"]);
+    }
+
+    /// `rename_with_retry` (for callers that stage their own temp file):
+    /// the same patience with a lock, but no in-place fallback.
+    #[cfg(windows)]
+    #[test]
+    fn rename_with_retry_waits_out_a_transient_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("a.part"), dir.path().join("a.wav"));
+        std::fs::write(&from, "audio").unwrap();
+        for code in [5, 32, 33] {
+            let calls = std::cell::Cell::new(0);
+            let res = rename_with_retry_using(
+                &from,
+                &to,
+                |_, _| {
+                    calls.set(calls.get() + 1);
+                    Err(io::Error::from_raw_os_error(code))
+                },
+                FAST,
+            );
+            assert_eq!(res.unwrap_err().raw_os_error(), Some(code));
+            assert_eq!(calls.get(), FAST.attempts, "error {code}");
+        }
+        let calls = std::cell::Cell::new(0);
+        rename_with_retry_using(
+            &from,
+            &to,
+            |a, b| {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    std::fs::rename(a, b)
+                }
+            },
+            FAST,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 3);
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "audio");
+        assert!(!from.exists());
+    }
+
+    #[test]
+    fn rename_with_retry_fails_at_once_on_other_errors_and_leaves_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("a.part"), dir.path().join("a.wav"));
+        std::fs::write(&from, "audio").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let err = rename_with_retry_using(
+            &from,
+            &to,
+            |_, _| {
+                calls.set(calls.get() + 1);
+                Err(io::Error::new(io::ErrorKind::NotFound, "simulated"))
+            },
+            FAST,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(calls.get(), 1);
+        // cleaning up the temp file is the caller's call
+        assert!(from.exists());
+        // and the real thing renames
+        rename_with_retry(&from, &to).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "audio");
     }
 
     #[test]
