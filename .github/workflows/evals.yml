@@ -104,7 +104,7 @@ jobs:
           printf 'Changed files:\n%s\n' "$files"
           # The workspace crates fly-evals depends on (no network needed).
           cargo metadata --no-deps --format-version 1 --locked >"$RUNNER_TEMP/workspace.json"
-          closure=$(python3 - "$RUNNER_TEMP/workspace.json" <<'PY'
+          closure=$(python3 -I - "$RUNNER_TEMP/workspace.json" <<'PY'
           import json, os, sys
           m = json.load(open(sys.argv[1], encoding="utf-8"))
           root = m["workspace_root"]
@@ -152,7 +152,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo metadata --format-version 1 --locked >"$RUNNER_TEMP/metadata.json"
-          python3 - "$RUNNER_TEMP/metadata.json" <<'PY'
+          python3 -I - "$RUNNER_TEMP/metadata.json" <<'PY'
           import json, os, sys
           m = json.load(open(sys.argv[1], encoding="utf-8"))
           ws = os.path.realpath(m["workspace_root"])
@@ -241,7 +241,7 @@ jobs:
           fi
           # The verdict must exist, be complete, cover every CI suite and
           # agree with the exit code (an early exit(0) leaves none).
-          python3 - "$code" <<'PY'
+          python3 -I - "$code" <<'PY'
           import json, sys
           code = int(sys.argv[1])
           try:
