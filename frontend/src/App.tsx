@@ -507,6 +507,7 @@ export default function App() {
     setTranscript(null);
     setCleanedTranscript(null);
     setImportStaged(null);
+    setPipelineError(null);
   }, []);
 
   // Undo toast = deferred delete (spec §3.2.5, noteDeletion.ts): the note
@@ -542,17 +543,26 @@ export default function App() {
       setPipelineError(null);
       setPipeDetail(null);
       if (meeting) {
-        const [raw, cleaned, stage, staged] = await Promise.all([
+        // a live pipeline:progress for this meeting while these reads run is
+        // newer than what they return: keep its stage and failure
+        const events = failureSeqRef.current.get(meeting.id) ?? 0;
+        const [raw, cleaned, stage, staged, failure] = await Promise.all([
           api.getTranscript(meeting.id),
           api.getCleanedTranscript(meeting.id).catch(() => null),
           api.pipelineStage(meeting.id),
           api.importState(meeting.id).catch(() => null),
+          // a run that gave up while this note wasn't open (or before a
+          // restart): its terminal event is gone, the cause isn't
+          api.pipelineFailure(meeting.id).catch(() => null),
         ]);
         if (!fresh()) return;
         setTranscript(raw);
         setCleanedTranscript(cleaned);
-        setPipeStage(stage);
         setImportStaged(staged);
+        if ((failureSeqRef.current.get(meeting.id) ?? 0) === events) {
+          setPipeStage(stage);
+          setPipelineError(failure);
+        }
       } else {
         setTranscript(null);
         setCleanedTranscript(null);
@@ -575,6 +585,7 @@ export default function App() {
     setCleanedTranscript(null);
     setPipeStage(null);
     setPipeDetail(null);
+    setPipelineError(null);
     setImportStaged(null);
   };
 
@@ -684,6 +695,11 @@ export default function App() {
         const meetings = await api.getMeetingsForNote(openNote.id);
         setNoteMeetings(meetings);
         setOpenMeeting(meetings[0] ?? null);
+        // the open meeting is now the new recording: nothing has run on it,
+        // so the previous meeting's stage or failure doesn't carry over
+        setPipeStage(null);
+        setPipeDetail(null);
+        setPipelineError(null);
       }
     } catch (e) {
       setError(String(e));
@@ -696,6 +712,8 @@ export default function App() {
       setRecStatus(IDLE_STATUS);
       if (openNote?.id === meeting.note_id) {
         setOpenMeeting(meeting);
+        // a just-recorded meeting has no failed run
+        setPipelineError(null);
         api.getMeetingsForNote(meeting.note_id).then(setNoteMeetings).catch(console.error);
       }
       await refreshNotes();
@@ -764,15 +782,21 @@ export default function App() {
     setOpenMeeting(m);
     setPipelineError(null);
     setPipeDetail(null);
-    const [raw, cleaned, stage] = await Promise.all([
+    // as in openNoteById: a live event during the reads wins over them
+    const events = failureSeqRef.current.get(m.id) ?? 0;
+    const [raw, cleaned, stage, failure] = await Promise.all([
       api.getTranscript(m.id),
       api.getCleanedTranscript(m.id).catch(() => null),
       api.pipelineStage(m.id),
+      api.pipelineFailure(m.id).catch(() => null),
     ]);
     if (!fresh()) return;
     setTranscript(raw);
     setCleanedTranscript(cleaned);
-    setPipeStage(stage);
+    if ((failureSeqRef.current.get(m.id) ?? 0) === events) {
+      setPipeStage(stage);
+      setPipelineError(failure);
+    }
   }, []);
 
   // Undo of a re-diarize hands back the restored raw transcript; the cleaned

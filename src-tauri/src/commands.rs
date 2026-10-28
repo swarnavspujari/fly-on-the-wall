@@ -305,14 +305,18 @@ fn delete_allowed_while_recording(note_id: &str, recording_note_id: Option<&str>
 /// Stop a queued or running transcription (the import queue's Cancel).
 /// Completed batches stay checkpointed, so a later Transcribe resumes
 /// instead of redoing them; the staged import queue drops back to idle.
+/// Always ends in a terminal "cancelled" event, even with nothing running.
 #[tauri::command]
 pub fn cancel_transcription(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     meeting_id: String,
 ) -> CmdResult<()> {
-    crate::import_commands::reset_staged_started(&state, &meeting_id);
-    crate::scheduler::cancel(&state, &crate::scheduler::stage_emitter(&app), &meeting_id)
+    crate::import_commands::cancel_staged_transcription(
+        &state,
+        &crate::scheduler::stage_emitter(&app),
+        &meeting_id,
+    )
 }
 
 // ---------------------------------------------------------------------------
