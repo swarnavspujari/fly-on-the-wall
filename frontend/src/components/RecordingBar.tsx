@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Check, Copy, Megaphone, Square, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, Copy, FileText, Megaphone, Square, X } from "lucide-react";
 import { api } from "../api";
 import { recordingNoticeText } from "../privacy";
 import { healthChips, remindNoticeOn, REMIND_NOTICE_KEY, type HealthChip } from "../recordingBar";
@@ -48,6 +48,7 @@ function useRecordingNotice(meetingId: string | null, noteTitle: string | null) 
   const [notified, setNotified] = useState(false);
   const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
   const resetCopied = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(resetCopied.current), []);
 
   useEffect(() => {
     setReminder(false);
@@ -100,28 +101,36 @@ function useRecordingNotice(meetingId: string | null, noteTitle: string | null) 
 }
 
 /** Whether stopping will start the transcript ("Transcribe when I stop"),
- *  read when each recording starts so the stop button says what happens. */
+ *  so the stop button says what happens. Read when each recording starts and
+ *  again as you reach for the button (hover or focus), so a change made in
+ *  Settings mid-recording shows before you click. */
 function useTranscribesOnStop(meetingId: string | null) {
   const [auto, setAuto] = useState(true);
+  const live = useRef(true);
   useEffect(() => {
-    if (!meetingId) return;
-    let live = true;
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+  const refresh = useCallback(() => {
     api
       .getAsrSettings()
       .then((s) => {
-        if (live) setAuto(s.auto_transcribe);
+        if (live.current) setAuto(s.auto_transcribe);
       })
       .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [meetingId]);
-  return auto;
+  }, []);
+  useEffect(() => {
+    if (meetingId) refresh();
+  }, [meetingId, refresh]);
+  return { auto, refresh };
 }
 
 /** One side of the call (You = your mic, Others = system audio). With no
  *  warning it's a quiet status chip; with one it turns ink and opens the
- *  full cause and fix (there are no live meters yet, spec §3.3.1). */
+ *  full cause and fix. There are no live meters yet (spec §3.3.1): nothing
+ *  checks the mic, so "You" never shows a green "fine". */
 function HealthChipView({
   chip,
   onOpenPrivacySettings,
@@ -132,38 +141,46 @@ function HealthChipView({
   const warn = chip.tone === "warn";
   const [open, setOpen] = useState(false);
   const popRef = useRef<HTMLDivElement>(null);
+  // the same element in both states, so focus has somewhere to go back to
+  const wrapRef = useRef<HTMLSpanElement>(null);
   const depth = useEscapeLayer(() => setOpen(false), open && warn);
   useDialogFocus(popRef, open && warn);
-  // a warning that clears (you unmuted) takes its popover with it
+  // A warning that clears (you unmuted) takes its popover with it; if focus
+  // was in there, it comes back to the chip instead of the page.
   useEffect(() => {
-    if (!warn) setOpen(false);
-  }, [warn]);
+    if (warn || !open) return;
+    setOpen(false);
+    const at = document.activeElement;
+    if (!at || at === document.body) wrapRef.current?.focus();
+  }, [warn, open]);
 
   const name = chip.side === "you" ? "You" : "Others";
   if (!warn) {
     return (
-      <span
-        className="inline-flex flex-none items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-[3px] text-[12px] font-semibold text-text-2"
-        title={
-          chip.tone === "paused"
-            ? "Paused"
-            : chip.side === "you"
-              ? "Your microphone: no problems detected"
-              : "The other participants' audio: no problems detected"
-        }
-      >
+      <span ref={wrapRef} tabIndex={-1} className="inline-flex flex-none outline-none">
         <span
-          className="h-[7px] w-[7px] flex-none rounded-full"
-          style={{ background: chip.tone === "paused" ? "var(--text-3)" : "var(--success)" }}
-        />
-        {chip.label}
+          className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-[3px] text-[12px] font-semibold text-text-2"
+          title={
+            chip.tone === "paused"
+              ? "Paused"
+              : chip.tone === "unmonitored"
+                ? "Your microphone: not monitored yet"
+                : "The other participants' audio: no problems detected"
+          }
+        >
+          <span
+            className="h-[7px] w-[7px] flex-none rounded-full"
+            style={{ background: chip.tone === "ok" ? "var(--success)" : "var(--text-3)" }}
+          />
+          {chip.label}
+        </span>
       </span>
     );
   }
 
   const detail = chip.label.slice(name.length);
   return (
-    <span className="relative inline-flex flex-none">
+    <span ref={wrapRef} tabIndex={-1} className="relative inline-flex flex-none outline-none">
       <button
         type="button"
         aria-label={chip.label}
@@ -174,7 +191,7 @@ function HealthChipView({
       >
         <span className="h-[7px] w-[7px] flex-none rounded-full bg-warning" />
         {name}
-        <span className="hidden md:inline">{detail}</span>
+        <span className="hidden lg:inline">{detail}</span>
       </button>
       {open && (
         <>
@@ -232,8 +249,9 @@ function HealthChipView({
 }
 
 /** Start-of-recording reminder under the notice controls. Never takes focus
- *  (you may already be typing notes); ticking "Participants notified", the X
- *  or Esc closes it. */
+ *  (you may already be typing notes); ticking "Participants notified", the X,
+ *  or Esc while focus is inside it closes it. It doesn't join the global
+ *  Esc stack: an Esc meant for the editor or a rename must not close it. */
 function NoticeReminder({
   copied,
   onCopy,
@@ -243,11 +261,15 @@ function NoticeReminder({
   onCopy: () => void;
   onClose: () => void;
 }) {
-  useEscapeLayer(onClose);
   return (
     <div
       role="region"
       aria-label="Reminder: let participants know"
+      onKeyDown={(e) => {
+        if (e.key !== "Escape" || e.defaultPrevented) return;
+        e.preventDefault();
+        onClose();
+      }}
       className="absolute right-0 z-40 w-[330px] max-w-[calc(100vw-32px)] rounded-2xl border border-line bg-surface p-3.5 text-text"
       style={{ top: "calc(100% + 8px)", boxShadow: "var(--shadow-pop)" }}
     >
@@ -317,7 +339,7 @@ export default function RecordingBar({
 }: Props) {
   const meetingId = status.active ? status.meeting_id : null;
   const notice = useRecordingNotice(meetingId, noteTitle);
-  const transcribesOnStop = useTranscribesOnStop(meetingId);
+  const stopping = useTranscribesOnStop(meetingId);
   if (!status.active) return null;
   const paused = status.state === "paused";
   const chips = healthChips(status.warnings, paused);
@@ -341,6 +363,16 @@ export default function RecordingBar({
           label={paused ? "Recording paused" : "Recording"}
           elapsedMs={status.elapsed_ms}
         />
+        {noteTitle && (
+          <button
+            className="flex-none cursor-pointer rounded p-0.5 text-primary-soft-text hover:bg-primary-soft lg:hidden"
+            onClick={onOpenNote}
+            title={noteTitle}
+            aria-label="Open the recording's note"
+          >
+            <FileText size={14} strokeWidth={1.75} />
+          </button>
+        )}
         {noteTitle && (
           <button
             className="hidden min-w-0 cursor-pointer truncate text-[13px] text-primary-soft-text underline-offset-2 hover:underline lg:block"
@@ -421,10 +453,12 @@ export default function RecordingBar({
             variant="contrast"
             size="sm"
             onClick={onStop}
-            title={transcribesOnStop ? "Stop recording and start the transcript" : "Stop recording"}
+            onMouseEnter={stopping.refresh}
+            onFocus={stopping.refresh}
+            title={stopping.auto ? "Stop recording and start the transcript" : "Stop recording"}
             startIcon={<Square size={11} strokeWidth={1.75} />}
           >
-            {transcribesOnStop ? "Stop and transcribe" : "Stop"}
+            {stopping.auto ? "Stop and transcribe" : "Stop"}
           </Button>
         </div>
       </div>

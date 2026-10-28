@@ -129,10 +129,49 @@ describe("RecordingBar", () => {
     expect(h.onOpenPrivacySettings).toHaveBeenCalledTimes(1);
   });
 
-  it("shows healthy chips with no warnings", async () => {
+  it("shows the chips with no warnings, without claiming the mic is fine", async () => {
     await mount(status());
-    expect(byText("You")).not.toBeNull();
-    expect(byText("Others")).not.toBeNull();
+    const chip = (label: string) =>
+      $$("span[title]").find((el) => el.textContent?.trim() === label) ?? null;
+    expect(chip("You")?.getAttribute("title")).toBe("Your microphone: not monitored yet");
+    expect(chip("Others")?.getAttribute("title")).toContain("no problems detected");
+  });
+
+  it("gives focus back when a warning clears with its details open", async () => {
+    const s = status({ warnings: [MUTED] });
+    const h = await mount(s);
+    await click(chipButton("Others · Output muted"));
+    expect(document.activeElement?.closest('[role="dialog"]')).not.toBeNull();
+    act(() =>
+      root!.render(<RecordingBar status={{ ...s, warnings: [] }} noteTitle="Acme sync" {...h} />),
+    );
+    await flush();
+    expect(host!.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(host!.contains(document.activeElement)).toBe(true);
+  });
+
+  it("opens the note from an icon when the title link is hidden", async () => {
+    const h = await mount(status());
+    await click(host!.querySelector('button[aria-label="Open the recording\'s note"]'));
+    expect(h.onOpenNote).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-reads 'Transcribe when I stop' when you reach for Stop", async () => {
+    const real = await api.getAsrSettings();
+    const asr = vi.spyOn(api, "getAsrSettings").mockResolvedValue(real);
+    await mount(status());
+    expect(byText("Stop and transcribe")).not.toBeNull();
+    asr.mockResolvedValue({ ...real, auto_transcribe: false } as AsrSettings);
+    await act(async () => {
+      byText("Stop and transcribe")!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    });
+    await flush();
+    expect(byText("Stop")).not.toBeNull();
+    asr.mockResolvedValue(real);
+    await act(async () => byText("Stop")!.focus());
+    await flush();
+    expect(byText("Stop and transcribe")).not.toBeNull();
   });
 
   it("copies the recording notice from the bar", async () => {
@@ -164,9 +203,21 @@ describe("RecordingBar", () => {
     expect($$('[aria-label="Reminder: let participants know"]')).toHaveLength(0);
   });
 
-  it("closes the reminder with Esc", async () => {
+  it("ignores a stray Esc meant for something else, but closes on Esc from inside", async () => {
     await mount(status());
+    // e.g. typing in the notes editor or cancelling a rename
     await pressEscape();
+    expect($$('[aria-label="Reminder: let participants know"]')).toHaveLength(1);
+    const inside = host!.querySelector<HTMLElement>(
+      '[aria-label="Reminder: let participants know"] button',
+    )!;
+    inside.focus();
+    await act(async () => {
+      inside.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
+    });
+    await flush();
     expect($$('[aria-label="Reminder: let participants know"]')).toHaveLength(0);
   });
 

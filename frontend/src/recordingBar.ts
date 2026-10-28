@@ -50,8 +50,11 @@ export function classifyWarning(text: string): CaptureWarning {
 
 export interface HealthChip {
   side: CaptureSide;
-  /** "ok": no problems detected · "warn": a warning applies · "paused". */
-  tone: "ok" | "warn" | "paused";
+  /** "ok": checked, no problems detected (the other participants' audio:
+   *  mute, volume, loopback start, macOS silence) · "unmonitored": nothing
+   *  checks it yet (your mic, until level meters land) · "warn": a warning
+   *  applies · "paused". */
+  tone: "ok" | "unmonitored" | "warn" | "paused";
   label: string;
   warnings: CaptureWarning[];
 }
@@ -64,7 +67,8 @@ export function healthChips(warnings: readonly string[], paused: boolean): Healt
     const mine = all.filter((w) => w.side === side);
     const name = side === "you" ? "You" : "Others";
     if (mine.length === 0) {
-      return { side, tone: paused ? "paused" : "ok", label: name, warnings: [] };
+      const quiet = side === "you" ? "unmonitored" : "ok";
+      return { side, tone: paused ? "paused" : quiet, label: name, warnings: [] };
     }
     const more = mine.length > 1 ? ` +${mine.length - 1}` : "";
     return { side, tone: "warn", label: `${name} · ${mine[0].label}${more}`, warnings: mine };

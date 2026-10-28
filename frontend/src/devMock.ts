@@ -34,10 +34,11 @@
                                      can't convert screen-walkthrough.mp4:
                                      that row shows its cause, the others
                                      convert; "Retry failed file" succeeds
-     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "none"
+     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "none"
                                    → with fotwMockRecording, the capture's
                                      warnings are the exact backend sentence
-                                     for that case (recording bar chips)
+                                     for that case (recording bar chips;
+                                     "worst": two warnings + a 1 h timer)
      fotwMockNoAttendees = "1"     → Record starts with no attendees, as with
                                      no calendar event (speaker card, typed)
 
@@ -1281,6 +1282,10 @@ const MOCK_REC_WARNINGS: Record<string, string[]> = {
   loopback: [
     "System audio capture couldn't start (no default output device) — only your microphone is being recorded, so the other participants won't be in this recording.",
   ],
+  worst: [
+    "System audio capture couldn't start (no default output device) — only your microphone is being recorded, so the other participants won't be in this recording.",
+    "System volume is at 0% — the other participants' audio will record as silence. Raise your system volume.",
+  ],
   macos: [
     "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall. If it already shows as allowed, the grant belongs to a previously installed build: remove Fly on the Wall from that list with the − button and re-add it (or run `tccutil reset ScreenCapture com.flyonthewall.app` in Terminal), then relaunch.",
   ],
@@ -1292,7 +1297,7 @@ function mockRecordingQa() {
   return {
     active: true,
     state: mockRecPaused ? "paused" : "recording",
-    elapsed_ms: 154_000,
+    elapsed_ms: which === "worst" ? 3_723_000 : 154_000,
     meeting_id: "m1",
     note_id: "n1",
     warnings: which != null ? (MOCK_REC_WARNINGS[which] ?? []) : (MOCK_REC_WARNINGS.muted ?? []),

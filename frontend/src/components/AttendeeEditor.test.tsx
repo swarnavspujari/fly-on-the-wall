@@ -153,15 +153,15 @@ describe("speaker card", () => {
     expect(card()).toBeNull();
   });
 
-  it("opens the editor with a new row for 'Someone else joined'", async () => {
+  it("opens the editor on 'Edit list' without confirming anything", async () => {
     const m = meetingOf();
     vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(m.id));
     const update = vi.spyOn(api, "updateMeetingAttendees");
     await mount(m);
-    await click(button("Someone else joined", card()));
+    await click(button("Edit list", card()));
     expect(popover()).not.toBeNull();
     expect(card()).toBeNull();
-    expect(popover()!.querySelectorAll("input[data-name-input]")).toHaveLength(SEEDED.length + 1);
+    expect(popover()!.querySelectorAll("input[data-name-input]")).toHaveLength(SEEDED.length);
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -188,21 +188,70 @@ describe("speaker card", () => {
     expect(card()).toBeNull();
   });
 
-  it("dismisses with the X and with Esc, and stays dismissed for that meeting", async () => {
+  it("'Not now' dismisses it for the session without saving anything", async () => {
     const m = meetingOf();
     vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(m.id));
+    const update = vi.spyOn(api, "updateMeetingAttendees");
     await mount(m);
     await click(card()!.querySelector('button[aria-label="Not now"]'));
     expect(card()).toBeNull();
-    await rerender({ ...m });
+    // remounting (switching notes and back) doesn't bring it back
+    act(() => root!.unmount());
+    host!.remove();
+    await mount({ ...m });
     expect(card()).toBeNull();
+    expect(update).not.toHaveBeenCalled();
+  });
 
-    const m2 = meetingOf();
-    vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(m2.id));
-    await rerender(m2);
-    expect(card()).not.toBeNull();
+  it("ignores a stray Esc; Esc from inside hides it only for now", async () => {
+    const m = meetingOf();
+    vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(m.id));
+    const update = vi.spyOn(api, "updateMeetingAttendees");
+    await mount(m);
+    // an Esc meant for something else (the notes editor, a rename)
     await key(document.body, "Escape");
+    expect(card()).not.toBeNull();
+    // Esc while focus is in the card hides it…
+    await key(button("Looks right", card())!, "Escape");
     expect(card()).toBeNull();
+    // …but not for good: it's back next time the note opens
+    act(() => root!.unmount());
+    host!.remove();
+    await mount({ ...m });
+    expect(card()).not.toBeNull();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("never saves names you typed but didn't confirm", async () => {
+    const m = meetingOf({ attendees: [] });
+    vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(m.id));
+    const update = vi.spyOn(api, "updateMeetingAttendees");
+    await mount(m);
+    const input = card()!.querySelector<HTMLInputElement>('input[aria-label="Add a name"]')!;
+    await type(input, "Priya");
+    await key(input, "Enter");
+    await type(input, "Sam");
+    act(() => root!.unmount());
+    host!.remove();
+    root = null;
+    host = null;
+    await flush();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("doesn't add a name twice when the draft repeats one", async () => {
+    const m = meetingOf({ attendees: [] });
+    vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(m.id));
+    const update = vi
+      .spyOn(api, "updateMeetingAttendees")
+      .mockResolvedValue({ ...m, attendees_confirmed: true });
+    await mount(m);
+    const input = card()!.querySelector<HTMLInputElement>('input[aria-label="Add a name"]')!;
+    await type(input, "Priya");
+    await key(input, "Enter");
+    await type(input, "priya ");
+    await click(button("Done", card()));
+    expect(update).toHaveBeenCalledWith(m.id, [{ name: "Priya" }]);
   });
 
   it("without a calendar roster, asks who's on the call and confirms only what you typed", async () => {

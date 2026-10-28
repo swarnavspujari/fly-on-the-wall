@@ -45,23 +45,30 @@ describe("classifyWarning", () => {
     });
   });
 
+  it("puts an unknown, non-mic warning on the others chip as 'Check audio'", () => {
+    expect(classifyWarning("Something about the loopback looks odd.")).toMatchObject({
+      side: "others",
+      label: "Check audio",
+    });
+  });
+
   it("keeps the full sentence for the popover", () => {
     expect(classifyWarning(MUTED).text).toBe(MUTED);
   });
 });
 
 describe("healthChips", () => {
-  it("shows both sides with no problems when there are no warnings", () => {
+  it("never claims the mic is fine: nothing monitors it yet", () => {
     const chips = healthChips([], false);
     expect(chips.map((c) => [c.side, c.tone, c.label])).toEqual([
-      ["you", "ok", "You"],
+      ["you", "unmonitored", "You"],
       ["others", "ok", "Others"],
     ]);
   });
 
   it("flags only the side a warning belongs to", () => {
     const [you, others] = healthChips([MUTED], false);
-    expect(you.tone).toBe("ok");
+    expect(you.tone).toBe("unmonitored");
     expect(others.tone).toBe("warn");
     expect(others.label).toBe("Others · Output muted");
     expect(others.warnings.map((w) => w.text)).toEqual([MUTED]);

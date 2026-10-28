@@ -24,8 +24,9 @@ import { Avatar, Button, useEscapeLayer } from "./ui";
 /** How long the undo affordance stays reachable after a re-analyze. */
 const UNDO_WINDOW_MS = 10 * 60_000;
 
-/** Meetings whose speaker card you closed this session (it doesn't come back
- *  when you switch notes and return). */
+/** Meetings whose speaker card you closed with "Not now" this session (it
+ *  doesn't come back when you switch notes and return). Esc only hides it
+ *  until the note is opened again. */
 const dismissedCards = new Set<string>();
 
 const displayName = (a: Attendee): string => (a.name.trim() ? a.name.trim() : (a.email ?? ""));
@@ -88,6 +89,7 @@ export default function AttendeeEditor({
   // the previous meeting's card.
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [, setDismissTick] = useState(0);
+  const [cardHiddenFor, setCardHiddenFor] = useState<string | null>(null);
   const [cardBusy, setCardBusy] = useState(false);
   const [cardError, setCardError] = useState<string | null>(null);
 
@@ -164,12 +166,12 @@ export default function AttendeeEditor({
     recordingId === meeting.id &&
     !meeting.attendees_confirmed &&
     !dismissedCards.has(meeting.id) &&
+    cardHiddenFor !== meeting.id &&
     !open;
   const dismissCard = () => {
     dismissedCards.add(meeting.id);
     setDismissTick((t) => t + 1);
   };
-  useEscapeLayer(dismissCard, cardOpen);
 
   // The only paths that confirm a roster from the card: "Looks right" (the
   // list exactly as it is) and "Done" after typing names. Both are clicks.
@@ -650,12 +652,14 @@ export default function AttendeeEditor({
         </>
       )}
 
-      {/* success toast — dismissing it doesn't strand the undo (it stays in
-          the popover footer for the same 10 minutes) */}
-      {toast && undoLive && (
+      {/* success toast, anchored under the pill (the bottom corners belong to
+          the notice stack); hidden while the popover is open, whose footer
+          carries the same undo. Dismissing it doesn't strand the undo (it
+          stays in the popover footer for the same 10 minutes). */}
+      {toast && undoLive && !open && (
         <div
-          className="print:hidden fixed bottom-5 right-5 z-50 flex items-center gap-3 rounded-xl border border-line bg-surface py-2.5 pl-3.5 pr-3"
-          style={{ boxShadow: "var(--shadow-lg)" }}
+          className="print:hidden absolute left-0 z-20 flex w-max max-w-[calc(100vw-32px)] items-center gap-3 rounded-xl border border-line bg-surface py-2.5 pl-3.5 pr-3"
+          style={{ top: "calc(100% + 8px)", boxShadow: "var(--shadow-lg)" }}
           role="status"
         >
           <span
@@ -705,11 +709,9 @@ export default function AttendeeEditor({
           busy={cardBusy}
           error={cardError}
           onConfirm={(list) => void confirmRoster(list)}
-          onSomeoneElse={() => {
-            openEditor();
-            addRow();
-          }}
+          onEdit={openEditor}
           onDismiss={dismissCard}
+          onEscape={() => setCardHiddenFor(meeting.id)}
         />
       )}
     </>
@@ -725,21 +727,29 @@ function SpeakerCard({
   busy,
   error,
   onConfirm,
-  onSomeoneElse,
+  onEdit,
   onDismiss,
+  onEscape,
 }: {
   attendees: Attendee[];
   busy: boolean;
   error: string | null;
   onConfirm: (attendees: Attendee[]) => void;
-  onSomeoneElse: () => void;
+  onEdit: () => void;
+  /** "Not now": closed for this meeting for the session. */
   onDismiss: () => void;
+  /** Esc from inside the card: hidden until the note opens again. */
+  onEscape: () => void;
 }) {
   const [names, setNames] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   const hasRoster = attendees.length > 0;
   const fromCalendar = attendees.some((a) => a.email != null);
-  const typed = draft.trim() ? [...names, draft.trim()] : names;
+  const pending = draft.trim();
+  const typed =
+    pending && !names.some((x) => x.toLowerCase() === pending.toLowerCase())
+      ? [...names, pending]
+      : names;
 
   const addName = () => {
     const n = draft.trim();
@@ -773,6 +783,13 @@ function SpeakerCard({
     <div
       role="region"
       aria-label="Who's on this call"
+      // Esc only from inside the card: a stray Esc meant for the notes editor
+      // or a rename elsewhere must never close it
+      onKeyDown={(e) => {
+        if (e.key !== "Escape" || e.defaultPrevented) return;
+        e.preventDefault();
+        onEscape();
+      }}
       className="order-last flex w-full basis-full flex-col gap-3 rounded-[14px] border border-line bg-surface px-4 py-3.5"
       style={{ animation: "fly-fade-up 200ms var(--ease-out)" }}
     >
@@ -804,8 +821,14 @@ function SpeakerCard({
           {chip("You", 0, true)}
           {attendees.map((a, i) => chip(displayName(a), i + 1))}
           <div className="ml-auto flex gap-1.5">
-            <Button variant="ghost" size="xs" onClick={onSomeoneElse} disabled={busy}>
-              Someone else joined
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={onEdit}
+              disabled={busy}
+              title="Add someone who joined, or remove someone who didn't"
+            >
+              Edit list
             </Button>
             <Button
               variant="soft"
