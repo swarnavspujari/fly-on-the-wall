@@ -540,6 +540,11 @@ export default function App() {
       setNoteMeetings(meetings);
       const meeting = meetings[0] ?? null; // newest is the primary
       setOpenMeeting(meeting);
+      // Now, not after the re-render: an event for this meeting that lands
+      // while the reads below run must reach the inline state (the listener
+      // compares against this ref), since the guard then skips the reads.
+      openMeetingIdRef.current = meeting?.id ?? null;
+      setPipeStage(null);
       setPipelineError(null);
       setPipeDetail(null);
       if (meeting) {
@@ -780,6 +785,8 @@ export default function App() {
     const seq = ++openSeq.current;
     const fresh = () => openSeq.current === seq;
     setOpenMeeting(m);
+    openMeetingIdRef.current = m.id; // as in openNoteById: before the reads
+    setPipeStage(null);
     setPipelineError(null);
     setPipeDetail(null);
     // as in openNoteById: a live event during the reads wins over them

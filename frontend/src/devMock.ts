@@ -1005,6 +1005,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "pipeline_failure":
       return mockPipelineFailures[String(args.meetingId)] ?? null;
     case "transcribe_meeting":
+      // re-enqueued: like the backend's job row, the parked failure is gone
+      delete mockPipelineFailures[String(args.meetingId)];
       if (args.meetingId === IMPORT_MEETING_ID && mockImport?.started && !mockImportRunning) {
         mockImportRetry();
       }
