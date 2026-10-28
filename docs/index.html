@@ -732,8 +732,8 @@
     if (os) btn.textContent = "Download for " + os;
   })();
 
-  // Download counter (docs/data/stats.json, refreshed daily by the stats workflow).
-  fetch("data/stats.json")
+  // Download counter (stats.json on the `stats` branch, refreshed daily by the stats workflow).
+  fetch("https://raw.githubusercontent.com/swarnavspujari/fly-on-the-wall/stats/stats.json")
     .then(function (r) { return r.ok ? r.json() : null; })
     .then(function (s) {
       if (!s || !s.totalDownloads) return;
