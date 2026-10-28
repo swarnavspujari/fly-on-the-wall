@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { PanelLeft } from "lucide-react";
 import { api } from "./api";
@@ -7,6 +7,8 @@ import { WHISPER_ENGINE_ID } from "./types";
 import type {
   AppInfo,
   CalendarEvent,
+  CalendarStatus,
+  LlmSettings,
   Folder,
   ImportStaged,
   Meeting,
@@ -23,8 +25,8 @@ import type {
 } from "./types";
 import { readNotesCache, writeNotesCache } from "./notesCache";
 import { useTheme } from "./theme";
-import logoLight from "./assets/brand/fly-on-the-wall-logo.svg";
-import logoDark from "./assets/brand/fly-on-the-wall-logo-dark.svg";
+import { privacySummary, type LiveNoteState } from "./homeModel";
+import { useDeferredDelete } from "./deferredDelete";
 import Sidebar, { type Selection } from "./components/Sidebar";
 import NoteList from "./components/NoteList";
 import Editor from "./components/Editor";
@@ -40,6 +42,8 @@ import {
   type PipelineFailure,
 } from "./pipelineFailures";
 import RestartRequired from "./components/RestartRequired";
+import Home from "./components/Home";
+import UndoToast from "./components/UndoToast";
 import { useUpdater } from "./updater";
 
 /** Window width (px) under which the sidebars collapse into a menu button. */
@@ -111,6 +115,23 @@ export default function App() {
   const [calendarNeedsReconnect, setCalendarNeedsReconnect] = useState<("google" | "msgraph")[]>(
     [],
   );
+  // Which calendars are connected (Up next's "connect a calendar" prompt);
+  // null until the first fetch.
+  const [calendarStatus, setCalendarStatus] = useState<CalendarStatus | null>(null);
+  // Provider whose OAuth window is open (connect or reconnect).
+  const [calendarBusy, setCalendarBusy] = useState<string | null>(null);
+  const refreshCalendarStatus = useCallback(() => {
+    api.getCalendarSettings().then(setCalendarStatus).catch(console.error);
+  }, []);
+  // Saved AI provider + transcription target, for the sidebar privacy pill.
+  const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null);
+  const [asrPrivacy, setAsrPrivacy] = useState<{ tier: string; use_groq: boolean } | null>(null);
+  const refreshLlmSettings = useCallback(() => {
+    api.getLlmSettings().then(setLlmSettings).catch(console.error);
+  }, []);
+  // Meetings with a transcription running (any note), for the list's chips.
+  const [runningMeetings, setRunningMeetings] = useState<ReadonlySet<string>>(() => new Set());
+  const runningMeetingsRef = useRef(new Set<string>());
   const refreshUpcoming = useCallback(() => {
     api
       .upcomingMeetings()
@@ -126,16 +147,22 @@ export default function App() {
   const [settingsFocus, setSettingsFocus] = useState<"engine" | "groq" | null>(null);
   const [showFirstRun, setShowFirstRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Re-run the interactive OAuth flow for a provider whose token expired,
-  // then refresh "Up next" so the Reconnect row clears on success.
-  const reconnectCalendar = useCallback(
+  // Run the interactive OAuth flow: a first connect from Up next, or a
+  // provider whose token expired. Then refresh "Up next" and the connection
+  // status so the prompt / Reconnect row clears on success.
+  const connectCalendar = useCallback(
     (provider: "google" | "msgraph") => {
+      setCalendarBusy(provider);
       void api
         .connectCalendar(provider)
-        .then(refreshUpcoming)
-        .catch((e) => setError(String(e)));
+        .then(() => {
+          refreshUpcoming();
+          refreshCalendarStatus();
+        })
+        .catch((e) => setError(String(e)))
+        .finally(() => setCalendarBusy(null));
     },
-    [refreshUpcoming],
+    [refreshUpcoming, refreshCalendarStatus],
   );
   // Notepad mode: below this width both sidebars fold into a menu button and
   // only the note itself stays visible, so the app works docked in a corner.
@@ -183,6 +210,7 @@ export default function App() {
       .then((s) => {
         setAutoTranscribe(s.auto_transcribe);
         setEngine({ installed: s.engine_installed, managed: s.engine_managed });
+        setAsrPrivacy({ tier: s.tier, use_groq: s.use_groq });
       })
       .catch(console.error);
   }, []);
@@ -217,12 +245,14 @@ export default function App() {
       .catch((e) => setError(String(e)));
     refreshFolders().catch((e) => setError(String(e)));
     refreshAsrState();
+    refreshLlmSettings();
+    refreshCalendarStatus();
     api.listTemplates().then(setTemplates).catch(console.error);
     api
       .getAppSetting("consent.recording_notice_accepted")
       .then((v) => setShowFirstRun(v !== "true"))
       .catch(console.error);
-  }, [refreshFolders, refreshAsrState]);
+  }, [refreshFolders, refreshAsrState, refreshLlmSettings, refreshCalendarStatus]);
 
   // macOS consent probe: a short throwaway system-audio tap at launch, so a
   // TCC denial (incl. the stale-grant case where the Settings toggle already
@@ -315,9 +345,19 @@ export default function App() {
           .catch(() => add(undefined));
       }
     };
+    // Track which meetings are mid-transcription (list status chips). Only a
+    // change of membership re-renders, not every progress tick.
+    const markRunning = (meetingId: string, running: boolean) => {
+      const set = runningMeetingsRef.current;
+      if (set.has(meetingId) === running) return;
+      if (running) set.add(meetingId);
+      else set.delete(meetingId);
+      setRunningMeetings(new Set(set));
+    };
     const unPipeline = listen<PipelineProgress>("pipeline:progress", (e) => {
       const p = e.payload;
       trackFailures(p);
+      markRunning(p.meeting_id, !(p.done || p.stage === "cancelled"));
       if (p.meeting_id !== openMeetingIdRef.current) return;
       // Cancelled is terminal but neither success nor failure: clear the
       // progress UI and drop a staged import queue back to idle (the backend
@@ -487,10 +527,30 @@ export default function App() {
     setImportStaged(null);
   };
 
-  const deleteNote = async (id: string) => {
-    await api.deleteNote(id);
-    dispatchFailures({ type: "noteDeleted", noteId: id });
-    if (openNote?.id === id) {
+  // Undo toast = deferred delete (spec §3.2.5): the note disappears now,
+  // and the delete command runs only when the toast expires. Undo cancels
+  // it; closing the app while it waits deletes nothing.
+  const commitDelete = useCallback(
+    (item: { id: string; title: string }) => {
+      api
+        .deleteNote(item.id)
+        .then(() => dispatchFailures({ type: "noteDeleted", noteId: item.id }))
+        .catch((e) => setError(`Couldn’t delete “${item.title}”: ${String(e)}`))
+        .finally(() => void refreshNotes().catch(console.error));
+    },
+    [refreshNotes],
+  );
+  const pendingDelete = useDeferredDelete<{ id: string; title: string; wasOpen: boolean }>(
+    commitDelete,
+  );
+
+  const deleteNote = (id: string) => {
+    const title =
+      notes.find((n) => n.id === id)?.title ??
+      (openNote?.id === id ? openNote.title : null) ??
+      "Untitled";
+    const wasOpen = openNote?.id === id;
+    if (wasOpen) {
       openSeq.current++;
       setOpenNote(null);
       setOpenMeeting(null);
@@ -499,7 +559,12 @@ export default function App() {
       setCleanedTranscript(null);
       setImportStaged(null);
     }
-    await refreshNotes();
+    pendingDelete.schedule({ id, title, wasOpen });
+  };
+
+  const undoDelete = () => {
+    const item = pendingDelete.undo();
+    if (item?.wasOpen) void openNoteById(item.id);
   };
 
   const moveOpenNote = async (folderId: string | null) => {
@@ -744,13 +809,47 @@ export default function App() {
         (openNote?.id === recStatus.note_id ? openNote.title : null))
       : null;
 
+  // A note waiting on its Undo toast is already gone from every list.
+  const pendingDeleteId = pendingDelete.pending?.id ?? null;
+  const listedNotes = pendingDeleteId ? notes.filter((n) => n.id !== pendingDeleteId) : notes;
+  const listedHits = pendingDeleteId
+    ? searchHits.filter((h) => h.note_id !== pendingDeleteId)
+    : searchHits;
+
+  // Status chips: recording, transcribing (any meeting) and failed runs.
+  const openMeetingId = openMeeting?.id ?? null;
+  const liveNotes = useMemo<LiveNoteState>(() => {
+    const running = new Set(runningMeetings);
+    if (openMeetingId && pipeStage) running.add(openMeetingId);
+    const failed = new Set(pipelineFailures.map((f) => f.meetingId));
+    if (openMeetingId && pipelineError) failed.add(openMeetingId);
+    return {
+      recordingNoteId: recStatus.active ? recStatus.note_id : null,
+      runningMeetingIds: running,
+      failedMeetingIds: failed,
+    };
+  }, [
+    runningMeetings,
+    openMeetingId,
+    pipeStage,
+    pipelineFailures,
+    pipelineError,
+    recStatus.active,
+    recStatus.note_id,
+  ]);
+
+  const privacy = useMemo(() => privacySummary(asrPrivacy, llmSettings), [asrPrivacy, llmSettings]);
+
   // Shared by the docked layout and the narrow-mode drawer.
   const sidebarEl = (
     <Sidebar
       folders={folders}
       upcoming={upcoming}
       calendarNeedsReconnect={calendarNeedsReconnect}
-      onReconnectCalendar={reconnectCalendar}
+      onReconnectCalendar={connectCalendar}
+      calendar={calendarStatus}
+      calendarBusy={calendarBusy}
+      privacy={privacy}
       selection={selection}
       onSelect={setSelection}
       onCreateFolder={(name, parentId) =>
@@ -781,9 +880,10 @@ export default function App() {
   );
   const noteListEl = (
     <NoteList
-      notes={notes}
+      notes={listedNotes}
       searchQuery={searchQuery}
-      searchHits={searchHits}
+      searchHits={listedHits}
+      live={liveNotes}
       selectedNoteId={openNote?.id ?? null}
       onSearchChange={setSearchQuery}
       onOpenNote={(id) => {
@@ -794,7 +894,7 @@ export default function App() {
         setDrawerOpen(false);
         void newNote();
       }}
-      onDeleteNote={(id) => void deleteNote(id)}
+      onDeleteNote={deleteNote}
     />
   );
 
@@ -873,27 +973,22 @@ export default function App() {
             onEditSegment={(id, text) => void editSegment(id, text)}
           />
         ) : (
-          <div className="flex flex-1 flex-col items-center justify-center gap-5 bg-surface text-text-3">
-            <div className="text-center">
-              <img
-                src={resolved === "dark" ? logoDark : logoLight}
-                alt="Fly on the Wall"
-                className="mx-auto block h-auto w-[260px] select-none"
-                draggable={false}
-              />
-              <div className="mt-3 text-sm text-text-2">
-                Select a note, create one, or start recording.
-              </div>
-            </div>
-            {!recStatus.active && (
-              <button
-                onClick={() => void startRecording()}
-                className="inline-flex cursor-pointer items-center gap-2.5 rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-on-primary transition-[filter] hover:brightness-105"
-              >
-                <span className="h-3 w-3 rounded-full bg-on-primary" /> Start a meeting
-              </button>
-            )}
-          </div>
+          <Home
+            recording={recStatus.active}
+            upcoming={upcoming}
+            calendar={calendarStatus}
+            needsReconnect={calendarNeedsReconnect}
+            calendarBusy={calendarBusy}
+            hasNotes={
+              selection.view === "all" && !searchQuery.trim() ? listedNotes.length > 0 : null
+            }
+            onRecord={() => void startRecording()}
+            onStartFromEvent={(ev) => void startFromEvent(ev)}
+            onConnectCalendar={connectCalendar}
+            onOpenSettings={() => setShowSettings(true)}
+            onImport={() => void importMedia()}
+            onNewNote={() => void newNote()}
+          />
         )}
       </div>
       {narrow && drawerOpen && (
@@ -944,6 +1039,13 @@ export default function App() {
         }}
         updater={updater}
       />
+      {pendingDelete.pending && (
+        <UndoToast
+          title={pendingDelete.pending.title}
+          onUndo={undoDelete}
+          onDismiss={pendingDelete.flush}
+        />
+      )}
       {/* after "Delete all my data": blocks the app until it restarts */}
       <RestartRequired />
       {showFirstRun && (
@@ -967,6 +1069,8 @@ export default function App() {
             refreshAsrState();
             api.listTemplates().then(setTemplates).catch(console.error);
             refreshUpcoming();
+            refreshCalendarStatus();
+            refreshLlmSettings();
           }}
         />
       )}

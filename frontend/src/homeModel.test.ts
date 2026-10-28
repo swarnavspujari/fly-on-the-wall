@@ -1,0 +1,331 @@
+import { describe, expect, it } from "vitest";
+import {
+  AI_USES,
+  dateGroupLabel,
+  eventGuests,
+  greeting,
+  groupNotesByDate,
+  isLoopbackUrl,
+  meetingApp,
+  nextVideoEvent,
+  noteStatus,
+  privacySummary,
+  rowDateLabel,
+  upNextState,
+  upNextWhen,
+  type LiveNoteState,
+} from "./homeModel";
+import type { CalendarEvent, LlmSettings, NoteSummary } from "./types";
+
+// Local-time constructors keep these independent of the runner's timezone.
+const NOW = new Date(2026, 9, 27, 14, 0); // Tue Oct 27 2026, 2:00 PM
+const at = (y: number, m: number, d: number, h = 10) => new Date(y, m, d, h, 0).toISOString();
+
+describe("dateGroupLabel", () => {
+  it.each([
+    [at(2026, 9, 27, 0), "Today"],
+    [at(2026, 9, 27, 23), "Today"],
+    [at(2026, 9, 26, 23), "Yesterday"],
+    [at(2026, 9, 25), "Previous 7 days"],
+    [at(2026, 9, 21), "Previous 7 days"],
+    [at(2026, 9, 20), "Previous 30 days"],
+    [at(2026, 8, 28), "Previous 30 days"],
+    [at(2026, 8, 27), "September"],
+    [at(2025, 11, 3), "December 2025"],
+    [at(2026, 9, 28), "Upcoming"],
+    ["not a date", "Undated"],
+  ])("%s → %s", (iso, label) => {
+    expect(dateGroupLabel(iso, NOW)).toBe(label);
+  });
+});
+
+const note = (id: string, happened_at: string, meeting_id: string | null = null): NoteSummary => ({
+  id,
+  title: id,
+  folder_id: null,
+  meeting_id,
+  updated_at: happened_at,
+  happened_at,
+});
+
+describe("groupNotesByDate", () => {
+  it("keeps the list order and groups consecutive runs", () => {
+    const groups = groupNotesByDate(
+      [
+        note("a", at(2026, 9, 27, 13)),
+        note("b", at(2026, 9, 27, 9)),
+        note("c", at(2026, 9, 26)),
+        note("d", at(2026, 9, 23)),
+        note("e", at(2026, 6, 1)),
+      ],
+      NOW,
+    );
+    expect(groups.map((g) => [g.label, g.notes.map((n) => n.id)])).toEqual([
+      ["Today", ["a", "b"]],
+      ["Yesterday", ["c"]],
+      ["Previous 7 days", ["d"]],
+      ["July", ["e"]],
+    ]);
+  });
+
+  it("falls back to updated_at for summaries cached before happened_at existed", () => {
+    const legacy = { ...note("x", ""), happened_at: undefined } as unknown as NoteSummary;
+    legacy.updated_at = at(2026, 9, 27);
+    expect(groupNotesByDate([legacy], NOW)[0].label).toBe("Today");
+  });
+
+  it("no notes → no groups", () => {
+    expect(groupNotesByDate([], NOW)).toEqual([]);
+  });
+});
+
+describe("rowDateLabel", () => {
+  it("today and yesterday show only the time (the group names the day)", () => {
+    expect(rowDateLabel(at(2026, 9, 27, 9), NOW)).not.toMatch(/Oct|·/);
+    expect(rowDateLabel(at(2026, 9, 26, 9), NOW)).not.toMatch(/Oct|·/);
+  });
+
+  it("within a week: weekday + time; older: date + time; another year adds it", () => {
+    expect(rowDateLabel(at(2026, 9, 23, 9), NOW)).toMatch(/·/);
+    expect(rowDateLabel(at(2026, 9, 23, 9), NOW)).not.toMatch(/23/);
+    expect(rowDateLabel(at(2026, 6, 1, 9), NOW)).toMatch(/1/);
+    expect(rowDateLabel(at(2025, 6, 1, 9), NOW)).toMatch(/2025/);
+  });
+});
+
+describe("noteStatus", () => {
+  const idle: LiveNoteState = {
+    recordingNoteId: null,
+    runningMeetingIds: new Set(),
+    failedMeetingIds: new Set(),
+  };
+
+  it("recording wins over everything", () => {
+    const live = { ...idle, recordingNoteId: "n1", runningMeetingIds: new Set(["m1"]) };
+    expect(noteStatus(note("n1", NOW.toISOString(), "m1"), live)).toEqual({
+      label: "Recording",
+      tone: "live",
+    });
+  });
+
+  it("a note without a meeting is notes only", () => {
+    expect(noteStatus(note("n1", NOW.toISOString()), idle)).toEqual({
+      label: "Notes only",
+      tone: "neutral",
+    });
+  });
+
+  it("transcribing, then a failed run", () => {
+    const n = note("n1", NOW.toISOString(), "m1");
+    expect(noteStatus(n, { ...idle, runningMeetingIds: new Set(["m1"]) })?.label).toBe(
+      "Transcribing",
+    );
+    expect(noteStatus(n, { ...idle, failedMeetingIds: new Set(["m1"]) })).toEqual({
+      label: "Transcription failed",
+      tone: "danger",
+    });
+    // a retry in flight beats the old failure
+    expect(
+      noteStatus(n, {
+        ...idle,
+        runningMeetingIds: new Set(["m1"]),
+        failedMeetingIds: new Set(["m1"]),
+      })?.label,
+    ).toBe("Transcribing");
+  });
+
+  it("a meeting with nothing going on has no chip", () => {
+    expect(noteStatus(note("n1", NOW.toISOString(), "m1"), idle)).toBeNull();
+  });
+});
+
+const ev = (over: Partial<CalendarEvent>): CalendarEvent => ({
+  id: "e",
+  provider: "google",
+  title: "Sync",
+  start: new Date(NOW.getTime() + 10 * 60_000).toISOString(),
+  end: new Date(NOW.getTime() + 40 * 60_000).toISOString(),
+  attendees: [],
+  join_url: "https://zoom.us/j/1",
+  ...over,
+});
+
+describe("Up next", () => {
+  const nowMs = NOW.getTime();
+
+  it("offers only events with a join link (the Sidebar rule)", () => {
+    expect(nextVideoEvent([ev({ join_url: null }), ev({ join_url: "" })], nowMs)).toBeNull();
+  });
+
+  it("an in-progress meeting comes before the next one; ended ones are skipped", () => {
+    const ended = ev({
+      id: "ended",
+      start: new Date(nowMs - 60 * 60_000).toISOString(),
+      end: new Date(nowMs - 5 * 60_000).toISOString(),
+    });
+    const live = ev({
+      id: "live",
+      start: new Date(nowMs - 5 * 60_000).toISOString(),
+      end: new Date(nowMs + 25 * 60_000).toISOString(),
+    });
+    const later = ev({ id: "later" });
+    expect(nextVideoEvent([later, ended, live], nowMs)?.id).toBe("live");
+  });
+
+  it.each([
+    ["https://acme.zoom.us/j/123", "Zoom"],
+    ["https://meet.google.com/abc-defg-hij", "Google Meet"],
+    ["https://teams.microsoft.com/l/meetup-join/x", "Teams"],
+    ["https://teams.live.com/meet/1", "Teams"],
+    ["https://acme.webex.com/meet/x", "Webex"],
+    ["https://evilzoom.us.example.com/x", null],
+    ["not a url", null],
+    [null, null],
+  ])("meetingApp(%s) → %s", (url, app) => {
+    expect(meetingApp(url)).toBe(app);
+  });
+
+  it("when: now, minutes away, or a clock time", () => {
+    expect(upNextWhen(ev({ start: new Date(nowMs - 60_000).toISOString() }), nowMs)).toBe(
+      "Now · Zoom",
+    );
+    expect(upNextWhen(ev({}), nowMs)).toBe("In 10 min · Zoom");
+    expect(
+      upNextWhen(ev({ start: new Date(nowMs + 90 * 60_000).toISOString(), join_url: "x" }), nowMs),
+    ).toMatch(/^At /);
+  });
+
+  it("guests leave out you and anyone who declined", () => {
+    const e = ev({
+      attendees: [
+        { email: "me@x.com", name: "Me", is_self: true, declined: false },
+        { email: "dana@x.com", name: "Dana", is_self: false, declined: false },
+        { email: "sam@x.com", is_self: false, declined: false },
+        { email: "no@x.com", name: "No", is_self: false, declined: true },
+      ],
+    });
+    expect(eventGuests(e)).toEqual(["Dana", "sam@x.com"]);
+  });
+
+  it("card state: event, no calendar, or nothing left today", () => {
+    expect(upNextState(true, [], ev({}))).toBe("event");
+    expect(upNextState(false, [], null)).toBe("no-calendar");
+    expect(upNextState(true, [], null)).toBe("empty");
+    // expired: Reconnect, never "connect" or a guess that nothing's on
+    expect(upNextState(true, ["google"], null)).toBe("expired");
+    expect(upNextState(false, ["google"], null)).toBe("expired");
+    // a meeting from another calendar still shows
+    expect(upNextState(true, ["google"], ev({}))).toBe("event");
+    // unknown yet: neutral copy, never a wrong prompt
+    expect(upNextState(null, [], null)).toBe("empty");
+  });
+});
+
+describe("greeting", () => {
+  it.each([
+    [8, "Good morning"],
+    [13, "Good afternoon"],
+    [19, "Good evening"],
+    [2, "Good evening"],
+  ])("%i:00 → %s", (h, text) => {
+    expect(greeting(new Date(2026, 9, 27, h))).toBe(text);
+  });
+});
+
+describe("privacySummary", () => {
+  const providers = [
+    {
+      id: "ollama",
+      default_model: "llama3.1",
+      is_local: true,
+      has_key: true,
+      model: null,
+      base_url: null,
+    },
+    {
+      id: "anthropic",
+      default_model: "c",
+      is_local: false,
+      has_key: true,
+      model: null,
+      base_url: null,
+    },
+    {
+      id: "openai",
+      default_model: "g",
+      is_local: false,
+      has_key: true,
+      model: null,
+      base_url: null,
+    },
+    { id: "nim", default_model: "n", is_local: false, has_key: true, model: null, base_url: null },
+  ];
+  const llm = (provider: string, base_url: string | null = null): LlmSettings => ({
+    provider,
+    providers: providers.map((p) => (p.id === provider ? { ...p, base_url } : p)),
+  });
+  const local = { tier: "balanced", use_groq: false };
+
+  it("is null until both settings load (never claims local early)", () => {
+    expect(privacySummary(null, llm("ollama"))).toBeNull();
+    expect(privacySummary(local, null)).toBeNull();
+  });
+
+  it("Ollama on this computer + local transcription → On this computer", () => {
+    for (const url of [null, "http://localhost:11434", "http://127.0.0.1:11434"]) {
+      const s = privacySummary(local, llm("ollama", url))!;
+      expect(s.offDevice).toBe(false);
+      expect(s.label).toBe("On this computer");
+      expect(s.uses).toEqual([]);
+    }
+  });
+
+  it.each([
+    ["anthropic", null, "Anthropic"],
+    ["openai", null, "OpenAI"],
+    ["nim", null, "NVIDIA"],
+    ["openai", "https://gateway.example.com/v1", "gateway.example.com"],
+  ])("%s (%s) → Cloud on · %s, with every AI use listed", (id, url, where) => {
+    const s = privacySummary(local, llm(id, url))!;
+    expect(s.offDevice).toBe(true);
+    expect(s.label).toBe(`Cloud on · ${where}`);
+    expect(s.uses).toEqual([{ where, what: AI_USES }]);
+    expect(s.footnote).toBe("Except notes you keep local.");
+  });
+
+  it("lists Ask, Enhance, transcript cleanup and action items", () => {
+    expect(AI_USES).toEqual(["Ask", "Enhance", "Transcript cleanup", "Action items"]);
+  });
+
+  it("Groq transcription counts, alone or with a cloud AI provider", () => {
+    const groqOnly = privacySummary({ tier: "cloud", use_groq: true }, llm("ollama"))!;
+    expect(groqOnly.label).toBe("Cloud on · Groq");
+    expect(groqOnly.uses).toEqual([{ where: "Groq", what: ["Transcription (audio)"] }]);
+    const hybrid = privacySummary({ tier: "balanced", use_groq: true }, llm("anthropic"))!;
+    expect(hybrid.label).toBe("Cloud on · Anthropic, Groq");
+  });
+
+  it("an Ollama server on another machine is off this computer, not 'cloud'", () => {
+    const s = privacySummary(local, llm("ollama", "http://192.168.1.20:11434"))!;
+    expect(s.offDevice).toBe(true);
+    expect(s.label).toBe("Off this computer · 192.168.1.20:11434");
+  });
+
+  it("a provider this build doesn't list is assumed off-device", () => {
+    const s = privacySummary(local, { provider: "mistral", providers })!;
+    expect(s.label).toBe("Cloud on · mistral");
+  });
+});
+
+describe("isLoopbackUrl", () => {
+  it.each([
+    ["http://localhost:11434", true],
+    ["http://127.0.0.1:1234", true],
+    ["http://[::1]:8080", true],
+    ["http://192.168.1.2:11434", false],
+    ["https://api.openai.com", false],
+    ["garbage", false],
+  ])("%s → %s", (url, loop) => {
+    expect(isLoopbackUrl(url)).toBe(loop);
+  });
+});

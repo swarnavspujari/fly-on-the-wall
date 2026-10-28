@@ -1,3 +1,5 @@
+import { Fragment, useEffect, useState } from "react";
+import { groupNotesByDate, noteStatus, rowDateLabel, type LiveNoteState } from "../homeModel";
 import type { NoteSummary, SearchHit } from "../types";
 import { Avatar, Badge, Button, SectionLabel } from "./ui";
 import { Mic, Plus, Search, Trash2 } from "lucide-react";
@@ -10,21 +12,10 @@ interface Props {
   onSearchChange: (q: string) => void;
   onOpenNote: (id: string) => void;
   onNewNote: () => void;
+  /** Deletes after an Undo window (App's deferred delete): no confirm. */
   onDeleteNote: (id: string) => void;
-}
-
-/** The meeting's date (started_at, else note created_at) as an absolute
- * local date + time; the year appears once it isn't the current one. */
-function fmtMeetingDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const date = d.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }),
-  });
-  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  return `${date} · ${time}`;
+  /** Recording / transcribing / failed state for the status chips. */
+  live: LiveNoteState;
 }
 
 /** Render a FTS snippet, highlighting the [[match]] markers. */
@@ -69,7 +60,16 @@ export default function NoteList({
   onOpenNote,
   onNewNote,
   onDeleteNote,
+  live,
 }: Props) {
+  // Clock for the date groups (Today rolls over at midnight), refreshed each
+  // minute so render stays pure.
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    setNow(Date.now());
+    const t = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(t);
+  }, []);
   const searching = searchQuery.trim().length > 0;
   const scopeLabel = searching ? "Results" : "Notes";
   const visibleCount = searching ? searchHits.length : notes.length;
@@ -150,49 +150,68 @@ export default function NoteList({
             Create one with “New note”.
           </div>
         ) : (
-          notes.map((n) => {
-            const active = selectedNoteId === n.id;
-            return (
-              <div
-                key={n.id}
-                {...noteDragProps(n.id)}
-                onClick={() => onOpenNote(n.id)}
-                className={`group flex cursor-pointer items-center gap-2.5 rounded-[var(--radius-lg)] px-2.5 py-[9px] ${
-                  active ? "bg-primary-soft" : "hover:bg-surface-3"
-                }`}
-              >
-                <Avatar shape="square" colorKey={n.id} size="md" name={n.title} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                      <span className="min-w-0 truncate text-[14px] font-semibold text-text">
-                        {n.title}
-                      </span>
-                      {n.meeting_id && (
-                        <Mic size={12} strokeWidth={1.75} className="flex-none text-text-3" />
-                      )}
-                    </span>
-                    <button
-                      title="Delete note"
-                      className="hidden flex-none cursor-pointer rounded-[var(--radius-sm)] p-1 text-text-3 hover:bg-surface-3 hover:text-rec group-hover:inline-flex"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (confirm(`Delete note "${n.title}"?`)) onDeleteNote(n.id);
-                      }}
-                    >
-                      <Trash2 size={13} strokeWidth={1.75} />
-                    </button>
-                  </div>
-                  {/* happened_at fallback: pre-feature summaries in the localStorage cache */}
-                  <div className="mt-0.5 text-[12px] text-text-3">
-                    {fmtMeetingDate(n.happened_at ?? n.updated_at)}
-                  </div>
-                </div>
-              </div>
-            );
-          })
+          now != null &&
+          groupNotesByDate(notes, new Date(now)).map((g) => (
+            <Fragment key={g.label}>
+              <SectionLabel as="div" className="px-2.5 pb-1 pt-2.5" role="heading" aria-level={3}>
+                {g.label}
+              </SectionLabel>
+              {g.notes.map((n) => renderRow(n, new Date(now)))}
+            </Fragment>
+          ))
         )}
       </div>
     </div>
   );
+
+  function renderRow(n: NoteSummary, nowDate: Date) {
+    const active = selectedNoteId === n.id;
+    const status = noteStatus(n, live);
+    return (
+      <div
+        key={n.id}
+        {...noteDragProps(n.id)}
+        onClick={() => onOpenNote(n.id)}
+        className={`group flex cursor-pointer items-center gap-2.5 rounded-[var(--radius-lg)] px-2.5 py-[9px] ${
+          active ? "bg-primary-soft" : "hover:bg-surface-3"
+        }`}
+      >
+        <Avatar shape="square" colorKey={n.id} size="md" name={n.title} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="flex min-w-0 flex-1 items-center gap-1.5">
+              <span className="min-w-0 truncate text-[14px] font-semibold text-text">
+                {n.title}
+              </span>
+              {n.meeting_id && (
+                <Mic size={12} strokeWidth={1.75} className="flex-none text-text-3" />
+              )}
+            </span>
+            <button
+              title="Delete note"
+              aria-label={`Delete note “${n.title}”`}
+              className="hidden flex-none cursor-pointer rounded-[var(--radius-sm)] p-1 text-text-3 hover:bg-surface-3 hover:text-rec focus-visible:inline-flex group-hover:inline-flex"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeleteNote(n.id);
+              }}
+            >
+              <Trash2 size={13} strokeWidth={1.75} />
+            </button>
+          </div>
+          <div className="mt-0.5 flex items-center justify-between gap-2">
+            {/* happened_at fallback: pre-feature summaries in the localStorage cache */}
+            <span className="min-w-0 truncate text-[12px] text-text-3">
+              {rowDateLabel(n.happened_at ?? n.updated_at, nowDate)}
+            </span>
+            {status && (
+              <Badge tone={status.tone} size="sm" className="flex-none">
+                {status.label}
+              </Badge>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 }
