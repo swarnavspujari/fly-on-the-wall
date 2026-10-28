@@ -7,15 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use fly_audio::vad::{detect_speech_spans, map_to_original, stitch_spans, SpeechSpan, VadConfig};
+use fly_audio::vad::SpeechSpan;
 use fly_core::Word;
 
 use crate::{AsrError, RawTranscript, Result, TranscribeOptions, TranscriptionEngine};
 
-/// Cap on the speech content of one whisper-cli invocation. Batching many
-/// short spans into one call amortizes model load; the cap keeps single
-/// invocations bounded.
-const MAX_BATCH_SPEECH_MS: u64 = 120_000;
 /// Batches are boosted so their peak reaches this (never attenuated) —
 /// system-loopback audio routinely peaks below −12 dBFS. Shared with the
 /// Groq engine so both tiers apply identical preprocessing.
@@ -62,109 +58,18 @@ impl TranscriptionEngine for WhisperCppEngine {
         on_progress: crate::TranscribeProgressFn<'_>,
         cancel: crate::CancelFn<'_>,
     ) -> Result<RawTranscript> {
-        if !self.model.exists() {
-            return Err(AsrError::ModelMissing(self.model.display().to_string()));
-        }
-        if !wav_path.exists() {
-            return Err(AsrError::BadAudio(wav_path.display().to_string()));
-        }
-
-        let (samples, rate) = fly_audio::mix::read_wav_mono(wav_path)
-            .map_err(|e| AsrError::BadAudio(format!("{}: {e}", wav_path.display())))?;
-        let spans = detect_speech_spans(&samples, rate, &VadConfig::default());
-        let total_speech_ms: u64 = spans.iter().map(|s| s.end_ms - s.start_ms).sum();
-        tracing::debug!(
-            file = %wav_path.file_name().unwrap_or_default().to_string_lossy(),
-            spans = spans.len(),
-            speech_ms = total_speech_ms,
-            total_ms = samples.len() as u64 * 1000 / rate.max(1) as u64,
-            "vad segmentation"
-        );
-
-        let mut words = Vec::new();
-        let mut language = None;
-        let batches = plan_batches(&spans, MAX_BATCH_SPEECH_MS);
-        let mut ckpt = self.resume.then(|| {
-            let model_tag = self
-                .model
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            crate::checkpoint::CheckpointFile::open(
-                crate::checkpoint::checkpoint_path_for(wav_path),
-                crate::checkpoint::plan_key(
-                    "whisper.cpp",
-                    &model_tag,
-                    opts.language.as_deref(),
-                    &batches,
-                ),
-            )
-        });
-        let resumed = ckpt.as_ref().map(|c| c.resumed()).unwrap_or_default();
-        if !resumed.is_empty() {
-            tracing::info!(
-                resumed = resumed.len(),
-                total = batches.len(),
-                "resuming transcription from ASR checkpoint"
-            );
-        }
-        // Initial 0% so the UI shows progress before the first — possibly
-        // minutes-long — batch completes. A silent recording (no speech)
-        // emits nothing: there is no work to report a fraction of.
-        if total_speech_ms > 0 {
-            on_progress(crate::TranscribeProgress {
-                done_ms: 0,
-                total_ms: total_speech_ms,
-                quota_wait_ms: None,
-            });
-        }
-        for (i, (batch, progress)) in batches
-            .iter()
-            .zip(cumulative_progress(&batches))
-            .enumerate()
-        {
-            if let Some(done) = resumed.get(i) {
-                language = language.or_else(|| done.language.clone());
-                words.extend(done.words.iter().cloned());
-                on_progress(progress);
-                continue;
-            }
-            // between batches is the cheap place to abort: everything decoded
-            // so far is already checkpointed
-            if cancel() {
-                return Err(AsrError::Cancelled);
-            }
-            let (mut chunk, map) = stitch_spans(&samples, rate, batch)
-                .map_err(|e| AsrError::BadAudio(e.to_string()))?;
-            fly_audio::mix::normalize_peak(&mut chunk, NORMALIZE_TARGET_PEAK, NORMALIZE_MAX_GAIN);
-            let raw = self.run_whisper_cli(&chunk, rate, opts).await?;
-            let batch_language = raw.language;
-            let mapped: Vec<Word> = raw
-                .words
-                .into_iter()
-                .map(|mut w| {
-                    w.start_ms = map_to_original(w.start_ms, &map);
-                    w.end_ms = map_to_original(w.end_ms, &map);
-                    w
-                })
-                .collect();
-            if let Some(c) = ckpt.as_mut() {
-                c.push(crate::checkpoint::BatchResult {
-                    language: batch_language.clone(),
-                    words: mapped.clone(),
-                    engine: Some(self.id().to_string()),
-                });
-            }
-            language = language.or(batch_language);
-            words.extend(mapped);
-            on_progress(progress);
-        }
-
-        Ok(RawTranscript {
-            language: language.or_else(|| opts.language.clone()),
-            words,
-            segments: vec![],
-        })
+        crate::batch::transcribe_batched(
+            self.id(),
+            &self.model,
+            wav_path,
+            opts,
+            self.resume,
+            None,
+            on_progress,
+            cancel,
+            |chunk, rate| async move { self.run_whisper_cli(&chunk, rate, opts).await },
+        )
+        .await
     }
 }
 
@@ -351,6 +256,8 @@ pub(crate) fn cumulative_progress(batches: &[Vec<SpeechSpan>]) -> Vec<crate::Tra
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch::MAX_BATCH_SPEECH_MS;
+    use fly_audio::vad::{detect_speech_spans, VadConfig};
 
     fn span(start_s: u64, end_s: u64) -> SpeechSpan {
         SpeechSpan {

@@ -1,0 +1,30 @@
+{
+  "out_dir": "C:\\path\\outside\\the\\repo\\asr-results",
+  "cache_dir": "C:\\path\\outside\\the\\repo\\asr-cache",
+  "teams_dir": "C:\\path\\to\\Teams recordings folder",
+  "attribution": "Provenance / licence notes for public data (e.g. AMI: CC BY 4.0)",
+  "items": [
+    {
+      "name": "fotw-2ch-01",
+      "kind": "fotw",
+      "dir": "C:\\path\\to\\two-channel recording folder",
+      "reference": "C:\\path\\to\\human-checked transcript.txt",
+      "ref_self": "<substring of your name in the reference>",
+      "expected_far_end_speakers": 1
+    },
+    {
+      "name": "ami-ES2004a-sdm",
+      "kind": "ami-sdm",
+      "dir": "C:\\path\\to\\ami\\ES2004a-sdm",
+      "reference": "C:\\path\\to\\ami\\ES2004a\\reference.vtt"
+    },
+    {
+      "name": "gold-01",
+      "kind": "gold",
+      "dir": "C:\\path\\to\\recording folder",
+      "start_secs": 720,
+      "max_secs": 900,
+      "reference": "C:\\path\\to\\gold\\meeting\\gold.txt"
+    }
+  ]
+}

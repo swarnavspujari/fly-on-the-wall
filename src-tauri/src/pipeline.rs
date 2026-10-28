@@ -221,7 +221,16 @@ pub async fn run_with(
     }
 
     // ---- settings → engines ----
-    let (tier, use_groq, max_quality, model_override, language_setting, use_gpu) = {
+    let (
+        tier,
+        use_groq,
+        max_quality,
+        model_override,
+        language_setting,
+        use_gpu,
+        engine_setting,
+        xtalk_window_ms,
+    ) = {
         let storage = state.storage.lock().unwrap();
         let get = |k: &str| storage.get_setting(k).ok().flatten();
         (
@@ -233,6 +242,8 @@ pub async fn run_with(
             get("asr.model_id").filter(|s| !s.is_empty()),
             get("asr.language").filter(|s| !s.is_empty()),
             gpu::enabled(&storage),
+            get(ENGINE_SETTING_KEY),
+            get(XTALK_WINDOW_SETTING_KEY).and_then(|v| v.parse::<u64>().ok()),
         )
     };
 
@@ -431,23 +442,33 @@ pub async fn run_with(
             },
         };
 
-        GuardedAsr::chain(
-            local_tiers(
-                state,
-                on_stage,
-                on_model,
-                meeting_id,
-                whisper_exe,
-                model_path,
-                &model_id,
-                threads,
-                &opts,
-                &sample_src,
-                use_gpu,
-            )
-            .await
-            .0,
+        let whisper_tiers = local_tiers(
+            state,
+            on_stage,
+            on_model,
+            meeting_id,
+            whisper_exe.clone(),
+            model_path,
+            &model_id,
+            threads,
+            &opts,
+            &sample_src,
+            use_gpu,
         )
+        .await
+        .0;
+        // Internal engine flag (dormant: off unless set). Parakeet leads,
+        // the unchanged whisper chain stays below it as the fallback.
+        let mut tiers = if use_parakeet(engine_setting.as_deref(), opts.language.as_deref()) {
+            let gpu_leads = whisper_tiers
+                .first()
+                .is_some_and(|t| tier_kind(t) == TierKind::Gpu);
+            parakeet_tiers(on_model, &data_dir, &whisper_exe, gpu_leads, threads).await
+        } else {
+            Vec::new()
+        };
+        tiers.extend(whisper_tiers);
+        GuardedAsr::chain(tiers)
     };
     let diarizer = fly_diarize::sherpa::SherpaDiarizeEngine {
         exe: sherpa_exe,
@@ -584,11 +605,12 @@ pub async fn run_with(
         // source (measured: the system loopback). Genuine talk-over — DIFFERENT
         // words on the two channels at the same instant — has no cross-channel
         // token match and survives.
-        let split = fly_core::crosstalk::split_crosstalk(
-            &mic_raw.words,
-            &sys_raw.words,
-            &fly_core::crosstalk::CrosstalkOptions::default(),
-        );
+        let mut xtalk = fly_core::crosstalk::CrosstalkOptions::default();
+        if let Some(window_ms) = xtalk_window_ms {
+            // internal tuning knob (harness / engine re-tune); unset = shipped
+            xtalk.window_ms = window_ms;
+        }
+        let split = fly_core::crosstalk::split_crosstalk(&mic_raw.words, &sys_raw.words, &xtalk);
         let echo_dropped = mic_raw.words.len().saturating_sub(split.you_words.len());
         if echo_dropped > 0 {
             tracing::info!(
@@ -955,6 +977,94 @@ fn transcribe_detail(
     })
 }
 
+/// Internal engine selector (v2.5 PR 2.2). Not webview-settable (outside
+/// the `consent.`/`capture.`/`ui.` allowlist) and not a Settings row: the
+/// harness and hardware tests set it; everyone else stays on whisper.
+/// Only the fully-local path honours it: with Groq on, Groq leads and the
+/// local fallback chain below it stays whisper (Groq is whisper too).
+pub const ENGINE_SETTING_KEY: &str = "asr.engine";
+/// Same selector from the environment, for testing a dev build on real
+/// meetings without touching the database. Wins over the setting.
+pub const ENGINE_ENV_VAR: &str = "FLYONTHEWALL_ASR_ENGINE";
+/// Internal override of the cross-talk dedup `window_ms` (engine re-tune).
+pub const XTALK_WINDOW_SETTING_KEY: &str = "asr.xtalk_window_ms";
+
+/// Whether this run should lead with Parakeet: only when the internal flag
+/// asks for it AND the meeting is transcribed as English — parakeet-cli has
+/// no language flag, so other languages and auto-detect stay on whisper.
+fn use_parakeet(setting: Option<&str>, language: Option<&str>) -> bool {
+    let wanted = std::env::var(ENGINE_ENV_VAR)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| setting.map(str::to_string));
+    wants_parakeet(wanted.as_deref(), language)
+}
+
+/// Pure half of [`use_parakeet`] (testable without touching the env).
+fn wants_parakeet(flag: Option<&str>, language: Option<&str>) -> bool {
+    flag.map(str::trim) == Some("parakeet") && language == Some("en")
+}
+
+/// Parakeet tiers to put ahead of the whisper chain: the Vulkan build's
+/// parakeet-cli when whisper's GPU benchmark already approved Vulkan and
+/// that build carries one, then the CPU zip's. Best-effort — a missing CLI
+/// or an undownloadable model yields no tiers (whisper transcribes, as it
+/// would without the flag). A Parakeet GPU failure never pins whisper's
+/// GPU verdict (`gpu_model_id: None`).
+async fn parakeet_tiers(
+    on_model: models::ProgressSink<'_>,
+    data_dir: &Path,
+    whisper_cpu_exe: &Path,
+    gpu_leads: bool,
+    threads: usize,
+) -> Vec<AsrTier> {
+    let cpu_cli = models::parakeet_cli_beside(whisper_cpu_exe);
+    let gpu_cli = if gpu_leads {
+        models::artifact("whisper-bin-vulkan")
+            .and_then(|a| models::installed_path(data_dir, a))
+            .and_then(|exe| models::parakeet_cli_beside(&exe))
+    } else {
+        None
+    };
+    if cpu_cli.is_none() && gpu_cli.is_none() {
+        tracing::warn!("parakeet requested but no parakeet-cli is installed — using whisper");
+        return Vec::new();
+    }
+    let model =
+        match models::ensure_engine_model(on_model, data_dir, models::PARAKEET_MODEL_ID).await {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!(error = %e, "parakeet model unavailable — using whisper");
+                return Vec::new();
+            }
+        };
+    let engine = |exe: PathBuf| {
+        Box::new(fly_asr::parakeet::ParakeetEngine {
+            exe,
+            model: model.clone(),
+            threads,
+            force_cpu: false,
+            resume: true,
+        }) as Box<dyn TranscriptionEngine>
+    };
+    let mut tiers = Vec::new();
+    if let Some(exe) = gpu_cli {
+        tiers.push(AsrTier {
+            engine: engine(exe),
+            label: Some("parakeet-vulkan"),
+            gpu_model_id: None,
+        });
+    }
+    if let Some(exe) = cpu_cli {
+        tiers.push(AsrTier {
+            engine: engine(exe),
+            label: None,
+            gpu_model_id: None,
+        });
+    }
+    tiers
+}
+
 /// One engine in the pipeline's fallback chain.
 struct AsrTier {
     engine: Box<dyn TranscriptionEngine>,
@@ -1027,9 +1137,15 @@ impl GuardedAsr {
     }
 
     /// What actually transcribed this meeting, for `Transcript::engine`.
+    /// Engines that report a model tag (Parakeet) record it too, as
+    /// `engine:model`; whisper/groq strings are unchanged.
     fn engine_id(&self) -> String {
         let tier = &self.tiers[*self.active.lock().unwrap()];
-        tier.label.unwrap_or(tier.engine.id()).to_string()
+        let base = tier.label.unwrap_or(tier.engine.id());
+        match tier.engine.model_tag() {
+            Some(model) => format!("{base}:{model}"),
+            None => base.to_string(),
+        }
     }
 
     /// (model_id, error) when a GPU tier failed during this run.
@@ -1078,7 +1194,10 @@ impl GuardedAsr {
             if idx + 1 >= self.tiers.len() {
                 return Err(msg);
             }
-            let ui = if tier.engine.is_local() {
+            let next = &self.tiers[idx + 1];
+            let ui = if tier.engine.id() == "parakeet" && next.engine.id() != "parakeet" {
+                "Parakeet transcription failed — continuing with Whisper"
+            } else if tier.engine.is_local() {
                 "GPU transcription failed — continuing on CPU"
             } else {
                 "Cloud transcription failed — continuing with local transcription"
@@ -1543,6 +1662,118 @@ mod tests {
         assert!(
             notes[0].contains("Cloud transcription failed"),
             "user-visible detail should name the cloud, got: {notes:?}"
+        );
+    }
+
+    /// Stand-in for ParakeetEngine: reports a model tag, optionally fails.
+    struct FakeParakeet {
+        fail: bool,
+    }
+    #[async_trait::async_trait]
+    impl TranscriptionEngine for FakeParakeet {
+        fn id(&self) -> &'static str {
+            "parakeet"
+        }
+        fn is_local(&self) -> bool {
+            true
+        }
+        fn model_tag(&self) -> Option<String> {
+            Some("ggml-parakeet-tdt-0.6b-v3-q8_0".into())
+        }
+        async fn transcribe(
+            &self,
+            _wav: &Path,
+            _opts: &TranscribeOptions,
+        ) -> fly_asr::Result<RawTranscript> {
+            if self.fail {
+                return Err(fly_asr::AsrError::Engine("parakeet-cli exited".into()));
+            }
+            Ok(RawTranscript {
+                language: Some("en".into()),
+                words: vec![fly_core::Word {
+                    text: "parakeet".into(),
+                    start_ms: 0,
+                    end_ms: 100,
+                }],
+                segments: vec![],
+            })
+        }
+    }
+
+    /// The internal ASR keys must never become webview-settable: a page
+    /// script could otherwise switch engines or retune dedup silently.
+    #[test]
+    fn internal_asr_keys_are_not_webview_settable() {
+        assert!(!crate::commands::is_webview_setting_key(ENGINE_SETTING_KEY));
+        assert!(!crate::commands::is_webview_setting_key(
+            XTALK_WINDOW_SETTING_KEY
+        ));
+    }
+
+    #[test]
+    fn parakeet_flag_only_routes_english() {
+        assert!(wants_parakeet(Some("parakeet"), Some("en")));
+        assert!(wants_parakeet(Some(" parakeet "), Some("en")));
+        // other languages and auto-detect stay on whisper
+        assert!(!wants_parakeet(Some("parakeet"), Some("de")));
+        assert!(!wants_parakeet(Some("parakeet"), None));
+        // dormant by default: no flag, or any other value → whisper
+        assert!(!wants_parakeet(None, Some("en")));
+        assert!(!wants_parakeet(Some("whisper"), Some("en")));
+    }
+
+    /// The transcript records engine AND model for Parakeet; whisper's
+    /// engine string is untouched.
+    #[tokio::test]
+    async fn parakeet_transcripts_record_engine_and_model() {
+        let asr = GuardedAsr::chain(vec![
+            tier(Box::new(FakeParakeet { fail: false }), None, None),
+            tier(Box::new(FixedLocal), None, None),
+        ]);
+        let raw = asr
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &|_| {},
+                &|_, _| {},
+                &|| false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(raw.words[0].text, "parakeet");
+        assert_eq!(asr.engine_id(), "parakeet:ggml-parakeet-tdt-0.6b-v3-q8_0");
+    }
+
+    /// A Parakeet failure falls back to the whisper chain below it, says so
+    /// in words the user can act on, and never pins whisper's GPU verdict.
+    #[tokio::test]
+    async fn parakeet_failure_falls_back_to_whisper() {
+        let asr = GuardedAsr::chain(vec![
+            tier(
+                Box::new(FakeParakeet { fail: true }),
+                Some("parakeet-vulkan"),
+                None,
+            ),
+            tier(Box::new(FixedLocal), None, None),
+        ]);
+        let notes = std::sync::Mutex::new(Vec::new());
+        let notify = |d: String| notes.lock().unwrap().push(d);
+        let raw = asr
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &notify,
+                &|_, _| {},
+                &|| false,
+            )
+            .await
+            .expect("whisper must rescue the meeting");
+        assert_eq!(raw.words[0].text, "local");
+        assert_eq!(asr.engine_id(), "whisper.cpp");
+        assert!(asr.runtime_failure().is_none());
+        assert_eq!(
+            notes.lock().unwrap().as_slice(),
+            ["Parakeet transcription failed — continuing with Whisper"]
         );
     }
 

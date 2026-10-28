@@ -285,7 +285,9 @@ pub struct Speaker {
 pub struct Transcript {
     pub meeting_id: String,
     pub language: Option<String>,
-    /// Which ASR engine produced this ("whisper.cpp", "parakeet", "groq").
+    /// Which ASR engine produced this: "whisper.cpp", "whisper.cpp-vulkan",
+    /// "groq", … — and for engines that record their weights,
+    /// "parakeet[-vulkan]:<model file stem>".
     pub engine: String,
     pub segments: Vec<TranscriptSegment>,
     pub speakers: Vec<Speaker>,
