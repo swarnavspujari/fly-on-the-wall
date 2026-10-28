@@ -1,0 +1,25 @@
+[package]
+name = "fly-evals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Fly on the Wall system evals: retrieval, Ask contract and local benchmarks (immutable to AI agents; see evals/README.md)"
+
+# The scorer. It reads the fixtures and thresholds next to it (evals/) and
+# talks to the app only through public crate APIs. It never constructs a
+# real LLM provider (build_provider stays the only constructor): the Ask
+# contract runs against a request-recording mock.
+[dependencies]
+fly-core.workspace = true
+fly-storage.workspace = true
+fly-context = { path = "../../crates/fly-context" }
+fly-llm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+toml = "1"
+tempfile = "3"
