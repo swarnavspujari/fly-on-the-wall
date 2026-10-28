@@ -645,14 +645,14 @@ export default function App() {
     setPipelineError(null);
     try {
       const updated = await api.importTranscribe(staged.meeting_id, order);
-      setImportStaged(updated);
+      if (openMeetingIdRef.current === staged.meeting_id) setImportStaged(updated);
       if (openNoteIdRef.current === staged.note_id) {
         setOpenMeeting(await api.getMeetingForNote(staged.note_id));
       }
     } catch (e) {
       setError(String(e));
       const fresh = await api.importState(staged.meeting_id).catch(() => null);
-      setImportStaged(fresh);
+      if (openMeetingIdRef.current === staged.meeting_id) setImportStaged(fresh);
     }
   };
 
