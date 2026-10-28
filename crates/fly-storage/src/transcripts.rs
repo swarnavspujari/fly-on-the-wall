@@ -71,10 +71,14 @@ impl Storage {
     /// triggers) is rebuilt and the save retried once.
     pub fn save_transcript(&self, transcript: &Transcript) -> Result<()> {
         // Read the old transcript BEFORE it's replaced.
-        let reanchor = self.plan_reanchor(transcript).unwrap_or_else(|e| {
-            tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "re-anchor planning failed; citations stay changed");
-            crate::citations::ReanchorPlan::default()
-        });
+        // `None` = planning failed: fail closed (see upsert_transcript).
+        let reanchor = match self.plan_reanchor(transcript) {
+            Ok(plan) => Some(plan),
+            Err(e) => {
+                tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "re-anchor planning failed; marking citations changed");
+                None
+            }
+        };
         let json = serde_json::to_string(transcript)?;
         let note = match self.upsert_transcript(transcript, &json, &reanchor) {
             Err(e) if crate::segments::is_corrupt(&e) => {
@@ -95,11 +99,14 @@ impl Storage {
 
     /// The upsert plus the database side of re-anchoring, in one savepoint.
     /// A re-anchor error rolls back only the re-anchor (nested savepoint).
+    /// Fail closed: when planning failed (`None`) or the re-anchor rolled
+    /// back, nothing vouches for the meeting's citations any more (cited
+    /// keys may predate a renumbering), so they're all marked `changed`.
     fn upsert_transcript(
         &self,
         transcript: &Transcript,
         json: &str,
-        reanchor: &crate::citations::ReanchorPlan,
+        reanchor: &Option<crate::citations::ReanchorPlan>,
     ) -> Result<Option<crate::citations::ReanchoredNote>> {
         self.conn.execute_batch("SAVEPOINT save_transcript")?;
         let res = (|| -> Result<Option<crate::citations::ReanchoredNote>> {
@@ -108,19 +115,32 @@ impl Storage {
                  ON CONFLICT(meeting_id) DO UPDATE SET json = excluded.json",
                 (&transcript.meeting_id, json),
             )?;
-            if reanchor.is_empty() {
+            let mark_all_changed = || -> Result<()> {
+                self.conn.execute(
+                    "UPDATE citation_locators SET status = 'changed'
+                      WHERE meeting_id = ?1 AND status != 'changed'",
+                    [&transcript.meeting_id],
+                )?;
+                Ok(())
+            };
+            let Some(plan) = reanchor else {
+                mark_all_changed()?;
+                return Ok(None);
+            };
+            if plan.is_empty() {
                 return Ok(None);
             }
             self.conn.execute_batch("SAVEPOINT reanchor")?;
-            match self.apply_reanchor_db(transcript, reanchor) {
+            match self.apply_reanchor_db(transcript, plan) {
                 Ok(note) => {
                     self.conn.execute_batch("RELEASE reanchor")?;
                     Ok(note)
                 }
                 Err(e) => {
-                    tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "re-anchor failed; citations stay changed");
+                    tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "re-anchor failed; marking citations changed");
                     self.conn
                         .execute_batch("ROLLBACK TO reanchor; RELEASE reanchor")?;
+                    mark_all_changed()?;
                     Ok(None)
                 }
             }

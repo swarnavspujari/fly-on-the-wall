@@ -51,8 +51,9 @@ Table: `citation_locators(owner_kind, owner_id, note_id, meeting_id, seg_id, sta
   - Keys are numbered by first appearance, so a re-diarize or re-transcribe routinely renumbers a stable speaker (Karim spk_2 → spk_1).
   - `save_transcript` maps old keys to new keys with the rule `rebuild_speakers` uses: ≥ 80% of the cluster's duration onto one counterpart, in both directions. Weights come from shared segment ids (re-diarize) or from time overlap (re-transcribe).
   - It rewrites the cited `speaker_key` of the stable pairs.
+  - When any speaker was renumbered, a cited key whose cluster has no stable image (it split or merged) is rewritten to a sentinel no segment carries, so it reads `changed`. This matters because its number may now belong to someone else: in the case found in review, Karim was renumbered onto Dana's old spk_0, and the cited Dana line had landed in it. The rule also covers lost segments being re-pointed (`unstable_cluster_whose_number_was_taken_reads_changed`, both the re-diarize and re-transcribe variants). It's never NULL, because a NULL key means "recorded before speaker keys" and matches any speaker.
   - A line that genuinely moved to another cluster still reads `changed`, even when the clusters were renumbered too.
-  - In a transcript with too little context (a single line), a renumbering and a speaker swap look the same.
+  - In a transcript with too little context (a single line), a renumbering and a speaker swap look the same. That case resolves to the stable mapping: the citation reads `ok` / `reanchored`, matching the label `rebuild_speakers` carries over and shows.
 - **No visibility filter.** `citation_locators()` answers for any owner. Callers serving an AI reader (Ask, MCP, a future `segments_by_ids`) must gate on the owner's keep-local status first.
 
 **Re-anchoring** happens in `save_transcript`, while the old transcript is still readable. For each cited segment the new transcript no longer has:
@@ -64,7 +65,8 @@ Table: `citation_locators(owner_kind, owner_id, note_id, meeting_id, seg_id, sta
 5. Rewrite the id in `meeting_items.segment_ids_json` and in the note's `BlockOrigin::Ai.source_segment_ids`. Nothing else changes: not block markdown, order or origin kind, not user blocks, and not the note's `updated_at`.
 
 **Failure handling:**
-- The upsert and the database side of the re-anchor share one savepoint. A re-anchor error rolls back only the re-anchor, through a nested savepoint; citations then stay `changed` on their old ids, and the save still succeeds (`reanchor_db_error_rolls_back_only_the_reanchor`). A failed `RELEASE` rolls back too, so no savepoint is ever left open on the connection.
+- The upsert and the database side of the re-anchor share one savepoint. A re-anchor error rolls back only the re-anchor, through a nested savepoint, and the save still succeeds. A failed `RELEASE` rolls back too, so no savepoint is ever left open on the connection.
+- **Fail closed:** when re-anchor planning fails, or the re-anchor rolls back, nothing vouches for the meeting's citations any more. Even citations on surviving ids may carry pre-renumbering keys. So, inside the same savepoint as the upsert, **every** citation of that meeting is marked `changed` and left on its old id (`reanchor_db_error_rolls_back_only_the_reanchor` checks a citation on a surviving id too).
 - Note mirrors are refreshed afterwards, and their I/O errors are only logged (`reanchor_mirror_failure_never_fails_the_save`).
 
 ## The v3 step (`migrations::to_v3`)

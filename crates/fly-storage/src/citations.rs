@@ -288,18 +288,42 @@ pub(crate) fn stable_key_map(old: &Transcript, new: &Transcript) -> HashMap<Stri
         .collect()
 }
 
+/// A speaker key no segment ever carries: what a cited key becomes when the
+/// speakers were renumbered and its cluster has no stable image. Never NULL —
+/// a NULL `speaker_key` means "recorded before keys" and matches any speaker.
+pub(crate) const UNSTABLE_SPEAKER: &str = "<unstable speaker>";
+
 /// What `save_transcript` does to citations when a transcript is replaced.
 #[derive(Default)]
 pub(crate) struct ReanchorPlan {
-    /// Renumbered speakers: cited key → its key in the new transcript.
+    /// The FULL stable speaker map (identity pairs included), so a key with
+    /// no stable image is distinguishable from one that kept its number.
     key_map: HashMap<String, String>,
     /// Lost cited segment id → best new segment id.
     pairs: Vec<(String, String)>,
 }
 
 impl ReanchorPlan {
+    /// Some stable cluster got a new number.
+    fn renumbered(&self) -> bool {
+        self.key_map.iter().any(|(o, n)| o != n)
+    }
+
+    /// A cited key's key in the new transcript. Without a renumbering every
+    /// key keeps its meaning (a cluster that merely changed shape keeps its
+    /// number). With one, a key whose cluster has no stable image becomes
+    /// [`UNSTABLE_SPEAKER`]: its number may now belong to someone else (a
+    /// stable cluster renumbered onto it), so it must not match anything.
+    fn map_key(&self, key: &str) -> String {
+        match self.key_map.get(key) {
+            Some(to) => to.clone(),
+            None if self.renumbered() => UNSTABLE_SPEAKER.to_string(),
+            None => key.to_string(),
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
-        self.key_map.is_empty() && self.pairs.is_empty()
+        !self.renumbered() && self.pairs.is_empty()
     }
 }
 
@@ -681,13 +705,13 @@ impl Storage {
             }
         }
         let old = self.get_transcript(&new.meeting_id).ok().flatten();
-        let key_map: HashMap<String, String> = old
-            .as_ref()
-            .map(|o| stable_key_map(o, new))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|(o, n)| o != n)
-            .collect();
+        let mut plan = ReanchorPlan {
+            key_map: old
+                .as_ref()
+                .map(|o| stable_key_map(o, new))
+                .unwrap_or_default(),
+            pairs: vec![],
+        };
         let lost: Vec<Lost> = cited
             .into_iter()
             .filter(|(id, _, _, _)| !new_keys.contains_key(id.as_str()))
@@ -712,13 +736,13 @@ impl Storage {
                 Lost {
                     span,
                     words,
-                    speaker_key: key.map(|k| key_map.get(&k).cloned().unwrap_or(k)),
+                    speaker_key: key.map(|k| plan.map_key(&k)),
                     seg_id,
                 }
             })
             .collect();
-        let pairs = match_lost(&lost, new);
-        Ok(ReanchorPlan { key_map, pairs })
+        plan.pairs = match_lost(&lost, new);
+        Ok(plan)
     }
 
     /// After the new transcript is saved, database side only: point the
@@ -738,7 +762,7 @@ impl Storage {
         // Renumbered speakers first: cited keys follow their cluster, so the
         // checks below (and every later read) compare like with like. Row by
         // row, so a swap (spk_0 ↔ spk_1) can't chain.
-        if !plan.key_map.is_empty() {
+        if plan.renumbered() {
             let rows: Vec<(String, String, String, String)> = self
                 .conn
                 .prepare(
@@ -750,11 +774,12 @@ impl Storage {
                 })?
                 .collect::<std::result::Result<_, _>>()?;
             for (kind, owner, seg_id, key) in rows {
-                if let Some(to) = plan.key_map.get(&key) {
+                let to = plan.map_key(&key);
+                if to != key {
                     self.conn.execute(
                         "UPDATE citation_locators SET speaker_key = ?1
                           WHERE owner_kind = ?2 AND owner_id = ?3 AND seg_id = ?4",
-                        (to, &kind, &owner, &seg_id),
+                        (&to, &kind, &owner, &seg_id),
                     )?;
                 }
             }
@@ -1611,7 +1636,8 @@ mod tests {
     fn reanchor_db_error_rolls_back_only_the_reanchor() {
         let (_d, s, note_id, mid) = setup();
         let b = NoteBlock::ai("- Renewal", vec!["a3".into()]);
-        s.update_note_blocks(&note_id, std::slice::from_ref(&b))
+        let kept = NoteBlock::ai("- Bid", vec!["a1".into()]);
+        s.update_note_blocks(&note_id, &[b.clone(), kept.clone()])
             .unwrap();
         let it = item(&mid, &["a3"]);
         s.replace_meeting_items(&mid, std::slice::from_ref(&it))
@@ -1622,14 +1648,24 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'injected'); END;",
             )
             .unwrap();
+        // a1 survives under its id; a3 is replaced by c3.
         s.save_transcript(&transcript(
             &mid,
-            vec![seg("c3", 4_000, "and we ship the renewal on friday")],
+            vec![
+                seg("a1", 0, FIRST[0].2),
+                seg("c3", 4_000, "and we ship the renewal on friday"),
+            ],
         ))
         .expect("save survives a re-anchor failure");
         assert_eq!(
-            s.get_transcript(&mid).unwrap().unwrap().segments[0].id,
+            s.get_transcript(&mid).unwrap().unwrap().segments[1].id,
             "c3"
+        );
+        // Fail closed: with the re-anchor rolled back, nothing vouches for
+        // the surviving citation either.
+        assert_eq!(
+            s.citation_locators(OWNER_NOTE_BLOCK, &kept.id).unwrap()[0].status,
+            CitationStatus::Changed
         );
         let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
         assert_eq!(
@@ -1641,6 +1677,90 @@ mod tests {
         assert!(matches!(&note.blocks[0].origin,
             BlockOrigin::Ai { source_segment_ids } if source_segment_ids == &["a3".to_string()]));
         assert!(s.conn.is_autocommit(), "no savepoint left open");
+    }
+
+    /// Dana spk_0, Karim spk_1; the note cites Dana's d2. After the run,
+    /// Karim is spk_0 (stable: 6/7 of the new spk_0), Dana split across
+    /// spk_1/spk_2 (no stable image), and d2 itself landed in the new spk_0.
+    /// The number spk_0 now means Karim, so the citation must not read as
+    /// Dana's line still holding.
+    fn split_and_renumber(meeting_id: &str, prefix: &str) -> (Transcript, Transcript) {
+        let mk = |id: String, at: u64, key: &str, text: String| {
+            let mut x = seg(&id, at, &text);
+            x.speaker_key = key.into();
+            x
+        };
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        for i in 0..6u64 {
+            old.push(mk(
+                format!("d{i}"),
+                i * 8_000,
+                "spk_0",
+                format!("dana says {i}"),
+            ));
+            old.push(mk(
+                format!("k{i}"),
+                i * 8_000 + 4_000,
+                "spk_1",
+                format!("karim says {i}"),
+            ));
+            let dana_key = match i {
+                2 => "spk_0",
+                0 | 1 | 3 => "spk_1",
+                _ => "spk_2",
+            };
+            new.push(mk(
+                format!("{prefix}d{i}"),
+                i * 8_000,
+                dana_key,
+                format!("dana says {i}"),
+            ));
+            new.push(mk(
+                format!("{prefix}k{i}"),
+                i * 8_000 + 4_000,
+                "spk_0",
+                format!("karim says {i}"),
+            ));
+        }
+        (transcript(meeting_id, old), transcript(meeting_id, new))
+    }
+
+    #[test]
+    fn unstable_cluster_whose_number_was_taken_reads_changed() {
+        for prefix in ["", "x"] {
+            // "" = re-diarize (ids kept); "x" = re-transcribe (new ids)
+            let (_d, s) = test_storage();
+            let note = s.create_note("1:1", None).unwrap();
+            let m = s.create_meeting("1:1", &note.id, &[]).unwrap();
+            let (old, new) = split_and_renumber(&m.id, prefix);
+            let map = stable_key_map(&old, &new);
+            assert_eq!(
+                map.get("spk_1").map(String::as_str),
+                Some("spk_0"),
+                "Karim stable"
+            );
+            assert!(!map.contains_key("spk_0"), "Dana has no stable image");
+            s.save_transcript(&old).unwrap();
+            let b = NoteBlock::ai("- Dana said", vec!["d2".into()]);
+            s.update_note_blocks(&note.id, std::slice::from_ref(&b))
+                .unwrap();
+
+            s.save_transcript(&new).unwrap();
+            let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+            assert_eq!(l.len(), 1, "{prefix:?}");
+            assert_eq!(l[0].status, CitationStatus::Changed, "{prefix:?}: {l:?}");
+            assert_eq!(
+                l[0].speaker_key.as_deref(),
+                Some(UNSTABLE_SPEAKER),
+                "never NULL"
+            );
+            assert_eq!(
+                l[0].seg_id,
+                format!("{prefix}d2"),
+                "{prefix:?}: still points at it"
+            );
+        }
     }
 
     #[test]
