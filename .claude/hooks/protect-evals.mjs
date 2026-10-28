@@ -451,14 +451,14 @@ const SHELL_INLINE = /^(-c|-lc|-ic|-xc|-ec|-command|-c[a-z]*|\/c|\/k)$/i;
 // flag isn't listed is treated as reading stdin (fail closed): `perl -p`
 // loops over stdin, `ruby -r x` still reads its script from stdin.
 const INLINE_FLAGS = {
-  python: /^-[a-zA-Z]*c$/,
-  py: /^-[a-zA-Z]*c$/,
+  python: /^-[bBdEhiIOqsSuvx]*c$/,
+  py: /^-[bBdEhiIOqsSuvx]*c$/,
   node: /^(-e|--eval|-p|--print)$/,
   nodejs: /^(-e|--eval|-p|--print)$/,
   bun: /^(-e|--eval|-p|--print)$/,
   deno: /^(eval)$/,
-  perl: /^-[a-zA-Z]*[eE]$/,
-  ruby: /^-[a-zA-Z]*e$/,
+  perl: /^-[aclnpsTtUuWwX0-9]*[eE]$/,
+  ruby: /^-[acdlnpsvwyW]*e$/,
   php: /^-r$/,
   osascript: /^-e$/,
 };
@@ -646,7 +646,7 @@ export function commandViolation(command, ctx = {}, depth = 0) {
       const rest = ws.slice(k + 1);
       const shell = SHELLS.has(v);
       if (!shell && !isInterpreter(v)) return null;
-      if (rest.some((x) => (shell ? SHELL_INLINE.test(x) : inlineFlag(v, x)))) return null;
+      if (rest.some((x, j) => (shell ? SHELL_INLINE.test(x) : inlineFlag(v, x) && j + 1 < rest.length))) return null;
       // The script argument, skipping options that take a value (-o x, +o x, -O x).
       let script = null;
       for (let j = 0; j < rest.length; j++) {
