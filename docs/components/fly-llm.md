@@ -1,7 +1,7 @@
 # LLM providers (`fly-llm`)
 
 > Layer: crate. Described at main `82b7edf` (v2.4.0).
-> In flight: None in this crate. The tool loop, `converse()` / `chat_stream()` and capability probing are merged but **dormant** (no app caller); the Ask harness PR 3.3 will wire them. The consent hardening (#102) changes the gate in the app's `build_provider`, not this crate.
+> In flight: None in this crate. The tool loop, `converse()` / `chat_stream()` and capability probing are merged but **dormant** (no app caller); the Ask harness PR 3.3 will wire them.
 
 ## Purpose
 The `LLMProvider` trait and its two HTTP implementations: `AnthropicProvider` (`/v1/messages`) and `OpenAiCompatProvider` (OpenAI, NVIDIA NIM, and Ollama's native `/api/chat`). Today every feature (Enhance, Ask, transcript polish, item extraction, Test connection) uses only the text-only `chat()` call, whose request bodies are frozen by a golden test. The block-structured `converse()` / `chat_stream()` surface, the bounded tool loop, and small-model tool-call repair are there for the agentic Ask harness. The crate holds no policy: consent, Keep local and base-URL checks live in the app's `build_provider`.
@@ -36,7 +36,7 @@ The `LLMProvider` trait and its two HTTP implementations: `AnthropicProvider` (`
 | Mock | `mock::MockLLMProvider::{new, with_response, scripted, requests, remaining}` |
 | Unused by the app | `ProviderSettings` (`lib.rs:163-167`) |
 
-The app uses only `chat()`, `test_connection()`, `model()`, `id()`, the four constructors, `ANTHROPIC_DEFAULT_MODEL`, `successor_model()` and `MockLLMProvider` (`src-tauri/src/llm_commands.rs:9,23,48,312-340`, `src-tauri/src/extraction.rs:12`).
+The app uses only `chat()`, `test_connection()`, `model()`, `id()`, the four constructors, `ANTHROPIC_DEFAULT_MODEL`, `successor_model()` and `MockLLMProvider` (`src-tauri/src/llm_commands.rs:9,23,48,624-652`, `src-tauri/src/extraction.rs:12`).
 
 ### Tauri commands
 None (crates expose no commands). The LLM commands live in [app-llm](app-llm.md).
@@ -45,7 +45,7 @@ None (crates expose no commands). The LLM commands live in [app-llm](app-llm.md)
 None.
 
 ### Settings keys
-None read by this crate. The app reads `llm.provider`, `llm.<provider>.model`, `llm.<provider>.base_url` and `consent.cloud_llm.<provider>` in `build_provider` (`llm_commands.rs:268-290`) and passes plain values in; see [app-settings-consent](app-settings-consent.md).
+None read by this crate. The app reads `llm.provider`, `llm.<provider>.model`, `llm.<provider>.base_url` and `consent.cloud_llm.<provider>` in `build_provider` (`llm_commands.rs:581-602`) and passes plain values in; see [app-settings-consent](app-settings-consent.md).
 
 ### Database
 None.
@@ -56,10 +56,10 @@ None at runtime. The golden test rewrites `crates/fly-llm/tests/golden/legacy_bo
 ### Network egress
 | Host | When | Gate (consent / keep-local / user action) |
 |---|---|---|
-| `https://api.anthropic.com/v1/messages` (`anthropic.rs:131,352-355`) | `AnthropicProvider` `chat` / `converse` / `chat_stream` / `test_connection` | App only: `build_provider` checks cloud consent and Keep local (`llm_commands.rs:290-301`). The host is fixed because the app never sets `base_url` (`llm_commands.rs:278,333-336`). The field is `pub`, so the crate itself doesn't enforce it. |
-| `https://api.openai.com/v1/chat/completions` (`openai_compat.rs:51,264-268`), or a custom base URL | OpenAI provider calls | Consent + Keep local in `build_provider`. Custom base URL must be https (http only to loopback), checked on save (`llm_commands.rs:858`) and on use (`llm_commands.rs:279-281`, `validate_base_url` `:822-851`). |
+| `https://api.anthropic.com/v1/messages` (`anthropic.rs:131,352-355`) | `AnthropicProvider` `chat` / `converse` / `chat_stream` / `test_connection` | App only: `build_provider` checks cloud consent and Keep local (`llm_commands.rs:602-613`). The host is fixed because the app never sets `base_url` (`llm_commands.rs:591,645-648`). The field is `pub`, so the crate itself doesn't enforce it. |
+| `https://api.openai.com/v1/chat/completions` (`openai_compat.rs:51,264-268`), or a custom base URL | OpenAI provider calls | Consent + Keep local in `build_provider`. Custom base URL must be https (http only to loopback), checked on save (`llm_commands.rs:1170`) and on use (`llm_commands.rs:592-594`, `validate_base_url` `:1134-1163`). |
 | `https://integrate.api.nvidia.com/v1/chat/completions` (`openai_compat.rs:61`), or a custom base URL | NIM provider calls | Same as OpenAI. |
-| `http://localhost:11434/api/chat` and `/api/show` (`openai_compat.rs:71,192-194,253-257,323`), or the configured Ollama URL (any http(s) host) | Ollama `chat` / `converse` / `chat_stream` / `probe_capabilities` (probe is dormant) | No consent (local kind). Keep-local data is refused when the Ollama URL isn't loopback (`on_device`, `llm_commands.rs:300`). |
+| `http://localhost:11434/api/chat` and `/api/show` (`openai_compat.rs:71,192-194,253-257,323`), or the configured Ollama URL (any http(s) host) | Ollama `chat` / `converse` / `chat_stream` / `probe_capabilities` (probe is dormant) | No consent (local kind). Keep-local data is refused when the Ollama URL isn't loopback (`on_device`, `llm_commands.rs:612`). |
 
 Retries can repeat a request to the same host: Anthropic re-POSTs after a 400 up to 4 times, each time with one optional feature removed (`anthropic.rs:294-301,332-339`). Ollama retries once without `think` (400 mentioning "think") and once without `num_ctx` (5xx) (`openai_compat.rs:338-355`). There is no retry or backoff for 429 / 529; they come back as `LlmError::Provider("<status>: <first 300 chars>")`.
 
@@ -69,7 +69,7 @@ Timeouts: the Anthropic client has a 20 s connect / 1,200 s total timeout (`anth
 None.
 
 ### Secrets and keychain entries
-None read here. Keys arrive as plain `String`s from `build_provider`, which reads `fly_secrets::keys::{OPENAI,NIM,ANTHROPIC}_API_KEY` (`llm_commands.rs:304-336`). Header carriage:
+None read here. Keys arrive as plain `String`s from `build_provider`, which reads `fly_secrets::keys::{OPENAI,NIM,ANTHROPIC}_API_KEY` (`llm_commands.rs:616-648`). Header carriage:
 | Provider | Header |
 |---|---|
 | Anthropic | `x-api-key: <key>`, `anthropic-version: 2023-06-01`, plus `anthropic-beta: server-side-fallback-2026-07-01` only when the body has `fallbacks` (`anthropic.rs:356-360,379`) |
@@ -83,9 +83,9 @@ The crate never logs keys or bodies. Its one `tracing::warn!` logs only the mode
 - **Outbound:** reqwest 0.13 (workspace), serde / serde_json (sorted-key maps: no `preserve_order` in `Cargo.lock`), futures-util, async-trait, thiserror, tracing. fly-core is declared but unused.
 
 ## Invariants
-- `build_provider` is the only LLM constructor; consent and Keep local are enforced there, before any request (spec §2 item 1; `lib.rs:13-14`; enforced at `llm_commands.rs:256-341`). The crate cannot enforce this itself: constructors and fields (`base_url`, `api_key`) are `pub`.
-- A stored API key only goes to an https host or loopback; the Anthropic host is fixed (THREAT_MODEL T4; `docs/SECURITY_AUDIT_2026-10.md` "Anthropic and Groq hosts are fixed"). Enforced in the app (`llm_commands.rs:278-281,333-336,822-851`), not here.
-- `is_local()` means *local kind*, not *on this device*: an Ollama provider is `local: true` for any base URL (`openai_compat.rs:68-76`). The app derives `on_device` separately (`llm_commands.rs:300`). Callers must not use `is_local()` as a privacy decision.
+- `build_provider` is the only LLM constructor; consent and Keep local are enforced there, before any request (spec §2 item 1; `lib.rs:13-14`; enforced at `llm_commands.rs:569-653`). The crate cannot enforce this itself: constructors and fields (`base_url`, `api_key`) are `pub`.
+- A stored API key only goes to an https host or loopback; the Anthropic host is fixed (THREAT_MODEL T4; `docs/SECURITY_AUDIT_2026-10.md` "Anthropic and Groq hosts are fixed"). Enforced in the app (`llm_commands.rs:591-594,645-648,1134-1163`), not here.
+- `is_local()` means *local kind*, not *on this device*: an Ollama provider is `local: true` for any base URL (`openai_compat.rs:68-76`). The app derives `on_device` separately (`llm_commands.rs:612`). Callers must not use `is_local()` as a privacy decision.
 - `temperature` is sent to Anthropic only for an allowlist of older model prefixes, so current and future models never get a 400 (`anthropic.rs:94-114,182-186`).
 - "Thinking off" uses the shape each model accepts: `{type: disabled}`, `{type: between_tools}` on Sonnet 5.5, or `effort: low` on Opus 5.5 / Fable / Mythos (`anthropic.rs:63-81,196-205`). This keeps structured JSON from truncating (`lib.rs:121-125`).
 - Legacy `chat()` bodies stay byte-identical for every provider (`lib.rs:8-9`; test `golden.rs:190-219`).
@@ -123,4 +123,4 @@ The crate never logs keys or bodies. Its one `tracing::warn!` logs only the mode
 - Keep providers constructed only in `build_provider`. Never set `AnthropicProvider.base_url` from settings (T4).
 - When wiring `converse` / the tool loop (Ask PR 3.3), pick fly-context's `Visibility` from `build_provider`'s on-device decision, not from `is_local()`.
 - Don't log `ContentBlock::Opaque`, tool arguments or results, or `LlmError::Provider` text in run logs (spec §4.2a #7).
-- Adding a field to `ChatRequest` changes every exhaustive struct literal in the app (`llm_commands.rs:379,542,701`, `extraction.rs:240`) and must keep the golden green.
+- Adding a field to `ChatRequest` changes every exhaustive struct literal in the app (`llm_commands.rs:691,854,1013`, `extraction.rs:240`) and must keep the golden green.

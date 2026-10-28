@@ -14,9 +14,9 @@ Turns existing audio or video files into a normal note in three steps. **Stage:*
 | Item | Where | Called by |
 |---|---|---|
 | `ImportFile { id, file_name, size, kind, rel_path, error, convert_error }`, `ImportStaged { note_id, meeting_id, files, boundaries_ms, started }` | `import_commands.rs:34-61` | serialized to the UI (`frontend/src/types.ts:381-404` mirrors them) |
-| `cancel_staged_transcription(state, on_stage, meeting_id)` (crate) | `import_commands.rs:363-387` | `cancel_transcription` (`commands.rs:310-320`, owned by [app-pipeline](app-pipeline.md)) |
+| `cancel_staged_transcription(state, on_stage, meeting_id)` (crate) | `import_commands.rs:363-387` | `cancel_transcription` (`commands.rs:332-342`, owned by [app-pipeline](app-pipeline.md)) |
 | `reset_staged_started(state, meeting_id)` (crate) | `import_commands.rs:343-350` | the function above |
-| `purge_staged_import(state, meeting_id)` (crate) | `import_commands.rs:392-409` | `delete_note` (`commands.rs:288`), `scheduler::finish_cancelled` (`scheduler.rs:358`) |
+| `purge_staged_import(state, meeting_id)` (crate) | `import_commands.rs:392-409` | `delete_note` (`commands.rs:310`), `scheduler::finish_cancelled` (`scheduler.rs:358`) |
 
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
@@ -30,7 +30,7 @@ Cancel for a running import is `cancel_transcription`, documented in [app-pipeli
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
-| `import:progress` | emits during conversion (`import_commands.rs:646-656`) | `ImportProgress { meeting_id, file_id, stage: "converting" \| "converted" \| "failed", error? }` (`import_commands.rs:66-74`) | `ImportQueue.tsx:77`; devMock mirrors (`devMock.ts:424-436`, `:1490-1505`) |
+| `import:progress` | emits during conversion (`import_commands.rs:646-656`) | `ImportProgress { meeting_id, file_id, stage: "converting" \| "converted" \| "failed", error? }` (`import_commands.rs:66-74`) | `ImportQueue.tsx:77`; devMock mirrors (`devMock.ts:424-436`, `:1534-1549`) |
 | `pipeline:progress` | emits `waiting` via `scheduler::enqueue`; `cancelled` via `cancel_staged_transcription` | `PipelineProgress` (see [app-pipeline](app-pipeline.md)) | `App.tsx:373` |
 | `model:progress` | emits while the ffmpeg sidecar downloads on first use (`import_commands.rs:274-279`) | `models::ModelProgress` | `App.tsx:450` |
 
@@ -39,7 +39,7 @@ Per-file progress during ASR: `import_transcribe` stores `boundaries_ms` (the cu
 ### Settings keys
 | Key (or prefix) | Read / write | Webview-settable? (`is_webview_setting_key`) | Meaning |
 |---|---|---|---|
-| `import.staged.<meeting_id>` | R/W/delete (`import_commands.rs:30-32`, `:315-338`, `:404-408`, `:562-567`) | No. Pinned by `commands::security_tests::webview_can_only_touch_ui_level_settings` (`commands.rs:694`). | JSON `ImportStaged` manifest. It holds file paths, so only these commands may write it. |
+| `import.staged.<meeting_id>` | R/W/delete (`import_commands.rs:30-32`, `:315-338`, `:404-408`, `:562-567`) | No. Pinned by `commands::security_tests::webview_can_only_touch_ui_level_settings` (`commands.rs:760`). | JSON `ImportStaged` manifest. It holds file paths, so only these commands may write it. |
 
 ### Database
 | Table | Columns | Read / write |

@@ -7,13 +7,13 @@
 The Tauri surface for the user's library: folders, notes, attachments, exports, and opening or revealing files. Each command is a thin wrapper over [fly-storage](fly-storage.md), plus the parts that need the app: native file pickers and save dialogs, the clipboard, the OS opener, and deleting a note safely while transcriptions may be running.
 
 ## Files it owns
-- `src-tauri/src/commands.rs` (part) — the 20 commands below, `delete_allowed_while_recording` (`:298-303`), `is_executable_attachment` (`:511-548`), and the `delete_guard_tests` module (`:708-723`).
+- `src-tauri/src/commands.rs` (part) — the 20 commands below, `delete_allowed_while_recording` (`:320-325`), `is_executable_attachment` (`:533-570`), and the `delete_guard_tests` module (`:774-789`).
 
 The rest of `commands.rs` belongs to [app-shell](app-shell.md) (`ping`, `app_info`, `reveal_*_dir`, `open_external_url`), [app-settings-consent](app-settings-consent.md) (`get/set_app_setting`, `is_webview_setting_key`), [app-search](app-search.md) (`search`, `search_semantic`), [app-pipeline](app-pipeline.md) (`cancel_transcription`) and [app-mcp-sidecar](app-mcp-sidecar.md) (`mcp_config`).
 
 ## Surface area
 ### Public API
-- `pub fn is_executable_attachment(&Path) -> bool` (`commands.rs:511-548`) — extension deny-list used by `open_attachment`.
+- `pub fn is_executable_attachment(&Path) -> bool` (`commands.rs:533-570`) — extension deny-list used by `open_attachment`.
 - No other module calls these commands' internals.
 
 ### Tauri commands
@@ -43,9 +43,9 @@ The rest of `commands.rs` belongs to [app-shell](app-shell.md) (`ping`, `app_inf
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
-| `pipeline:progress` (stage `cancelled`) | Emitted indirectly by `delete_note` through `scheduler::cancel` for each of the note's meetings (`commands.rs:272-275`) | Owned by [app-pipeline](app-pipeline.md) | Pipeline / import UI |
+| `pipeline:progress` (stage `cancelled`) | Emitted indirectly by `delete_note` through `scheduler::cancel` for each of the note's meetings (`commands.rs:294-297`) | Owned by [app-pipeline](app-pipeline.md) | Pipeline / import UI |
 
-`update_note_scratchpad` also nudges the embedding worker (`AppState.embed_notify`, `commands.rs:234`); not an IPC event.
+`update_note_scratchpad` also nudges the embedding worker (`AppState.embed_notify`, `commands.rs:256`); not an IPC event.
 
 ### Settings keys
 None.
@@ -63,8 +63,8 @@ All through [fly-storage](fly-storage.md):
 ### Files and directories written
 - **Mirrors (every note write):** `notes/<date> <title>.md` (atomic), plus `note.json` inside each of the note's `recordings/<date> <title>/` folders (`crates/fly-storage/src/notes.rs:320-345`). Title edits also rename the note mirror and the meeting folders and refresh their manifests (`notes.rs:186-201`). Moving a note or deleting a folder refreshes the meetings' `manifest.json` (filed-under path).
 - **Attachments:** `attach_file` copies the picked file to `attachments/<note_id>/<name>` (de-duplicated `name (1).ext`) (`crates/fly-storage/src/attachments.rs:11-50`). `remove_attachment` deletes the copied file best-effort (`attachments.rs:53-64`).
-- **Recursive deletes:** `delete_note` removes the note mirror and `attachments/<note_id>/` with `remove_dir_all` (`notes.rs:263-286`), then purges each idle meeting (its `recordings/` folder, through fly-storage's contained-delete guard) and any staged import (`commands.rs:282-293`). A meeting with a running pipeline gets a cooperative cancel; the scheduler purges it when the run unwinds.
-- **Exports (user-chosen path, outside the data dir):** `export_note` copies the markdown mirror (provenance flattened) to a `.md` (`commands.rs:351-393`); `export_transcript_vtt` writes WebVTT rendered fresh from the stored transcript (polished variant when `cleaned` and present) (`:398-447`). Suggested file names keep only alphanumerics and ` -_.`.
+- **Recursive deletes:** `delete_note` removes the note mirror and `attachments/<note_id>/` with `remove_dir_all` (`notes.rs:263-286`), then purges each idle meeting (its `recordings/` folder, through fly-storage's contained-delete guard) and any staged import (`commands.rs:304-315`). A meeting with a running pipeline gets a cooperative cancel; the scheduler purges it when the run unwinds.
+- **Exports (user-chosen path, outside the data dir):** `export_note` copies the markdown mirror (provenance flattened) to a `.md` (`commands.rs:373-415`); `export_transcript_vtt` writes WebVTT rendered fresh from the stored transcript (polished variant when `cleaned` and present) (`:420-469`). Suggested file names keep only alphanumerics and ` -_.`.
 - **Clipboard:** `copy_note_markdown` writes `note.to_markdown(false)` natively (`:453-469`).
 
 ### Network egress
@@ -83,9 +83,9 @@ None.
 
 ## Invariants
 - **Attachment paths stay inside `attachments/` or `recordings/`.** `open_attachment`, `reveal_attachment` (and `ensure_video_thumbnail`) resolve `rel_path` through `attachment_abs_path` → `safe_path::contained(.., ["attachments", "recordings"], 3)`, which rejects absolute/UNC paths, `..`, drive prefixes, trailing dots/spaces, `a:stream` and device names (`crates/fly-storage/src/attachments.rs:70-79`, `safe_path.rs:41-58`). Source: THREAT_MODEL T3; SECURITY_AUDIT_2026-10 "Path containment hardened".
-- **Opening never executes code.** `open_attachment` refuses program/script extensions (`exe`, `bat`, `ps1`, `lnk`, `url`, `hta`, `jar`, `sh`, `app`, …) and points the user to "Show in folder" (`commands.rs:497-502`, `:511-548`). Source: SECURITY_AUDIT_2026-10.
-- **The recording note can't be deleted.** `delete_note` refuses when `id` is the active audio recording's note (`commands.rs:260-265`, `:298-303`); the UI also hides its trash (`App.test.tsx:228`).
-- **No orphaned meetings.** Queued jobs are cancelled, running pipelines get a cooperative cancel, idle meetings are purged with their recordings (`commands.rs:252-295`). The DB delete is one transaction including FTS and chunks (`notes.rs:263-275`; THREAT_MODEL T11).
+- **Opening never executes code.** `open_attachment` refuses program/script extensions (`exe`, `bat`, `ps1`, `lnk`, `url`, `hta`, `jar`, `sh`, `app`, …) and points the user to "Show in folder" (`commands.rs:519-524`, `:533-570`). Source: SECURITY_AUDIT_2026-10.
+- **The recording note can't be deleted.** `delete_note` refuses when `id` is the active audio recording's note (`commands.rs:282-287`, `:320-325`); the UI also hides its trash (`App.test.tsx:228`).
+- **No orphaned meetings.** Queued jobs are cancelled, running pipelines get a cooperative cancel, idle meetings are purged with their recordings (`commands.rs:274-317`). The DB delete is one transaction including FTS and chunks (`notes.rs:263-275`; THREAT_MODEL T11).
 - Folder deletes never delete notes or files: sub-folders cascade, notes become unfiled (`crates/fly-storage/src/folders.rs:168-179`, schema `lib.rs:422`, `:432`).
 - Pickers and openers run in Rust; paths never round-trip through the DOM for picking (DECISIONS.md "M1 — Native dialogs/openers via Rust plugin APIs"). Attachments are copied, never referenced in place (DECISIONS.md "M1 — Attachments copied").
 
@@ -102,7 +102,7 @@ None.
 - **Screen capture vs delete (inferred, untested):** `delete_note` checks only `AppState.recording`, not `AppState.screen`. Deleting a note during its screen capture removes `attachments/<note_id>/` under the live encoder, and `stop_screen_recording` then fails.
 - **No test pins that ids used as path components are plain ids.** Note ids become path components in `delete_note` and in attachment storage (`notes.rs:276-286`). Ids can also arrive from outside the app, through copied-in recording folders (THREAT_MODEL T7). A containment test belongs here and in [fly-storage](fly-storage.md).
 - `remove_attachment` should resolve its path through the same containment check as `open_attachment` (`attachments.rs:62`).
-- devMock drift (spec §2 item 4): `attach_file`, `remove_attachment`, `open_attachment` and `reveal_attachment` fall through to `return null` (`devMock.ts:1463`); `remove_attachment` should return a `Note` (`Editor.tsx:1134-1135` passes `null` on). devMock `delete_note` never models the backend's "Stop the recording before deleting this note." error (`devMock.ts:1012-1016`).
+- devMock drift (spec §2 item 4): `attach_file`, `remove_attachment`, `open_attachment` and `reveal_attachment` fall through to `return null` (`devMock.ts:1507`); `remove_attachment` should return a `Note` (`Editor.tsx:1134-1135` passes `null` on). devMock `delete_note` never models the backend's "Stop the recording before deleting this note." error (`devMock.ts:1049-1053`).
 - Every vitest that covers deletes runs against devMock in jsdom; none exercises the real cancel/purge path.
 
 ## Changing it safely

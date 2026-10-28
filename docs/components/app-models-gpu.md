@@ -38,7 +38,7 @@
 |---|---|---|---|
 | `download_model` | `id: String` (any `registry()` id) | `Result<String, String>` — installed probe path | `ui-app-shell` (`App.tsx:744`, engine install from the notice), `ui-settings` (`SettingsModal.tsx:545` model downloads, `SettingsModal.tsx:597` Ollama runtime install), via `api.downloadModel` (`api.ts:161`) |
 
-`download_model` has no gate beyond the id being in the registry (`asr_commands.rs:403-417`): the webview can start any pinned download, including the 1.5 GB Ollama runtime. devMock mirrors it (`devMock.ts:1337-1343`) but returns `""` instead of a path and emits no `model:progress`.
+`download_model` has no gate beyond the id being in the registry (`asr_commands.rs:403-417`): the webview can start any pinned download, including the 1.5 GB Ollama runtime. devMock mirrors it (`devMock.ts:1381-1387`) but returns `""` instead of a path and emits no `model:progress`.
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |

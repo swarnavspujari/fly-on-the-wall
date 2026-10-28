@@ -2,7 +2,7 @@
 
 Fly on the Wall is a modular monolith: one desktop process (Tauri 2) plus one sidecar binary (the MCP server). This catalog makes the modules explicit. It gives each one a doc covering what it owns, everything it touches, the rules it must keep, and the tests that cover it. You can then change, test or extract one component without reading the whole codebase.
 
-Written against main `82b7edf` (v2.4.0, 2026-10-28), then refreshed after #86 merged (`f2b8981`). [In-flight work](#in-flight-work) lists what's about to change.
+Written against main `82b7edf` (v2.4.0, 2026-10-28), then refreshed after #86 merged (`f2b8981`) and for backend-only cloud consent (#102). [In-flight work](#in-flight-work) lists what's about to change.
 
 "Spec" throughout means the [UX rollout and platform design](../superpowers/specs/2026-10-27-ux-rollout-and-platform-design.md). Its §2 lists the invariants every PR must keep.
 
@@ -19,7 +19,7 @@ Three layers:
 | Layer | Where | Components |
 |---|---|---|
 | **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 10 `ui-*` docs |
-| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 104 Tauri commands) | 15 `app-*` docs |
+| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 105 Tauri commands) | 15 `app-*` docs |
 | **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 11 `fly-*` docs |
 
 ## Index
@@ -47,7 +47,7 @@ Three layers:
 | [app-shell](app-shell.md) | `lib.rs`, `state.rs`, `logging.rs`, `nav_guard.rs`, `main.rs`, `tauri.conf.json`, `capabilities/` | Composition root: plugins, startup tasks, `AppState`, data-dir resolution, logging, CSP, nav guard, asset scope. |
 | [app-notes-library](app-notes-library.md) | `commands.rs` (part) | Folders, notes, attachments, export, open and reveal. |
 | [app-search](app-search.md) | `commands.rs` (part), `embeddings.rs` | Keyword and semantic search, plus the background embedding indexer. |
-| [app-settings-consent](app-settings-consent.md) | `commands.rs` (part), `llm_commands.rs` (part) | Generic settings and the webview allowlist, LLM settings, cloud consent, consent-skipped re-runs. **Has the app-wide settings-key registry.** |
+| [app-settings-consent](app-settings-consent.md) | `commands.rs` (part), `llm_commands.rs` (part) | Generic settings and the webview allowlists, LLM settings, cloud consent (the native dialog and the only consent writer), consent-skipped re-runs. **Has the app-wide settings-key registry.** |
 | [app-recording](app-recording.md) | `recording.rs`, `live.rs` | Recording lifecycle, capture, live captions, meeting lookups. |
 | [app-pipeline](app-pipeline.md) | `pipeline.rs`, `scheduler.rs`, `asr_commands.rs` | Transcribe → diarize → align → store, re-diarize, the job queue, the background AI pass, transcript edits. |
 | [app-import](app-import.md) | `import_commands.rs` | Staged multi-file media import. |
@@ -73,7 +73,7 @@ Three layers:
 | [ui-notices](ui-notices.md) | `AppNotices.tsx`, `notices.ts`, `pipelineNotice.ts`, `pipelineFailures.ts` | The single notice stack and its notice kinds. |
 | [ui-recording-bar](ui-recording-bar.md) | `RecordingBar.tsx`, `recordingBar.ts`, `LivePane.tsx` | Recording controls, capture warnings, live captions. |
 | [ui-attendees](ui-attendees.md) | `AttendeeEditor.tsx`, `calendarMatch.ts` | Attendee roster, confirmation, re-diarize with undo. |
-| [ui-confirm-consent](ui-confirm-consent.md) | `confirm.tsx`, `CloudConsent.tsx` | The in-app confirm dialog and every cloud-consent prompt. |
+| [ui-confirm-consent](ui-confirm-consent.md) | `confirm.tsx`, `CloudConsent.tsx` | The in-app confirm dialog, and every cloud-consent request (the backend shows the dialog). |
 
 ## Dependency diagrams
 
@@ -164,7 +164,7 @@ flowchart TB
   mcpBin["flyonthewall-mcp<br/>(fly-mcp, separate process)"]
 
   FE -- "invoke() via api.ts / events" --> BE
-  uiConfirm -. "consent.cloud_llm.* via set_app_setting" .-> settings
+  uiConfirm -. "consent asked via request_cloud_consent, read via get_app_setting" .-> settings
 
   rec --> audio & pipe
   rec --> calApp
@@ -190,19 +190,19 @@ Back-edges inside `fly-app` that the map doesn't show, measured with `grep crate
 - `scheduler` → `pipeline`, `import_commands`, `llm_commands`, `extraction`, `models`;
 - `llm_commands` → `commands`, `ollama`, `scheduler`;
 - `privacy` → `calendar_commands`, `scheduler`;
-- `state` → `calendar_commands`, `live`, `recording`, `screen_commands`. The state module depends on feature modules, which inverts the layering.
+- `state` → `calendar_commands`, `live`, `llm_commands`, `recording`, `screen_commands`. The state module depends on feature modules, which inverts the layering.
 - `embeddings` → `llm_commands` (`is_loopback_url`), `ollama`, `models`.
 
 ## Command ownership
 
-Each of the 104 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs:182-287`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
+Each of the 105 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs:182-288`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
 
 | Doc | Commands |
 |---|---|
 | [app-shell](app-shell.md) | 5 |
 | [app-notes-library](app-notes-library.md) | 20 |
 | [app-search](app-search.md) | 2 |
-| [app-settings-consent](app-settings-consent.md) | 6 |
+| [app-settings-consent](app-settings-consent.md) | 7 |
 | [app-recording](app-recording.md) | 12 |
 | [app-pipeline](app-pipeline.md) | 14 |
 | [app-import](app-import.md) | 3 |
@@ -249,23 +249,23 @@ The rules on this page are **proposals**. This PR changes no code.
 
 ### Where boundaries leak
 
-1. **One app crate holds 15 components.** `fly-app` is about 14,100 lines in 23 modules. Every module can reach every other module's `pub` items, and the feature modules call each other in both directions (see the back-edges under the component map). `state.rs` imports four feature modules, which inverts the layering.
+1. **One app crate holds 15 components.** `fly-app` is about 14,100 lines in 23 modules. Every module can reach every other module's `pub` items, and the feature modules call each other in both directions (see the back-edges under the component map). `state.rs` imports five feature modules, which inverts the layering.
    - Command bodies take Tauri's `State`/`AppHandle`, so integration tests can't call them. Several tests rebuild the command's logic by hand instead (for example `src-tauri/tests/enhance_flow.rs` versus `enhance_note`), and pass even when the shipped code changes.
    - `run_polish` shows the alternative: it takes `&AppState`, so a test can call the shipped function directly.
-2. **Shared mutable `AppState`** (`src-tauri/src/state.rs`): 13 fields.
+2. **Shared mutable `AppState`** (`src-tauri/src/state.rs`): 14 fields.
    - `storage` is **one SQLite connection behind one `Mutex`**. It is locked at about 59 sites in 15 modules, including the background workers (scheduler, embeddings, retention, self-heal), so UI commands queue behind long holds. The one-time embedding-chunk backfill holds the lock for its whole run.
    - `pipeline_stage` is touched by 6 modules, `recording` by 5 and `secrets` by 6.
    - `consent_skipped` is written from 3 modules, but only one of them emits `llm:consent-skips`.
 3. **Settings act as an untyped message bus.** About 66 `get_setting`/`set_setting` call sites in 12 modules use string-literal keys, with no registry or constants module. [app-settings-consent](app-settings-consent.md) holds the first full key registry.
-   - The webview-settable prefixes include `consent.`, and the consent gate reads its records from there. This is being fixed now (see [In-flight work](#in-flight-work)).
+   - The webview-settable prefixes include `consent.`. The consent gate's own records are carved out: the webview can read `consent.cloud_llm.*` but can't set it (`is_webview_writable_setting_key`), and only `request_cloud_consent` writes it.
 4. **Privacy policy is implemented in several places:**
    - **Consent and on-device decisions:** `build_provider` decides them. The embedding worker re-derives the "remote Ollama means shareable only" rule from the URL itself, `validate_base_url` re-implements `is_loopback_url`, and `ollama.rs` re-implements the settings getter and reads `llm_commands::PROVIDERS`.
    - **Keep local:** enforced in three styles. There are per-row functions, a SQL CTE, and post-filters in consumers (fly-mcp, fly-context). `vector_search`, `list_meetings` and `search()` have no filter of their own; #92 fixes `vector_search`.
-   - **Frontend copies:** `homeModel.privacySummary` and `isLoopbackUrl` mirror `build_provider`. `askModel.CLAUDE_MODELS` duplicates `SettingsModal`'s model list, the consent copy exists twice, and `devMock.ts` re-implements the refusal policy.
+   - **Frontend copies:** `homeModel.privacySummary` and `isLoopbackUrl` mirror `build_provider`. `askModel.CLAUDE_MODELS` duplicates `SettingsModal`'s model list, the consent disclosure exists twice (Rust `cloud_consent_prompt` and devMock's `mockConsentPrompt`, kept equal by a Rust test), and `devMock.ts` re-implements the refusal policy.
 5. **The Rust↔TypeScript contract is copied by hand, and CI checks the two halves separately.**
    - `types.ts` (474 lines) mirrors the serde structs, and `api.ts` names commands as strings.
    - Refusal text, recording-warning sentences and pipeline stage names are matched by substring in TypeScript.
-   - `devMock.ts` (1,609 lines) handles 95 of the 104 commands and returns `null` for any command it doesn't know.
+   - `devMock.ts` (1,653 lines) handles 96 of the 105 commands and returns `null` for any command it doesn't know.
    - CI path gating runs the Rust tests and vitest on disjoint sets of changed files. A Rust-only change to a command, event or error string never runs the frontend tests, and vice versa.
 6. **`App.tsx` orchestrates everything:** 1,159 lines, 37 `useState`, 14 `useEffect`, 4 event subscriptions (2 Tauri `listen`, plus window `resize` and `keydown`). Fourteen files import `api` directly, and `safeContent.ts` calls `invoke` itself.
    - Large frontend files: `SettingsModal.tsx` 2,328 lines, `Editor.tsx` 1,614, `ui.tsx` 1,593.
@@ -285,17 +285,17 @@ Ordered by value for effort. Each check takes seconds in CI.
 
 | # | Check | What it enforces | Sketch |
 |---|---|---|---|
-| 1 | **Command ownership and devMock parity** | Every command is documented in exactly one component doc and mirrored in devMock (spec §2) | A script parses `generate_handler!` in `lib.rs`. Each name must appear as a backticked first-column row under `### Tauri commands` in exactly one `app-*.md`, and as a `case` in `devMock.ts`. devMock's `default:` throws under test. Gate it on `src-tauri/src/lib.rs`, `frontend/src/devMock.ts` and `docs/components/**`. This catalog passes the doc half today (104 of 104). The devMock half fails today (9 missing). |
+| 1 | **Command ownership and devMock parity** | Every command is documented in exactly one component doc and mirrored in devMock (spec §2) | A script parses `generate_handler!` in `lib.rs`. Each name must appear as a backticked first-column row under `### Tauri commands` in exactly one `app-*.md`, and as a `case` in `devMock.ts`. devMock's `default:` throws under test. Gate it on `src-tauri/src/lib.rs`, `frontend/src/devMock.ts` and `docs/components/**`. This catalog passes the doc half today (105 of 105). The devMock half fails today (9 missing). |
 | 2 | **Crate dependency rules** | The golden rule, and spec §2 "the MCP binary never holds keys or calls a cloud LLM" | `deny.toml` `[[bans.deny]]` entries with `wrappers`, so that only the listed crates may depend directly on `reqwest` (fly-asr, fly-llm, fly-calendar, fly-app), `keyring` (fly-secrets), `rusqlite` (fly-storage) and `tauri` (fly-app). Add a CI step requiring that `cargo tree -p fly-mcp -e normal -i reqwest` (and the same for `keyring`, `fly-llm` and `fly-secrets`) finds nothing. |
 | 3 | **Security config pin** | Spec §2: CSP and nav guard unchanged, asset scope `recordings/` + `attachments/` only | A Rust test parses `tauri.conf.json` and `capabilities/*.json` and asserts the exact CSP, permission list and empty static asset scope. Put the file under CODEOWNERS. |
-| 4 | **Settings-key registry** | Spec §2: webview-settable keys only under `consent.`/`capture.`/`ui.` | One table of key or prefix, owner component and webview-settable flag. A test finds every string literal passed to `get_setting`/`set_setting` and fails on unregistered keys. devMock imports the same allowlist. |
+| 4 | **Settings-key registry** | Spec §2: webview-settable keys only under `consent.`/`capture.`/`ui.` (and never `consent.cloud_llm.*`, which only the backend writes) | One table of key or prefix, owner component and webview-settable flag. A test finds every string literal passed to `get_setting`/`set_setting` and fails on unregistered keys. devMock imports the same allowlist. |
 | 5 | **IPC contract manifest** | Rust and TypeScript agree on commands, argument names, events, stage names and refusal markers | A Rust test writes `ipc.json` and fails if the committed copy differs. A vitest checks `api.ts`, `devMock.ts` and the string matchers against it. Add the manifest to both CI path gates. Later, generate `types.ts` with ts-rs or specta. |
 | 6 | **Frontend import boundaries** | `ui-*` components stay separable | ESLint `no-restricted-imports` zones, or `eslint-plugin-boundaries`:<br>• `devMock` may be imported only from `main.tsx` and tests.<br>• `api.ts` is the only `invoke` caller.<br>• A feature may import `ui.tsx`, `api.ts`, `types.ts` and its own model, but not another feature's components.<br>Start in warn mode. |
 | 7 | **Module edges inside `fly-app`** | Back-edges don't grow | Make the feature modules private, each behind a small `pub(crate)` facade. A grep test allows `crate::<module>::` references only along the edges listed in this README, and forbids `state.rs` from importing feature modules. |
 
 ### Staged extraction plan
 
-Each stage is independently shippable. Start after #92 and the consent hardening land, so these PRs don't fight in-flight work in `fly-storage`, `fly-context` and `llm_commands.rs`.
+Each stage is independently shippable. Start after #92 lands, so these PRs don't fight in-flight work in `fly-storage` and `fly-context`.
 
 | Stage | What | Why first | Moves |
 |---|---|---|---|
@@ -317,7 +317,7 @@ Each extraction moves its component doc with it, and the doc's **Tests** section
 |---|---|---|
 | **#92** storage schema v3: a per-segment FTS index, spanned and label-free embedding chunks, `citation_locators` with re-anchoring on re-transcribe, keep-local inside SQL for `vector_search`, `list_meetings_filtered` | Draft, v2.5; merges after the v2.4 tag | [fly-storage](fly-storage.md), [fly-context](fly-context.md), [app-search](app-search.md) (snippets lose speaker prefixes; the corpus re-embeds once), [fly-mcp](fly-mcp.md) (an old binary refuses a v3 file) |
 | **#86** multi-engine ASR harness and a dormant Parakeet engine | **Merged** (`f2b8981`); the docs below describe it | [fly-asr](fly-asr.md) (`batch.rs`, `parakeet.rs`), [app-pipeline](app-pipeline.md) (the internal `asr.engine` flag), [app-models-gpu](app-models-gpu.md) (`ENGINE_MODELS`), [fly-core](fly-core.md) (engine strings) |
-| **#102** consent hardening: only the backend records cloud-AI consent | Open | [app-settings-consent](app-settings-consent.md), [app-llm](app-llm.md), [ui-confirm-consent](ui-confirm-consent.md). Today `consent.cloud_llm.<id>` sits under the webview-settable `consent.` prefix. |
+| **#102** backend-only cloud consent: `request_cloud_consent` asks in a native dialog and is the only writer of `consent.cloud_llm.*`, which the webview can read but not set | **Merged**; the docs below describe it | [app-settings-consent](app-settings-consent.md), [app-llm](app-llm.md), [ui-confirm-consent](ui-confirm-consent.md), [ui-ask](ui-ask.md) |
 | **#103** immutable system-evals foundation (`evals/`, lock and run scripts) | Open, v2.5 | Test infrastructure; no component's surface changes |
 | **Ask harness (PR 3.3)** wires [fly-context](fly-context.md) and the fly-llm tool loop into Ask | Planned, v2.5 | [app-llm](app-llm.md), [ui-ask](ui-ask.md) |
 
@@ -325,5 +325,5 @@ Each extraction moves its component doc with it, and the doc's **Tests** section
 
 - A PR that adds or removes a command, event, settings key, table, written path, network host, external process or keychain entry updates the owning component's doc in the same PR.
 - Docs describe `main`. In-flight work goes in the doc's `In flight:` line, citing PR numbers rather than branch names, not in the body.
-- `file:line` references are as of `82b7edf` unless a doc says otherwise; #86 shifted `pipeline.rs` and `models.rs`, and `fly-asr.md` was rewritten around symbol names. When a line reference drifts, the symbol named beside it is authoritative. In new text, prefer a symbol name and keep `file:line` only where it adds precision.
+- `file:line` references are as of `82b7edf` unless a doc says otherwise; #86 shifted `pipeline.rs` and `models.rs`, and `fly-asr.md` was rewritten around symbol names. #102 shifted `llm_commands.rs`, `commands.rs`, `state.rs`, `lib.rs`, `api.ts`, `askModel.ts`, `CloudConsent.tsx` and `devMock.ts`, and references into those files were refreshed with it. When a line reference drifts, the symbol named beside it is authoritative. In new text, prefer a symbol name and keep `file:line` only where it adds precision.
 - This repository is public: use synthetic examples only ("Weekly sync", "Dana", "Speaker 1"), and write `<data_dir>` instead of a real path.

@@ -10,7 +10,7 @@ Turns a meeting's recorded WAVs into a saved, diarized transcript, then runs the
 - `src-tauri/src/pipeline.rs`: `run_with` (full pipeline), `re_diarize_with`, the ASR fallback chain (`GuardedAsr`), local tier planning, speaker-count hint, progress detail strings.
 - `src-tauri/src/scheduler.rs`: job queue worker (`tick`, `spawn`), retry/permanent/cancel classification, `ai_pass`, consent-skip re-runs, `cancel`, `last_failure`, startup `recover`, the `pipeline:progress` emitter.
 - `src-tauri/src/asr_commands.rs`: the transcript, attendee, re-diarize, stage and ASR-settings commands. `download_model` in this file belongs to [app-models-gpu](app-models-gpu.md).
-- `src-tauri/src/commands.rs:305-320`: `cancel_transcription`, a thin wrapper over `import_commands::cancel_staged_transcription`.
+- `src-tauri/src/commands.rs:327-342`: `cancel_transcription`, a thin wrapper over `import_commands::cancel_staged_transcription`.
 
 ## Surface area
 ### Public API
@@ -24,8 +24,8 @@ Turns a meeting's recorded WAVs into a saved, diarized transcript, then runs the
 | `scheduler::enqueue(state, on_stage, meeting_id)` (idempotent) | `scheduler.rs:56-68` | `transcribe_meeting`, `import_transcribe` (`import_commands.rs:745`) |
 | `scheduler::tick` / `Tick::{Idle, RecordingActive, Completed, Cancelled, Retrying, GaveUp}` | `scheduler.rs:34-151` | `spawn` loop; tests |
 | `scheduler::spawn(app)` | `scheduler.rs:156-201` | `lib.rs:173` (app setup) |
-| `scheduler::cancel(state, on_stage, meeting_id) -> Result<bool>` | `scheduler.rs:306-344` | `delete_note` (`commands.rs:274`), `cancel_staged_transcription` (`import_commands.rs:369`) |
-| `scheduler::{finish_cancelled, emit_cancelled (crate), recover, stage_emitter, last_failure, retry_consent_skipped, recording_active (crate)}` | `scheduler.rs:237-470` | import, `llm_commands.rs:163` (`retry_consent_skipped`), `privacy.rs:259`, `privacy.rs:405` (`recording_active`) |
+| `scheduler::cancel(state, on_stage, meeting_id) -> Result<bool>` | `scheduler.rs:306-344` | `delete_note` (`commands.rs:296`), `cancel_staged_transcription` (`import_commands.rs:369`) |
+| `scheduler::{finish_cancelled, emit_cancelled (crate), recover, stage_emitter, last_failure, retry_consent_skipped, recording_active (crate)}` | `scheduler.rs:237-470` | import, `llm_commands.rs:476` (`retry_consent_skipped`), `privacy.rs:259`, `privacy.rs:405` (`recording_active`) |
 | `scheduler::{MAX_ATTEMPTS = 3, WAITING_STAGE = "waiting"}` | `scheduler.rs:24-26` | tests, UI stage handling |
 
 ### Tauri commands
@@ -51,9 +51,9 @@ All are registered in `src-tauri/src/lib.rs` (`cancel_transcription` at `lib.rs:
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
-| `pipeline:progress` | emits (`scheduler::stage_emitter`, `scheduler.rs:459-466`; sinks in `pipeline.rs:113-132`, `scheduler.rs:369-377`, `:424-437`, `:472-502`, `asr_commands.rs:124-130`) | `PipelineProgress { meeting_id, stage, detail: Option<String>, done: bool, error: Option<String> }` | `App.tsx:373` (stage strip, run chips, failure notices, import queue); devMock mirrors the shape (`devMock.ts:419`, `:484-511`, `:1588`) |
+| `pipeline:progress` | emits (`scheduler::stage_emitter`, `scheduler.rs:459-466`; sinks in `pipeline.rs:113-132`, `scheduler.rs:369-377`, `:424-437`, `:472-502`, `asr_commands.rs:124-130`) | `PipelineProgress { meeting_id, stage, detail: Option<String>, done: bool, error: Option<String> }` | `App.tsx:373` (stage strip, run chips, failure notices, import queue); devMock mirrors the shape (`devMock.ts:419`, `:484-511`, `:1632`) |
 | `model:progress` | emits (worker `on_model`, `scheduler.rs:159-164`; `re_diarize_meeting`, `asr_commands.rs:114-120`) | `models::ModelProgress` (owned by [app-models-gpu](app-models-gpu.md)) | `App.tsx:450` |
-| `llm:consent-skips` | emits after every AI pass (`scheduler.rs:222-229`) | `Vec<String>` meeting ids skipped for missing cloud consent | `CloudConsent.tsx:134` (`ui-confirm-consent`) |
+| `llm:consent-skips` | emits after every AI pass (`scheduler.rs:222-229`) | `Vec<String>` meeting ids skipped for missing cloud consent | `CloudConsent.tsx:122` (`ui-confirm-consent`) |
 
 `pipeline:progress` stages, in order:
 
@@ -118,7 +118,7 @@ Intermediates never go next to the recordings: a title or date edit renames the 
 |---|---|---|
 | `api.groq.com` (via [fly-asr](fly-asr.md)) | transcribing, when the engine chain starts with Groq | `asr.use_groq` or tier `cloud`, **and** a stored `groq_api_key`, **and** not Keep local for the meeting or its folder (`pipeline.rs:148-150`, `:274-310`). There is no `consent.*` prompt for Groq. |
 | Model and sidecar hosts (via `models::ensure` / `ensure_tool`) | `ensuring-models`, when artifacts are missing | first use; see [app-models-gpu](app-models-gpu.md) |
-| The configured LLM provider | the AI pass: `llm_commands::run_polish` and `extraction::extract_after_transcribe` (`scheduler.rs:216-221`) | `build_provider` enforces cloud consent and Keep local (spec §2 item 1; `llm_commands.rs:256`, `:509-511`; `extraction.rs:273`). A refusal is recorded as a consent skip (`scheduler.rs:403-406`). |
+| The configured LLM provider | the AI pass: `llm_commands::run_polish` and `extraction::extract_after_transcribe` (`scheduler.rs:216-221`) | `build_provider` enforces cloud consent and Keep local (spec §2 item 1; `llm_commands.rs:569`, `:821-823`; `extraction.rs:273`). A refusal is recorded as a consent skip (`scheduler.rs:403-406`). |
 
 Engine routing (`pipeline.rs:319-451`, `pipeline.rs:1138-1307`):
 
@@ -146,7 +146,7 @@ A GPU tier failure pins that model to CPU for later meetings. A cloud failure ne
 - **Only a confirmed attendee list sets `num_speakers`.** Spec §2 item 7. `speaker_hint` returns `Unknown` unless `attendees_confirmed` (`pipeline.rs:43-51`). Confirmed and empty means "Just you": no diarization run (`pipeline.rs:568-569`, `:644-652`, `:768-783`). Confirmed with n attendees means n+1 speakers on a mixed track and n far-end clusters on the system channel (`pipeline.rs:60-72`). Confirmation is set only by `update_meeting_attendees` (`crates/fly-storage/src/meetings.rs:82`). Test: only the ignored `rediarize_e2e`.
 - **Keep local skips Groq.** THREAT_MODEL T10. Enforced at `pipeline.rs:148-150`, `:274-290`. Test: `pipeline::keep_local_meetings_never_use_cloud_asr` (predicate only).
 - **Diarization is always local, on every tier.** ARCHITECTURE.md "Privacy boundaries"; `pipeline.rs:239-250`.
-- **The AI pass goes through `build_provider`.** Spec §2 item 1. Enforced at `scheduler.rs:208-230` → `llm_commands.rs:509-511`, `extraction.rs:273`.
+- **The AI pass goes through `build_provider`.** Spec §2 item 1. Enforced at `scheduler.rs:208-230` → `llm_commands.rs:821-823`, `extraction.rs:273`.
 - **ASR, GPU and import settings are not webview-settable.** Spec §2 item 2. They get dedicated commands (`commands.rs:59-66`).
 - **Recording always wins.** No job starts while audio or screen capture is active (`scheduler.rs:98-100`, `:468-470`). The check runs at job start only; a recording started mid-run does not pause it (inferred from the code).
 - **One pipeline per meeting.** The guard is `pipeline_stage` (`pipeline.rs:158-164`, `:738-743`). The check and the insert take the lock separately (`pipeline.rs:160`, `:120-124`), so the guard is not atomic (inferred minor race).
@@ -171,7 +171,7 @@ A GPU tier failure pins that model to CPU for later meetings. A cloud failure ne
 - `pipeline_e2e` still asserts `track.16k.wav` is absent from the meeting folder (`tests/pipeline_e2e.rs:266-269`). Intermediates moved to scratch, so this can't fail, and scratch cleanup is unverified.
 - Nothing times out. `run_with`, the Groq HTTP call and the sidecars have no time limit, so a hang stalls the single worker and Cancel can't interrupt it. The AI pass runs inline before the next job, for up to 2 × `POLISH_TIMEOUT` (20 min, `scheduler.rs:172`, `:382`).
 - The `spawn` loop (retry delay, the `Completed` → `ai_pass` → `done` ordering, `embed_notify`) and the cancel unwind (`Tick::Cancelled` → `finish_cancelled` → purge) have no test.
-- Deleting a note while its meeting is `polishing`, or mid-re-diarize: `scheduler::cancel` reports running, `delete_note` skips the purge (`commands.rs:283-292`), and nothing purges later. The meeting row, transcript and recordings folder are orphaned (inferred from code).
+- Deleting a note while its meeting is `polishing`, or mid-re-diarize: `scheduler::cancel` reports running, `delete_note` skips the purge (`commands.rs:305-314`), and nothing purges later. The meeting row, transcript and recordings folder are orphaned (inferred from code).
 - `relabel_speaker` and `edit_transcript_segment` don't check for a running re-transcribe, which then overwrites them (inferred).
 - `asr.language` has no writer.
 

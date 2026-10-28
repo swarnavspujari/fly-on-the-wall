@@ -8,7 +8,7 @@ The process entry point and the only place platform implementations are chosen. 
 
 ## Files it owns
 - `src-tauri/src/main.rs` — 6-line shim; `windows_subsystem = "windows"` in release.
-- `src-tauri/src/lib.rs` — `run()`: pre-builder startup, plugin order, `setup` tasks, command registration (104 commands, `lib.rs:182-287`), Exit hook.
+- `src-tauri/src/lib.rs` — `run()`: pre-builder startup, plugin order, `setup` tasks, command registration (105 commands, `lib.rs:182-288`), Exit hook.
 - `src-tauri/src/state.rs` — `AppState`, data-dir resolution, Looma→FlyOnTheWall folder move, legacy keychain copy.
 - `src-tauri/src/logging.rs` — tracing subscriber, rolling file logs, panic hook, the log-hygiene rule and its lexical test.
 - `src-tauri/src/nav_guard.rs` — the `nav-guard` plugin (`on_navigation`).
@@ -21,12 +21,12 @@ The process entry point and the only place platform implementations are chosen. 
 ## Surface area
 ### Public API
 - `pub fn run()` (`lib.rs:28`), called by `main.rs:4`.
-- `pub struct AppState` (`state.rs:15-54`), `AppState::init()` (`:57-69`), `AppState::init_with(data_dir, secrets)` for tests (`:72-95`), `secrets_arc()` (`:99-101`).
-- `pub fn prepared_data_dir()` (`state.rs:123-128`); `pub(crate) const LEGACY_KEYCHAIN_SERVICE = "com.looma.notetaker"` (`:107`, also used by `privacy.rs:808`).
+- `pub struct AppState` (`state.rs:15-58`), `AppState::init()` (`:61-73`), `AppState::init_with(data_dir, secrets)` for tests (`:76-100`), `secrets_arc()` (`:104-106`).
+- `pub fn prepared_data_dir()` (`state.rs:128-133`); `pub(crate) const LEGACY_KEYCHAIN_SERVICE = "com.looma.notetaker"` (`:112`, also used by `privacy.rs:808`).
 - `logging::init(Option<&Path>)`, `logging::LOGS_DIR = "logs"` (`logging.rs:19`, `:29`).
-- `nav_guard::is_app_url`, `nav_guard::init` (`nav_guard.rs:14`, `:32`); `commands::is_openable_external_url` (`commands.rs:553-558`, also used by the nav guard).
+- `nav_guard::is_app_url`, `nav_guard::init` (`nav_guard.rs:14`, `:32`); `commands::is_openable_external_url` (`commands.rs:575-580`, also used by the nav guard).
 
-**`AppState` fields** (all built in `state.rs:80-94`):
+**`AppState` fields** (all built in `state.rs:84-99`):
 | Field | Type | Who locks / mutates it |
 |---|---|---|
 | `storage` | `Mutex<Storage>` | Nearly every module: asr_commands, calendar_commands, commands, embeddings, extraction, gpu, import_commands, live, llm_commands, ollama, pipeline, privacy, recording, scheduler, screen_commands, and `lib.rs` startup tasks. The single SQLite connection. |
@@ -40,10 +40,11 @@ The process entry point and the only place platform implementations are chosen. 
 | `jobs_notify` | `tokio::sync::Notify` | Notified by recording.rs, screen_commands.rs, scheduler.rs; awaited by the scheduler worker |
 | `ollama` | `Mutex<Option<Child>>` | ollama.rs only (spawn, status, `shutdown` on Exit) |
 | `live_status` | `Mutex<Option<LiveStatus>>` | live.rs only |
-| `consent_skipped` | `Mutex<BTreeSet<meeting_id>>` | Inserted/retried by scheduler.rs; read/drained by llm_commands.rs:136-150 |
+| `consent_skipped` | `Mutex<BTreeSet<meeting_id>>` | Inserted/retried by scheduler.rs; read/drained by llm_commands.rs:449-463 |
+| `consent_prompt` | `tokio::sync::Mutex<ConsentPacing>` | llm_commands.rs only: `request_cloud_consent` holds it while the cloud-consent dialog is open (one dialog at a time) and keeps each provider's recent declines in it |
 | `embed_notify` | `tokio::sync::Notify` | Notified by commands.rs, llm_commands.rs, scheduler.rs; awaited by embeddings.rs |
 
-Observed lock nesting: `recording` → `storage` (`recording.rs:134-140`), `recording` → `screen` (`scheduler.rs:469`). No reverse order was found.
+Observed lock nesting: `recording` → `storage` (`recording.rs:134-140`), `recording` → `screen` (`scheduler.rs:469`), `consent_prompt` → `storage` (`llm_commands.rs:294-308`). No reverse order was found.
 
 **Webview security config**
 - **CSP** (`tauri.conf.json:36`): `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http(s)://asset.localhost data: blob:; media-src 'self' asset: http(s)://asset.localhost blob:; font-src 'self' data:; connect-src 'self' ipc: http(s)://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'; worker-src 'self' blob:`.
@@ -74,17 +75,17 @@ In `setup` (`lib.rs:68-180`): `AppState::init` (on failure: error dialog, `exit(
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
-| (Tauri) `RunEvent::Exit` | Listens (`lib.rs:290-295`) | — | Calls `ollama::shutdown` only |
+| (Tauri) `RunEvent::Exit` | Listens (`lib.rs:291-296`) | — | Calls `ollama::shutdown` only |
 
 ### Settings keys
 None read or written directly. Startup calls `llm_commands::migrate_anthropic_model`, `reset_unseen_cloud_consent` and `privacy::record_pending_wipe` (`lib.rs:111-117`), which own their keys (see [app-settings-consent](app-settings-consent.md), [app-llm](app-llm.md), [app-privacy](app-privacy.md)).
 
 ### Database
-None directly. `AppState::init_with` opens `flyonthewall.db` with `Storage::open_with_retry(.., OpenRetry::STARTUP)` (`state.rs:78`); see [fly-storage](fly-storage.md).
+None directly. `AppState::init_with` opens `flyonthewall.db` with `Storage::open_with_retry(.., OpenRetry::STARTUP)` (`state.rs:82`); see [fly-storage](fly-storage.md).
 
 ### Files and directories written
-- `<data_dir>` = `dirs::data_dir()/FlyOnTheWall` (`%APPDATA%\FlyOnTheWall` on Windows), `./FlyOnTheWall` if the OS has no data dir (`state.rs:113-117`).
-- Renames `<os data dir>/Looma` → `<data_dir>` once, only when the new folder doesn't exist (`state.rs:133-148`).
+- `<data_dir>` = `dirs::data_dir()/FlyOnTheWall` (`%APPDATA%\FlyOnTheWall` on Windows), `./FlyOnTheWall` if the OS has no data dir (`state.rs:118-122`).
+- Renames `<os data dir>/Looma` → `<data_dir>` once, only when the new folder doesn't exist (`state.rs:138-153`).
 - `<data_dir>/logs/flyonthewall.<date>.log`, rotated daily, newest 5 kept (`logging.rs:19-23`, `:73-82`).
 - Creates `<data_dir>/recordings/` and `<data_dir>/attachments/` at startup (`lib.rs:104-108`).
 
@@ -102,22 +103,22 @@ Startup itself makes no requests. Background workers started here (embeddings �
 
 ### Secrets and keychain entries
 - New service `com.flyonthewall.app`, legacy service `com.looma.notetaker`.
-- On **every** launch, `copy_secrets` copies 7 keys from the legacy service into the new one when the new one lacks them (`state.rs:59-67`, `:152-175`): `openai_api_key`, `anthropic_api_key`, `nim_api_key`, `groq_api_key`, `google_oauth_token`, `ms_oauth_token`, `google_oauth_client_secret`. Failures are swallowed.
+- On **every** launch, `copy_secrets` copies 7 keys from the legacy service into the new one when the new one lacks them (`state.rs:63-71`, `:157-180`): `openai_api_key`, `anthropic_api_key`, `nim_api_key`, `groq_api_key`, `google_oauth_token`, `ms_oauth_token`, `google_oauth_client_secret`. Failures are swallowed.
 
 ## Dependencies
 - **Inbound:** `main.rs`; every `app-*` module reads `AppState`; integration tests build state with `AppState::init_with` (`src-tauri/tests/scheduling.rs:40`, `pipeline_e2e.rs:136`, `rediarize_e2e.rs:91`).
 - **Outbound:** all `app-*` modules (registration), [fly-storage](fly-storage.md), [fly-secrets](fly-secrets.md), [fly-audio](fly-audio.md) (`CpalAudioCapture`), Tauri plugins (single-instance, dialog, opener, clipboard-manager, updater, process), tracing-subscriber / tracing-appender.
 
 ## Invariants
-- Platform impls are chosen only here (`lib.rs:1-2`, `state.rs:20-21`, `:83`). Source: ARCHITECTURE.md golden rule.
-- The data dir is migrated before anything creates files in it (`lib.rs:29-41`, `state.rs:119-128`).
+- Platform impls are chosen only here (`lib.rs:1-2`, `state.rs:20-21`, `:87`). Source: ARCHITECTURE.md golden rule.
+- The data dir is migrated before anything creates files in it (`lib.rs:29-41`, `state.rs:124-133`).
 - Asset protocol scope stays `recordings/` + `attachments/` (`lib.rs:100-108`, `tauri.conf.json:39-42`). Source: spec §2 item 3; THREAT_MODEL T6.
 - CSP and nav guard unchanged (`tauri.conf.json:36`, `nav_guard.rs`, `lib.rs:66`). Source: spec §2 item 3; THREAT_MODEL T2, T5.
 - Webview capabilities stay minimal: no fs/shell/http plugins exposed to JS (`capabilities/default.json:6`). Source: THREAT_MODEL T2.
-- Only http, https and mailto links leave the app, re-validated in Rust (`commands.rs:553-569`). Source: THREAT_MODEL T1, T5.
+- Only http, https and mailto links leave the app, re-validated in Rust (`commands.rs:575-591`). Source: THREAT_MODEL T1, T5.
 - A database that won't open shows a dialog and exits; never a silent crash (`lib.rs:76-98`).
 - No user content in logs: no titles, folder names, transcript/note/prompt text, attendee names or emails, calendar ids, tokens or keys (`logging.rs:6-13`).
-- The managed `ollama serve` child never outlives the app (`lib.rs:290-295`).
+- The managed `ollama serve` child never outlives the app (`lib.rs:291-296`).
 
 ## Tests
 | Kind | File | Tests | Covers |

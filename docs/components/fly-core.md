@@ -1,7 +1,7 @@
 # Domain core (`fly-core`)
 
 > Layer: crate. Described at main `82b7edf` (v2.4.0).
-> In flight: None. #86 (merged) changed only the doc comment on `Transcript.engine` in `model.rs`. `engine` can now also hold `whisper.cpp-vulkan` and `parakeet[-vulkan]:<model file stem>`, with no type changes. Anything that matches on `engine` must expect those strings. PR #92 and the consent hardening (#102) don't touch this crate.
+> In flight: None. #86 (merged) changed only the doc comment on `Transcript.engine` in `model.rs`. `engine` can now also hold `whisper.cpp-vulkan` and `parakeet[-vulkan]:<model file stem>`, with no type changes. Anything that matches on `engine` must expect those strings. PR #92 doesn't touch this crate.
 
 ## Purpose
 This crate holds the types every other crate shares: notes, blocks with provenance, meetings, attendees, transcripts, speaker turns, meeting items and templates. It also holds the pure algorithms that turn raw ASR and diarization output into a trustworthy transcript (word↔speaker alignment, cross-talk de-dup, hallucination-loop collapse, re-diarize). It owns the Enhance and Polish prompt contracts and their parsers, plus a per-model prompt-profile table. Everything is deterministic and in-memory, with no I/O.

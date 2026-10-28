@@ -40,7 +40,7 @@ Called by other src-tauri modules:
 | `delete_all_data` | `include_models: bool, confirmation: String` (must be `"delete everything"`) | `Result<WipeReport, String>` | `ui-settings` (`PrivacySection.tsx:111`); retry from `ui-notices` (`RestartRequired.tsx:75`); via `api.deleteAllData` |
 | `disk_encryption_status` | — | `Result<DiskEncryption, String>` (`state` on/off/unknown, `method`, `volume`) | `ui-settings` (`PrivacySection.tsx:55`), via `api.diskEncryptionStatus` |
 
-All 12 are registered at `src-tauri/src/lib.rs:275-286` and mirrored in `frontend/src/devMock.ts:1376-1437`. Drift: the mock's `delete_all_data` rejects a wrong phrase with `"confirmation mismatch"` (backend: `"confirmation text doesn't match — nothing was deleted"`), never refuses for busy work, and always returns `last_wipe: null`; `set_note_keep_local` doesn't error on an unknown note.
+All 12 are registered at `src-tauri/src/lib.rs:276-287` and mirrored in `frontend/src/devMock.ts:1420-1481`. Drift: the mock's `delete_all_data` rejects a wrong phrase with `"confirmation mismatch"` (backend: `"confirmation text doesn't match — nothing was deleted"`), never refuses for busy work, and always returns `last_wipe: null`; `set_note_keep_local` doesn't error on an unknown note.
 
 ### Events
 No Tauri events are emitted or listened to here. Two frontend `window` events carry the feature in the UI:
@@ -104,7 +104,7 @@ The result (including `unknown`) is cached for the session under a mutex held ac
 - **Outbound:** [fly-storage](fly-storage.md) (`MeetingPrivacy`, keep-local, retention, `erase_all_content`), [fly-secrets](fly-secrets.md), `crate::state::AppState` (`storage`, `secrets`, `pipeline_stage`, `data_dir`), `crate::scheduler::recording_active`, `crate::calendar_commands::GOOGLE_CLIENT_SECRET_KEY`, `tauri-plugin-clipboard-manager`, `tokio` timers, std file locking (`File::try_lock`).
 
 ## Invariants
-- **T10 (cloud without the user realizing):** Keep local is enforced where providers are chosen, not here: `build_provider` refuses cloud LLMs for keep-local notes/meetings (`src-tauri/src/llm_commands.rs:293-301`), the pipeline skips Groq (`src-tauri/src/pipeline.rs:148-149`, `274`), and the embedding worker uses the shareable queue (`src-tauri/src/embeddings.rs:176`, `202`). Lookups fail closed (fly-storage `privacy.rs:209-241`). A folder flag can't be overridden per note (UI: `Editor.tsx:1045`). Spec §2 item 1.
+- **T10 (cloud without the user realizing):** Keep local is enforced where providers are chosen, not here: `build_provider` refuses cloud LLMs for keep-local notes/meetings (`src-tauri/src/llm_commands.rs:605-613`), the pipeline skips Groq (`src-tauri/src/pipeline.rs:148-149`, `274`), and the embedding worker uses the shareable queue (`src-tauri/src/embeddings.rs:176`, `202`). Lookups fail closed (fly-storage `privacy.rs:209-241`). A folder flag can't be overridden per note (UI: `Editor.tsx:1045`). Spec §2 item 1.
 - **T11 (deleted data recoverable from the DB):** `erase_all_content` deletes every row, runs `VACUUM`, and reports `checkpointed: false` when a reader blocks the WAL truncate; the report is then not `clean()` and the UI won't auto-restart (`privacy.rs:854-870`, `516-523`; `RestartRequired.tsx:59-66`).
 - **T12 (consent of other participants):** the participants-notified flag and the recording notice (≤2000 chars, `privacy.rs:113-129`) are records/helpers only; nothing blocks recording.
 - **T13 (stolen laptop):** retention and delete-all limit what's on disk; the disk probe never needs elevation and says nothing when unsure (`privacy.rs:894-913`).
@@ -118,7 +118,7 @@ The result (including `unknown`) is cached for the session under a mutex held ac
 |---|---|---|---|
 | unit | `src-tauri/src/privacy.rs` | 16 (15 off Windows: `hung_probe_is_killed_after_the_timeout` is `cfg(windows)`) | classifiers, drive validation, notice length, owned-key delete, data-dir wipe, marker freshness/consumption, lock semantics, `perform_delete_all`, `apply_erase`, busy refusal, retention guards |
 | unit (storage side) | `crates/fly-storage/src/privacy.rs`, `tests/storage_safety.rs` | 13 + 1 | keep-local sets, retention candidates, erase, scratch removal (see [fly-storage](fly-storage.md)) |
-| unit (enforcement) | `src-tauri/src/llm_commands.rs`, `src-tauri/src/pipeline.rs` | — | keep-local refuses cloud LLM / Groq (`llm_commands.rs:910`, `pipeline.rs:1417`) |
+| unit (enforcement) | `src-tauri/src/llm_commands.rs`, `src-tauri/src/pipeline.rs` | — | keep-local refuses cloud LLM / Groq (`llm_commands.rs:1222`, `pipeline.rs:1417`) |
 | vitest | `frontend/src/privacy.test.ts` | 15 | pure helpers: notice text, retention parsing, banner rule, delete-all gating, wipe outcome |
 | vitest | `frontend/src/components/Sidebar.test.tsx`, `RecordingBar.test.tsx`, `SettingsModal.test.tsx` | — | folder toggle (api mocked), participants flag, restart event closes Settings |
 

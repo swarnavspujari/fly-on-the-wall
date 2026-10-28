@@ -7,7 +7,7 @@
 Search-as-you-type over notes and transcripts. `search` is plain SQLite FTS5. `search_semantic` fuses FTS with a vector search (reciprocal rank fusion, grouped by note). Its vectors come from a background worker that chunks every note and transcript and embeds the chunks through Ollama's `/api/embed` with `embeddinggemma:300m`. Everything semantic is best-effort: no Ollama, no model or a dead server means FTS-only, never an error.
 
 ## Files it owns
-- `src-tauri/src/commands.rs` (part) — `search` (629-637), `search_semantic` (639-680).
+- `src-tauri/src/commands.rs` (part) — `search` (651-659), `search_semantic` (661-702).
 - `src-tauri/src/embeddings.rs` — the indexer (`spawn`), `embed_raw`, `embed_query`, prompts, model constant.
 - Storage halves live in [fly-storage](fly-storage.md): `search.rs` (`search`, `search_split`, `SearchFilter`), `embeddings.rs` (chunking, queue, `vector_search`), `hybrid.rs` (`fuse`), `privacy.rs:303-338` (shareable queue).
 
@@ -30,9 +30,9 @@ Search-as-you-type over notes and transcripts. `search` is plain SQLite FTS5. `s
 4. `ensure_ready` (126-142): `ollama::ensure_running` (may spawn the managed `ollama serve`), then `GET /api/tags`; if the model is missing, **pull it** (`POST /api/pull`, progress on `model:progress`). Failure → wait 60 s or a nudge.
 5. Re-derive remote/local from the URL actually used (198), take 16 pending chunks (shareable queue when remote), embed `doc_prompt(title, text)`, store vectors (`store_chunk_embeddings`). Failure → sleep 60 s.
 
-The storage lock is never held across HTTP. `embed_notify` is nudged by `update_note_scratchpad` (`commands.rs:234`), Enhance/block edits (`llm_commands.rs:426,444`) and each finished transcription (`scheduler.rs:171`).
+The storage lock is never held across HTTP. `embed_notify` is nudged by `update_note_scratchpad` (`commands.rs:256`), Enhance/block edits (`llm_commands.rs:738,756`) and each finished transcription (`scheduler.rs:171`).
 
-#### `search_semantic` (`commands.rs:644-680`)
+#### `search_semantic` (`commands.rs:666-702`)
 `SearchFilter { limit: 30, ..Default }`, so `exclude_keep_local = false`. Runs `search_split` (FTS notes, FTS transcripts), then `embed_query`. With a vector it calls `vector_search(…, EMBED_MODEL, &filter, 30)`; a failure there is logged and treated as empty. Then `hybrid::fuse`. Keep-local notes **are** returned. That's correct for the user's own UI. But `vector_search` would ignore `exclude_keep_local` even if it were set (`crates/fly-storage/src/embeddings.rs:391-418`). fly-context post-filters it itself (`crates/fly-context/src/tools.rs:738-749`); PR #92 moves the filter into SQL.
 
 ### Tauri commands
@@ -41,7 +41,7 @@ The storage lock is never held across HTTP. `embed_notify` is nudged by `update_
 | `search` | `query: String` | `Result<Vec<SearchHit>, String>` (FTS, limit 30, notes then transcripts) | `ui-app-shell` search box (`App.tsx:472`, 200 ms debounce), via `api.search` |
 | `search_semantic` | `query: String` | `Result<Vec<SearchHit>, String>` (fused, grouped by note, limit 30) | `ui-app-shell` (`App.tsx:480`, 450 ms debounce; replaces the FTS list; errors ignored; stale responses dropped by `searchSeq`), via `api.searchSemantic` |
 
-devMock mirrors both (`devMock.ts:1166-1171`). It returns the same two canned hits for every query, and `search_semantic` returns the first one. Mock data has no keep-local or empty-result case.
+devMock mirrors both (`devMock.ts:1203-1208`). It returns the same two canned hits for every query, and `search_semantic` returns the first one. Mock data has no keep-local or empty-result case.
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
@@ -76,11 +76,11 @@ devMock mirrors both (`devMock.ts:1166-1171`). It returns the same two canned hi
 None.
 
 ## Dependencies
-- **Inbound:** `lib.rs:177` (`embeddings::spawn`), `lib.rs:212-213` (registration), `commands.rs:234`, `llm_commands.rs:426,444`, `scheduler.rs:171` (`embed_notify`), `tests/search_eval.rs`.
+- **Inbound:** `lib.rs:177` (`embeddings::spawn`), `lib.rs:212-213` (registration), `commands.rs:256`, `llm_commands.rs:738,756`, `scheduler.rs:171` (`embed_notify`), `tests/search_eval.rs`.
 - **Outbound:** [fly-storage](fly-storage.md) (`search_split`, `vector_search`, `hybrid::fuse`, chunk queue incl. `*_shareable`), [app-ollama](app-ollama.md) (`root_url`, `server_alive`, `ensure_running`, `pull_model`), [app-llm](app-llm.md) (`is_loopback_url`), `AppState::embed_notify`.
 
 ## Invariants
-- Semantic search degrades to FTS and never fails a search or blocks the UI (`embeddings.rs:10-13`; `commands.rs:661-672`).
+- Semantic search degrades to FTS and never fails a search or blocks the UI (`embeddings.rs:10-13`; `commands.rs:683-694`).
 - The query path never spawns a server or pulls a model (`embeddings.rs:79-85`).
 - Keep-local notes and transcripts are never sent to an Ollama on another machine for indexing; the decision is made from the URL actually used (THREAT_MODEL T10; `embeddings.rs:168-207`, `crates/fly-storage/src/privacy.rs:303-338`).
 - The storage lock is never held across an HTTP call (`embeddings.rs:149-150`).
@@ -108,5 +108,5 @@ None.
 - Run `cargo test -p fly-storage` (chunking, fusion, shareable queue) and, with Ollama + `embeddinggemma:300m` running locally, `cargo test -p fly-app --test search_eval -- --nocapture`. Read the printed table; a pass in CI means nothing.
 - Changing `doc_prompt` / `query_prompt` / chunking changes every vector's meaning. Bump or re-queue (the `model` column only re-queues on a model-name change), then re-run `search_eval`.
 - Any new caller that serves results to an external tool (MCP, agentic Ask) must set `exclude_keep_local` **and** post-filter vector hits until PR #92 lands.
-- Keep `search` cheap: it is a synchronous command (`commands.rs:629-630`), so it runs on the main thread per keystroke (see `commands.rs:36-40`).
+- Keep `search` cheap: it is a synchronous command (`commands.rs:651-652`), so it runs on the main thread per keystroke (see `commands.rs:36-40`).
 - devMock: keep `search` / `search_semantic` returning the `SearchHit` shape (`kind`, `note_id`, `title`, `snippet` with `[[match]]`, `start_ms`).

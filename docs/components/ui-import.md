@@ -47,7 +47,7 @@ How backend import state maps onto the queue:
 | Fixture files have no `convert_error` key until a failure (`devMock.ts:348-373`) | Always serialized, `null` when none (`import_commands.rs:44-47`) |
 | Cancel while running is ignored and leaves `started` as is (`devMock.ts:504-506`) | Resets `started` first, then the worker emits `"cancelled"` when it unwinds (`import_commands.rs:363-372`, `scheduler.rs:306-318`) |
 | Run gives up at once (`fotwMockImportPipelineFail`, `devMock.ts:453-463`) | Up to 3 attempts, each retry emitting `"waiting"` with detail `"retrying (attempt N failed)"` (`scheduler.rs:175-191`) |
-| `import_state` non-null until `"done"` (`devMock.ts:1361-1364`) | `null` as soon as the transcript is saved, before `"polishing"` (`import_commands.rs:554-569`) |
+| `import_state` non-null until `"done"` (`devMock.ts:1405-1408`) | `null` as soon as the transcript is saved, before `"polishing"` (`import_commands.rs:554-569`) |
 | `"no staged import"` thrown as an `Error` (`devMock.ts:396`) | Plain string |
 
 ### Events
@@ -108,6 +108,6 @@ None.
 ## Changing it safely
 - Run `npm --prefix frontend test` (ImportQueue, importProgress, App).
 - A new pipeline stage: add a header label to `RUNNING_LABELS` and decide whether it counts as "after ASR" (`ImportQueue.tsx:134-135`).
-- A change to the `ImportStaged` / `ImportFile` / `import:progress` shapes in `import_commands.rs`: update `types.ts`, devMock's import mock (`devMock.ts:302-521`, `:1468-1514`) and the tests together.
+- A change to the `ImportStaged` / `ImportFile` / `import:progress` shapes in `import_commands.rs`: update `types.ts`, devMock's import mock (`devMock.ts:302-521`, `:1512-1558`) and the tests together.
 - Keep `cancel_transcription` ending in a terminal `"cancelled"` for every case; the queue has no other way back to idle.
 - Before tagging, check a real failed import in the app (PR #100's lesson: unit tests passed while the real app stuck).

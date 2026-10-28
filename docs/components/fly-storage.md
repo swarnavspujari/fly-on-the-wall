@@ -64,7 +64,7 @@ The `settings` table is a generic key/value store (`settings.rs:8-43`); keys are
 |---|---|---|---|
 | `privacy.audio_retention_days` | R/W (`privacy.rs:450-468`) | No (`privacy.` isn't an allowed prefix, `src-tauri/src/commands.rs:59-66`) | Retention period in days; only 7/30/90/365 are honored, anything else reads as "keep forever" (`privacy.rs:454-455`) |
 
-`delete_settings_with_prefix` (`settings.rs:35`) is used by the app to void `consent.cloud_llm.*` (`src-tauri/src/llm_commands.rs:91`).
+`delete_settings_with_prefix` (`settings.rs:35`) is used by the app to void `consent.cloud_llm.*` (`src-tauri/src/llm_commands.rs:102`).
 
 ### Database
 `flyonthewall.db`, `user_version` = 2 (`lib.rs:385`). Schema in `create_baseline` (`lib.rs:416-552`); columns added after first release are back-filled by `repair_missing_columns` (`lib.rs:123-177`, `559-569`). No foreign key ties `meetings.note_id`, `transcripts`, `meeting_items`, `transcription_jobs` or `embedding_chunks` to their owners; deletes clean them up by hand (`notes.rs:263`, `meetings.rs:98`).
@@ -157,7 +157,7 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 - No test pins `secure_delete`, `foreign_keys` or `journal_mode` pragmas, or that deleted text is gone from the file (T11).
 - Migration tests use hand-written SQL fixtures, not a file made by an older build; the "rerun after a mid-migration crash" promise (`migrations.rs:2-4`) is untested.
 - Atomic-write tests simulate a failing write through a seam; a kill between `sync_all` and rename (leftover `.tmp`) isn't covered.
-- Note delete and meeting purge are separate transactions in the app (`src-tauri/src/commands.rs:276-292`); an orphaned meeting keeps searchable transcript text and no test or sweep covers it.
+- Note delete and meeting purge are separate transactions in the app (`src-tauri/src/commands.rs:298-314`); an orphaned meeting keeps searchable transcript text and no test or sweep covers it.
 
 ## Changing it safely
 - Run `cargo test -p fly-storage` (and `-p fly-mcp -p fly-context`, which read through it), then `cargo clippy --workspace --all-targets -D warnings`.
