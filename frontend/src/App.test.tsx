@@ -35,7 +35,9 @@ async function settle(ms = 0) {
   });
 }
 
-async function boot(flags: Record<string, string> = {}) {
+/** `setup` runs against the fresh mock before the App renders (e.g. a setting
+ *  the App reads once at startup). */
+async function boot(flags: Record<string, string> = {}, setup?: () => Promise<void>) {
   vi.useFakeTimers();
   localStorage.clear();
   for (const [k, v] of Object.entries(flags)) localStorage.setItem(k, v);
@@ -53,6 +55,7 @@ async function boot(flags: Record<string, string> = {}) {
     calls.push({ cmd, args });
     return override?.(cmd, args ?? {}) ?? real(cmd, args);
   };
+  await setup?.();
   const { default: App } = await import("./App");
   const { ConfirmProvider } = await import("./components/confirm");
   host = document.createElement("div");
@@ -401,34 +404,73 @@ describe("App: a recording whose transcription failed", () => {
 });
 
 describe("App: a failure stays with its own meeting", () => {
-  it("never carries over to a new note or the recording made in it", async () => {
-    const WHY = "whisper-cli exited with status 3221225477";
-    await boot({ fotwMockNoTranscript: "1" });
+  // A stale failure only shows on a meeting: these follow each way the open
+  // meeting changes without a fresh load (record, stop, new note, close).
+  const WHY = "whisper-cli exited with status 3221225477";
+  const freshMeeting = (id: string, noteId: string, title: string) => ({
+    id,
+    title,
+    note_id: noteId,
+    attendees: [],
+    attendees_confirmed: false,
+    started_at: new Date().toISOString(),
+    ended_at: new Date().toISOString(),
+    recording: { mic_path: null, system_path: null, mixed_path: "mix.wav", duration_ms: 1 },
+  });
+  const transcriptTab = () =>
+    Array.from(host!.querySelectorAll("button")).find((b) => b.textContent?.includes("Transcript"));
+  /** Transcribe when I stop: off, so the stop clears nothing on its way. */
+  const autoTranscribeOff = async () => {
+    const s = (await realInvoke("get_asr_settings", {})) as Record<string, unknown>;
+    await realInvoke("set_asr_settings", { update: { ...s, auto_transcribe: false } });
+  };
+  /** The transcript panel of the open note's meeting: rendered, and clean. */
+  const expectCleanPanel = async () => {
+    await click(transcriptTab());
+    expect(button("Transcribe recording")).toBeDefined();
+    expect(host!.textContent).not.toContain(WHY);
+  };
+
+  /** Overrides for note n3 ("Design weekly — notes", the mock's create_note):
+   *  `before` is its meeting until Record, then a fresh one; Stop returns it.
+   *  (The mock always records n1, so n3's own panel stays on screen.) */
+  function n3Meetings(before: ReturnType<typeof freshMeeting> | null, failed: string[]) {
+    const fresh = freshMeeting("m-new", "n3", "Design weekly — notes");
     let recorded = false;
     override = (cmd, args) => {
-      if (cmd === "pipeline_failure") return Promise.resolve(args.meetingId === "m1" ? WHY : null);
+      if (cmd === "pipeline_failure") {
+        return Promise.resolve(failed.includes(String(args.meetingId)) ? WHY : null);
+      }
       if (cmd === "start_recording") recorded = true;
-      // the new note (the mock's create_note is n3) gets its own fresh meeting
-      if (cmd === "get_meetings_for_note" && args.noteId === "n3" && recorded) {
-        return Promise.resolve([
-          {
-            id: "m-new",
-            title: "Design weekly — notes",
-            note_id: "n3",
-            attendees: [],
-            attendees_confirmed: false,
-            started_at: new Date().toISOString(),
-            ended_at: null,
-            recording: { mic_path: null, system_path: null, mixed_path: "mix.wav", duration_ms: 1 },
-          },
-        ]);
+      if (cmd === "get_meetings_for_note" && args.noteId === "n3") {
+        return Promise.resolve(
+          recorded ? [fresh, ...(before ? [before] : [])] : before ? [before] : [],
+        );
+      }
+      if (cmd === "stop_recording" && recorded) {
+        localStorage.removeItem("fotwMockRecording");
+        return Promise.resolve(fresh);
       }
       return undefined;
     };
-    const transcriptTab = () =>
-      Array.from(host!.querySelectorAll("button")).find((b) =>
-        b.textContent?.includes("Transcript"),
-      );
+  }
+
+  it("recording again into a note whose last run failed starts clean", async () => {
+    await boot({ fotwMockNoTranscript: "1" });
+    n3Meetings(freshMeeting("m-old", "n3", "Design weekly — notes"), ["m-old"]);
+    await click(rowFor("Design weekly — notes"));
+    await settle(100);
+    await click(transcriptTab());
+    expect(host!.textContent).toContain(WHY);
+
+    await click(button("Record"));
+    await settle(100);
+    await expectCleanPanel();
+  });
+
+  it("a new note recorded and stopped (Transcribe when I stop off) carries nothing over", async () => {
+    await boot({ fotwMockNoTranscript: "1" }, autoTranscribeOff);
+    n3Meetings(null, ["m1"]);
     await click(rowFor("Acme — renewal review"));
     await settle(100);
     await click(transcriptTab());
@@ -438,9 +480,68 @@ describe("App: a failure stays with its own meeting", () => {
     await settle(100);
     await click(button("Record"));
     await settle(100);
+    await click(button("Stop"));
+    await settle(100);
+    await expectCleanPanel();
+  });
+
+  it("closing a failed note (delete) and recording a new one carries nothing over", async () => {
+    await boot({ fotwMockNoTranscript: "1" }, autoTranscribeOff);
+    n3Meetings(null, ["m1"]);
+    await click(rowFor("Acme — renewal review"));
+    await settle(100);
     await click(transcriptTab());
-    // the new meeting's panel renders, without the other meeting's failure
-    expect(button("Transcribe recording")).toBeDefined();
+    expect(host!.textContent).toContain(WHY);
+
+    await click(trashFor("Acme — renewal review"));
+    expect(homeShown()).toBe(true);
+    await click(host!.querySelector('button[title="New note"]'));
+    await settle(100);
+    await click(button("Record"));
+    await settle(100);
+    await click(button("Stop"));
+    await settle(100);
+    await expectCleanPanel();
+  });
+
+  it("stopping after a source jumped to an earlier failed meeting shows the new one clean", async () => {
+    // the live pane (this note is recording) scrolls; jsdom has no layout
+    Element.prototype.scrollIntoView ??= () => {};
+    await boot({}, autoTranscribeOff);
+    const earlier = (await realInvoke("get_meetings_for_note", { noteId: "n1" })) as unknown[];
+    const rec = freshMeeting("m-rec", "n1", "Acme — renewal review");
+    let recorded = false;
+    override = (cmd, args) => {
+      // the note's earlier meeting (m1) gave up; the one being recorded is new
+      if (cmd === "pipeline_failure") return Promise.resolve(args.meetingId === "m1" ? WHY : null);
+      if (cmd === "start_recording") recorded = true;
+      if (cmd === "get_meetings_for_note" && args.noteId === "n1" && recorded) {
+        return Promise.resolve([rec, ...earlier]);
+      }
+      if (cmd === "get_transcript" && args.meetingId === "m-rec") return Promise.resolve(null);
+      if (cmd === "stop_recording" && recorded) {
+        localStorage.removeItem("fotwMockRecording");
+        return Promise.resolve(rec);
+      }
+      return undefined;
+    };
+    await click(rowFor("Acme — renewal review"));
+    await settle(100);
+    await click(button("Record"));
+    await settle(100);
+    // while recording, a source in the enhanced notes opens the earlier
+    // (failed) meeting's transcript: its failure is loaded
+    const enhanced = Array.from(host!.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Enhanced"),
+    );
+    await click(enhanced);
+    await settle(100);
+    await click(host!.querySelector(".fly-cite"));
+    await settle(100);
+
+    await click(button("Stop"));
+    await settle(100);
+    await click(transcriptTab());
     expect(host!.textContent).not.toContain(WHY);
   });
 });
@@ -474,5 +575,63 @@ describe("App: opening a note while its run reports", () => {
     );
     await click(tab);
     expect(host!.textContent).toContain(LIVE);
+  });
+
+  it("an event that lands as the note opens shows inline, with no stage left from the last note", async () => {
+    const LIVE = "speaker detection failed: the diarizer crashed";
+    await boot({ fotwMockNoTranscript: "1" });
+    // the note open before was mid-run
+    override = (cmd, args) =>
+      cmd === "pipeline_stage" && args.meetingId === "m2"
+        ? Promise.resolve("transcribing")
+        : undefined;
+    await click(rowFor("Weekly 1:1 with Dana"));
+    await settle(100);
+    // Opening Acme: its reads start in the same tick the open meeting changes,
+    // before React re-renders. A terminal event for it lands right there.
+    override = (cmd, args) => {
+      if (cmd === "get_transcript" && args.meetingId === "m1") {
+        w().fotwMockEmit!("pipeline:progress", {
+          meeting_id: "m1",
+          stage: "error",
+          detail: null,
+          done: true,
+          error: LIVE,
+        });
+      }
+      return undefined;
+    };
+    await click(rowFor("Acme — renewal review"));
+    await settle(100);
+    const tab = Array.from(host!.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Transcript"),
+    );
+    await click(tab);
+    // the transcript panel (not the notice stack) says why, and no stale
+    // "Transcribing" from the last note replaces it
+    const panel = button("Transcribe recording")?.closest(".mb-4");
+    expect(panel?.textContent).toContain(LIVE);
+  });
+});
+
+describe("App: the seeded failed note (dev mock)", () => {
+  it("Retry clears its stored cause, so reopening doesn't bring it back", async () => {
+    await boot({ fotwMockNoTranscript: "1" });
+    const transcriptTab = () =>
+      Array.from(host!.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Transcript"),
+      );
+    await click(rowFor("Interview — staff eng"));
+    await settle(100);
+    await click(transcriptTab());
+    expect(host!.textContent).toContain("whisper-cli exited with status 3221225477");
+
+    await click(button("Transcribe recording"));
+    await click(rowFor("Design weekly — notes"));
+    await settle(100);
+    await click(rowFor("Interview — staff eng"));
+    await settle(100);
+    await click(transcriptTab());
+    expect(host!.textContent).not.toContain("whisper-cli exited with status 3221225477");
   });
 });
