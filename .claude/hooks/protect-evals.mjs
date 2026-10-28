@@ -462,6 +462,28 @@ const INLINE_FLAGS = {
   php: /^-r$/,
   osascript: /^-e$/,
 };
+// Per interpreter: options whose value is the NEXT word. python -E/-I
+// take none; perl attaches its values (-Idir, -Mmod); php -f names the
+// script itself. Shells: -o/-O/+o/+O and --rcfile / --init-file.
+const VALUE_OPTS = {
+  python: /^-[WXmQ]$/,
+  py: /^-[WXmQ]$/,
+  node: /^(-r|--require|--import|--loader|--experimental-loader|--input-type|-C|--conditions)$/,
+  nodejs: /^(-r|--require|--import|--loader|--experimental-loader|--input-type|-C|--conditions)$/,
+  bun: /^(-r|--require|--preload|--cwd|--config|-c)$/,
+  deno: /^(--config|-c|--import-map|--location|--cert)$/,
+  perl: /^$/,
+  ruby: /^-[rIECX]$/,
+  php: /^-[dcz]$/,
+  osascript: /^-l$/,
+};
+const SHELL_VALUE_OPTS = /^([-+][oO]|--rcfile|--init-file)$/;
+const valueOpt = (v, x, shell) => {
+  if (shell) return SHELL_VALUE_OPTS.test(x);
+  const key = /^python[0-9.]*$/.test(v) ? "python" : v;
+  return VALUE_OPTS[key] ? VALUE_OPTS[key].test(x) : false;
+};
+
 const inlineFlag = (v, x) => {
   const key = /^python[0-9.]*$/.test(v) ? "python" : v;
   return INLINE_FLAGS[key] ? INLINE_FLAGS[key].test(x) : false;
@@ -659,16 +681,14 @@ export function commandViolation(command, ctx = {}, depth = 0) {
           continue;
         }
         if (/^[0-9&]*[<>]/.test(x)) continue;
-        // Options that take a value: shells -o/-O/+o; interpreters
-        // -r/-I/-W/-X/-C/-E/-M (ruby -r json, perl -M x, python -W x) and
-        // --require / --import / --loader.
-        const takesValue = shell
-          ? /^[-+][oO]$/.test(x)
-          : /^(-[rIWXCEM]|--require|--import|--loader|--input-type)$/.test(x);
-        if (takesValue) {
+        // Options whose value is the next word (per program, see VALUE_OPTS).
+        if (valueOpt(v, x, shell)) {
           j++;
           continue;
         }
+        // deno / bun subcommands (`deno run -`, `bun run -`, `bun x`): keep
+        // walking for what they run.
+        if ((v === "deno" || v === "bun") && /^(run|x|exec)$/.test(x)) continue;
         if (shell ? SHELL_INLINE.test(x) : inlineFlag(v, x)) {
           reads = j + 1 >= rest.length; // inline code needs a code word
           break;
@@ -687,6 +707,8 @@ export function commandViolation(command, ctx = {}, depth = 0) {
           break;
         }
       }
+      // Fail closed: any `-` (or a shell's `-s`) anywhere still means stdin.
+      if (!reads && (rest.includes("-") || (shell && rest.includes("-s")))) reads = true;
       return reads ? v : null;
     })
     .filter(Boolean);

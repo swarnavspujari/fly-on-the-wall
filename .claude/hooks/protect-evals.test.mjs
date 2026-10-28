@@ -250,6 +250,14 @@ test("Bash: writes, moves, deletes and redirects are denied", () => {
     "echo \"open('evals/x', 'w').write('x')\" | python - -c x",
     "echo \"require('fs').writeFileSync('evals/x', 'x')\" | node - -e x",
     "echo \"rm evals/thresholds.toml\" | bash -s -c x",
+    // Options that take no value, shell long options that do, deno/bun subcommands.
+    "echo \"open('evals/x', 'w').write('x')\" | python -E - x",
+    "echo \"open('evals/x', 'w').write('x')\" | python -I - x",
+    "echo \"rm evals/thresholds.toml\" | bash --rcfile /dev/null -s",
+    "echo \"rm evals/thresholds.toml\" | bash --init-file /dev/null",
+    "echo \"Deno.writeTextFileSync('evals/x', 'x')\" | deno run -",
+    "echo \"require('fs').writeFileSync('evals/x', 'x')\" | bun run -",
+    "echo \"open('evals/x', 'w').write('x')\" | python script.py -",
     // Launchers whose options take values.
     "echo \"rm evals/thresholds.toml\" | sudo -u nobody bash",
     "echo \"rm evals/thresholds.toml\" | timeout -s KILL 5 bash",
