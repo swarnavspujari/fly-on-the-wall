@@ -13,6 +13,12 @@
 //! embedding worker. A freshly (re)chunked row has `embedding = NULL` —
 //! "pending" — and unchanged chunks keep their vector across a re-sync, so
 //! a one-line edit re-embeds one chunk, not the whole meeting.
+//!
+//! Since schema v3, transcript chunks are label-free (speaker names are
+//! display data that a rename changes; a rename now re-embeds nothing),
+//! record their exact span (`segment_ids_json`, `start_ms`, `end_ms`), and
+//! embed each segment's polished text when the polished transcript has it
+//! (`variant`).
 
 use fly_core::{Note, Transcript};
 use serde::{Deserialize, Serialize};
@@ -30,12 +36,30 @@ const CHUNK_MIN_TAIL_WORDS: usize = 30;
 const SNIPPET_CHARS: usize = 160;
 
 /// One chunk of owner text, pre-embedding.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Chunk {
     /// Display/snippet text — exactly what was on screen, no prompt wrapping.
+    /// Transcript chunks: segment texts, one line per speaker turn, no labels.
     pub text: String,
     /// For transcript chunks: start of the window (deep-link position).
     pub start_ms: Option<u64>,
+    /// For transcript chunks: end of the window's last segment.
+    pub end_ms: Option<u64>,
+    /// For transcript chunks: the segments in the window, in order.
+    pub segment_ids: Vec<String>,
+    /// For transcript chunks: at least one segment's text came from the
+    /// polished transcript.
+    pub polished: bool,
+}
+
+impl Chunk {
+    fn variant(&self) -> &'static str {
+        if self.polished {
+            "polished"
+        } else {
+            "raw"
+        }
+    }
 }
 
 /// A chunk pending embedding, handed to the embedding worker.
@@ -60,6 +84,15 @@ pub struct VectorHit {
     pub start_ms: Option<u64>,
     /// Cosine similarity in [-1, 1] (vectors are stored normalized).
     pub score: f32,
+    /// Transcript hits: the chunk's segments, in order. Empty for notes, and
+    /// for a chunk an older build wrote (span unknown until re-chunked).
+    #[serde(default)]
+    pub segment_ids: Vec<String>,
+    #[serde(default)]
+    pub end_ms: Option<u64>,
+    /// The whole chunk text (`snippet` is its first ~160 chars).
+    #[serde(default)]
+    pub text: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -71,20 +104,44 @@ fn word_count(s: &str) -> usize {
 }
 
 /// Split a transcript into speaker-turn windows: consecutive segments merge
-/// into turns, turns pack into ~CHUNK_TARGET_WORDS windows that only break
-/// at turn boundaries, and each line carries its speaker label so names are
-/// part of what gets embedded.
+/// into turns, and turns pack into ~CHUNK_TARGET_WORDS windows that only
+/// break at turn boundaries. Text is label-free (one line per turn); see
+/// [`chunk_transcript_variant`] for the polished-text form.
 pub fn chunk_transcript(t: &Transcript) -> Vec<Chunk> {
+    chunk_transcript_variant(t, None)
+}
+
+/// [`chunk_transcript`] over the text the index should hold: each segment
+/// of `raw` uses the text of the `cleaned` segment with the same id when
+/// there is one (polished), else its own. Ids, speakers and times always
+/// come from `raw`, so a stale polished variant from an earlier run (other
+/// ids) contributes nothing.
+pub fn chunk_transcript_variant(raw: &Transcript, cleaned: Option<&Transcript>) -> Vec<Chunk> {
+    let polished: std::collections::HashMap<&str, &str> = cleaned
+        .map(|c| {
+            c.segments
+                .iter()
+                .map(|s| (s.id.as_str(), s.text.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     // 1. segments → turns (same speaker, contiguous)
     struct Turn {
         key: String,
         line: String,
         start_ms: u64,
+        end_ms: u64,
         words: usize,
+        ids: Vec<String>,
+        polished: bool,
     }
     let mut turns: Vec<Turn> = Vec::new();
-    for seg in &t.segments {
-        let text = seg.text.trim();
+    for seg in &raw.segments {
+        let (text, is_polished) = match polished.get(seg.id.as_str()) {
+            Some(p) => (p.trim(), true),
+            None => (seg.text.trim(), false),
+        };
         if text.is_empty() {
             continue;
         }
@@ -93,47 +150,55 @@ pub fn chunk_transcript(t: &Transcript) -> Vec<Chunk> {
                 last.line.push(' ');
                 last.line.push_str(text);
                 last.words += word_count(text);
+                last.end_ms = last.end_ms.max(seg.end_ms);
+                last.ids.push(seg.id.clone());
+                last.polished |= is_polished;
             }
             _ => turns.push(Turn {
                 key: seg.speaker_key.clone(),
-                line: format!("{}: {}", t.label_for(&seg.speaker_key), text),
+                line: text.to_string(),
                 start_ms: seg.start_ms,
+                end_ms: seg.end_ms,
                 words: word_count(text),
+                ids: vec![seg.id.clone()],
+                polished: is_polished,
             }),
         }
     }
 
     // 2. turns → windows
-    let mut chunks: Vec<Chunk> = Vec::new();
-    let mut cur = String::new();
-    let mut cur_words = 0usize;
-    let mut cur_start = 0u64;
-    for turn in &turns {
-        if cur.is_empty() {
-            cur_start = turn.start_ms;
+    fn append(c: &mut Chunk, turn: &Turn) {
+        if c.text.is_empty() {
+            c.start_ms = Some(turn.start_ms);
         } else {
-            cur.push('\n');
+            c.text.push('\n');
         }
-        cur.push_str(&turn.line);
+        c.text.push_str(&turn.line);
+        c.end_ms = Some(c.end_ms.unwrap_or(0).max(turn.end_ms));
+        c.segment_ids.extend(turn.ids.iter().cloned());
+        c.polished |= turn.polished;
+    }
+    let mut chunks: Vec<Chunk> = Vec::new();
+    let mut cur = Chunk::default();
+    let mut cur_words = 0usize;
+    for turn in &turns {
+        append(&mut cur, turn);
         cur_words += turn.words;
         if cur_words >= CHUNK_TARGET_WORDS {
-            chunks.push(Chunk {
-                text: std::mem::take(&mut cur),
-                start_ms: Some(cur_start),
-            });
+            chunks.push(std::mem::take(&mut cur));
             cur_words = 0;
         }
     }
-    if !cur.is_empty() {
-        if cur_words < CHUNK_MIN_TAIL_WORDS && !chunks.is_empty() {
-            let last = chunks.last_mut().unwrap();
-            last.text.push('\n');
-            last.text.push_str(&cur);
-        } else {
-            chunks.push(Chunk {
-                text: cur,
-                start_ms: Some(cur_start),
-            });
+    if !cur.text.is_empty() {
+        match chunks.last_mut() {
+            Some(last) if cur_words < CHUNK_MIN_TAIL_WORDS => {
+                last.text.push('\n');
+                last.text.push_str(&cur.text);
+                last.end_ms = last.end_ms.max(cur.end_ms);
+                last.segment_ids.extend(cur.segment_ids);
+                last.polished |= cur.polished;
+            }
+            _ => chunks.push(cur),
         }
     }
     chunks
@@ -167,7 +232,7 @@ pub fn chunk_note(note: &Note) -> Vec<Chunk> {
             if cur_words >= CHUNK_TARGET_WORDS {
                 chunks.push(Chunk {
                     text: std::mem::take(&mut cur),
-                    start_ms: None,
+                    ..Default::default()
                 });
                 cur_words = 0;
             }
@@ -181,7 +246,7 @@ pub fn chunk_note(note: &Note) -> Vec<Chunk> {
         } else {
             chunks.push(Chunk {
                 text: cur,
-                start_ms: None,
+                ..Default::default()
             });
         }
     }
@@ -236,14 +301,18 @@ impl Storage {
         self.sync_chunks("note", &note.id, &note.title, &chunks)
     }
 
-    /// Re-chunk a transcript. The owning meeting's title (the note's title
-    /// is snapshotted there) becomes the embedding context.
+    /// Re-chunk a transcript (`t` is the raw variant; the stored polished
+    /// variant, if any, supplies text by segment id). The owning meeting's
+    /// title (the note's title is snapshotted there) becomes the embedding
+    /// context.
     pub(crate) fn sync_transcript_chunks(&self, t: &Transcript) -> Result<()> {
         let title = self
             .get_meeting(&t.meeting_id)
             .map(|m| m.title)
             .unwrap_or_default();
-        let chunks = chunk_transcript(t);
+        // An unreadable polished variant must not block the raw write.
+        let cleaned = self.get_cleaned_transcript(&t.meeting_id).ok().flatten();
+        let chunks = chunk_transcript_variant(t, cleaned.as_ref());
         self.sync_chunks("transcript", &t.meeting_id, &title, &chunks)
     }
 
@@ -264,21 +333,46 @@ impl Storage {
     ) -> Result<()> {
         // Existing rows, so an unchanged chunk can carry its vector over.
         let mut stmt = self.conn.prepare(
-            "SELECT chunk_index, title, text, embedding, model FROM embedding_chunks
-             WHERE owner_kind = ?1 AND owner_id = ?2",
+            "SELECT chunk_index, title, text, embedding, model,
+                    segment_ids_json, end_ms, variant
+             FROM embedding_chunks
+             WHERE owner_kind = ?1 AND owner_id = ?2 ORDER BY chunk_index",
         )?;
-        type Row = (i64, String, String, Option<Vec<u8>>, Option<String>);
+        struct Row {
+            title: String,
+            text: String,
+            embedding: Option<Vec<u8>>,
+            model: Option<String>,
+            span: (String, Option<i64>, String),
+        }
         let existing: Vec<Row> = stmt
             .query_map((owner_kind, owner_id), |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                Ok(Row {
+                    title: r.get(1)?,
+                    text: r.get(2)?,
+                    embedding: r.get(3)?,
+                    model: r.get(4)?,
+                    span: (r.get(5)?, r.get(6)?, r.get(7)?),
+                })
             })?
             .collect::<std::result::Result<_, _>>()?;
+        let span_of = |c: &Chunk| -> Result<(String, Option<i64>, String)> {
+            Ok((
+                serde_json::to_string(&c.segment_ids)?,
+                c.end_ms.map(|v| v as i64),
+                c.variant().to_string(),
+            ))
+        };
+        let spans: Vec<(String, Option<i64>, String)> =
+            chunks.iter().map(span_of).collect::<Result<_>>()?;
 
         let unchanged = existing.len() == chunks.len()
             && existing
                 .iter()
-                .zip(chunks)
-                .all(|((_, t, txt, _, _), c)| t == title && *txt == c.text);
+                .zip(chunks.iter().zip(&spans))
+                .all(|(row, (c, span))| {
+                    row.title == title && row.text == c.text && &row.span == span
+                });
         if unchanged {
             return Ok(());
         }
@@ -287,9 +381,9 @@ impl Storage {
         // for one window must not re-embed the rest.
         let mut by_content: std::collections::HashMap<(String, String), (Vec<u8>, String)> =
             std::collections::HashMap::new();
-        for (_, t, txt, emb, model) in existing {
-            if let (Some(emb), Some(model)) = (emb, model) {
-                by_content.insert((t, txt), (emb, model));
+        for row in existing {
+            if let (Some(emb), Some(model)) = (row.embedding, row.model) {
+                by_content.insert((row.title, row.text), (emb, model));
             }
         }
 
@@ -299,12 +393,13 @@ impl Storage {
         )?;
         let mut insert = self.conn.prepare(
             "INSERT INTO embedding_chunks
-             (owner_kind, owner_id, chunk_index, title, text, start_ms, embedding, model)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (owner_kind, owner_id, chunk_index, title, text, start_ms, embedding, model,
+              segment_ids_json, end_ms, variant)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
-        for (i, c) in chunks.iter().enumerate() {
+        for (i, (c, (ids, end_ms, variant))) in chunks.iter().zip(spans).enumerate() {
             let reuse = by_content.get(&(title.to_string(), c.text.clone()));
-            insert.execute((
+            insert.execute(rusqlite::params![
                 owner_kind,
                 owner_id,
                 i as i64,
@@ -313,7 +408,10 @@ impl Storage {
                 c.start_ms.map(|v| v as i64),
                 reuse.map(|(emb, _)| emb.clone()),
                 reuse.map(|(_, m)| m.clone()),
-            ))?;
+                ids,
+                end_ms,
+                variant,
+            ])?;
         }
         Ok(())
     }
@@ -388,6 +486,12 @@ impl Storage {
     /// folder/date semantics as FTS: note chunks filter on the note's
     /// folder/updated_at, transcript chunks on the owning note's folder and
     /// the meeting's started_at. `query` need not be normalized.
+    ///
+    /// Every filter, `filter.exclude_keep_local` included, is applied inside
+    /// the query, before `limit` — so hidden chunks can't crowd shareable
+    /// ones out of the top `limit`. Chunks whose owner row is gone are never
+    /// returned; under `exclude_keep_local`, neither is a transcript chunk
+    /// whose meeting has no note row (its privacy can't be checked).
     pub fn vector_search(
         &self,
         query: &[f32],
@@ -400,22 +504,34 @@ impl Storage {
         let since = filter.since.map(|t| t.to_rfc3339());
         let until = filter.until.map(|t| t.to_rfc3339());
 
-        let mut stmt = self.conn.prepare(
-            "SELECT c.owner_kind,
+        let (cte, shareable) = if filter.exclude_keep_local {
+            (
+                crate::privacy::KEEP_LOCAL_CTE,
+                format!(
+                    " AND (c.owner_kind != 'transcript' OR mn.id IS NOT NULL) AND {}",
+                    crate::privacy::SHAREABLE_CHUNK
+                ),
+            )
+        } else {
+            ("", String::new())
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "{cte}SELECT c.owner_kind,
                     COALESCE(n.id, m.note_id, ''),
                     CASE c.owner_kind WHEN 'transcript' THEN c.owner_id END,
                     COALESCE(n.title, m.title, ''),
-                    c.text, c.start_ms, c.embedding
+                    c.text, c.start_ms, c.embedding, c.segment_ids_json, c.end_ms
              FROM embedding_chunks c
              LEFT JOIN notes n  ON c.owner_kind = 'note' AND n.id = c.owner_id
              LEFT JOIN meetings m ON c.owner_kind = 'transcript' AND m.id = c.owner_id
              LEFT JOIN notes mn ON mn.id = m.note_id
              WHERE c.embedding IS NOT NULL AND c.model = ?1
                AND (c.owner_kind != 'note' OR n.id IS NOT NULL)
+               AND (c.owner_kind != 'transcript' OR m.id IS NOT NULL)
                AND (?2 IS NULL OR COALESCE(n.folder_id, mn.folder_id) = ?2)
                AND (?3 IS NULL OR COALESCE(m.started_at, n.updated_at) >= ?3)
-               AND (?4 IS NULL OR COALESCE(m.started_at, n.updated_at) <= ?4)",
-        )?;
+               AND (?4 IS NULL OR COALESCE(m.started_at, n.updated_at) <= ?4){shareable}"
+        ))?;
         let rows = stmt.query_map(rusqlite::params![model, folder, &since, &until], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -425,12 +541,14 @@ impl Storage {
                 r.get::<_, String>(4)?,
                 r.get::<_, Option<i64>>(5)?,
                 r.get::<_, Vec<u8>>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, Option<i64>>(8)?,
             ))
         })?;
 
         let mut hits: Vec<VectorHit> = Vec::new();
         for row in rows {
-            let (kind, note_id, meeting_id, title, text, start_ms, blob) = row?;
+            let (kind, note_id, meeting_id, title, text, start_ms, blob, ids, end_ms) = row?;
             let v = decode_vector(&blob);
             if v.len() != qnorm.len() {
                 continue; // vector from an older/mismatched model dimension
@@ -447,6 +565,9 @@ impl Storage {
                 snippet: snippet_of(&text),
                 start_ms: start_ms.map(|v| v as u64),
                 score: dot(&qnorm, &v),
+                segment_ids: serde_json::from_str(&ids).unwrap_or_default(),
+                end_ms: end_ms.map(|v| v.max(0) as u64),
+                text,
             });
         }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -492,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_chunks_carry_speaker_labels_and_start_ms() {
+    fn transcript_chunks_are_label_free_with_exact_spans() {
         let t = transcript(
             "m1",
             vec![
@@ -503,11 +624,23 @@ mod tests {
         );
         let chunks = chunk_transcript(&t);
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0]
-            .text
-            .contains("You: let's talk pricing specifically the fuel bid"));
-        assert!(chunks[0].text.contains("Karim: I think we should go lower"));
+        assert_eq!(
+            chunks[0].text,
+            "let's talk pricing specifically the fuel bid\nI think we should go lower"
+        );
         assert_eq!(chunks[0].start_ms, Some(0));
+        assert_eq!(chunks[0].end_ms, Some(3000));
+        assert_eq!(chunks[0].segment_ids, vec!["s1", "s2", "s3"]);
+        assert!(!chunks[0].polished);
+
+        // Polished text by segment id; ids/times from raw; unknown ids ignored.
+        let mut cleaned = t.clone();
+        cleaned.segments[2].text = "I think we should go lower.".into();
+        cleaned.segments[0].id = "stale".into();
+        let p = chunk_transcript_variant(&t, Some(&cleaned));
+        assert!(p[0].text.ends_with("go lower."));
+        assert!(p[0].polished);
+        assert_eq!(p[0].segment_ids, chunks[0].segment_ids);
     }
 
     #[test]
@@ -524,10 +657,10 @@ mod tests {
         );
         let chunks = chunk_transcript(&t);
         assert!(chunks.len() >= 2, "got {} chunks", chunks.len());
-        // each chunk starts at a turn boundary with its speaker label
-        for c in &chunks {
-            assert!(c.text.starts_with("You:") || c.text.starts_with("Karim:"));
-        }
+        // each chunk starts at a turn boundary
+        assert_eq!(chunks[0].segment_ids, vec!["s1", "s2"]);
+        assert_eq!(chunks[1].segment_ids, vec!["s3"]);
+        assert!(!chunks[0].text.contains(':'), "no labels");
         assert_eq!(chunks[0].start_ms, Some(0));
         assert!(chunks[1].start_ms.unwrap() >= 5000);
     }

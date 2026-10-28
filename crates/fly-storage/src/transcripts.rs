@@ -57,15 +57,107 @@ impl SpeakerSnapshot {
 
 impl Storage {
     /// Upsert a meeting's transcript; keeps FTS and on-disk mirrors in sync.
+    /// The per-segment index follows through triggers (segments.rs). When the
+    /// new transcript drops segments that notes or items cite (a new
+    /// transcription run makes new ids), those citations are re-anchored to
+    /// the best-matching new segments (citations.rs).
+    ///
+    /// Re-anchoring is best-effort: if it fails, the transcript still saves
+    /// and the affected citations read `changed`. Its database side commits
+    /// together with the upsert (one savepoint), so a crash can't leave a
+    /// new transcript with citations that were never re-pointed; the note
+    /// mirrors it touches are refreshed afterwards and their I/O errors are
+    /// only logged. A damaged segment index (`SQLITE_CORRUPT` from the
+    /// triggers) is rebuilt and the save retried once.
     pub fn save_transcript(&self, transcript: &Transcript) -> Result<()> {
+        // Read the old transcript BEFORE it's replaced.
+        // `None` = planning failed: fail closed (see upsert_transcript).
+        let reanchor = match self.plan_reanchor(transcript) {
+            Ok(plan) => Some(plan),
+            Err(e) => {
+                tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "re-anchor planning failed; marking citations changed");
+                None
+            }
+        };
         let json = serde_json::to_string(transcript)?;
-        self.conn.execute(
-            "INSERT INTO transcripts (meeting_id, json) VALUES (?1, ?2)
-             ON CONFLICT(meeting_id) DO UPDATE SET json = excluded.json",
-            (&transcript.meeting_id, &json),
-        )?;
+        let note = match self.upsert_transcript(transcript, &json, &reanchor) {
+            Err(e) if crate::segments::is_corrupt(&e) => {
+                tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "segment index damaged; rebuilding");
+                self.rebuild_segment_index()?;
+                self.upsert_transcript(transcript, &json, &reanchor)?
+            }
+            other => other?,
+        };
         self.sync_transcript_derived(transcript)?;
+        if let Some(crate::citations::ReanchoredNote(note)) = note {
+            if let Err(e) = self.sync_note_derived(&note) {
+                tracing::warn!(note = %note.id, error = %e, "re-anchored note: mirror refresh failed");
+            }
+        }
         Ok(())
+    }
+
+    /// The upsert plus the database side of re-anchoring, in one savepoint.
+    /// A re-anchor error rolls back only the re-anchor (nested savepoint).
+    /// Fail closed: when planning failed (`None`) or the re-anchor rolled
+    /// back, nothing vouches for the meeting's citations any more (cited
+    /// keys may predate a renumbering), so they're all marked `changed`.
+    fn upsert_transcript(
+        &self,
+        transcript: &Transcript,
+        json: &str,
+        reanchor: &Option<crate::citations::ReanchorPlan>,
+    ) -> Result<Option<crate::citations::ReanchoredNote>> {
+        self.conn.execute_batch("SAVEPOINT save_transcript")?;
+        let res = (|| -> Result<Option<crate::citations::ReanchoredNote>> {
+            self.conn.execute(
+                "INSERT INTO transcripts (meeting_id, json) VALUES (?1, ?2)
+                 ON CONFLICT(meeting_id) DO UPDATE SET json = excluded.json",
+                (&transcript.meeting_id, json),
+            )?;
+            let mark_all_changed = || -> Result<()> {
+                self.conn.execute(
+                    "UPDATE citation_locators SET status = 'changed'
+                      WHERE meeting_id = ?1 AND status != 'changed'",
+                    [&transcript.meeting_id],
+                )?;
+                Ok(())
+            };
+            let Some(plan) = reanchor else {
+                mark_all_changed()?;
+                return Ok(None);
+            };
+            if plan.is_empty() {
+                return Ok(None);
+            }
+            self.conn.execute_batch("SAVEPOINT reanchor")?;
+            match self.apply_reanchor_db(transcript, plan) {
+                Ok(note) => {
+                    self.conn.execute_batch("RELEASE reanchor")?;
+                    Ok(note)
+                }
+                Err(e) => {
+                    tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "re-anchor failed; marking citations changed");
+                    self.conn
+                        .execute_batch("ROLLBACK TO reanchor; RELEASE reanchor")?;
+                    mark_all_changed()?;
+                    Ok(None)
+                }
+            }
+        })();
+        // Never leave the savepoint open on the long-lived connection: a
+        // failed RELEASE (e.g. a deferred constraint) rolls back like any
+        // other failure.
+        let res = res.and_then(|note| {
+            self.conn.execute_batch("RELEASE save_transcript")?;
+            Ok(note)
+        });
+        if res.is_err() {
+            let _ = self
+                .conn
+                .execute_batch("ROLLBACK TO save_transcript; RELEASE save_transcript");
+        }
+        res
     }
 
     pub fn get_transcript(&self, meeting_id: &str) -> Result<Option<Transcript>> {
@@ -105,6 +197,10 @@ impl Storage {
                 cleaned.meeting_id
             )));
         }
+        // Chunks embed the polished text where it exists.
+        if let Some(raw) = self.get_transcript(&cleaned.meeting_id)? {
+            self.sync_transcript_chunks(&raw)?;
+        }
         let paths = self.transcript_mirror_paths(&cleaned.meeting_id, ".cleaned");
         write_atomic(&paths.md, cleaned.to_markdown())?;
         write_atomic(&paths.json, serde_json::to_string_pretty(cleaned)?)?;
@@ -121,6 +217,9 @@ impl Storage {
             "UPDATE transcripts SET cleaned_json = NULL WHERE meeting_id = ?1",
             [meeting_id],
         )?;
+        if let Some(raw) = self.get_transcript(meeting_id)? {
+            self.sync_transcript_chunks(&raw)?;
+        }
         let paths = self.transcript_mirror_paths(meeting_id, ".cleaned");
         let _ = std::fs::remove_file(paths.md);
         let _ = std::fs::remove_file(paths.json);

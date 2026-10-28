@@ -55,6 +55,7 @@ impl Storage {
                 &item.extracted_by,
             ))?;
         }
+        self.sync_item_citations(meeting_id)?;
         Ok(())
     }
 

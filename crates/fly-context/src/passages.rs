@@ -286,7 +286,13 @@ mod tests {
             assert_eq!(chunks.len(), windows.len());
             for (c, w) in chunks.iter().zip(&windows) {
                 assert_eq!(c.start_ms, Some(w.start_ms));
-                assert_eq!(c.text, window_text(&t, w));
+                assert_eq!(c.end_ms, Some(w.end_ms));
+                let ids: Vec<&str> = w
+                    .segments
+                    .iter()
+                    .map(|&i| t.segments[i].id.as_str())
+                    .collect();
+                assert_eq!(c.segment_ids, ids);
             }
         }
     }
