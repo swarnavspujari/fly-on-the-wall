@@ -9,6 +9,7 @@ import { api } from "../api";
 import type { Meeting, Note, Transcript } from "../types";
 import Editor from "./Editor";
 import { REMOVE_UNDO_MS } from "./EnhancedDoc";
+import { ConfirmProvider } from "./confirm";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -104,7 +105,13 @@ describe("Editor › Enhanced", () => {
     host = document.createElement("div");
     document.body.appendChild(host);
     root = createRoot(host);
-    act(() => root!.render(<Harness />));
+    act(() =>
+      root!.render(
+        <ConfirmProvider>
+          <Harness />
+        </ConfirmProvider>,
+      ),
+    );
     await act(async () => {});
     expect(host.querySelector('[data-testid="trust-legend"]')).not.toBeNull();
     const remove = [...host.querySelectorAll("button")].find((b) => b.textContent === "Remove")!;
@@ -173,7 +180,13 @@ describe("Editor › Enhanced › a note recorded into again", () => {
     document.body.appendChild(host);
     root = createRoot(host);
     try {
-      act(() => root!.render(<TwoRecordings onPick={onPick} />));
+      act(() =>
+        root!.render(
+          <ConfirmProvider>
+            <TwoRecordings onPick={onPick} />
+          </ConfirmProvider>,
+        ),
+      );
       for (let i = 0; i < 4; i++) await act(async () => {});
       expect(host.querySelector('[data-trust="sourced"]')).not.toBeNull();
       expect(host.querySelector('[data-trust="missing"]')).toBeNull();

@@ -349,6 +349,43 @@ pub(crate) fn reset_staged_started(state: &AppState, meeting_id: &str) {
     }
 }
 
+/// The import queue's Cancel (`cancel_transcription`), tauri-free. The queue
+/// drops back to idle, then whatever is in flight stops: a running pipeline
+/// unwinds at its next batch boundary and the worker emits "cancelled"; a
+/// queued job is removed and "cancelled" is emitted on the spot. With
+/// nothing queued or running (a queue left started with no job, e.g. an
+/// enqueue that never happened) "cancelled" is emitted here, so the queue
+/// never waits on an event that can't come.
+///
+/// Dropping a parked failure is defensive: the queue hides Cancel once a run
+/// has failed (it offers Retry), but if Cancel arrives anyway, the failure
+/// goes with the run it belongs to, so the list stops saying "Failed".
+pub(crate) fn cancel_staged_transcription(
+    state: &AppState,
+    on_stage: crate::pipeline::StageSink<'_>,
+    meeting_id: &str,
+) -> CmdResult<()> {
+    reset_staged_started(state, meeting_id);
+    if scheduler::cancel(state, on_stage, meeting_id)? {
+        return Ok(());
+    }
+    {
+        // checked and deleted under one lock: only a job still parked as failed
+        let storage = state.storage.lock().unwrap();
+        let parked = storage
+            .transcription_job(meeting_id)
+            .map_err(|e| e.to_string())?
+            .is_some_and(|j| j.status == fly_storage::JOB_FAILED);
+        if parked {
+            storage
+                .delete_transcription_job(meeting_id)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    scheduler::emit_cancelled(on_stage, meeting_id);
+    Ok(())
+}
+
 /// Delete a meeting's staged-import residue: the manifest row and — for an
 /// import that never transcribed (no recording_json yet) — the folder of
 /// staged copies. Safe no-op for meetings that were never imports.
@@ -1104,5 +1141,206 @@ mod tests {
         );
         std::fs::write(dir.path().join("a.mp3"), b"x").unwrap();
         assert_eq!(copy_name(dir.path(), "a.mp3"), "a (2).mp3");
+    }
+
+    // ---- after Transcribe: a failed run, and Cancel with nothing running ----
+
+    fn app_state(dir: &Path) -> AppState {
+        AppState::init_with(
+            dir.to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap()
+    }
+
+    /// A staged import whose Transcribe already ran (`started`). Its joined
+    /// recording is missing on disk, so the pipeline gives up on the first
+    /// attempt (a permanent failure, never retried).
+    fn started_import(state: &AppState) -> String {
+        let (note_id, meeting_id) = {
+            let storage = state.storage.lock().unwrap();
+            let note = storage.create_note("Imported call", None).unwrap();
+            let meeting = storage
+                .create_meeting("Imported call", &note.id, &[])
+                .unwrap();
+            storage
+                .end_meeting(
+                    &meeting.id,
+                    &RecordingRef {
+                        mic_path: None,
+                        system_path: None,
+                        mixed_path: Some("recordings/gone/recording.mixed.wav".into()),
+                        playback_path: None,
+                        duration_ms: 1000,
+                    },
+                )
+                .unwrap();
+            (note.id, meeting.id)
+        };
+        let staged = ImportStaged {
+            note_id,
+            meeting_id: meeting_id.clone(),
+            files: vec![ImportFile {
+                id: "f1".into(),
+                file_name: "call.wav".into(),
+                size: 1,
+                kind: "audio".into(),
+                rel_path: Some("recordings/x/call.wav".into()),
+                error: None,
+                convert_error: None,
+            }],
+            boundaries_ms: vec![1000],
+            started: true,
+        };
+        save_staged(state, &staged).unwrap();
+        meeting_id
+    }
+
+    type Seen = std::sync::Mutex<Vec<(String, bool, Option<String>)>>;
+
+    fn seen_by(seen: &Seen) -> impl Fn(crate::pipeline::PipelineProgress) + Send + Sync + '_ {
+        move |p| seen.lock().unwrap().push((p.stage, p.done, p.error))
+    }
+
+    fn cancelled() -> (String, bool, Option<String>) {
+        ("cancelled".into(), true, None)
+    }
+
+    /// A pipeline failure after Transcribe is the run's, not the queue's. The
+    /// queue stays started, so Retry re-enqueues the joined recording (and
+    /// resumes from its checkpoints). The cause stays readable after the live
+    /// event is gone: on reopening the note, and after a restart.
+    #[test]
+    fn a_terminal_failure_leaves_the_staged_queue_retryable_with_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let meeting_id = started_import(&state);
+        let quiet = |_: crate::pipeline::PipelineProgress| {};
+        let model = |_: models::ModelProgress| {};
+        scheduler::enqueue(&state, &quiet, &meeting_id).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tick = rt.block_on(scheduler::tick(&state, &quiet, &model));
+        assert!(matches!(tick, scheduler::Tick::GaveUp { .. }));
+
+        assert!(load_staged(&state, &meeting_id).unwrap().unwrap().started);
+        let cause = scheduler::last_failure(&state, &meeting_id).expect("the failure is kept");
+        assert!(
+            cause.contains(crate::pipeline::ERR_NO_RECORDING_FILES),
+            "{cause}"
+        );
+
+        drop(state);
+        let state = app_state(dir.path());
+        assert_eq!(
+            scheduler::last_failure(&state, &meeting_id).as_deref(),
+            Some(cause.as_str()),
+            "a restart keeps it"
+        );
+
+        // Retry re-enqueues: the job is queued again and the failure clears
+        scheduler::enqueue(&state, &quiet, &meeting_id).unwrap();
+        assert_eq!(scheduler::last_failure(&state, &meeting_id), None);
+    }
+
+    /// An automatic retry is not a failure: while the job waits for its next
+    /// attempt it's queued again (with the error noted), so nothing reads it
+    /// as failed, and the queue keeps showing a run in progress.
+    #[test]
+    fn an_automatic_retry_never_reads_as_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let meeting_id = started_import(&state);
+        let quiet = |_: crate::pipeline::PipelineProgress| {};
+        scheduler::enqueue(&state, &quiet, &meeting_id).unwrap();
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .requeue_transcription(&meeting_id, 1, "boom")
+            .unwrap();
+
+        assert_eq!(scheduler::last_failure(&state, &meeting_id), None);
+    }
+
+    /// The stuck case: the queue says started but no job is queued or running
+    /// (a failed run, or an enqueue that never happened). Cancel drops it to
+    /// idle and emits the terminal "cancelled" the UI listens for.
+    #[test]
+    fn cancel_with_nothing_running_drops_the_queue_to_idle_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let meeting_id = started_import(&state);
+        let seen = Seen::default();
+
+        cancel_staged_transcription(&state, &seen_by(&seen), &meeting_id).unwrap();
+
+        assert!(!load_staged(&state, &meeting_id).unwrap().unwrap().started);
+        assert_eq!(*seen.lock().unwrap(), vec![cancelled()]);
+    }
+
+    /// Cancel after a run gave up abandons that run: the queue goes idle and
+    /// the parked failure goes with it, so the list stops saying "Failed".
+    #[test]
+    fn cancel_after_a_failed_run_forgets_the_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let meeting_id = started_import(&state);
+        let quiet = |_: crate::pipeline::PipelineProgress| {};
+        let model = |_: models::ModelProgress| {};
+        scheduler::enqueue(&state, &quiet, &meeting_id).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(scheduler::tick(&state, &quiet, &model));
+        assert!(scheduler::last_failure(&state, &meeting_id).is_some());
+        let seen = Seen::default();
+
+        cancel_staged_transcription(&state, &seen_by(&seen), &meeting_id).unwrap();
+
+        assert!(!load_staged(&state, &meeting_id).unwrap().unwrap().started);
+        assert_eq!(scheduler::last_failure(&state, &meeting_id), None);
+        assert_eq!(*seen.lock().unwrap(), vec![cancelled()]);
+    }
+
+    /// Unchanged: a queued job is removed on the spot with exactly one
+    /// "cancelled" (the new no-job event must never double it).
+    #[test]
+    fn cancel_of_a_queued_job_emits_one_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let meeting_id = started_import(&state);
+        let quiet = |_: crate::pipeline::PipelineProgress| {};
+        scheduler::enqueue(&state, &quiet, &meeting_id).unwrap();
+        let seen = Seen::default();
+
+        cancel_staged_transcription(&state, &seen_by(&seen), &meeting_id).unwrap();
+
+        let job = state
+            .storage
+            .lock()
+            .unwrap()
+            .transcription_job(&meeting_id)
+            .unwrap();
+        assert!(job.is_none());
+        assert!(!load_staged(&state, &meeting_id).unwrap().unwrap().started);
+        assert_eq!(*seen.lock().unwrap(), vec![cancelled()]);
+    }
+
+    /// Unchanged: a running pipeline gets a cooperative cancel request and
+    /// emits nothing yet; the worker sends "cancelled" once it has unwound.
+    #[test]
+    fn cancel_of_a_running_job_waits_for_the_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let meeting_id = started_import(&state);
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .insert(meeting_id.clone(), "transcribing".into());
+        let seen = Seen::default();
+
+        cancel_staged_transcription(&state, &seen_by(&seen), &meeting_id).unwrap();
+
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(state.cancel_requests.lock().unwrap().contains(&meeting_id));
     }
 }

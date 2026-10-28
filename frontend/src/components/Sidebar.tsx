@@ -15,6 +15,7 @@ import { CALENDAR_NAMES, videoEvents, type PrivacySummary } from "../homeModel";
 import { PRIVACY_CHANGED_EVENT } from "../privacy";
 import type { CalendarEvent, CalendarStatus, Folder } from "../types";
 import PrivacyPill from "./PrivacyPill";
+import { useConfirm } from "./confirm";
 import { Badge, Button, SectionLabel } from "./ui";
 import logoLight from "../assets/brand/fly-on-the-wall-logo.svg";
 import logoDark from "../assets/brand/fly-on-the-wall-logo-dark.svg";
@@ -187,6 +188,7 @@ export default function Sidebar({
     const t = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(t);
   }, []);
+  const confirm = useConfirm();
   // Folder-level "Keep local" (backend-enforced for every note filed under it)
   const [localOnly, setLocalOnly] = useState<Set<string>>(new Set());
   useEffect(() => {
@@ -195,13 +197,16 @@ export default function Sidebar({
       .then((ids) => setLocalOnly(new Set(ids)))
       .catch(() => {});
   }, [folders]);
-  const toggleFolderLocal = (id: string, name: string) => {
+  const toggleFolderLocal = async (id: string, name: string) => {
     const next = !localOnly.has(id);
     if (
       next &&
-      !confirm(
-        `Keep everything in "${name}" local? Notes in this folder and its subfolders will never be sent to cloud AI providers or Groq.`,
-      )
+      !(await confirm({
+        title: `Keep everything in “${name}” local?`,
+        message:
+          "Notes in this folder and its subfolders will never be sent to cloud AI providers or Groq.",
+        confirmLabel: "Keep local",
+      }))
     ) {
       return;
     }
@@ -355,7 +360,7 @@ export default function Sidebar({
             }`}
             onClick={(e) => {
               e.stopPropagation();
-              toggleFolderLocal(folder.id, folder.name);
+              void toggleFolderLocal(folder.id, folder.name);
             }}
           >
             {localOnly.has(folder.id) ? (
@@ -380,9 +385,14 @@ export default function Sidebar({
             className="hidden flex-none cursor-pointer rounded p-0.5 text-text-3 hover:text-rec group-hover:inline-flex"
             onClick={(e) => {
               e.stopPropagation();
-              if (confirm(`Delete folder "${folder.name}"? Notes inside become unfiled.`)) {
-                onDeleteFolder(folder.id);
-              }
+              void confirm({
+                title: `Delete folder “${folder.name}”?`,
+                message: "Notes inside become unfiled.",
+                confirmLabel: "Delete folder",
+                tone: "danger",
+              }).then((ok) => {
+                if (ok) onDeleteFolder(folder.id);
+              });
             }}
           >
             <X size={14} strokeWidth={2} />
