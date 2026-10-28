@@ -1,14 +1,17 @@
 //! fly-asr: the `TranscriptionEngine` trait and its backends.
 //!
-//! Backends (landing in M3):
+//! Backends:
 //! - whisper.cpp — primary, fully local, every hardware tier
-//! - parakeet — optional local engine for NVIDIA/Apple hardware
+//! - parakeet — NVIDIA Parakeet TDT via the `parakeet-cli` sidecar from the
+//!   same pinned whisper.cpp release; English, internal flag only (v2.5 2.2)
 //! - groq — cloud FALLBACK only (audio leaves the device; the UI must say
 //!   so). Returns no speaker labels; diarization always runs locally
 //!   regardless (spec §6.3).
 
+mod batch;
 pub mod checkpoint;
 pub mod groq;
+pub mod parakeet;
 pub mod retry;
 pub mod whisper_cpp;
 
@@ -235,6 +238,12 @@ pub trait TranscriptionEngine: Send + Sync {
     fn id(&self) -> &'static str;
     /// False only for cloud engines; the UI shows a privacy notice for those.
     fn is_local(&self) -> bool;
+    /// Which weights this engine decodes with, when it should be recorded
+    /// in transcript metadata alongside the engine id. Default `None`: the
+    /// whisper/groq engine strings stay exactly as they always were.
+    fn model_tag(&self) -> Option<String> {
+        None
+    }
     async fn transcribe(&self, wav_path: &Path, opts: &TranscribeOptions) -> Result<RawTranscript>;
     /// Like [`transcribe`](Self::transcribe), reporting batch progress and
     /// honoring cooperative cancellation where the engine can. Default: no

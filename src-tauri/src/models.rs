@@ -266,6 +266,51 @@ const MODELS: &[Artifact] = &[
     },
 ];
 
+/// Weights for engines behind an internal flag (v2.5 PR 2.2): downloadable
+/// and checksum-pinned like everything else, but deliberately NOT part of
+/// [`registry`] — that list feeds the Settings model picker and the
+/// whisper-model fallback, and a Parakeet file handed to whisper-cli would
+/// fail every meeting. Resolved ONLY through [`engine_artifact`] /
+/// [`ensure_engine_model`]: [`artifact`] (Settings `model_id`, the whisper
+/// path, the webview's `download_model`) never sees these ids.
+const ENGINE_MODELS: &[Artifact] = &[
+    // NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0), GGML q8_0 conversion published
+    // by ggml-org for whisper.cpp's parakeet-cli. q8_0 is the int8 variant
+    // (accuracy-equivalent to f16, about the size of turbo-q5). URL pinned
+    // to repo commit 35156454; sha256 = the HF LFS oid, re-hashed locally
+    // 2026-10-27.
+    Artifact {
+        id: PARAKEET_MODEL_ID,
+        display: "Parakeet TDT 0.6B v3 (Q8, ~670 MB)",
+        url: "https://huggingface.co/ggml-org/parakeet-GGUF/resolve/35156454d1a39de06863303dd209fd2bed6ee079/ggml-parakeet-tdt-0.6b-v3-q8_0.bin",
+        sha256: "4d64e9e96c2792186d072fde0034df0ad670cf680a2f53069052ead827fd600e",
+        bytes: 668_757_119,
+        kind: ArtifactKind::File,
+        dest_rel: "models/asr/ggml-parakeet-tdt-0.6b-v3-q8_0.bin",
+        probe_rel: "models/asr/ggml-parakeet-tdt-0.6b-v3-q8_0.bin",
+    },
+];
+
+/// Artifact id of the Parakeet weights. Not `ggml-`-prefixed on purpose:
+/// [`best_installed_asr_model`] treats `ggml-*` ids as whisper models.
+pub const PARAKEET_MODEL_ID: &str = "parakeet-tdt-0.6b-v3-q8_0";
+
+/// Parakeet's CLI ships inside the whisper.cpp release zip, beside
+/// whisper-cli — on this OS's managed build when it has one.
+pub const PARAKEET_CLI_NAME: &str = if cfg!(windows) {
+    "parakeet-cli.exe"
+} else {
+    "parakeet-cli"
+};
+
+/// `parakeet-cli` next to a resolved `whisper-cli`, if that build has one
+/// (the Windows CPU zip does; the self-built Vulkan and macOS archives
+/// currently don't).
+pub fn parakeet_cli_beside(whisper_cli: &Path) -> Option<PathBuf> {
+    let p = whisper_cli.parent()?.join(PARAKEET_CLI_NAME);
+    p.is_file().then_some(p)
+}
+
 /// Every artifact this OS can manage (tools first, then model weights).
 pub fn registry() -> impl Iterator<Item = &'static Artifact> {
     TOOLS.iter().chain(MODELS.iter())
@@ -273,6 +318,13 @@ pub fn registry() -> impl Iterator<Item = &'static Artifact> {
 
 pub fn artifact(id: &str) -> Option<&'static Artifact> {
     registry().find(|a| a.id == id)
+}
+
+/// Weights for an internal-flag engine (Parakeet). Deliberately separate
+/// from [`artifact`]: an `asr.model_id` or `download_model` id can never
+/// resolve to these, so whisper-cli is never handed Parakeet weights.
+pub fn engine_artifact(id: &str) -> Option<&'static Artifact> {
+    ENGINE_MODELS.iter().find(|a| a.id == id)
 }
 
 /// Artifact id for the whisper.cpp engine and the executable name(s) to look
@@ -637,6 +689,26 @@ pub async fn ensure_with(
     effort: DownloadEffort,
 ) -> Result<PathBuf, String> {
     let a = artifact(id).ok_or_else(|| format!("unknown artifact {id}"))?;
+    ensure_artifact(progress, data_dir, a, effort).await
+}
+
+/// [`ensure`] for engine weights resolved by [`engine_artifact`] — the only
+/// way Parakeet's model is fetched (pinned + SHA-verified like any other).
+pub async fn ensure_engine_model(
+    progress: ProgressSink<'_>,
+    data_dir: &Path,
+    id: &str,
+) -> Result<PathBuf, String> {
+    let a = engine_artifact(id).ok_or_else(|| format!("unknown engine model {id}"))?;
+    ensure_artifact(progress, data_dir, a, DownloadEffort::Full).await
+}
+
+async fn ensure_artifact(
+    progress: ProgressSink<'_>,
+    data_dir: &Path,
+    a: &'static Artifact,
+    effort: DownloadEffort,
+) -> Result<PathBuf, String> {
     if let Some(path) = installed_path(data_dir, a) {
         return Ok(path);
     }
@@ -1823,6 +1895,53 @@ mod tests {
         let gh =
             candidate_urls("https://github.com/k2-fsa/sherpa-onnx/releases/download/x.tar.bz2");
         assert_eq!(gh.len(), 1);
+    }
+
+    /// The Parakeet weights are pinned and resolvable as an ENGINE model,
+    /// but invisible to every whisper-facing lookup: not in the registry
+    /// (Settings model list), not resolvable by `artifact()` (so an
+    /// `asr.model_id` or `download_model` of that id fails instead of
+    /// handing Parakeet weights to whisper-cli), and never offered as a
+    /// whisper fallback model — the v2.5 flag is dormant.
+    #[test]
+    fn parakeet_model_is_pinned_but_hidden() {
+        assert!(artifact(PARAKEET_MODEL_ID).is_none());
+        let a = engine_artifact(PARAKEET_MODEL_ID).expect("parakeet resolves as an engine model");
+        assert_eq!(a.sha256.len(), 64);
+        assert!(
+            a.url.contains("/resolve/35156454"),
+            "url pinned to a commit"
+        );
+        assert!(registry().all(|r| r.id != PARAKEET_MODEL_ID));
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join(a.probe_rel);
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::write(&dst, b"x").unwrap();
+        assert!(best_installed_asr_model(tmp.path(), "ggml-small-q5_1").is_none());
+    }
+
+    #[test]
+    fn parakeet_cli_is_found_beside_whisper_cli() {
+        let tmp = tempfile::tempdir().unwrap();
+        let whisper = tmp.path().join("whisper-cli.exe");
+        assert!(parakeet_cli_beside(&whisper).is_none());
+        std::fs::write(tmp.path().join(PARAKEET_CLI_NAME), b"x").unwrap();
+        assert_eq!(
+            parakeet_cli_beside(&whisper),
+            Some(tmp.path().join(PARAKEET_CLI_NAME))
+        );
+    }
+
+    /// An `asr.model_id` set to the Parakeet id must fail `ensure` (as an
+    /// unknown model) rather than download 670 MB and give it to whisper.
+    #[tokio::test]
+    async fn whisper_ensure_rejects_the_parakeet_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = ensure(&|_| {}, tmp.path(), PARAKEET_MODEL_ID)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown artifact"), "{err}");
+        assert!(!tmp.path().join("models").exists(), "nothing downloaded");
     }
 
     /// The stand-in for a missing model prefers the largest installed model

@@ -7,9 +7,9 @@
 //! * **Keep local is enforced here, not by callers.** A [`Context`] is built
 //!   with a [`Visibility`]. Under [`Visibility::ShareableOnly`] (cloud model
 //!   or external AI tool) keep-local notes and meetings are excluded inside
-//!   the storage queries where storage supports it (FTS, items, note
-//!   listings) and by a fail-closed set check everywhere else (vector hits,
-//!   meeting listings, by-id reads). A failed keep-local lookup returns an
+//!   the storage queries (FTS, vector hits, items, note and meeting
+//!   listings), and by a fail-closed set check on top of those and on every
+//!   by-id read. A failed keep-local lookup returns an
 //!   error, never unfiltered content. Tool results say nothing about
 //!   what was excluded — not even a count (see
 //!   [`Context::excluded_keep_local_meetings`]).
@@ -18,11 +18,11 @@
 //!   rendering for a model ([`render`]) that cites transcript lines as
 //!   `[seg:ID]`.
 //!
-//! Dormant in v2.5 PR 3.2a: nothing calls it yet. Built on the current
-//! storage schema (meeting-level transcript FTS + `embedding_chunks` with
-//! `start_ms` only); passages are localized to segment ids in memory (see
-//! [`passages`]). The schema migration that makes this cheaper and exact is
-//! proposed in `MIGRATION.md`.
+//! Dormant in v2.5: nothing calls it yet. Keyword passages are still
+//! localized in memory (see [`passages`]); vector hits map onto windows by
+//! the chunk's segment ids (storage schema v3).
+//! `crates/fly-storage/SCHEMA_V3.md` records the v3 schema and what is
+//! left for fly-context to adopt.
 
 use std::collections::HashSet;
 

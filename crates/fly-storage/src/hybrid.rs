@@ -122,6 +122,9 @@ mod tests {
             snippet: format!("vector snippet {note}"),
             start_ms: Some(1000),
             score,
+            segment_ids: vec![],
+            end_ms: None,
+            text: String::new(),
         }
     }
 
