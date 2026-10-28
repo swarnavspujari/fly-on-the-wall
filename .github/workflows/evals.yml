@@ -1,22 +1,34 @@
 name: Evals
 
-# Runs the CI system evals, `fly-evals --suite ci` (evals/README.md), with
-# no secrets. Job name: evals-run. It fails when a required suite misses a
-# gate in evals/thresholds.toml or regresses past evals/baselines/.
+# Runs the CI system evals (evals/README.md) with no secrets, as two checks
+# from one matrix job:
+#   evals-security  `fly-evals --suite ci --gate security`: the privacy and
+#                   injection gates (keep-local leaks, executed proposals,
+#                   rendered links, run-log free text), absolute.
+#   evals-quality   `fly-evals --suite ci --gate quality`: fails only when a
+#                   gated metric regresses past evals/baselines/.
+# Integrity gates (gold-set floors, crashed scenarios) and scorer errors fail
+# both. A release requires `--strict` (every absolute gate), run before
+# tagging.
 #
-# The job always runs, so it can be a required check. It builds and runs
-# the evals only when the PR (or push) touches what they measure: evals/,
-# the crates the scorer links (fly-context, fly-llm, fly-storage, fly-core),
-# an Ask harness crate (crates/fly-ask*), the workspace manifests, the agent
-# hook or this file. Otherwise it passes in seconds.
+# The job always runs, so both checks can be required. It builds and runs
+# the evals only when the change touches what they measure: evals/, any
+# crate fly-evals links (its workspace dependency closure, from cargo
+# metadata), the workspace manifests, the agent hook or this file.
 #
 # Before running, it checks the scorer can't be swapped or edited from
 # outside evals/ (this file and evals/ are locked by evals-guard.yml):
-#   * fly-evals must resolve to evals/runner/Cargo.toml, with no [patch] or
-#     [replace] in the root manifest and no .cargo/config;
-#   * production code must not read the eval files (a tripwire: an answer
-#     key read at run time would game every metric);
-#   * nothing under evals/ may change during the build or the run.
+#   * no rust-toolchain file and no .cargo/config anywhere (checked before
+#     any cargo command: a toolchain file can point cargo at any binary);
+#   * every package in fly-evals' dependency graph is one of its five path
+#     crates at the expected path, or comes from crates.io;
+#   * production code doesn't reference the eval files (a tripwire, not a
+#     proof: an answer key read at run time would game every metric);
+#   * nothing under evals/ changes during the build or the run;
+#   * the run wrote a complete verdict file that agrees with its exit code.
+# The crates under test run inside the scorer's process, so a hostile change
+# to them could still lie from inside; running them out of process is a
+# later hardening step. Review (the third layer) covers that gap.
 on:
   pull_request:
   push:
@@ -37,12 +49,16 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
 
 jobs:
-  evals-run:
-    name: evals-run
+  evals:
+    name: evals-${{ matrix.gate }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [security, quality]
     steps:
       # Depth 2: on pull_request HEAD is GitHub's merge commit, so
       # HEAD^1..HEAD is exactly what the PR changes.
@@ -50,6 +66,17 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 2
+
+      # First, before anything runs cargo.
+      - name: Refuse toolchain and cargo-config overrides
+        run: |
+          set -euo pipefail
+          found=$(git ls-files | grep -E '(^|/)(rust-toolchain(\.toml)?|\.cargo/config(\.toml)?)$' || true)
+          if [ -n "$found" ]; then
+            printf '%s\n' "$found"
+            echo "::error::A rust-toolchain file or .cargo/config could swap the toolchain or redirect the scorer's build. Not allowed while evals run (a locked change to evals.yml can allow a vetted one)."
+            exit 1
+          fi
 
       - name: Decide whether the evals need to run
         id: gate
@@ -75,7 +102,32 @@ jobs:
           esac
           files=$(git -c core.quotePath=false diff --name-only --no-renames "${range[@]}" --)
           printf 'Changed files:\n%s\n' "$files"
-          if grep -qE '^(evals/|crates/fly-(context|llm|storage|core)/|crates/fly-ask[^/]*/|Cargo\.(toml|lock)$|rust-toolchain|\.cargo/|\.github/workflows/evals\.yml$|\.claude/(settings\.json$|hooks/))' <<<"$files"; then
+          # The workspace crates fly-evals depends on (no network needed).
+          cargo metadata --no-deps --format-version 1 --locked >"$RUNNER_TEMP/workspace.json"
+          closure=$(python3 - "$RUNNER_TEMP/workspace.json" <<'PY'
+          import json, os, sys
+          m = json.load(open(sys.argv[1], encoding="utf-8"))
+          root = m["workspace_root"]
+          pk = {p["name"]: p for p in m["packages"]}
+          todo, seen = ["fly-evals"], set()
+          while todo:
+              n = todo.pop()
+              if n in seen or n not in pk:
+                  continue
+              seen.add(n)
+              todo += [d["name"] for d in pk[n]["dependencies"] if d.get("path")]
+          for n in sorted(seen):
+              d = os.path.relpath(os.path.dirname(pk[n]["manifest_path"]), root)
+              print(d.replace(os.sep, "/") + "/")
+          PY
+          )
+          printf 'Crates the evals measure:\n%s\n' "$closure"
+          while IFS= read -r dir; do
+            if [ -n "$dir" ] && printf '%s\n' "$files" | awk -v d="$dir" 'index($0, d) == 1 { hit = 1 } END { exit !hit }'; then
+              decide true
+            fi
+          done <<<"$closure"
+          if grep -qE '^(evals/|Cargo\.(toml|lock)$|\.github/workflows/evals\.yml$|\.claude/(settings\.json$|hooks/))' <<<"$files"; then
             decide true
           fi
           decide false
@@ -83,34 +135,6 @@ jobs:
       - name: Nothing to evaluate
         if: steps.gate.outputs.run != 'true'
         run: echo "No change to evals/ or the crates it measures; the evals were not run." | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Check the scorer is the one under evals/
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          set -euo pipefail
-          if grep -nE '^[[:space:]]*\[(patch|replace)([.\]]|$)' Cargo.toml; then
-            echo "::error::Cargo.toml has a [patch] or [replace] section, which could swap what the scorer links. Not allowed while evals run."
-            exit 1
-          fi
-          if compgen -G ".cargo/config*" >/dev/null || compgen -G "evals/runner/.cargo/*" >/dev/null; then
-            echo "::error::A .cargo/config could redirect the scorer's build. Not allowed while evals run."
-            exit 1
-          fi
-          manifests=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "fly-evals") | .manifest_path')
-          if [ "$manifests" != "$GITHUB_WORKSPACE/evals/runner/Cargo.toml" ]; then
-            echo "::error::fly-evals must be the single package at evals/runner/Cargo.toml (got: $manifests)."
-            exit 1
-          fi
-          # Production code must never read the answer key.
-          if git grep -nE 'evals/(fixtures|suites|baselines)|questions\.toml|keep_local_probes|scenarios\.toml|thresholds\.toml' -- 'crates/*/src/**' 'src-tauri/src/**' 'frontend/src/**'; then
-            echo "::error::Production code references the eval files above. The evals would be gamed; remove the reference."
-            exit 1
-          fi
-
-      # The agent hook (.claude/hooks/protect-evals.mjs): node built-ins only.
-      - name: Hook tests
-        if: steps.gate.outputs.run == 'true'
-        run: node --test .claude/hooks/protect-evals.test.mjs
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         if: steps.gate.outputs.run == 'true'
@@ -122,6 +146,67 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check the scorer's dependency graph
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 --locked >"$RUNNER_TEMP/metadata.json"
+          python3 - "$RUNNER_TEMP/metadata.json" <<'PY'
+          import json, os, sys
+          m = json.load(open(sys.argv[1], encoding="utf-8"))
+          ws = os.path.realpath(m["workspace_root"])
+          expected = {
+              "fly-evals": "evals/runner",
+              "fly-core": "crates/fly-core",
+              "fly-storage": "crates/fly-storage",
+              "fly-context": "crates/fly-context",
+              "fly-llm": "crates/fly-llm",
+          }
+          crates_io = "registry+https://github.com/rust-lang/crates.io-index"
+          pk = {p["id"]: p for p in m["packages"]}
+          nodes = {n["id"]: n for n in m["resolve"]["nodes"]}
+          roots = [p["id"] for p in m["packages"] if p["name"] == "fly-evals"]
+          if len(roots) != 1:
+              sys.exit("::error::expected exactly one fly-evals package, found %d" % len(roots))
+          seen, todo = set(), list(roots)
+          while todo:
+              i = todo.pop()
+              if i in seen:
+                  continue
+              seen.add(i)
+              todo += [d["pkg"] for d in nodes[i]["deps"]]
+          bad = []
+          for i in sorted(seen):
+              p = pk[i]
+              name, src = p["name"], p.get("source")
+              if src is None:
+                  want = expected.get(name)
+                  got = os.path.relpath(os.path.dirname(os.path.realpath(p["manifest_path"])), ws)
+                  got = got.replace(os.sep, "/")
+                  if want != got:
+                      bad.append("%s at %s (expected %s)" % (name, got, want or "no path crate"))
+              elif src != crates_io:
+                  bad.append("%s from %s" % (name, src))
+          if bad:
+              print("::error::fly-evals links packages outside its allowed set (a [patch], [replace], path or git override?):")
+              print("\n".join(bad))
+              sys.exit(1)
+          print("fly-evals graph OK: %d packages, all from crates.io or the expected path crates." % len(seen))
+          PY
+
+      - name: "Tripwire: production code must not read the eval files"
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          if git grep -nE 'evals/(fixtures|suites|baselines)|questions\.toml|keep_local_probes|scenarios\.toml|thresholds\.toml' -- 'crates/*/src/**' 'src-tauri/src/**' 'frontend/src/**'; then
+            echo "::error::Production code references the eval files above. The evals would be gamed; remove the reference."
+            exit 1
+          fi
+
+      # The agent hook (.claude/hooks/protect-evals.mjs): node built-ins only.
+      - name: Hook tests
+        if: steps.gate.outputs.run == 'true' && matrix.gate == 'security'
+        run: node --test .claude/hooks/protect-evals.test.mjs
 
       - name: Build the scorer
         if: steps.gate.outputs.run == 'true'
@@ -136,11 +221,14 @@ jobs:
             exit 1
           fi
 
-      - name: Run the CI evals
+      - name: Run the CI evals (${{ matrix.gate }} gating)
         if: steps.gate.outputs.run == 'true'
+        env:
+          GATE: ${{ matrix.gate }}
         run: |
           set +e
-          ./target/debug/fly-evals --suite ci
+          rm -f target/evals/verdict.json
+          ./target/debug/fly-evals --suite ci --gate "$GATE"
           code=$?
           set -e
           if [ -f target/evals/summary.md ]; then
@@ -151,4 +239,30 @@ jobs:
             echo "::error::Something changed the eval files during the run."
             exit 1
           fi
+          # The verdict must exist, be complete, cover every CI suite and
+          # agree with the exit code (an early exit(0) leaves none).
+          python3 - "$code" <<'PY'
+          import json, sys
+          code = int(sys.argv[1])
+          try:
+              v = json.load(open("target/evals/verdict.json", encoding="utf-8"))
+          except Exception as e:
+              sys.exit(f"::error::no complete verdict file ({e}); the run didn't finish")
+          import os
+          problems = []
+          if v.get("complete") is not True:
+              problems.append("verdict not complete")
+          if v.get("gating") != os.environ["GATE"]:
+              problems.append(f"verdict gating {v.get('gating')!r} != {os.environ['GATE']!r}")
+          names = [s.get("suite") for s in v.get("suites", [])]
+          if names != ["retrieval", "ask_contract"]:
+              problems.append(f"verdict suites {names} != ['retrieval', 'ask_contract']")
+          if v.get("pass") is not (code == 0):
+              problems.append(f"verdict pass={v.get('pass')} but exit code {code}")
+          if any(s.get("blocks") for s in v.get("suites", [])) == v.get("pass"):
+              problems.append("verdict pass disagrees with its suites")
+          if problems:
+              sys.exit("::error::" + "; ".join(problems))
+          print("verdict:", "pass" if v["pass"] else "FAIL")
+          PY
           exit "$code"
