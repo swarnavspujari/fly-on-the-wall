@@ -1,0 +1,500 @@
+{
+  "suite": "retrieval",
+  "ran": true,
+  "note": null,
+  "metrics": {
+    "answerable_questions": 47.0,
+    "keep_local_leaks": 0.0,
+    "keyword_only_mrr_at_8": 0.02127659574468085,
+    "keyword_only_recall_at_8": 0.02127659574468085,
+    "mrr_at_8": 0.43447315096251266,
+    "must_cite_coverage": 0.8723404255319149,
+    "recall_at_8": 0.8829787234042553,
+    "unanswerable_questions": 11.0,
+    "unanswerable_returning_passages": 11.0
+  },
+  "info": {
+    "config": {
+      "embedder": "hashed-bow-v1",
+      "k": 8,
+      "meetings": 12,
+      "segments": 192
+    },
+    "keep_local_sweep": {
+      "checks": 146,
+      "leaks": [],
+      "probes_reaching_keep_local_under_all": 14
+    },
+    "questions": [
+      {
+        "covered": true,
+        "id": "q01",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q02",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 7,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q03",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 8,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "id": "q04",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": false,
+        "id": "q05",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "id": "q06",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 5,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q07",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 5,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q08",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q09",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 6,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q10",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q11",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q12",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 6,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q13",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q14",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q15",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q16",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q17",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q18",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q19",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 5,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q20",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q21",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 7,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "id": "q22",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 5,
+        "recall": 0.5
+      },
+      {
+        "covered": false,
+        "id": "q23",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "id": "q24",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 5,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q25",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 6,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q26",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q27",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q28",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q29",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q30",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 5,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q31",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q32",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q33",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 7,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "id": "q34",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "id": "q35",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q36",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q37",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q38",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q39",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q40",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q41",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "id": "q42",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "id": "q47",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q43",
+        "keyword_only_rank": null,
+        "passages": 2,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q44",
+        "keyword_only_rank": 1,
+        "passages": 2,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q45",
+        "keyword_only_rank": null,
+        "passages": 5,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "id": "q46",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0
+      }
+    ],
+    "recall_by_category": {
+      "action_items": {
+        "questions": 7,
+        "recall_at_8": 1.0
+      },
+      "cross_meeting": {
+        "questions": 3,
+        "recall_at_8": 0.8333333333333334
+      },
+      "dates": {
+        "questions": 7,
+        "recall_at_8": 0.5714285714285714
+      },
+      "decisions": {
+        "questions": 10,
+        "recall_at_8": 0.9
+      },
+      "decisions_vs_actions": {
+        "questions": 4,
+        "recall_at_8": 0.75
+      },
+      "keep_local": {
+        "questions": 1,
+        "recall_at_8": 1.0
+      },
+      "names": {
+        "questions": 11,
+        "recall_at_8": 1.0
+      },
+      "near_duplicate": {
+        "questions": 11,
+        "recall_at_8": 0.8181818181818182
+      },
+      "numbers": {
+        "questions": 17,
+        "recall_at_8": 0.9117647058823529
+      },
+      "scoped": {
+        "questions": 3,
+        "recall_at_8": 1.0
+      },
+      "series": {
+        "questions": 9,
+        "recall_at_8": 0.7777777777777778
+      }
+    },
+    "unanswerable": [
+      {
+        "id": "u01",
+        "passages": 8
+      },
+      {
+        "id": "u02",
+        "passages": 8
+      },
+      {
+        "id": "u03",
+        "passages": 8
+      },
+      {
+        "id": "u04",
+        "passages": 8
+      },
+      {
+        "id": "u05",
+        "passages": 8
+      },
+      {
+        "id": "u06",
+        "passages": 8
+      },
+      {
+        "id": "u07",
+        "passages": 8
+      },
+      {
+        "id": "u08",
+        "passages": 8
+      },
+      {
+        "id": "u09",
+        "passages": 8
+      },
+      {
+        "id": "u10",
+        "passages": 8
+      },
+      {
+        "id": "u11",
+        "passages": 8
+      }
+    ]
+  },
+  "errors": []
+}
