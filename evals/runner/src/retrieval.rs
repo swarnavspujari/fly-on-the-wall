@@ -301,50 +301,55 @@ struct Scored {
     rank: Option<usize>,
 }
 
-/// How note passages (the user's own notes, which carry no segment ids)
-/// count. Undecided (README, "Open questions"): today they never satisfy a
-/// must-cite requirement, yet each one takes one of the 8 slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotePolicy {
-    /// Never relevant: the scoring every committed number uses.
-    Ignore,
-    /// Prepared, not used: a note passage of a meeting that holds a
-    /// must-cite segment counts as relevant for MRR's first-hit rank (not
-    /// for recall or coverage, which stay segment-based).
-    RankByMeeting,
-}
-
-/// The policy the suite scores with. Changing it is a locked change.
-pub const NOTE_POLICY: NotePolicy = NotePolicy::Ignore;
-
+/// Gating score: only transcript segments count (note passages, which carry
+/// no segment ids, never satisfy a must-cite requirement but still take one
+/// of the 8 slots; crowding citable passages out is a real miss).
 fn score(q: &Answerable, passages: &[fly_context::Passage]) -> Scored {
-    score_with(q, passages, NOTE_POLICY, &BTreeSet::new())
-}
-
-/// `must_meetings`: database ids of the meetings holding must-cite segments
-/// (used only by [`NotePolicy::RankByMeeting`]).
-fn score_with(
-    q: &Answerable,
-    passages: &[fly_context::Passage],
-    policy: NotePolicy,
-    must_meetings: &BTreeSet<String>,
-) -> Scored {
     let top = &passages[..passages.len().min(K)];
     let mut all = BTreeSet::new();
     let mut rank = None;
     for (i, p) in top.iter().enumerate() {
         let segs: BTreeSet<String> = p.segments.iter().map(|s| s.id.clone()).collect();
-        let note_hit = policy == NotePolicy::RankByMeeting
-            && p.source == fly_context::PassageSource::Note
-            && p.meeting_id
-                .as_ref()
-                .is_some_and(|m| must_meetings.contains(m));
-        if rank.is_none() && (note_hit || q.must_cite.iter().any(|r| r.met_by(&segs))) {
+        if rank.is_none() && q.must_cite.iter().any(|r| r.met_by(&segs)) {
             rank = Some(i + 1);
         }
         all.extend(segs);
     }
     let met = q.must_cite.iter().filter(|r| r.met_by(&all)).count();
+    Scored {
+        recall: met as f64 / q.must_cite.len() as f64,
+        rr: rank.map_or(0.0, |r| 1.0 / r as f64),
+        covered: met == q.must_cite.len(),
+        rank,
+    }
+}
+
+/// Report-only evidence score: like [`score`], but a note passage of a
+/// meeting that holds a requirement's segment also meets it (the user's own
+/// notes are evidence an answer could use, though not citable lines).
+/// `req_meetings[i]`: database ids of the meetings requirement `i` lives in.
+fn score_evidence(
+    q: &Answerable,
+    passages: &[fly_context::Passage],
+    req_meetings: &[BTreeSet<String>],
+) -> Scored {
+    let top = &passages[..passages.len().min(K)];
+    let mut met_reqs = vec![false; q.must_cite.len()];
+    let mut rank = None;
+    for (i, p) in top.iter().enumerate() {
+        let segs: BTreeSet<String> = p.segments.iter().map(|s| s.id.clone()).collect();
+        let note_meeting = (p.source == fly_context::PassageSource::Note)
+            .then_some(p.meeting_id.as_ref())
+            .flatten();
+        for (k, r) in q.must_cite.iter().enumerate() {
+            let hit = r.met_by(&segs) || note_meeting.is_some_and(|m| req_meetings[k].contains(m));
+            if hit {
+                met_reqs[k] = true;
+                rank.get_or_insert(i + 1);
+            }
+        }
+    }
+    let met = met_reqs.iter().filter(|m| **m).count();
     Scored {
         recall: met as f64 / q.must_cite.len() as f64,
         rr: rank.map_or(0.0, |r| 1.0 / r as f64),
@@ -390,6 +395,7 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
     let mut res = SuiteResult::new("retrieval");
     let (mut recalls, mut rrs, mut covered) = (Vec::new(), Vec::new(), Vec::new());
     let (mut kw_recalls, mut kw_rrs) = (Vec::new(), Vec::new());
+    let (mut ev_recalls, mut ev_rrs) = (Vec::new(), Vec::new());
     let mut by_category: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut rows = Vec::new();
     for q in &gold.answerable {
@@ -407,6 +413,20 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
             .with_context(|| format!("{}: keyword search", q.id))?;
         let s = score(q, &hybrid.passages);
         let kw = score(q, &keyword.passages);
+        let req_meetings: Vec<BTreeSet<String>> = q
+            .must_cite
+            .iter()
+            .map(|r| {
+                r.ids()
+                    .iter()
+                    .filter_map(|id| corpus.segment(id))
+                    .map(|seg| db.meeting_ids[&seg.meeting].clone())
+                    .collect()
+            })
+            .collect();
+        let ev = score_evidence(q, &hybrid.passages, &req_meetings);
+        ev_recalls.push(ev.recall);
+        ev_rrs.push(ev.rr);
         recalls.push(s.recall);
         rrs.push(s.rr);
         covered.push(if s.covered { 1.0 } else { 0.0 });
@@ -421,6 +441,7 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
             "rank": s.rank,
             "covered": s.covered,
             "keyword_only_rank": kw.rank,
+            "evidence_rank": ev.rank,
             "passages": hybrid.passages.len(),
         }));
     }
@@ -557,6 +578,12 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         .insert("keyword_only_recall_at_8".into(), mean(&kw_recalls));
     res.metrics
         .insert("keyword_only_mrr_at_8".into(), mean(&kw_rrs));
+    // Report-only (no gate in thresholds.toml, so they can't block): note
+    // passages of a must-cite meeting count as hits.
+    res.metrics
+        .insert("evidence_recall_at_8".into(), mean(&ev_recalls));
+    res.metrics
+        .insert("evidence_mrr_at_8".into(), mean(&ev_rrs));
     res.metrics.insert(
         "unanswerable_returning_passages".into(),
         unanswerable_with_passages as f64,
@@ -667,5 +694,19 @@ mod tests {
         many.push(passage(&["a"]));
         let s = score(&q, &many);
         assert_eq!((s.recall, s.rank), (0.0, None), "only the top 8 count");
+
+        // Evidence score: a note passage of a must-cite meeting is a hit;
+        // the gating score ignores it.
+        let mut note = passage(&[]);
+        note.source = fly_context::PassageSource::Note;
+        note.meeting_id = Some("M".into());
+        let reqs = vec![
+            ["M".to_string()].into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::new(),
+        ];
+        let gate = score(&q, &[note.clone(), passage(&["b"])]);
+        assert_eq!((gate.recall, gate.rank), (0.5, Some(2)));
+        let ev = score_evidence(&q, &[note, passage(&["b"])], &reqs);
+        assert_eq!((ev.recall, ev.rank, ev.covered), (1.0, Some(1), true));
     }
 }

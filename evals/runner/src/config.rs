@@ -106,6 +106,11 @@ impl Thresholds {
                 if gate.min.is_none() && gate.max.is_none() {
                     bail!("{name}.gates.{metric} has neither min nor max");
                 }
+                // The evidence metrics are report-only by decision of the
+                // user (README, "Note passages"): they never gate.
+                if metric.starts_with("evidence_") {
+                    bail!("{name}.gates.{metric}: evidence_* metrics are report-only and can't have a gate");
+                }
             }
         }
         if t.retrieval.k != Some(8) {

@@ -202,14 +202,17 @@ or contains one of its canary phrases. This is spec §4.2a #13: every
 retrieval path, tool calls included, goes through the Keep-local filter.
 
 Reported but not gated: per-category recall, how many unanswerable questions
-still return passages (the reason Ask needs a score floor, §4.2a #1), and
-keyword-only recall.
+still return passages (the reason Ask needs a score floor, §4.2a #1),
+keyword-only recall, and the evidence metrics below.
 
 **Note passages** (the user's own notes, which carry no segment ids) never
-count as relevant today, yet each one takes one of the 8 slots. Whether they
-should is an open question for the user. The alternative (a note of a
-must-cite meeting counts for MRR's rank) is prepared in the scorer
-(`NotePolicy::RankByMeeting`) but not used.
+count toward the gating metrics, though each one takes one of the 8 slots:
+notes crowding out citable lines is a real miss for retrieval to fix (the
+user's decision). `evidence_recall_at_8` and `evidence_mrr_at_8` report the
+same questions with a note passage from a must-cite meeting counted as a
+hit, so the gap between the two shows how much notes crowd out. They are
+report-only: the thresholds loader refuses any gate on an `evidence_*`
+metric.
 
 **Why a hashed bag-of-words embedder?** CI has no model. Hybrid fusion
 still needs a vector list, so the runner embeds chunks and questions with
