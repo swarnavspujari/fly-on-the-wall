@@ -1310,6 +1310,9 @@ interface SheetProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
   /** Position against the window instead of the nearest positioned ancestor. */
   fixed?: boolean;
   closeOnScrim?: boolean;
+  /** Move focus into the sheet when it opens (default). Off when the sheet
+   *  opens from a control that keeps focus, like the Ask composer. */
+  autoFocus?: boolean;
 }
 
 /** A panel over part of the screen (the Ask answer sheet). Esc closes it
@@ -1325,13 +1328,14 @@ export function Sheet({
   modal = false,
   fixed = false,
   closeOnScrim = true,
+  autoFocus = true,
   className = "",
   children,
   ...rest
 }: SheetProps) {
   const depth = useEscapeLayer(onClose, open);
   const sheetRef = useRef<HTMLDivElement>(null);
-  useDialogFocus(sheetRef, open, { trap: modal });
+  useDialogFocus(sheetRef, open, { trap: modal, autoFocus });
   const titleId = useId();
   if (!open) return null;
   return (

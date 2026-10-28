@@ -41,6 +41,10 @@
                                      "worst": two warnings + a 1 h timer)
      fotwMockNoAttendees = "1"     → Record starts with no attendees, as with
                                      no calendar event (speaker card, typed)
+     fotwMockAskError = keep_local | consent | no_key | auth | ollama_missing |
+                        ollama_down | model_missing | offline | timeout |
+                        rate_limit | server | other → ask_meeting fails with
+                                     the backend's own text for that case
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -828,6 +832,52 @@ function ollamaState() {
   return mockOllama;
 }
 
+/* ---- Ask ---- */
+// The backend's own failure text (llm_commands.rs, ollama.rs, fly-llm), so
+// the Ask sheet's human-readable errors can be checked here. Without a
+// forced error the mock mirrors build_provider: a cloud provider is refused
+// for a kept-local note, before consent, or without a key.
+const MOCK_ASK_ERRORS: Record<string, string> = {
+  keep_local:
+    'this note is set to "Keep local", so it isn\'t sent to anthropic. Switch the AI provider to Ollama (runs on this device) in Settings, or turn off Keep local for this note',
+  consent:
+    "confirm that meeting content may be sent to openai: open Settings → AI provider and select it again",
+  no_key: "no API key stored for openai — add one in Settings",
+  auth: "authentication failed — check the API key",
+  ollama_missing:
+    "Ollama isn't installed — use the Install button in Settings → AI provider, or install it yourself from ollama.com",
+  ollama_down:
+    "Ollama isn't reachable at http://localhost:11434. Start the Ollama app (or install it from ollama.com), or switch provider in Settings.",
+  model_missing:
+    'provider returned an error: 404 Not Found: {"error":"model \\"llama3.1\\" not found, try pulling it first"}',
+  offline: "Can't reach anthropic — check your internet connection.",
+  timeout: "anthropic timed out. The model may still be loading — try again in a moment.",
+  rate_limit:
+    'provider returned an error: 429 Too Many Requests: {"type":"error","error":{"type":"rate_limit_error"}}',
+  server: 'provider returned an error: 500 Internal Server Error: {"type":"error"}',
+  other: "invalid request: the request couldn't be sent",
+};
+const MOCK_ASK_ANSWER =
+  "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
+function mockAsk(args: Record<string, unknown>): Promise<string> {
+  const forced = mockFlag("fotwMockAskError");
+  const provider = llmSettings.provider;
+  const info = llmSettings.providers.find((p) => p.id === provider);
+  const meetingId = noteMeta.find((n) => n.id === args.noteId)?.meeting_id ?? null;
+  const privacy = meetingId ? meetingPrivacy(meetingId) : null;
+  const keptLocal = !!privacy && (privacy.keep_local || privacy.keep_local_from_folder);
+  let error = forced ? (MOCK_ASK_ERRORS[forced] ?? MOCK_ASK_ERRORS.other) : null;
+  if (!error && info && !info.is_local) {
+    if (keptLocal) error = MOCK_ASK_ERRORS.keep_local.replace("anthropic", provider);
+    else if (mockUiSettings[`consent.cloud_llm.${provider}`] !== "true")
+      error = MOCK_ASK_ERRORS.consent.replace("openai", provider);
+    else if (!info.has_key) error = MOCK_ASK_ERRORS.no_key.replace("openai", provider);
+  }
+  return new Promise((resolve, reject) =>
+    setTimeout(() => (error ? reject(error) : resolve(MOCK_ASK_ANSWER)), 700),
+  );
+}
+
 /* ---- command router ---- */
 function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
   // Stateful delete for the session, so Home's Undo-then-expire is visible
@@ -1098,7 +1148,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "mcp_config":
       return mcpSnippet;
     case "ask_meeting":
-      return "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
+      return mockAsk(args);
     case "test_llm_connection":
       return `Connected to ${llmSettings.provider}. It answered in 0.8 s.`;
     case "ollama_status": {

@@ -26,7 +26,6 @@ import {
   List,
   Lock,
   LockOpen,
-  MessageSquare,
   Mic,
   Monitor,
   Paperclip,
@@ -50,7 +49,7 @@ import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
 import EnhancedDoc from "./EnhancedDoc";
-import AskPanel from "./AskPanel";
+import { AskComposer, AskSheet, useAskChat, useWideWindow } from "./AskPanel";
 
 interface Props {
   note: Note;
@@ -874,6 +873,7 @@ function ViewSwitcher({
   transcriptBusy,
   onEnhance,
   enhancing,
+  children,
 }: {
   view: View;
   setView: (v: View) => void;
@@ -882,9 +882,11 @@ function ViewSwitcher({
   transcriptBusy: boolean;
   onEnhance: () => void;
   enhancing: boolean;
+  /** The Ask composer (and its answer sheet, anchored above this dock). */
+  children?: ReactNode;
 }) {
   return (
-    <div className="print:hidden absolute bottom-5 left-1/2 z-[8] flex -translate-x-1/2 items-center gap-2.5">
+    <div className="print:hidden absolute bottom-5 left-1/2 z-[8] flex w-[min(760px,calc(100%-24px))] -translate-x-1/2 flex-wrap items-center justify-center gap-2.5">
       <div
         className="flex items-center gap-[3px] rounded-full border border-line bg-surface p-1"
         style={{ boxShadow: "var(--shadow-lg)" }}
@@ -932,6 +934,7 @@ function ViewSwitcher({
           {enhancing ? "Enhancing…" : enhanced ? "Re-enhance" : "Enhance"}
         </button>
       )}
+      {children}
     </div>
   );
 }
@@ -981,6 +984,24 @@ export default function Editor({
   const [enhancing, setEnhancing] = useState(false);
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
   const [askOpen, setAskOpen] = useState(false);
+  // Ask chat for this note (ephemeral; resets on note switch) and whether
+  // its sheet is pinned beside the note (wide windows only; remembered).
+  const ask = useAskChat(note.id);
+  const askInputRef = useRef<HTMLInputElement>(null);
+  const wideWindow = useWideWindow();
+  const [askPinPref, setAskPinPref] = useState(false);
+  useEffect(() => {
+    api
+      .getAppSetting("ui.ask.pinned")
+      .then((v) => setAskPinPref(v === "true"))
+      .catch(() => {});
+  }, []);
+  const askPinned = askPinPref && wideWindow;
+  const toggleAskPin = () => {
+    const next = !askPinPref;
+    setAskPinPref(next);
+    void api.setAppSetting("ui.ask.pinned", String(next)).catch(() => {});
+  };
   const [zoomIds, setZoomIds] = useState<string[]>([]);
   // The recording a zoom points into: highlights wait for its transcript, so
   // the transcript view scrolls to them once it's shown.
@@ -1278,15 +1299,6 @@ export default function Editor({
               onStopScreen={onStopScreen}
             />
           )}
-          <Button
-            variant={askOpen ? "soft" : "outline"}
-            size="sm"
-            onClick={() => setAskOpen((o) => !o)}
-            title="Ask questions about this meeting"
-            startIcon={<MessageSquare size={13} strokeWidth={1.75} />}
-          >
-            Ask
-          </Button>
           <span className="h-5 w-px" style={{ background: "var(--line)" }} />
           <Button
             variant="ghost"
@@ -1395,8 +1407,9 @@ export default function Editor({
           </div>
         </div>
 
-        {/* single content region — one view at a time */}
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* single content region — one view at a time (extra bottom room for
+            the dock, which wraps to two rows on narrow windows) */}
+        <div className="min-h-0 flex-1 overflow-y-auto pb-6">
           <div
             className={`mx-auto max-w-[var(--content-max)] px-6 ${showNotes ? "" : "pb-28 pt-5"}`}
           >
@@ -1544,12 +1557,46 @@ export default function Editor({
             transcriptBusy={!!pipeStage || isRecordingThisNote}
             onEnhance={() => void enhance()}
             enhancing={enhancing}
-          />
+          >
+            <AskComposer
+              chat={ask}
+              inputRef={askInputRef}
+              open={askOpen}
+              onOpen={() => setAskOpen(true)}
+              placeholder={hasMeeting ? "Ask about this meeting" : "Ask about this note"}
+            />
+            {askOpen && !askPinned && (
+              <AskSheet
+                chat={ask}
+                inputRef={askInputRef}
+                hasMeeting={hasMeeting}
+                keptLocal={isKeptLocal(privacy)}
+                pinned={false}
+                canPin={wideWindow}
+                onTogglePin={toggleAskPin}
+                onClose={() => setAskOpen(false)}
+                onInsert={insertFromAsk}
+              />
+            )}
+          </ViewSwitcher>
         )}
       </div>
 
-      {askOpen && (
-        <AskPanel noteId={note.id} onInsert={insertFromAsk} onClose={() => setAskOpen(false)} />
+      {/* Pinned Ask sheet: a column beside the note on wide windows */}
+      {askOpen && askPinned && !pendingImport && (
+        <div className="print:hidden relative flex-none" style={{ width: "var(--ask-pinned-w)" }}>
+          <AskSheet
+            chat={ask}
+            inputRef={askInputRef}
+            hasMeeting={hasMeeting}
+            keptLocal={isKeptLocal(privacy)}
+            pinned
+            canPin={wideWindow}
+            onTogglePin={toggleAskPin}
+            onClose={() => setAskOpen(false)}
+            onInsert={insertFromAsk}
+          />
+        </div>
       )}
 
       {lightboxAtt && (
