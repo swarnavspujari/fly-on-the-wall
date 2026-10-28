@@ -251,3 +251,65 @@ describe("App: live chips", () => {
     expect(chipFor("Weekly 1:1 with Dana")).toBe("Transcribing");
   });
 });
+
+describe("App: a finished import call", () => {
+  const queueShown = () => host!.textContent?.includes("screen-walkthrough.mp4") ?? false;
+  const CAUSE = "This file looks damaged or incomplete, so its audio can't be read.";
+
+  /** Stage an import (it opens on its queue) and hold import_transcribe open. */
+  async function stageAndHoldTranscribe() {
+    let finish!: (outcome: "resolves" | "fails") => void;
+    override = (cmd, args) => {
+      if (cmd !== "import_transcribe") return undefined;
+      return new Promise((resolve, reject) => {
+        finish = (outcome) => {
+          if (outcome === "fails") return reject(new Error("ffmpeg went away"));
+          // the backend's paused queue: one file couldn't be converted
+          void realInvoke("import_state", { meetingId: args.meetingId }).then((q) => {
+            const staged = q as { files: { id: string }[] };
+            resolve({
+              ...staged,
+              files: staged.files.map((f) => ({
+                ...f,
+                convert_error: f.id === "if-2" ? CAUSE : null,
+              })),
+            });
+          });
+        };
+      });
+    };
+    await click(button("Import media as a note"));
+    await settle(100);
+    expect(queueShown()).toBe(true);
+    await click(button("Transcribe 2 files"));
+    return (outcome: "resolves" | "fails") =>
+      act(async () => {
+        finish(outcome);
+        await vi.advanceTimersByTimeAsync(100);
+      });
+  }
+
+  it("updates the queue of the import note that's still open", async () => {
+    await boot();
+    const finish = await stageAndHoldTranscribe();
+    await finish("resolves");
+    expect(queueShown()).toBe(true);
+    expect(host!.textContent).toContain(CAUSE);
+  });
+
+  it.each(["resolves", "fails"] as const)(
+    "never puts its queue on another note opened meanwhile (call %s)",
+    async (outcome) => {
+      await boot();
+      const finish = await stageAndHoldTranscribe();
+      await click(rowFor("Design weekly — notes"));
+      await settle(100);
+      expect(queueShown()).toBe(false);
+
+      await finish(outcome);
+      await settle(100);
+      expect(queueShown()).toBe(false);
+      expect(host!.textContent).not.toContain(CAUSE);
+    },
+  );
+});
