@@ -207,12 +207,31 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     });
 }
 
+/// Why this meeting's transcription last gave up: the error of a job parked
+/// as failed. The terminal error event is fire-and-forget, so a note opened
+/// later (another note was open, or the app restarted) reads it from here.
+/// None while a job is queued or running, after success, or with no job.
+pub fn last_failure(state: &AppState, meeting_id: &str) -> Option<String> {
+    let job = state
+        .storage
+        .lock()
+        .unwrap()
+        .transcription_job(meeting_id)
+        .ok()
+        .flatten()?;
+    (job.status == fly_storage::JOB_FAILED).then(|| {
+        job.last_error
+            .unwrap_or_else(|| "Transcription failed.".into())
+    })
+}
+
 /// Stop transcription work for a meeting. A pipeline that is actually
 /// running gets a cooperative cancel request and unwinds at its next batch
 /// boundary (cheap — completed batches are checkpointed); the worker then
 /// finishes up via [`Tick::Cancelled`]. A merely queued/waiting job is
 /// removed on the spot and the terminal "cancelled" event emitted here.
-pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Result<(), String> {
+/// Returns whether anything was in flight (so "cancelled" is out or coming).
+pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Result<bool, String> {
     let running = {
         let stages = state.pipeline_stage.lock().unwrap();
         matches!(stages.get(meeting_id).map(String::as_str), Some(s) if s != WAITING_STAGE)
@@ -223,7 +242,7 @@ pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Re
             .lock()
             .unwrap()
             .insert(meeting_id.to_string());
-        return Ok(());
+        return Ok(true);
     }
     let had_job = {
         let storage = state.storage.lock().unwrap();
@@ -249,7 +268,7 @@ pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Re
         state.pipeline_stage.lock().unwrap().remove(meeting_id);
         emit_cancelled(on_stage, meeting_id);
     }
-    Ok(())
+    Ok(had_job)
 }
 
 /// After a cancelled run winds down: if the owning note is gone (the cancel
@@ -275,7 +294,7 @@ pub fn finish_cancelled(state: &AppState, on_stage: StageSink<'_>, meeting_id: &
 
 /// Terminal event for a cancelled run: done, but neither success nor error —
 /// the frontend drops back to the pre-transcribe state.
-fn emit_cancelled(on_stage: StageSink<'_>, meeting_id: &str) {
+pub(crate) fn emit_cancelled(on_stage: StageSink<'_>, meeting_id: &str) {
     on_stage(PipelineProgress {
         meeting_id: meeting_id.to_string(),
         stage: "cancelled".into(),

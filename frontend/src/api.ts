@@ -131,6 +131,9 @@ export const api = {
   editTranscriptSegment: (meetingId: string, segmentId: string, text: string) =>
     invoke<Transcript>("edit_transcript_segment", { meetingId, segmentId, text }),
   pipelineStage: (meetingId: string) => invoke<string | null>("pipeline_stage", { meetingId }),
+  // Why the meeting's transcription last gave up (null = it didn't): the
+  // terminal error event is gone once you reopen the note or restart.
+  pipelineFailure: (meetingId: string) => invoke<string | null>("pipeline_failure", { meetingId }),
 
   // attendees & attendee-informed diarization
   // Replaces the list and marks it user-confirmed. Never re-transcribes.

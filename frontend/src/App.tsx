@@ -542,17 +542,21 @@ export default function App() {
       setPipelineError(null);
       setPipeDetail(null);
       if (meeting) {
-        const [raw, cleaned, stage, staged] = await Promise.all([
+        const [raw, cleaned, stage, staged, failure] = await Promise.all([
           api.getTranscript(meeting.id),
           api.getCleanedTranscript(meeting.id).catch(() => null),
           api.pipelineStage(meeting.id),
           api.importState(meeting.id).catch(() => null),
+          // a run that gave up while this note wasn't open (or before a
+          // restart): its terminal event is gone, the cause isn't
+          api.pipelineFailure(meeting.id).catch(() => null),
         ]);
         if (!fresh()) return;
         setTranscript(raw);
         setCleanedTranscript(cleaned);
         setPipeStage(stage);
         setImportStaged(staged);
+        setPipelineError(failure);
       } else {
         setTranscript(null);
         setCleanedTranscript(null);
@@ -764,15 +768,17 @@ export default function App() {
     setOpenMeeting(m);
     setPipelineError(null);
     setPipeDetail(null);
-    const [raw, cleaned, stage] = await Promise.all([
+    const [raw, cleaned, stage, failure] = await Promise.all([
       api.getTranscript(m.id),
       api.getCleanedTranscript(m.id).catch(() => null),
       api.pipelineStage(m.id),
+      api.pipelineFailure(m.id).catch(() => null),
     ]);
     if (!fresh()) return;
     setTranscript(raw);
     setCleanedTranscript(cleaned);
     setPipeStage(stage);
+    setPipelineError(failure);
   }, []);
 
   // Undo of a re-diarize hands back the restored raw transcript; the cleaned

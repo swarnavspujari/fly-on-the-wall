@@ -45,6 +45,10 @@
                         ollama_down | model_missing | offline | timeout |
                         rate_limit | server | other → ask_meeting fails with
                                      the backend's own text for that case
+     fotwMockImportPipelineFail = "1" → a staged import's run fails for good
+                                     at "Detecting speakers" (after ASR);
+                                     pipeline_failure keeps the cause, so the
+                                     queue shows it with Retry on reopen
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -313,6 +317,13 @@ let mockImport: {
   started: boolean;
 } | null = null;
 let mockImportDone = false;
+/** True while the mock import's pipeline is queued or running. */
+let mockImportRunning = false;
+/** A run that gave up keeps its cause, like the backend's parked job row
+ *  (read back by pipeline_failure); Retry (transcribe_meeting) clears it. */
+const mockPipelineFailures: Record<string, string> = {};
+const MOCK_PIPELINE_FAILURE =
+  "speaker detection failed: failed to launch sherpa-onnx (The filename or extension is too long. (os error 206))";
 
 const mockEmit = (event: string, payload: unknown) =>
   (window as unknown as { fotwMockEmit?: (e: string, p: unknown) => void }).fotwMockEmit?.(
@@ -388,6 +399,7 @@ function importTranscribe(order: string[]) {
     boundaries.push(cum);
   }
   mockImport = { ...mockImport, files, boundaries_ms: boundaries, started: true };
+  mockImportRunning = true;
 
   // simulated backend events: per-file conversion, then the real pipeline shape
   const pipe = (
@@ -429,14 +441,71 @@ function importTranscribe(order: string[]) {
     at((t += 450), () => pipe("transcribing", detail));
   }
   at((t += 500), () => pipe("diarizing"));
+  // fotwMockImportPipelineFail: gives up here, as a sherpa launch failure
+  // does (permanent, so no retries); the queue stays started
+  if (mockFlag("fotwMockImportPipelineFail") === "1") {
+    at((t += 1200), () => {
+      mockImportRunning = false;
+      mockPipelineFailures[IMPORT_MEETING_ID] = MOCK_PIPELINE_FAILURE;
+      pipe("error", null, true, MOCK_PIPELINE_FAILURE);
+    });
+    return mockImport;
+  }
   at((t += 1200), () => pipe("aligning"));
   at((t += 600), () => pipe("saving"));
   at((t += 500), () => pipe("polishing"));
   at((t += 1200), () => {
     mockImportDone = true;
+    mockImportRunning = false;
     pipe("done", null, true);
   });
   return mockImport;
+}
+
+/* ---- after Transcribe: Retry and Cancel (mirror cancel_transcription) ----
+   Retry re-enqueues the joined recording: the failure clears and the run
+   picks up after ASR (checkpointed), then finishes. Cancel with nothing
+   queued or running drops the queue to idle and emits the terminal
+   "cancelled" itself; a running mock run ignores it (no unwinding here). */
+function mockImportRetry() {
+  delete mockPipelineFailures[IMPORT_MEETING_ID];
+  mockImportRunning = true;
+  const pipe = (stage: string, done = false) =>
+    mockEmit("pipeline:progress", {
+      meeting_id: IMPORT_MEETING_ID,
+      stage,
+      detail: null,
+      done,
+      error: null,
+    });
+  let t = 0;
+  const at = (ms: number, fn: () => void) => window.setTimeout(fn, ms);
+  at((t += 100), () => pipe("waiting"));
+  for (const stage of ["starting", "diarizing", "aligning", "saving"]) {
+    at((t += 500), () => pipe(stage));
+  }
+  at((t += 500), () => {
+    mockImportDone = true;
+    mockImportRunning = false;
+    pipe("done", true);
+  });
+}
+
+function mockCancelTranscription(meetingId: string) {
+  if (meetingId !== IMPORT_MEETING_ID || !mockImport || mockImportRunning) return null;
+  mockImport = { ...mockImport, started: false };
+  window.setTimeout(
+    () =>
+      mockEmit("pipeline:progress", {
+        meeting_id: meetingId,
+        stage: "cancelled",
+        detail: null,
+        done: true,
+        error: null,
+      }),
+    0,
+  );
+  return null;
 }
 
 const seg = (id: string, key: string, start: number, text: string) => ({
@@ -925,6 +994,13 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "delete_folder":
     case "move_note":
     case "cancel_transcription":
+      return mockCancelTranscription(String(args.meetingId));
+    case "pipeline_failure":
+      return mockPipelineFailures[String(args.meetingId)] ?? null;
+    case "transcribe_meeting":
+      if (args.meetingId === IMPORT_MEETING_ID && mockImport?.started && !mockImportRunning) {
+        mockImportRetry();
+      }
       return null;
     case "list_recent_notes":
       if (mockFlag("fotwMockNoNotes") === "1") return [];

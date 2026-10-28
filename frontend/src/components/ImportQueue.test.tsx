@@ -39,7 +39,10 @@ async function flush() {
   for (let i = 0; i < 5; i++) await act(async () => {});
 }
 
-async function mount(s: ImportStaged) {
+async function mount(
+  s: ImportStaged,
+  over: { pipelineError?: string | null; onRetry?: () => void } = {},
+) {
   const onTranscribe = vi.fn();
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -50,9 +53,9 @@ async function mount(s: ImportStaged) {
         staged={s}
         pipeStage={null}
         pipeDetail={null}
-        pipelineError={null}
+        pipelineError={over.pipelineError ?? null}
         onTranscribe={onTranscribe}
-        onRetry={() => {}}
+        onRetry={over.onRetry ?? (() => {})}
         onCancel={() => {}}
       />,
     ),
@@ -165,5 +168,20 @@ describe("ImportQueue per-file failures", () => {
     expect(button("Retry failed file")).toBeNull();
     await click(button("Transcribe"));
     expect(onTranscribe).toHaveBeenCalledWith(["a"]);
+  });
+
+  it("after the run gave up: its cause and Retry, no per-file progress, no Cancel", async () => {
+    const onRetry = vi.fn();
+    await mount(staged([file("a"), file("b")], true), {
+      pipelineError: "speaker detection failed: failed to launch sherpa-onnx",
+      onRetry,
+    });
+    expect(host!.textContent).toContain("failed to launch sherpa-onnx");
+    expect(host!.textContent).not.toContain("Starting…");
+    // the files aren't waiting on anything: the run is over until Retry
+    expect(host!.textContent).not.toContain("Waiting");
+    expect(button("Cancel")).toBeNull();
+    await click(button("Retry"));
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });

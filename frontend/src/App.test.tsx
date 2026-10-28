@@ -313,3 +313,81 @@ describe("App: a finished import call", () => {
     },
   );
 });
+
+describe("App: an import whose run failed after Transcribe", () => {
+  const CAUSE = "failed to launch sherpa-onnx";
+  const text = () => host!.textContent ?? "";
+
+  /** Stage the mock import and transcribe it; the run gives up at speaker
+   *  detection (fotwMockImportPipelineFail), after ASR. */
+  async function importAndFail() {
+    await click(button("Import media as a note"));
+    await settle(100);
+    await click(button("Transcribe 2 files"));
+    await settle(16_000);
+  }
+
+  /** Open another note, then the import again: what a restart also does. */
+  async function reopenImport() {
+    await click(rowFor("Design weekly — notes"));
+    await settle(100);
+    await click(rowFor("Fuel Bid Meeting 2026-07-09"));
+    await settle(100);
+  }
+
+  it("shows the cause and Retry when you come back to the note", async () => {
+    await boot({ fotwMockImportPipelineFail: "1" });
+    await importAndFail();
+    expect(text()).toContain(CAUSE);
+
+    await reopenImport();
+    expect(text()).toContain(CAUSE);
+    expect(text()).not.toContain("Starting…");
+    expect(button("Retry")).toBeDefined();
+    expect(button("Cancel")).toBeUndefined();
+
+    // Retry re-enqueues the joined recording, and the run finishes
+    await click(button("Retry"));
+    expect(calls.some((c) => c.cmd === "transcribe_meeting" && c.args.meetingId === "m-imp")).toBe(
+      true,
+    );
+    await settle(5_000);
+    expect(text()).not.toContain(CAUSE);
+    expect(text()).not.toContain("Imported media");
+  });
+
+  it("Cancel with nothing running drops a stuck queue to idle at once", async () => {
+    await boot({ fotwMockImportPipelineFail: "1" });
+    await importAndFail();
+    // a queue left started with no job and no recorded failure (an enqueue
+    // that never happened): it can only say "Starting…" and offer Cancel
+    override = (cmd) => (cmd === "pipeline_failure" ? Promise.resolve(null) : undefined);
+    await reopenImport();
+    expect(text()).toContain("Starting…");
+
+    await click(button("Cancel"));
+    await settle(50);
+    expect(text()).not.toContain("Starting…");
+    expect(button("Transcribe 2 files")).toBeDefined();
+  });
+});
+
+describe("App: a recording whose transcription failed", () => {
+  it("says why when you open the note later, not just 'Transcribe recording'", async () => {
+    const WHY = "whisper-cli exited with status 3221225477";
+    await boot({ fotwMockNoTranscript: "1" });
+    // the run gave up while another note was open (or before a restart)
+    override = (cmd, args) =>
+      cmd === "pipeline_failure"
+        ? Promise.resolve(args.meetingId === "m1" ? WHY : null)
+        : undefined;
+    await click(rowFor("Acme — renewal review"));
+    await settle(100);
+    const tab = Array.from(host!.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Transcript"),
+    );
+    await click(tab);
+    expect(button("Transcribe recording")).toBeDefined();
+    expect(host!.textContent).toContain(WHY);
+  });
+});

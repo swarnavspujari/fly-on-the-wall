@@ -131,7 +131,8 @@ export default function ImportQueue({
     pipeStage != null && ["diarizing", "aligning", "saving", "polishing"].includes(pipeStage);
   let statuses: Record<string, ImportFileStatus> = {};
   let activePct: number | null = null;
-  if (running) {
+  // a run that gave up has no per-file progress: the header says why
+  if (running && !pipelineError) {
     if (afterAsr) {
       for (const f of supported) statuses[f.id] = "done";
     } else if (pipeStage === "transcribing") {
