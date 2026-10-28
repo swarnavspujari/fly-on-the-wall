@@ -1,7 +1,8 @@
 // Download/usage stats collector — runs daily via .github/workflows/stats.yml.
 //
-// Reads GitHub release + traffic data and writes three artifacts under docs/data/
-// (served publicly by GitHub Pages):
+// Reads GitHub release + traffic data and writes three files into <out-dir>, the
+// first argument. The workflow passes its checkout of the `stats` branch; the
+// landing page and README badge read the files from raw.githubusercontent.com.
 //   stats.json            — current headline numbers (the landing page fetches this)
 //   downloads-badge.json  — Shields "endpoint" badge payload (the README badge reads this)
 //   stats-history.jsonl   — one raw per-asset snapshot appended per run (the long-term log)
@@ -19,6 +20,13 @@
 //   - updateChecks      = sum of latest.json downloads (an app-launch/update-poll proxy).
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const OUT_DIR = process.argv[2];
+if (!OUT_DIR) {
+  console.error("usage: node scripts/collect-stats.mjs <out-dir>");
+  process.exit(2);
+}
 
 const REPO = process.env.GITHUB_REPOSITORY ?? "swarnavspujari/fly-on-the-wall";
 const TOKEN = process.env.STATS_TOKEN || process.env.GITHUB_TOKEN;
@@ -97,10 +105,10 @@ try {
 }
 
 const now = new Date().toISOString();
-mkdirSync("docs/data", { recursive: true });
+mkdirSync(OUT_DIR, { recursive: true });
 
 writeFileSync(
-  "docs/data/stats.json",
+  join(OUT_DIR, "stats.json"),
   JSON.stringify(
     {
       updated: now,
@@ -117,12 +125,12 @@ writeFileSync(
 );
 
 writeFileSync(
-  "docs/data/downloads-badge.json",
+  join(OUT_DIR, "downloads-badge.json"),
   JSON.stringify({ schemaVersion: 1, label: "downloads", message: String(totalDownloads), color: "6a4ae0" }) + "\n",
 );
 
 appendFileSync(
-  "docs/data/stats-history.jsonl",
+  join(OUT_DIR, "stats-history.jsonl"),
   JSON.stringify({ date: now, totalDownloads, estimatedInstalls, updateChecks, traffic, releases: snapshotReleases }) + "\n",
 );
 

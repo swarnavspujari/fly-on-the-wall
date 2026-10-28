@@ -12,29 +12,40 @@ concurrency:
   group: stats
   cancel-in-progress: false
 
+# The snapshot is committed to the `stats` branch, not main: main requires
+# the `ci-ok` check, and a personal-account repo can't exempt the Actions bot
+# from that rule. The landing page and README badge read the files from the
+# branch via raw.githubusercontent.com.
 jobs:
   snapshot:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # "Commit snapshot" pushes docs/data back to main
+      contents: write # "Commit snapshot" pushes to the `stats` branch
     steps:
-      # Credentials stay persisted ON PURPOSE: the final step's plain
-      # `git push` authenticates with the checkout-stored GITHUB_TOKEN. No
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # Credentials stay persisted in THIS checkout on purpose: the final
+      # step's plain `git push` authenticates with the stored GITHUB_TOKEN. No
       # third-party dependencies run in this job (collect-stats.mjs uses only
       # node: built-ins) and nothing is uploaded as an artifact.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 # zizmor: ignore[artipacked]
+        with:
+          ref: stats
+          path: stats-data
       - name: Collect release + traffic stats
         env:
           # STATS_TOKEN (fine-grained PAT, Administration: read) unlocks the
           # traffic API; without it the run still works, minus traffic numbers.
           STATS_TOKEN: ${{ secrets.STATS_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/collect-stats.mjs
+        run: node scripts/collect-stats.mjs stats-data
       - name: Commit snapshot
+        working-directory: stats-data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/data
+          git add stats.json downloads-badge.json stats-history.jsonl
           git diff --cached --quiet && echo "no changes" && exit 0
-          git commit -m "chore(stats): daily download snapshot [skip ci]"
+          git commit -m "chore(stats): daily download snapshot"
           git push
