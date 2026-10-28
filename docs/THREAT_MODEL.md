@@ -1,6 +1,6 @@
 # Threat model
 
-Last reviewed: 2026-10-23. Review it again when a release adds a new data flow, such as a cloud service, an IPC command that touches files, or a new import format.
+Last reviewed: 2026-10-28. Review it again when a release adds a new data flow, such as a cloud service, an IPC command that touches files, or a new import format.
 
 ## What we protect
 
@@ -45,7 +45,7 @@ Last reviewed: 2026-10-23. Review it again when a release adds a new data flow, 
 | T7 | A crafted manifest in a copied-in folder makes a delete escape the data folder | `contained_recordings_dir` guard on every `remove_dir_all`. | Mitigated. Follow-up: rebase all manifest paths during self-heal. |
 | T8 | A compromised npm package or GitHub Action steals the updater key | Lockfiles with `npm ci --ignore-scripts`; actions pinned by SHA; the frontend is built in a job with no secrets; the release environment can require reviewers; Dependabot and audit gates. | Mitigated. Owner action needed: environment reviewers. |
 | T9 | A tampered installer at first install | Updates are minisign-verified; macOS builds are notarized; releases carry provenance attestations. | Partial: Windows installers aren't Authenticode-signed yet. |
-| T10 | Meeting data sent to a cloud processor without the user realising | Local by default (Ollama, local whisper). A one-time disclosure appears per cloud LLM provider, in a native dialog; only the backend records the answer, so a webview script can't forge consent. The MCP copy states that results go to the client's model provider. Per-note and per-folder "Keep local", enforced in the backend: cloud LLM providers are refused and Groq is skipped for those meetings. | Mitigated. The MCP server can still return keep-local meetings to its client. |
+| T10 | Meeting data sent to a cloud processor without the user realising | Local by default (Ollama, local whisper). A one-time disclosure appears per cloud LLM provider, in a native dialog; only the backend records the answer, so a webview script can't forge consent. The MCP copy states that results go to the client's model provider. Per-note and per-folder "Keep local", enforced in the backend: cloud LLM providers are refused and Groq is skipped for those meetings. | Mitigated. The MCP server can still return keep-local meetings to its client. A script in the webview (it would need an XSS first; CSP is `script-src 'self'`) can still ask for the consent dialog again after a decline; two declines within a minute stop it for a minute. |
 | T11 | Deleted meetings recoverable from the DB file | Atomic deletes, and SQLite `secure_delete=ON`. | Mitigated. Audio files rely on FDE. |
 | T12 | Recording without other participants' consent (two-party-consent laws) | First-run notice. A non-blocking "Let participants know" strip at record start (copy a chat notice, tick "Participants notified", stored on the meeting). | Mitigated; the user stays responsible for consent. |
 | T13 | Data recoverable from a stolen or lost laptop | Relies on OS full-disk encryption; Settings → Privacy warns when BitLocker / FileVault is clearly off. Optional audio retention (delete recordings after 7–365 days) and "Delete all my data" (data folder + keychain entries) limit what's there to find. | Accepted risk; documented. |

@@ -53,10 +53,13 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
+
 # The cloud-AI consent dialog (llm_commands.rs request_cloud_consent) talks to
-# rfd directly: the dialog plugin reports Esc as the second button, which would
-# turn Esc into "allow" when the safe answer is the default button. Same
-# version and features tauri-plugin-dialog already builds, so no new crate.
+# rfd directly. Its safe answer is the default (first) button, and the dialog
+# plugin's builder would turn Esc / closing into a click on the second one,
+# which is allow. Same version, features and targets tauri-plugin-dialog
+# already builds, so no new crate.
+[target.'cfg(any(windows, target_os = "macos", target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
 rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
 
 [dev-dependencies]

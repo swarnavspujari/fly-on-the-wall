@@ -728,9 +728,12 @@ mod security_tests {
             check_webview_writable_setting_key("consent.cloud_llm.anthropic").unwrap_err(),
             "setting 'consent.cloud_llm.anthropic' can't be changed from the app UI"
         );
-        // the other UI-level settings stay writable
+        // the other UI-level settings stay writable, including look-alikes
+        // without the dot: harmless, since build_provider reads only
+        // `consent.cloud_llm.<provider>`
         for key in [
             "consent.recording_notice_accepted",
+            "consent.cloud_llm",
             "consent.cloud_llmX",
             "capture.mic_device_id",
             "ui.theme",

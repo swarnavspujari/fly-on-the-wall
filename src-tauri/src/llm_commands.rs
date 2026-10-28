@@ -197,6 +197,8 @@ fn has_cloud_consent(storage: &fly_storage::Storage, provider: &str) -> bool {
 /// What [`request_cloud_consent`] must do for `provider`: `None` when it may
 /// already receive content (a local provider, or allowed before), else the
 /// question to ask. An unknown provider is an error, with nothing shown.
+/// The launch wording ("Your AI provider is set to …") is used only when
+/// `provider` really is the saved one, whatever the caller says.
 pub fn cloud_consent_question(
     storage: &fly_storage::Storage,
     provider: &str,
@@ -208,7 +210,55 @@ pub fn cloud_consent_question(
     if is_local || has_cloud_consent(storage, provider) {
         return Ok(None);
     }
+    let saved = storage.get_setting("llm.provider").ok().flatten();
+    let at_launch = at_launch && saved.as_deref() == Some(provider);
     Ok(Some(cloud_consent_prompt(provider, at_launch)))
+}
+
+/// Two declines for one provider this close together…
+const DECLINE_BURST: std::time::Duration = std::time::Duration::from_secs(60);
+/// …and requests for it return false without a dialog for this long.
+const QUIET_AFTER_BURST: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Paces the consent dialog per provider. A script that loops
+/// [`request_cloud_consent`] would otherwise put a new modal up after every
+/// decline, locking the app, and keep hoping a Tab-then-Enter lands on
+/// allow. After two declines within [`DECLINE_BURST`], that provider gets no
+/// dialog for [`QUIET_AFTER_BURST`]; an allow clears its record.
+#[derive(Debug, Default)]
+pub struct ConsentPacing {
+    by_provider: HashMap<String, Pacing>,
+}
+
+#[derive(Debug, Default)]
+struct Pacing {
+    last_decline: Option<std::time::Instant>,
+    quiet_until: Option<std::time::Instant>,
+}
+
+impl ConsentPacing {
+    /// True while `provider` is in its quiet period: don't ask now.
+    pub fn is_quiet(&self, provider: &str, now: std::time::Instant) -> bool {
+        self.by_provider
+            .get(provider)
+            .and_then(|p| p.quiet_until)
+            .is_some_and(|until| now < until)
+    }
+
+    /// Note how a dialog for `provider` was answered at `now`.
+    pub fn record(&mut self, provider: &str, answer: ConsentAnswer, now: std::time::Instant) {
+        if answer == ConsentAnswer::Allow {
+            self.by_provider.remove(provider);
+            return;
+        }
+        let p = self.by_provider.entry(provider.to_string()).or_default();
+        if p.last_decline
+            .is_some_and(|prev| now.saturating_duration_since(prev) <= DECLINE_BURST)
+        {
+            p.quiet_until = Some(now + QUIET_AFTER_BURST);
+        }
+        p.last_decline = Some(now);
+    }
 }
 
 /// The only code that writes cloud consent: records it for `provider` when
@@ -232,7 +282,8 @@ pub fn record_cloud_consent(
 /// that a script in the webview can't draw, fill in or click, and record a
 /// yes. Returns true when it may: a local provider, consent given before, or
 /// given now. Requests take turns, so only one dialog is ever open; one that
-/// waited sees the earlier answer before asking again.
+/// waited sees the earlier answer before asking again. Right after two
+/// declines it returns false without asking ([`ConsentPacing`]).
 #[tauri::command]
 pub async fn request_cloud_consent(
     app: tauri::AppHandle,
@@ -240,21 +291,38 @@ pub async fn request_cloud_consent(
     provider: String,
     at_launch: bool,
 ) -> CmdResult<bool> {
-    let _turn = state.consent_prompt.lock().await;
+    let mut pacing = state.consent_prompt.lock().await;
     let question = cloud_consent_question(&state.storage.lock().unwrap(), &provider, at_launch)?;
     let Some(prompt) = question else {
         return Ok(true);
     };
+    if pacing.is_quiet(&provider, std::time::Instant::now()) {
+        tracing::warn!(
+            provider,
+            "cloud-AI consent asked again right after two declines; not asking"
+        );
+        return Ok(false);
+    }
     let answer = ask_consent_natively(&app, &prompt).await;
+    pacing.record(&provider, answer, std::time::Instant::now());
     let allowed = record_cloud_consent(&state.storage.lock().unwrap(), &provider, answer)?;
     tracing::info!(provider, allowed, "cloud-AI consent asked");
     Ok(allowed)
 }
 
-/// Map the dialog's result: only a click on the allow button counts. rfd
-/// reports Esc and closing the dialog as `Cancel` on every desktop backend
-/// this app builds with (Windows TaskDialog, macOS NSAlert, GTK3).
-#[cfg(desktop)]
+/// Map the dialog's result: only a click on the allow button counts. On the
+/// paths used here (Windows TaskDialog, macOS NSAlert, GTK's blocking
+/// dialog) rfd reports a button as `Custom(<its label>)`, and Esc or closing
+/// the dialog as `Cancel`.
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
 fn consent_answer(result: &rfd::MessageDialogResult, prompt: &ConsentPrompt) -> ConsentAnswer {
     match result {
         rfd::MessageDialogResult::Custom(label) if *label == prompt.allow => ConsentAnswer::Allow,
@@ -262,33 +330,44 @@ fn consent_answer(result: &rfd::MessageDialogResult, prompt: &ConsentPrompt) -> 
     }
 }
 
-/// Show `prompt` as a native dialog over the main window and wait for it.
+/// The dialog's buttons: decline in the first slot, which every platform
+/// makes the default, so Enter (say, a keystroke meant for the editor when
+/// the dialog pops up) declines, like the in-app confirm's focused Cancel.
 ///
-/// Decline sits in the first button slot, which each platform makes the
-/// default: Enter (say, a keystroke meant for the editor when the dialog
-/// pops up) declines, like the in-app confirm's focused Cancel. The dialog
-/// plugin's builder can't be used for this: it reports Esc as a click on the
-/// second button, which here is allow. rfd itself reports it as `Cancel`.
-/// (rfd's zenity backend, behind the plugin's opt-in `xdg-portal` feature,
-/// would also report Esc as the second button: don't enable that feature
-/// without revisiting this.)
-#[cfg(desktop)]
+/// The dialog plugin's builder can't be used for this: it turns rfd's
+/// `Cancel` (Esc, closing) into the second button's label, which here is
+/// allow.
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn consent_buttons(prompt: &ConsentPrompt) -> rfd::MessageButtons {
+    rfd::MessageButtons::OkCancelCustom(prompt.decline.clone(), prompt.allow.clone())
+}
+
+/// Windows and macOS: show `prompt` as a native dialog over the main window
+/// (modal to it) and wait for it. Built on the main thread like
+/// tauri-plugin-dialog does (macOS requires it), then awaited off it. On
+/// Windows, Esc and closing come back as `Cancel`; on macOS Esc does nothing
+/// here (NSAlert gives Esc only to a "Cancel" button that isn't first), so
+/// one of the two buttons must be clicked.
+#[cfg(any(windows, target_os = "macos"))]
 async fn ask_consent_natively(app: &tauri::AppHandle, prompt: &ConsentPrompt) -> ConsentAnswer {
     use tauri::Manager;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let shown = prompt.clone();
     let handle = app.clone();
-    // Like tauri-plugin-dialog: build the dialog on the main thread (macOS
-    // requires it), then wait for the answer off it.
     let scheduled = app.run_on_main_thread(move || {
         let mut dialog = rfd::AsyncMessageDialog::new()
             .set_level(rfd::MessageLevel::Info)
             .set_title(&shown.title)
             .set_description(&shown.message)
-            .set_buttons(rfd::MessageButtons::OkCancelCustom(
-                shown.decline.clone(),
-                shown.allow.clone(),
-            ));
+            .set_buttons(consent_buttons(&shown));
         if let Some(window) = handle.get_webview_window("main") {
             dialog = dialog.set_parent(&window);
         }
@@ -305,8 +384,48 @@ async fn ask_consent_natively(app: &tauri::AppHandle, prompt: &ConsentPrompt) ->
     rx.await.unwrap_or(ConsentAnswer::Decline)
 }
 
-/// No native dialog on mobile yet: nothing is allowed.
-#[cfg(mobile)]
+/// GTK (Linux, the BSDs): rfd's *blocking* dialog, run off the async
+/// runtime. Its async GTK path reports only Ok / Cancel, never which custom
+/// button: allow would come back as `Cancel`, the same as Esc, so nobody
+/// could ever allow. The blocking path (`gtk_dialog_run`) reports a button
+/// as its label and Esc / closing as `Cancel`. Both run on rfd's own GTK
+/// thread. rfd's GTK backend ignores the parent window, so here the dialog
+/// isn't modal to the app window.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+async fn ask_consent_natively(_app: &tauri::AppHandle, prompt: &ConsentPrompt) -> ConsentAnswer {
+    let shown = prompt.clone();
+    let asked = tauri::async_runtime::spawn_blocking(move || {
+        let result = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Info)
+            .set_title(&shown.title)
+            .set_description(&shown.message)
+            .set_buttons(consent_buttons(&shown))
+            .show();
+        consent_answer(&result, &shown)
+    })
+    .await;
+    asked.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not show the cloud-consent dialog");
+        ConsentAnswer::Decline
+    })
+}
+
+/// No native dialog elsewhere (mobile): nothing is allowed.
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
 async fn ask_consent_natively(_app: &tauri::AppHandle, _prompt: &ConsentPrompt) -> ConsentAnswer {
     ConsentAnswer::Decline
 }
@@ -1246,6 +1365,7 @@ mod security_tests {
         use super::{cloud_consent_prompt, cloud_consent_question};
         let (_dir, s) = temp_storage();
         assert_eq!(cloud_consent_question(&s, "ollama", false), Ok(None));
+        s.set_setting("llm.provider", "anthropic").unwrap();
         assert_eq!(
             cloud_consent_question(&s, "anthropic", true),
             Ok(Some(cloud_consent_prompt("anthropic", true)))
@@ -1287,32 +1407,147 @@ mod security_tests {
         assert_eq!(s.get_setting("consent.cloud_llm.openai").unwrap(), None);
     }
 
-    /// Only a click on the allow button is a yes. Esc and closing the dialog
-    /// come back as `Cancel`; Enter lands on the decline button.
+    /// The launch wording claims "Your AI provider is set to …": the caller
+    /// can't get it for a provider that isn't the saved one.
     #[test]
-    fn only_the_allow_button_counts_as_yes() {
+    fn launch_wording_only_for_the_saved_provider() {
+        use super::{cloud_consent_prompt, cloud_consent_question};
+        let (_dir, s) = temp_storage();
+        // nothing saved (Ollama by default), or another provider saved
+        assert_eq!(
+            cloud_consent_question(&s, "openai", true),
+            Ok(Some(cloud_consent_prompt("openai", false)))
+        );
+        s.set_setting("llm.provider", "anthropic").unwrap();
+        assert_eq!(
+            cloud_consent_question(&s, "openai", true),
+            Ok(Some(cloud_consent_prompt("openai", false)))
+        );
+        s.set_setting("llm.provider", "openai").unwrap();
+        assert_eq!(
+            cloud_consent_question(&s, "openai", true),
+            Ok(Some(cloud_consent_prompt("openai", true)))
+        );
+    }
+
+    /// What each dialog path reports for each answer (read from rfd 0.16's
+    /// backends), and what it means here: only a click on the allow button
+    /// is a yes. Pinned so an rfd upgrade or a change of dialog path gets
+    /// checked again.
+    #[test]
+    fn each_platforms_dialog_results_map_to_the_right_answer() {
         use super::{cloud_consent_prompt, consent_answer, ConsentAnswer};
         use rfd::MessageDialogResult as R;
+        use ConsentAnswer::{Allow, Decline};
         let p = cloud_consent_prompt("anthropic", true);
-        assert_eq!(
-            consent_answer(&R::Custom("Use Anthropic".into()), &p),
-            ConsentAnswer::Allow
-        );
-        for other in [
-            R::Custom("Not now".into()),
-            R::Custom("Use OpenAI".into()),
-            R::Custom(String::new()),
-            R::Cancel,
-            R::Ok,
-            R::Yes,
-            R::No,
-        ] {
-            assert_eq!(
-                consent_answer(&other, &p),
-                ConsentAnswer::Decline,
-                "{other:?}"
-            );
+        let allow = R::Custom("Use Anthropic".into());
+        let decline = R::Custom("Not now".into());
+        let table = [
+            // Windows TaskDialog: Enter is the first (decline) button; Esc
+            // and closing are IDCANCEL.
+            ("windows: allow", allow.clone(), Allow),
+            ("windows: decline or Enter", decline.clone(), Decline),
+            ("windows: Esc or close", R::Cancel, Decline),
+            // macOS NSAlert: Return is the first (decline) button; Esc does
+            // nothing.
+            ("macos: allow", allow.clone(), Allow),
+            ("macos: decline or Return", decline.clone(), Decline),
+            // GTK's blocking gtk_dialog_run: Esc and closing are
+            // DELETE_EVENT, reported as Cancel.
+            ("gtk blocking: allow", allow.clone(), Allow),
+            ("gtk blocking: decline", decline.clone(), Decline),
+            ("gtk blocking: Esc or close", R::Cancel, Decline),
+            // GTK's async path (not used) reports allow as plain Cancel, so
+            // nobody could ever allow through it.
+            ("gtk async: allow", R::Cancel, Decline),
+            ("gtk async: decline", R::Ok, Decline),
+            // anything else is no
+            ("another label", R::Custom("Use OpenAI".into()), Decline),
+            ("empty label", R::Custom(String::new()), Decline),
+            ("yes", R::Yes, Decline),
+            ("no", R::No, Decline),
+        ];
+        for (case, result, want) in table {
+            assert_eq!(consent_answer(&result, &p), want, "{case}");
         }
+    }
+
+    /// Two declines in a minute quiet that provider's dialog for a minute;
+    /// an allow, or time, clears it. Other providers are unaffected.
+    #[test]
+    fn repeated_declines_quiet_the_dialog_for_a_while() {
+        use super::{ConsentAnswer, ConsentPacing};
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |n: u64| t0 + Duration::from_secs(n);
+        let mut pacing = ConsentPacing::default();
+        assert!(!pacing.is_quiet("anthropic", t0));
+
+        pacing.record("anthropic", ConsentAnswer::Decline, at(0));
+        assert!(
+            !pacing.is_quiet("anthropic", at(1)),
+            "one decline isn't a burst"
+        );
+        pacing.record("anthropic", ConsentAnswer::Decline, at(30));
+        assert!(pacing.is_quiet("anthropic", at(31)));
+        assert!(pacing.is_quiet("anthropic", at(89)));
+        assert!(!pacing.is_quiet("openai", at(31)), "per provider");
+        assert!(!pacing.is_quiet("anthropic", at(90)), "quiet for a minute");
+
+        // declines more than a minute apart never quiet it
+        let mut slow = ConsentPacing::default();
+        slow.record("openai", ConsentAnswer::Decline, at(0));
+        slow.record("openai", ConsentAnswer::Decline, at(61));
+        assert!(!slow.is_quiet("openai", at(62)));
+
+        // an allow clears the record
+        let mut cleared = ConsentPacing::default();
+        cleared.record("nim", ConsentAnswer::Decline, at(0));
+        cleared.record("nim", ConsentAnswer::Allow, at(5));
+        cleared.record("nim", ConsentAnswer::Decline, at(10));
+        assert!(!cleared.is_quiet("nim", at(11)));
+    }
+
+    /// The dev mock (frontend/src/devMock.ts) asks with the backend's own
+    /// words; this catches the two drifting apart.
+    #[test]
+    fn dev_mock_shows_the_same_disclosure() {
+        use super::cloud_consent_prompt;
+        let mock = include_str!("../../frontend/src/devMock.ts").replace("\r\n", "\n");
+        let start = mock
+            .find("function mockConsentPrompt(")
+            .expect("devMock has mockConsentPrompt");
+        let end = start
+            + mock[start..]
+                .find("\n}\n")
+                .expect("end of mockConsentPrompt");
+        // Join its `…` + `…` template pieces, one line per whole string.
+        let mut joined = String::new();
+        let mut rest = &mock[start..end];
+        while let Some(open) = rest.find('`') {
+            let close = open + 1 + rest[open + 1..].find('`').expect("closing backtick");
+            joined.push_str(&rest[open + 1..close]);
+            rest = &rest[close + 1..];
+            if !rest.trim_start().starts_with('+') {
+                joined.push('\u{1}');
+            }
+        }
+        let joined = joined
+            .replace("\\n", "\n")
+            .replace("${vendor}", "OpenAI")
+            .replace("${disclosure}", "");
+        let rust = cloud_consent_prompt("openai", false);
+        assert!(
+            joined.contains(&rust.message),
+            "devMock disclosure differs from cloud_consent_prompt:\n{joined}"
+        );
+        assert!(joined.contains(&rust.title), "devMock title differs");
+        let launch = cloud_consent_prompt("openai", true);
+        let intro = launch
+            .message
+            .strip_suffix(rust.message.as_str())
+            .expect("launch message ends with the disclosure");
+        assert!(joined.contains(intro), "devMock launch intro differs");
     }
 
     /// The gate holds: no cloud provider is built without recorded consent,
@@ -1347,7 +1582,10 @@ mod security_tests {
             ConsentAnswer::Decline,
         )
         .unwrap();
-        assert!(build_provider(&state, DataScope::NoMeetingData).is_err());
+        let err = build_provider(&state, DataScope::NoMeetingData)
+            .err()
+            .expect("still refused after a decline");
+        assert!(is_consent_refusal(&err), "{err}");
 
         record_cloud_consent(
             &state.storage.lock().unwrap(),
