@@ -1,0 +1,44 @@
+{
+  "id": "m08",
+  "title": "Incident review: scheduler outage",
+  "started_at": "2026-10-02T16:00:00Z",
+  "folder": "Engineering",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Jun Park", "email": "jun@quillmark.example" },
+    { "name": "Odette Nwosu", "email": "odette@quillmark.example" },
+    { "name": "Hana Kobayashi", "email": "hana@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Jun Park", "spk_1": "Odette Nwosu", "spk_2": "Hana Kobayashi" },
+  "scratchpad": "root cause: expired cert on job queue\nweekly on-call starting Mon",
+  "segments": [
+    ["m08-01", "mic", "0:03", "Let's do the review for Wednesday's outage. Odette, walk us through the timeline."],
+    ["m08-02", "spk_1", "0:09", "The scheduler stopped dispatching jobs on September thirtieth at two fourteen in the afternoon."],
+    ["m08-03", "spk_1", "0:17", "It was down for forty seven minutes. We restored service at three oh one."],
+    ["m08-04", "mic", "0:24", "And the cause?"],
+    ["m08-05", "spk_0", "0:27", "An expired TLS certificate on the job queue. The workers couldn't connect, so nothing got picked up."],
+    ["m08-06", "spk_1", "0:35", "About three hundred jobs were delayed. Nothing was lost, they all ran after the fix."],
+    ["m08-07", "mic", "0:42", "Which customers noticed?"],
+    ["m08-08", "spk_2", "0:45", "Harrowgate opened a ticket, and two smaller accounts emailed support."],
+    ["m08-09", "mic", "0:51", "Harrowgate is in the middle of a renewal, so I'll mention it to Elena."],
+    ["m08-10", "spk_1", "0:57", "For action items, I want expiry alerts on every certificate we own."],
+    ["m08-11", "spk_1", "1:03", "I'll set them up to fire thirty days before expiry."],
+    ["m08-12", "spk_0", "1:08", "Alerts are good, but renewal should be automatic. Nobody should renew a cert by hand."],
+    ["m08-13", "spk_0", "1:14", "I'll move every certificate to automated renewal by October sixteenth."],
+    ["m08-14", "spk_2", "1:20", "Customers will want an explanation."],
+    ["m08-15", "spk_2", "1:24", "I'll write the status page post today and send it to Maya for review."],
+    ["m08-16", "mic", "1:29", "Thanks. The other problem is nobody was clearly on call."],
+    ["m08-17", "mic", "1:34", "From now on we run a weekly on-call rotation, starting next Monday."],
+    ["m08-18", "spk_0", "1:39", "Agreed. I'll put the schedule in the team calendar."]
+  ],
+  "items": [
+    { "kind": "figure", "text": "Scheduler outage on September 30 lasted 47 minutes", "segments": ["m08-02", "m08-03"] },
+    { "kind": "decision", "text": "Weekly on-call rotation starting next Monday", "segments": ["m08-17"] },
+    { "kind": "action_item", "text": "Add certificate expiry alerts that fire 30 days ahead", "owner": "Odette Nwosu", "segments": ["m08-10", "m08-11"] },
+    { "kind": "action_item", "text": "Move every certificate to automated renewal by October 16", "owner": "Jun Park", "segments": ["m08-13"] },
+    { "kind": "action_item", "text": "Write the status page post and send it for review", "owner": "Hana Kobayashi", "segments": ["m08-15"] },
+    { "kind": "action_item", "text": "Put the on-call schedule in the team calendar", "owner": "Jun Park", "segments": ["m08-18"] },
+    { "kind": "action_item", "text": "Tell Elena that Harrowgate was affected by the outage", "owner": "You", "segments": ["m08-09"] }
+  ]
+}

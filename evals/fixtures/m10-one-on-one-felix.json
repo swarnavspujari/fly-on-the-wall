@@ -1,0 +1,32 @@
+{
+  "id": "m10",
+  "title": "1:1 Maya / Felix",
+  "started_at": "2026-10-06T19:00:00Z",
+  "folder": "People",
+  "keep_local": true,
+  "canaries": ["Brightpath", "Kestrel", "retention bonus", "two regional teams"],
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Felix Brandt", "email": "felix@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Felix Brandt" },
+  "scratchpad": "Felix: Brightpath offer\nretention bonus 15k? take to Sam\nKestrel lead role",
+  "segments": [
+    ["m10-01", "mic", "0:04", "Thanks for being open with me last week. I wanted to follow up properly."],
+    ["m10-02", "spk_0", "0:10", "Sure. I've been thinking about it a lot."],
+    ["m10-03", "spk_0", "0:15", "Brightpath made me an offer to run their support team. It's a step up in title."],
+    ["m10-04", "mic", "0:22", "I'd really like you to stay. What would make the difference?"],
+    ["m10-05", "spk_0", "0:28", "Honestly, a clearer path to a director role, and some recognition for this year."],
+    ["m10-06", "mic", "0:35", "I can't promise a title today. But I can put something concrete on the table."],
+    ["m10-07", "mic", "0:41", "I'm going to propose a retention bonus of fifteen thousand, paid in two halves."],
+    ["m10-08", "spk_0", "0:48", "That would matter. What about the path?"],
+    ["m10-09", "mic", "0:52", "That's where Kestrel comes in. We're planning to split support into two regional teams."],
+    ["m10-10", "mic", "0:59", "Kestrel stays confidential until November. If it goes ahead, you'd lead both regions."],
+    ["m10-11", "spk_0", "1:06", "That's exactly the kind of role I want."],
+    ["m10-12", "mic", "1:10", "I'll take the bonus to Sam this week and come back to you by Friday."]
+  ],
+  "items": [
+    { "kind": "action_item", "text": "Propose a $15,000 retention bonus for Felix to Sam; answer Felix by Friday", "owner": "You", "segments": ["m10-07", "m10-12"] },
+    { "kind": "question", "text": "Kestrel: split support into two regional teams, with Felix leading both", "segments": ["m10-09", "m10-10"] }
+  ]
+}

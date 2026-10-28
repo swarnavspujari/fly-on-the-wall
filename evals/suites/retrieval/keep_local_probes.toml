@@ -1,0 +1,98 @@
+# Keep-local probes (spec §4.2a #13): every retrieval path, tool calls
+# included, must go through the Keep-local filter. All probes run under
+# Visibility::ShareableOnly (a cloud model or the MCP server), on top of
+# every gold question. A probe leaks when its result holds the keep-local
+# meeting's id, its note's id, any of its segment ids, or a canary phrase.
+# An error result (refused as Keep local, or not found) is not a leak, as
+# long as its message carries none of those either.
+#
+# Placeholders in string values:
+#   {meeting:m10}       the database id of fixture meeting m10
+#   {note:m10}          the id of m10's note
+#   {folder:People}     the id of folder "People" (a path for nested ones)
+
+# Searches aimed squarely at the keep-local 1:1.
+[[search]]
+query = "Brightpath offer"
+
+[[search]]
+query = "Felix retention bonus"
+
+[[search]]
+query = "Kestrel regional teams"
+
+[[search]]
+query = "1:1 Maya Felix"
+
+[[search]]
+query = "offer to run their support team and a path to a director role"
+
+[[search]]
+query = "bonus"
+folder = "People"
+
+[[search]]
+query = "Felix"
+meetings = ["m10"]
+
+[[search]]
+query = "Kestrel"
+since = "2026-10-06"
+until = "2026-10-06"
+
+# Every tool, by id, at the keep-local meeting and note.
+[[tool]]
+name = "read_segments"
+args = { meeting_id = "{meeting:m10}", around_segment_id = "m10-07" }
+
+[[tool]]
+name = "read_segments"
+args = { meeting_id = "{meeting:m10}", around_segment_id = "m10-09", before = 20, after = 20, prefer_polished = true }
+
+[[tool]]
+name = "get_event"
+args = { meeting_id = "{meeting:m10}" }
+
+[[tool]]
+name = "get_note"
+args = { meeting_id = "{meeting:m10}" }
+
+[[tool]]
+name = "get_note"
+args = { note_id = "{note:m10}", kind = "both" }
+
+[[tool]]
+name = "get_items"
+args = { meeting_ids = ["{meeting:m10}"] }
+
+[[tool]]
+name = "get_items"
+args = { owner = "You", limit = 200 }
+
+[[tool]]
+name = "get_items"
+args = {}
+
+[[tool]]
+name = "list_meetings"
+args = { title_contains = "Felix" }
+
+[[tool]]
+name = "list_meetings"
+args = { limit = 50 }
+
+[[tool]]
+name = "list_meetings"
+args = { folder_id = "{folder:People}", since = "2026-10-06", until = "2026-10-06" }
+
+[[tool]]
+name = "list_meetings"
+args = { attendee = "felix" }
+
+[[tool]]
+name = "search_passages"
+args = { query = "retention bonus", meeting_ids = ["{meeting:m10}"] }
+
+[[tool]]
+name = "search_passages"
+args = { query = "Brightpath Kestrel bonus", folder_id = "{folder:People}", limit = 20 }
