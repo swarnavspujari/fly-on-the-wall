@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api } from "../api";
+import { api, LLM_SETTINGS_CHANGED_EVENT } from "../api";
 import { cloudConsentCopy, cloudConsentLaunchIntro, providerName } from "../askModel";
 import type { LlmProviderInfo } from "../types";
 import { useConfirm } from "./confirm";
@@ -59,6 +59,7 @@ export function useCloudConsent() {
         if (!ok) return false;
         try {
           await api.setAppSetting(key, "true");
+          window.dispatchEvent(new Event(LLM_SETTINGS_CHANGED_EVENT));
           return true;
         } catch {
           return false;
@@ -143,7 +144,15 @@ export function useConsentSkips(): ConsentSkips {
   }, []);
 
   // Who to name: the saved provider, unless it's local or already allowed.
+  // Read again whenever the provider or a consent changes (Settings, Ask),
+  // so the copy never names a provider that no longer needs the OK.
   const waiting = skipped.length > 0;
+  const [settingsVersion, setSettingsVersion] = useState(0);
+  useEffect(() => {
+    const changed = () => setSettingsVersion((v) => v + 1);
+    window.addEventListener(LLM_SETTINGS_CHANGED_EVENT, changed);
+    return () => window.removeEventListener(LLM_SETTINGS_CHANGED_EVENT, changed);
+  }, []);
   useEffect(() => {
     if (!waiting) return;
     let live = true;
@@ -161,7 +170,7 @@ export function useConsentSkips(): ConsentSkips {
     return () => {
       live = false;
     };
-  }, [waiting]);
+  }, [waiting, settingsVersion]);
 
   const run = async () => {
     if (busy) return;

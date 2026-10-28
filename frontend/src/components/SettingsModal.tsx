@@ -32,6 +32,7 @@ import {
   EscapeLayerScope,
 } from "./ui";
 import { useTheme } from "../theme";
+import { briefError } from "../pipelineNotice";
 import { useCloudConsent } from "./CloudConsent";
 import { useConfirm } from "./confirm";
 import PrivacySection from "./PrivacySection";
@@ -235,6 +236,8 @@ export default function SettingsModal({
   const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
   const [backfillBusy, setBackfillBusy] = useState(false);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+  // The backend's own words when every meeting failed (muted, under the message)
+  const [backfillDetail, setBackfillDetail] = useState<string | null>(null);
   // null = count not loaded yet (generic label until it arrives)
   const [backfillPending, setBackfillPending] = useState<number | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -558,18 +561,22 @@ export default function SettingsModal({
     }
     setBackfillBusy(true);
     setBackfillMsg(null);
+    setBackfillDetail(null);
     try {
       const r = await api.backfillMeetingItems();
+      const allFailed = r.processed > 0 && r.failed === r.processed && !!r.first_error;
       setBackfillMsg(
         r.processed === 0
           ? "All meetings are already extracted."
-          : r.failed === r.processed && r.first_error
-            ? // every meeting failed the same way: say why
-              `Couldn't extract from ${r.processed} meeting(s). ${r.first_error}`
+          : allFailed
+            ? `Couldn't index ${r.processed === 1 ? "the meeting" : `any of the ${r.processed} meetings`}. ` +
+              "Check Ask and Enhance in Settings, then try again."
             : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
               (r.failed ? `, ${r.failed} failed` : "") +
               ".",
       );
+      // every meeting failed the same way: show why, briefly
+      if (allFailed) setBackfillDetail(briefError(r.first_error!, 200));
     } catch (e) {
       setBackfillMsg(String(e));
     } finally {
@@ -2112,6 +2119,14 @@ export default function SettingsModal({
                       {backfillMsg && (
                         <p role="status" className="text-text-2" style={SMALL}>
                           {backfillMsg}
+                          {backfillDetail && (
+                            <span
+                              className="text-text-3"
+                              style={{ display: "block", marginTop: 2 }}
+                            >
+                              {backfillDetail}
+                            </span>
+                          )}
                         </p>
                       )}
                     </SettingsRow>

@@ -235,11 +235,7 @@ async fn ai_pass<R: tauri::Runtime>(
 /// transcription, so an open note shows the cleaned transcript when it lands.
 /// Returns how many meetings it took on.
 pub fn retry_consent_skipped<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> usize {
-    let ids: Vec<String> = {
-        let state = app.state::<AppState>();
-        let mut skipped = state.consent_skipped.lock().unwrap();
-        std::mem::take(&mut *skipped).into_iter().collect()
-    };
+    let ids = take_consent_rerun(&app.state::<AppState>());
     let count = ids.len();
     if count == 0 {
         return 0;
@@ -248,13 +244,8 @@ pub fn retry_consent_skipped<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> usi
         let on_stage = stage_emitter(&app);
         let state = app.state::<AppState>();
         for meeting_id in ids {
-            // Being transcribed again right now: that run brings its own pass.
-            if state
-                .pipeline_stage
-                .lock()
-                .unwrap()
-                .contains_key(&meeting_id)
-            {
+            // Checked again: one may have started or failed since.
+            if !consent_rerun_allowed(&state, &meeting_id) {
                 continue;
             }
             ai_pass(&app, &state, &on_stage, &meeting_id).await;
@@ -262,6 +253,30 @@ pub fn retry_consent_skipped<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> usi
         }
     });
     count
+}
+
+/// Empty the consent-skipped list and return the meetings the re-run should
+/// take. The rest are dropped, not kept for later. A meeting being
+/// transcribed again gets its own AI pass from that run. A meeting whose last
+/// transcription failed keeps its failure notice: the re-run would end in a
+/// "done" event, which clears that notice and the note's inline error.
+fn take_consent_rerun(state: &AppState) -> Vec<String> {
+    let taken = std::mem::take(&mut *state.consent_skipped.lock().unwrap());
+    taken
+        .into_iter()
+        .filter(|id| consent_rerun_allowed(state, id))
+        .collect()
+}
+
+/// See [`take_consent_rerun`]: not while it's being transcribed, and not
+/// over a held transcription failure.
+fn consent_rerun_allowed(state: &AppState, meeting_id: &str) -> bool {
+    !state
+        .pipeline_stage
+        .lock()
+        .unwrap()
+        .contains_key(meeting_id)
+        && last_failure(state, meeting_id).is_none()
 }
 
 /// Why this meeting's transcription last gave up: the error of a job parked
@@ -499,6 +514,47 @@ fn set_job_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Review and allow" re-runs only meetings it can finish cleanly. One
+    /// whose last transcription failed keeps its failure notice (a re-run's
+    /// "done" event would clear it), and one being transcribed now gets the
+    /// pass from that run. Both leave the list rather than wait in it.
+    #[test]
+    fn consent_rerun_skips_held_failures_and_running_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        {
+            let storage = state.storage.lock().unwrap();
+            storage.enqueue_transcription("m-failed").unwrap();
+            storage
+                .mark_transcription_failed("m-failed", 1, "whisper-cli crashed")
+                .unwrap();
+            // a finished job is fine: done, not failed
+            storage.enqueue_transcription("m-done").unwrap();
+            storage.mark_transcription_done("m-done").unwrap();
+        }
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .insert("m-running".into(), "transcribing".into());
+        state
+            .consent_skipped
+            .lock()
+            .unwrap()
+            .extend(["m-ok", "m-done", "m-failed", "m-running"].map(String::from));
+
+        assert!(last_failure(&state, "m-failed").is_some());
+        assert_eq!(take_consent_rerun(&state), vec!["m-done", "m-ok"]);
+        assert!(state.consent_skipped.lock().unwrap().is_empty());
+        assert!(!consent_rerun_allowed(&state, "m-failed"));
+        assert!(!consent_rerun_allowed(&state, "m-running"));
+        assert!(consent_rerun_allowed(&state, "m-ok"));
+    }
 
     #[test]
     fn rejected_cloud_errors_are_permanent() {

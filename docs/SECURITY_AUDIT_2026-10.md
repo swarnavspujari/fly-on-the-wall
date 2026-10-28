@@ -103,6 +103,7 @@ The second pass followed staff-engineer and SOC 2 (Security, Confidentiality and
 | Run the live Claude 5.5 test once with a real key | Needs the owner's API key | Repo owner |
 | tauri-plugin-updater's own zip 4 copy (RUSTSEC-2026-0367/8/9) and quick-xml (build-time only) | Waiting on upstream; the updater only unpacks signature-verified updates | Upstream |
 | Screen-recording videos aren't covered by audio retention; the WebView2 profile isn't wiped by delete-all; the FileVault check hasn't run on a real Mac | Small follow-ups | Code |
+| `consent.*` settings are webview-writable (`is_webview_setting_key`), so a script running in the webview could forge `consent.cloud_llm.*` without the prompt | `build_provider` checks the record but can't tell who wrote it; the fix is a backend-owned consent write (follow-up proposed) | Code |
 
 ## Verified good practices
 - API keys live in the OS keychain and are never returned to the webview (only `has_key`).

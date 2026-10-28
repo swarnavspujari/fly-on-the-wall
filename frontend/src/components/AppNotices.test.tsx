@@ -3,7 +3,7 @@ import { act } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "../api";
+import { api, LLM_SETTINGS_CHANGED_EVENT } from "../api";
 import type { LlmSettings } from "../types";
 import type { Updater, UpdatePhase } from "../updater";
 import type { PipelineFailure } from "../pipelineFailures";
@@ -405,6 +405,36 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
     await flush();
     expect(confirmDialog()).toBeNull();
     expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
+  });
+
+  it("its wording follows a consent or provider change made elsewhere", async () => {
+    skipped = ["m1"];
+    const { host } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(notice(host)!.textContent).toContain("Anthropic needs your OK");
+    // allowed in Settings meanwhile
+    consents["consent.cloud_llm.anthropic"] = "true";
+    act(() => {
+      window.dispatchEvent(new Event(LLM_SETTINGS_CHANGED_EVENT));
+    });
+    await flush();
+    expect(notice(host)!.textContent).not.toContain("needs your OK");
+    expect(button(host, "Run them now")).toBeDefined();
+    // or switched to another cloud provider that isn't allowed
+    llm.provider = "openai";
+    llm.providers.push({
+      id: "openai",
+      default_model: "gpt-4o",
+      is_local: false,
+      has_key: true,
+      model: null,
+      base_url: null,
+    });
+    act(() => {
+      window.dispatchEvent(new Event(LLM_SETTINGS_CHANGED_EVENT));
+    });
+    await flush();
+    expect(notice(host)!.textContent).toContain("OpenAI needs your OK");
   });
 
   it("follows the backend's list, waits out a recording, and Dismiss hides it", async () => {

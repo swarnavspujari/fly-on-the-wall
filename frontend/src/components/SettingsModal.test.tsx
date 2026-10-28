@@ -582,8 +582,12 @@ describe("Settings › asking again for cloud consent", () => {
     });
     await open();
     await click($$("button").find((b) => b.textContent?.startsWith("Index ")) ?? null);
-    expect(host!.textContent).toContain(
-      "Couldn't extract from 3 meeting(s). no API key stored for anthropic — add one in Settings",
+    const status = $$("[role=status]").find((p) => p.textContent?.startsWith("Couldn't index"))!;
+    // plain words first; the backend's own text muted under them
+    expect(status.firstChild?.textContent).toBe(
+      "Couldn't index any of the 3 meetings. Check Ask and Enhance in Settings, then try again.",
     );
+    const detail = status.querySelector(".text-text-3")!;
+    expect(detail.textContent).toBe("no API key stored for anthropic — add one in Settings");
   });
 });
