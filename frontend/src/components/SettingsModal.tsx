@@ -1,9 +1,11 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy, Plus } from "lucide-react";
+import { ArrowLeft, Check, Copy, Plus } from "lucide-react";
 import { api } from "../api";
+import { RESTART_REQUIRED_EVENT } from "../privacy";
 import { WHISPER_ENGINE_ID } from "../types";
 import type {
+  AppInfo,
   AsrSettings,
   AudioDevice,
   CalendarStatus,
@@ -17,35 +19,52 @@ import {
   Badge,
   Button,
   Card,
-  Checkbox,
   Input,
   Modal,
   ProgressBar,
-  SectionLabel,
+  Segmented,
   Select,
+  SettingsGroup,
+  SettingsRow,
+  Switch,
+  useEscapeLayer,
+  useDialogFocus,
+  EscapeLayerScope,
 } from "./ui";
 import { useTheme } from "../theme";
 import PrivacySection from "./PrivacySection";
 import type { Updater } from "../updater";
+import {
+  activeSectionAt,
+  asrDraftFrom,
+  asrUpdateFrom,
+  claudeCodeCommand,
+  dataTiles,
+  effectiveModel,
+  isAsrDirty,
+  madeOnHelper,
+  matchSections,
+  mcpCommand,
+  providerLabel,
+  providerVendor,
+  qualityHelper,
+  type AsrDraft,
+  type MadeOn,
+  type Quality,
+  type SectionId,
+} from "../settingsModel";
 
 interface Props {
   modelProgress: ModelProgress | null;
   updater: Updater;
   recordingActive: boolean;
   appVersion: string | null;
-  /** Deep-link from the transcribe error: "engine" opens Technical view
-   *  scrolled to the transcription-engine row; "groq" opens Technical view
-   *  scrolled to the Groq card with the enable checkbox visible. */
+  /** Deep-link from the transcribe error: "engine" opens Transcripts › More
+   *  options scrolled to "Models on this computer"; "groq" scrolls to the
+   *  "Made on" row, where Groq is one click away. */
   initialFocus?: "engine" | "groq" | null;
   onClose: () => void;
 }
-
-const TIERS = [
-  { id: "light", label: "Light", desc: "Whisper small (Q5) — ~2 GB RAM, fine on old laptops" },
-  { id: "balanced", label: "Balanced", desc: "large-v3-turbo (Q5) — near-large accuracy on CPU" },
-  { id: "best", label: "Best", desc: "large-v3-turbo (Q5), large-v3 with max-quality toggle" },
-  { id: "cloud", label: "Cloud (Groq)", desc: "For weak devices — audio LEAVES this machine" },
-];
 
 /* Textarea chrome matched to the token field recipe (see USAGE.md). */
 const TEXTAREA: CSSProperties = {
@@ -61,12 +80,6 @@ const TEXTAREA: CSSProperties = {
   outline: "none",
   resize: "vertical",
 };
-/** Company that processes data for each cloud LLM provider (disclosure copy). */
-const CLOUD_VENDORS: Record<string, string> = {
-  anthropic: "Anthropic (Claude)",
-  openai: "OpenAI",
-  nim: "NVIDIA (NIM)",
-};
 
 /** Claude models offered for the Anthropic provider; the first is the default. */
 const ANTHROPIC_MODELS = [
@@ -74,19 +87,35 @@ const ANTHROPIC_MODELS = [
   { value: "claude-haiku-5-5", label: "Claude Haiku 5.5 (faster, lower cost)" },
 ];
 
-const MONO_KEY: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: "12px" };
-/* "LEAVES this machine" emphasis pill in the cloud-tier tooltip/warning. */
-const LEAVES_PILL: CSSProperties = {
-  display: "inline-block",
-  background: "var(--warning-soft)",
-  color: "var(--warning-text)",
-  fontWeight: 700,
-  fontSize: "10px",
-  letterSpacing: "0.04em",
-  padding: "0 6px",
-  borderRadius: "var(--radius-pill)",
-  verticalAlign: "baseline",
+const QUALITY_OPTIONS: { value: Quality; label: string }[] = [
+  { value: "light", label: "Fast" },
+  { value: "balanced", label: "Balanced" },
+  { value: "best", label: "Best" },
+];
+
+const MADE_ON_OPTIONS: { value: MadeOn; label: string }[] = [
+  { value: "local", label: "This computer" },
+  { value: "groq", label: "Groq" },
+  { value: "hybrid", label: "Groq, then this computer" },
+];
+
+const TIER_NAMES: Record<string, string> = {
+  light: "Fast",
+  balanced: "Balanced",
+  best: "Best",
+  cloud: "Groq",
 };
+
+const CALENDAR_NAMES: Record<string, string> = {
+  google: "Google Calendar",
+  msgraph: "Outlook",
+};
+
+const MONO_KEY: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: "12px" };
+const SMALL: CSSProperties = { margin: 0, fontSize: 12, lineHeight: 1.5 };
+const MONO_SMALL: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 11 };
+const LIST_ROW =
+  "flex items-center justify-between gap-3 border-t border-line-2 py-2 first:border-t-0";
 
 function gb(bytes: number): string {
   return bytes >= 1_000_000_000
@@ -94,99 +123,85 @@ function gb(bytes: number): string {
     : `${Math.round(bytes / 1_000_000)} MB`;
 }
 
-/* ------------------------------------------------------------------ Segmented
-   Composed pill control (Simple/Technical, tiers, appearance, provider).
-   Built inline per the design template's <Segmented> — no shipped primitive. */
-type SegOption = [string, ReactNode, ReactNode?];
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
-function Segmented({
-  value,
-  onChange,
-  options,
-  full = false,
+/** A section heading plus its group(s); `data-section` drives scroll-spy.
+ *  Search hides sections rather than unmounting them, so a half-filled
+ *  form (retention confirm, delete-all) survives typing in the search box. */
+function Section({
+  id,
+  title,
+  hidden,
+  children,
 }: {
-  value: string;
-  onChange: (v: string) => void;
-  options: SegOption[];
-  full?: boolean;
+  id: SectionId;
+  title: string;
+  hidden: boolean;
+  children: ReactNode;
 }) {
-  const [hint, setHint] = useState<string | null>(null);
-  const last = options.length - 1;
+  return (
+    <section
+      data-section={id}
+      hidden={hidden}
+      aria-labelledby={`settings-h-${id}`}
+      className="fly-settings-section"
+    >
+      <h2 id={`settings-h-${id}`} className="fly-settings-h">
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+/** Ink card holding a copyable snippet (MCP config, Claude Code command). */
+function SnippetCard({ label, text }: { label: string; text: string }) {
+  const [copied, setCopied] = useState(false);
   return (
     <div
       style={{
-        display: full ? "flex" : "inline-flex",
-        width: full ? "100%" : undefined,
-        padding: 3,
-        gap: 3,
-        flex: "none",
-        borderRadius: "var(--radius-pill)",
-        border: "1px solid var(--line)",
-        background: "var(--surface-2)",
+        background: "var(--brand-ink)",
+        color: "var(--brand-cream)",
+        borderRadius: "var(--radius-lg)",
+        padding: "12px 14px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
       }}
     >
-      {options.map(([id, l, tip], i) => {
-        const on = value === id;
-        // keep edge tooltips inside the panel: first anchors left, last right, middle centers
-        const anchor: CSSProperties =
-          i === 0
-            ? { left: 0 }
-            : i === last
-              ? { right: 0 }
-              : { left: "50%", transform: "translateX(-50%)" };
-        return (
-          <button
-            key={id}
-            type="button"
-            onClick={() => onChange(id)}
-            onMouseEnter={tip ? () => setHint(id) : undefined}
-            onMouseLeave={tip ? () => setHint((h) => (h === id ? null : h)) : undefined}
-            style={{
-              position: "relative",
-              flex: full ? 1 : undefined,
-              border: "none",
-              cursor: "pointer",
-              borderRadius: "var(--radius-pill)",
-              padding: "5px 13px",
-              fontSize: "12.5px",
-              fontWeight: 600,
-              fontFamily: "var(--font-sans)",
-              whiteSpace: "nowrap",
-              background: on ? "var(--primary)" : "transparent",
-              color: on ? "var(--on-primary)" : "var(--text-2)",
-              transition: "background .12s, color .12s",
-            }}
-          >
-            {l}
-            {tip && hint === id && (
-              <span
-                role="tooltip"
-                style={{
-                  position: "absolute",
-                  bottom: "calc(100% + 8px)",
-                  ...anchor,
-                  zIndex: 20,
-                  width: 200,
-                  maxWidth: "60vw",
-                  whiteSpace: "normal",
-                  textAlign: "left",
-                  background: "var(--text)",
-                  color: "var(--surface)",
-                  fontSize: "11.5px",
-                  fontWeight: 500,
-                  lineHeight: 1.45,
-                  padding: "7px 10px",
-                  borderRadius: 8,
-                  boxShadow: "var(--shadow-lg)",
-                  pointerEvents: "none",
-                }}
-              >
-                {tip}
-              </span>
-            )}
-          </button>
-        );
-      })}
+      <div className="flex items-center justify-between gap-2">
+        <span style={{ fontSize: 12, fontWeight: 600 }}>{label}</span>
+        <Button
+          variant="soft"
+          size="xs"
+          startIcon={
+            copied ? <Check size={13} strokeWidth={1.75} /> : <Copy size={13} strokeWidth={1.75} />
+          }
+          onClick={() => {
+            void navigator.clipboard.writeText(text).then(() => {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1500);
+            });
+          }}
+        >
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
+      <pre
+        style={{
+          margin: 0,
+          overflowX: "auto",
+          whiteSpace: "pre",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11.5,
+          lineHeight: 1.6,
+          color: "var(--brand-cream)",
+        }}
+      >
+        {text}
+      </pre>
     </div>
   );
 }
@@ -199,38 +214,28 @@ export default function SettingsModal({
   initialFocus = null,
   onClose,
 }: Props) {
+  /* ---------------------------------------------------------- transcripts */
+  // `settings` is what's saved; `draft` is the Transcripts group's unsaved
+  // edit, applied all-or-nothing by set_asr_settings via the save bar.
   const [settings, setSettings] = useState<AsrSettings | null>(null);
-  const [tier, setTier] = useState("balanced");
-  const [modelId, setModelId] = useState<string>("");
-  const [useGroq, setUseGroq] = useState(false);
-  const [maxQuality, setMaxQuality] = useState(false);
-  const [autoTranscribe, setAutoTranscribe] = useState(true);
-  const [useGpu, setUseGpu] = useState(true);
+  const [draft, setDraft] = useState<AsrDraft | null>(null);
   const [groqKey, setGroqKey] = useState("");
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // "Transcribe when I stop" applies at once (it lives in Recording).
+  const [autoTranscribe, setAutoTranscribe] = useState(true);
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoMsg, setAutoMsg] = useState<string | null>(null);
+  const [gpuBusy, setGpuBusy] = useState(false);
+  const [gpuMsg, setGpuMsg] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
   const [backfillBusy, setBackfillBusy] = useState(false);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
   // null = count not loaded yet (generic label until it arrives)
   const [backfillPending, setBackfillPending] = useState<number | null>(null);
+  const [confirmClose, setConfirmClose] = useState(false);
 
-  // Presentational view mode — Technical reveals model installs, GPU + OAuth details.
-  // A deep-link forces Technical so its target (engine row, or the Groq
-  // enable checkbox under the Groq card) is actually rendered.
-  const [technical, setTechnical] = useState(initialFocus !== null);
-  const engineRowRef = useRef<HTMLDivElement>(null);
-  const groqCardRef = useRef<HTMLDivElement>(null);
-  const didFocusRef = useRef(false);
-  // Deep-link: once settings have loaded (target is rendered), scroll it into
-  // view a single time — not on every later refresh (e.g. post-install).
-  useEffect(() => {
-    if (initialFocus && settings && !didFocusRef.current) {
-      didFocusRef.current = true;
-      const target = initialFocus === "groq" ? groqCardRef : engineRowRef;
-      target.current?.scrollIntoView({ block: "center" });
-    }
-  }, [initialFocus, settings]);
   // Appearance control (System / Light / Dark) — wired to the shared theme hook.
   const { theme, setTheme } = useTheme();
 
@@ -242,6 +247,7 @@ export default function SettingsModal({
   const [llmKey, setLlmKey] = useState("");
   const [llmTest, setLlmTest] = useState<string | null>(null);
   const [llmBusy, setLlmBusy] = useState(false);
+  const [llmLoadError, setLlmLoadError] = useState<string | null>(null);
 
   // managed Ollama (local provider) state
   const [ollama, setOllama] = useState<OllamaStatus | null>(null);
@@ -257,10 +263,11 @@ export default function SettingsModal({
   // templates state
   const [templates, setTemplates] = useState<Template[]>([]);
   const [editingTpl, setEditingTpl] = useState<Template | null>(null);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
 
   // MCP state
   const [mcpJson, setMcpJson] = useState("");
-  const [mcpCopied, setMcpCopied] = useState(false);
+  const [mcpSetupOpen, setMcpSetupOpen] = useState(false);
 
   // microphone
   const [mics, setMics] = useState<AudioDevice[]>([]);
@@ -276,6 +283,35 @@ export default function SettingsModal({
   // Per-calendar on/off toggles (which calendars feed "Up next").
   const [calList, setCalList] = useState<CalendarToggle[]>([]);
 
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+
+  /* ---------------------------------------------------------- navigation */
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState<SectionId>("recording");
+  // Per-group "More options". A deep link to the engine row opens Transcripts.
+  const [advOpen, setAdvOpen] = useState<Partial<Record<SectionId, boolean>>>(() => ({
+    transcripts: initialFocus === "engine",
+  }));
+  const [flash, setFlash] = useState<"engine" | "groq" | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const spyLock = useRef(0);
+  const didFocusRef = useRef(false);
+
+  const setAdv = (id: SectionId, open: boolean) => setAdvOpen((a) => ({ ...a, [id]: open }));
+  const patchDraft = (p: Partial<AsrDraft>) => {
+    setDraft((d) => (d ? { ...d, ...p } : d));
+    // The key field hides when Made on goes back to this computer; a typed
+    // key must not stay pending where you can't see it.
+    if (p.madeOn === "local") setGroqKey("");
+  };
+  // Instant-apply ASR writes send the saved snapshot; never let one race
+  // the save bar (set_asr_settings applies in arrival order).
+  const asrBusy = saving || autoBusy || gpuBusy;
+  const asrDirty = !!draft && isAsrDirty(draft, settings, groqKey);
+
+  /* ---------------------------------------------------------- loading */
+
   const loadCal = () =>
     api.getCalendarSettings().then((c) => {
       setCal(c);
@@ -290,99 +326,256 @@ export default function SettingsModal({
       .then(setCalList)
       .catch(() => setCalList([]));
 
-  const toggleCalendar = async (c: CalendarToggle, enabled: boolean) => {
-    setCalList((list) =>
-      list.map((x) => (x.provider === c.provider && x.id === c.id ? { ...x, enabled } : x)),
-    );
-    try {
-      await api.setCalendarEnabled(c.provider, c.id, enabled);
-    } catch (e) {
-      // revert the optimistic flip on failure
-      setCalList((list) =>
-        list.map((x) =>
-          x.provider === c.provider && x.id === c.id ? { ...x, enabled: !enabled } : x,
-        ),
-      );
-      setCalMsg(String(e));
-    }
-  };
-
-  const saveCal = async () => {
-    await api.setCalendarSettings({
-      google_client_id: googleId,
-      google_client_secret: googleSecret ? googleSecret : null,
-      ms_client_id: msId,
-    });
-    setGoogleSecret("");
-    await loadCal();
-    setCalMsg("saved ✓");
-  };
-
-  const connectCal = async (provider: string) => {
-    setCalBusy(provider);
-    setCalMsg("A browser window opened — finish signing in there…");
-    try {
-      await api.setCalendarSettings({
-        google_client_id: googleId,
-        google_client_secret: googleSecret ? googleSecret : null,
-        ms_client_id: msId,
-      });
-      setGoogleSecret("");
-      await api.connectCalendar(provider);
-      setCalMsg(`${provider} connected ✓`);
-      await loadCal();
-      await loadCalList();
-    } catch (e) {
-      setCalMsg(`✗ ${e}`);
-    } finally {
-      setCalBusy(null);
-    }
-  };
-
-  const disconnectCal = async (provider: string) => {
-    setCalBusy(provider);
-    try {
-      await api.disconnectCalendar(provider);
-      await loadCal();
-      await loadCalList();
-      setCalMsg(`${provider} disconnected`);
-    } catch (e) {
-      setCalMsg(String(e));
-    } finally {
-      setCalBusy(null);
-    }
-  };
-
+  /** Saved transcript settings + a fresh draft (initial load, after save). */
   const load = () =>
     api.getAsrSettings().then((s) => {
       setSettings(s);
-      setTier(s.tier);
-      setModelId(s.model_id ?? "");
-      setUseGroq(s.use_groq);
-      setMaxQuality(s.max_quality);
+      setDraft(asrDraftFrom(s));
       setAutoTranscribe(s.auto_transcribe);
-      setUseGpu(s.use_gpu);
     });
+
+  /** Saved settings only (installs, GPU re-test): keeps unsaved edits. */
+  const refreshSaved = () => api.getAsrSettings().then(setSettings);
 
   const loadLlm = () =>
-    api.getLlmSettings().then((s) => {
-      setLlm(s);
-      setLlmProvider(s.provider);
-      const info = s.providers.find((p) => p.id === s.provider);
-      setLlmModel(info?.model ?? "");
-      setLlmBaseUrl(info?.base_url ?? "");
-    });
+    api.getLlmSettings().then(
+      (s) => {
+        setLlm(s);
+        setLlmLoadError(null);
+        setLlmProvider(s.provider);
+        const info = s.providers.find((p) => p.id === s.provider);
+        setLlmModel(info?.model ?? "");
+        setLlmBaseUrl(info?.base_url ?? "");
+      },
+      (e) => {
+        // Keep the rest of the section usable (templates) and say why.
+        setLlmLoadError(`Couldn't load the AI settings: ${String(e)}`);
+        throw e;
+      },
+    );
 
   const loadOllama = () => api.ollamaStatus().then(setOllama);
+
+  useEffect(() => {
+    load().catch(console.error);
+    loadLlm().catch(console.error);
+    loadOllama().catch(console.error);
+    api.listTemplates().then(setTemplates).catch(console.error);
+    loadCal().catch(console.error);
+    loadCalList().catch(console.error);
+    api.mcpConfig().then(setMcpJson).catch(console.error);
+    api.listMicDevices().then(setMics).catch(console.error);
+    api.appInfo().then(setAppInfo).catch(console.error);
+    api
+      .getAppSetting("capture.mic_device_id")
+      .then((v) => setMicId(v ?? ""))
+      .catch(console.error);
+    // Count of un-extracted meetings behind the search-index button.
+    void api
+      .pendingBackfillCount()
+      .then(setBackfillPending)
+      .catch(() => {});
+  }, []);
+
+  /* ---------------------------------------------------------- overlay */
+
+  /** Back, Done and Esc: unsaved transcript changes ask first. */
+  const requestClose = () => {
+    if (asrDirty) setConfirmClose(true);
+    else onClose();
+  };
+  const escDepth = useEscapeLayer(requestClose);
+
+  // Focus moves in on open (the search box, unless deep-linked), Tab stays
+  // inside, and focus goes back to whatever had it when Settings closes, so
+  // you land where you were.
+  const overlayRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(overlayRef, true, { trap: true });
+
+  // After "Delete all my data" the app-level RestartRequired screen takes
+  // over; Settings closes so its focus trap can't hold the keyboard under it
+  // (nothing here is usable until the restart anyway).
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  });
+  useEffect(() => {
+    const close = () => closeRef.current();
+    window.addEventListener(RESTART_REQUIRED_EVENT, close);
+    return () => window.removeEventListener(RESTART_REQUIRED_EVENT, close);
+  }, []);
+
+  // Deep link: once settings have loaded (the target row is rendered),
+  // bring it into view a single time — not on every later refresh.
+  useEffect(() => {
+    if (!initialFocus || !settings || didFocusRef.current) return;
+    didFocusRef.current = true;
+    const el = scrollRef.current?.querySelector<HTMLElement>(
+      initialFocus === "groq" ? "#settings-row-groq" : "#settings-row-engine",
+    );
+    spyLock.current = Date.now();
+    setActive("transcripts");
+    setFlash(initialFocus);
+    el?.scrollIntoView({ block: "center" });
+  }, [initialFocus, settings]);
+
+  const visible = matchSections(query);
+  const visibleIds = new Set(visible.map((s) => s.id));
+  const show = (id: SectionId) => visibleIds.has(id);
+
+  const goSection = (id: SectionId) => {
+    const sc = scrollRef.current;
+    const el = sc?.querySelector<HTMLElement>(`[data-section="${id}"]`);
+    spyLock.current = Date.now();
+    setActive(id);
+    if (sc && el) {
+      sc.scrollTo?.({
+        top: Math.max(0, el.offsetTop - 20),
+        behavior: prefersReducedMotion() ? "auto" : "smooth",
+      });
+    }
+  };
+
+  const onScroll = () => {
+    if (Date.now() - spyLock.current < 700) return;
+    const sc = scrollRef.current;
+    if (!sc) return;
+    const tops = [...sc.querySelectorAll<HTMLElement>("[data-section]:not([hidden])")].map(
+      (el) => ({
+        id: el.dataset.section as SectionId,
+        top: el.offsetTop,
+      }),
+    );
+    const atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 2;
+    const id = activeSectionAt(tops, sc.scrollTop, 80, atBottom);
+    if (id && id !== active) setActive(id);
+  };
+
+  const onQuery = (q: string) => {
+    setQuery(q);
+    const matches = matchSections(q);
+    if (matches[0]) setActive(matches[0].id);
+    // A match can live in "More options" (e.g. "logs" → Diagnostics), so
+    // searching opens the matched groups; you can still collapse them.
+    if (q.trim()) {
+      setAdvOpen((a) => ({ ...a, ...Object.fromEntries(matches.map((s) => [s.id, true])) }));
+    }
+    scrollRef.current?.scrollTo?.({ top: 0 });
+  };
+
+  /* ---------------------------------------------------------- recording */
+
+  const setAutoNow = async (next: boolean) => {
+    if (!settings) return;
+    setAutoTranscribe(next);
+    setAutoBusy(true);
+    setAutoMsg(null);
+    try {
+      // Saved values for everything else: the Transcripts draft stays unsaved.
+      await api.setAsrSettings(asrUpdateFrom(asrDraftFrom(settings), settings, next, ""));
+      setSettings((s) => (s ? { ...s, auto_transcribe: next } : s));
+    } catch (e) {
+      setAutoTranscribe(!next);
+      setAutoMsg(String(e));
+    } finally {
+      setAutoBusy(false);
+    }
+  };
+
+  /* ---------------------------------------------------------- transcripts */
+
+  const save = async (): Promise<boolean> => {
+    if (!settings || !draft) return false;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await api.setAsrSettings(asrUpdateFrom(draft, settings, autoTranscribe, groqKey));
+      setGroqKey("");
+      await load();
+      return true;
+    } catch (e) {
+      setSaveError(String(e));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const discard = () => {
+    if (settings) setDraft(asrDraftFrom(settings));
+    setGroqKey("");
+    setSaveError(null);
+  };
+
+  /** Turning GPU off then on clears the stored speed-test verdict, so the
+   *  next transcription measures again (backend: set_asr_settings). */
+  const testGpuAgain = async () => {
+    if (!settings) return;
+    setGpuBusy(true);
+    setGpuMsg(null);
+    try {
+      const base = asrUpdateFrom(asrDraftFrom(settings), settings, autoTranscribe, "");
+      await api.setAsrSettings({ ...base, use_gpu: false });
+      await api.setAsrSettings({ ...base, use_gpu: true });
+    } catch (e) {
+      setGpuMsg(String(e));
+    } finally {
+      setGpuBusy(false);
+      refreshSaved().catch(console.error);
+    }
+  };
+
+  const download = async (id: string) => {
+    setDownloading(id);
+    setDownloadErrors((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    try {
+      await api.downloadModel(id);
+      await refreshSaved();
+    } catch (e) {
+      console.error(e);
+      setDownloadErrors((prev) => ({ ...prev, [id]: String(e) }));
+    } finally {
+      setDownloading(null);
+    }
+  };
+
+  const runBackfill = async () => {
+    setBackfillBusy(true);
+    setBackfillMsg(null);
+    try {
+      const r = await api.backfillMeetingItems();
+      setBackfillMsg(
+        r.processed === 0
+          ? "All meetings are already extracted."
+          : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
+              (r.failed ? `, ${r.failed} failed` : "") +
+              ".",
+      );
+    } catch (e) {
+      setBackfillMsg(String(e));
+    } finally {
+      setBackfillBusy(false);
+      void api
+        .pendingBackfillCount()
+        .then(setBackfillPending)
+        .catch(() => {});
+    }
+  };
+
+  /* ---------------------------------------------------------- ask and enhance */
 
   const installOllama = async () => {
     setOllamaBusy("install");
     setOllamaMsg(null);
     try {
       await api.downloadModel("ollama-bin");
-      setOllamaMsg("installed ✓");
+      setOllamaMsg("Installed.");
     } catch (e) {
-      setOllamaMsg(`✗ ${e}`);
+      setOllamaMsg(String(e));
     } finally {
       setOllamaBusy(null);
       loadOllama().catch(console.error);
@@ -407,7 +600,7 @@ export default function SettingsModal({
     setOllamaMsg(null);
     try {
       await api.ollamaPull(model);
-      setOllamaMsg(`${model} ready ✓`);
+      setOllamaMsg(`${model} is ready.`);
       // A guided swap just finished downloading its target: close the offer
       // and, if the previous model is still on disk, offer to reclaim it.
       if (swapOffer && sameOllamaModel(model, swapOffer.to)) {
@@ -417,7 +610,7 @@ export default function SettingsModal({
         if (old && !sameOllamaModel(old.name, model)) setDeleteOffer(old);
       }
     } catch (e) {
-      setOllamaMsg(`✗ ${e}`);
+      setOllamaMsg(String(e));
     } finally {
       setOllamaBusy(null);
       loadOllama().catch(console.error);
@@ -425,63 +618,17 @@ export default function SettingsModal({
   };
 
   const deleteOllamaModel = async (model: string) => {
-    if (!confirm(`Delete model "${model}" from this machine?`)) return;
+    if (!confirm(`Delete the model "${model}" from this computer?`)) return;
     setOllamaMsg(null);
     try {
       await api.ollamaDelete(model);
-      setOllamaMsg(`${model} deleted`);
+      setOllamaMsg(`${model} deleted.`);
       setDeleteOffer((d) => (d && sameOllamaModel(d.name, model) ? null : d));
     } catch (e) {
-      setOllamaMsg(`✗ ${e}`);
+      setOllamaMsg(String(e));
     } finally {
       loadOllama().catch(console.error);
     }
-  };
-
-  useEffect(() => {
-    load().catch(console.error);
-    loadLlm().catch(console.error);
-    loadOllama().catch(console.error);
-    api.listTemplates().then(setTemplates).catch(console.error);
-    loadCal().catch(console.error);
-    loadCalList().catch(console.error);
-    api.mcpConfig().then(setMcpJson).catch(console.error);
-    api.listMicDevices().then(setMics).catch(console.error);
-    api
-      .getAppSetting("capture.mic_device_id")
-      .then((v) => setMicId(v ?? ""))
-      .catch(console.error);
-  }, []);
-
-  const pickProvider = async (id: string) => {
-    // Disclose cloud processing before the provider is persisted (picking a
-    // tab saves immediately). The backend enforces the same consent.
-    if (!(await confirmCloudProvider(id))) {
-      setLlmTest("Kept your current provider — nothing was sent anywhere.");
-      return;
-    }
-    const prev = llmProvider;
-    setLlmProvider(id);
-    const info = llm?.providers.find((p) => p.id === id);
-    setLlmModel(info?.model ?? "");
-    setLlmBaseUrl(info?.base_url ?? "");
-    setLlmKey("");
-    setLlmTest(null);
-    // Persist the pick immediately (optimistic, like toggleCalendar). The
-    // Save button is far below the Ollama panel, so users routinely picked a
-    // provider, never hit Save, and reopened the modal to persisted Ollama.
-    // Save still owns model / base-url / key edits.
-    api
-      .setLlmSettings({
-        provider: id,
-        model: info?.model ?? null,
-        base_url: info?.base_url ?? null,
-        api_key: null,
-      })
-      .catch((e) => {
-        setLlmProvider(prev);
-        setLlmTest(String(e));
-      });
   };
 
   /** One-time disclosure before a cloud provider first receives meeting
@@ -495,21 +642,57 @@ export default function SettingsModal({
     } catch {
       /* fall through to asking */
     }
-    const vendor = CLOUD_VENDORS[provider] ?? provider;
+    const vendor = providerVendor(provider);
     const ok = confirm(
-      `Use ${vendor} for Enhance and Ask?\n\n` +
+      `Use ${vendor} for Ask and Enhance?\n\n` +
         `Your notes and full meeting transcripts will be sent to ${vendor} for processing ` +
-        `whenever you run Enhance, Ask, transcript polish or item extraction. ` +
-        `Their data-retention terms apply (see their privacy / data-usage policy).\n\n` +
-        `Recordings themselves stay on this computer. Choose Ollama to keep everything local.`,
+        `whenever you run Enhance or Ask, and automatically for transcript cleanup and ` +
+        `action items after each transcription. Their data-retention terms apply (see their ` +
+        `privacy / data-usage policy).\n\n` +
+        `Recordings themselves stay on this computer, and so do notes you keep local. ` +
+        `Choose This computer (Ollama) to keep everything local.`,
     );
     if (ok) await api.setAppSetting(key, "true").catch(() => {});
     return ok;
   };
 
+  const pickProvider = async (id: string) => {
+    // Disclose cloud processing before the provider is persisted (picking
+    // saves immediately). The backend enforces the same consent.
+    if (!(await confirmCloudProvider(id))) {
+      setLlmTest("Kept your current provider. Nothing was sent anywhere.");
+      return;
+    }
+    const prev = { provider: llmProvider, model: llmModel, baseUrl: llmBaseUrl };
+    setLlmProvider(id);
+    const info = llm?.providers.find((p) => p.id === id);
+    setLlmModel(info?.model ?? "");
+    setLlmBaseUrl(info?.base_url ?? "");
+    setLlmKey("");
+    setLlmTest(null);
+    // Persist the pick immediately (optimistic, like toggleCalendar). Save
+    // still owns model / base-url / key edits.
+    api
+      .setLlmSettings({
+        provider: id,
+        model: info?.model ?? null,
+        base_url: info?.base_url ?? null,
+        api_key: null,
+      })
+      .then(() => setLlm((s) => (s ? { ...s, provider: id } : s)))
+      .catch((e) => {
+        // Revert the fields too, so a later Save/Test can't write this
+        // provider's model or URL into the previous one.
+        setLlmProvider(prev.provider);
+        setLlmModel(prev.model);
+        setLlmBaseUrl(prev.baseUrl);
+        setLlmTest(String(e));
+      });
+  };
+
   const saveLlm = async () => {
     if (!(await confirmCloudProvider(llmProvider))) {
-      setLlmTest("Not saved — cloud processing wasn't confirmed.");
+      setLlmTest("Not saved. Cloud processing wasn't confirmed.");
       return;
     }
     setLlmBusy(true);
@@ -527,7 +710,7 @@ export default function SettingsModal({
       });
       setLlmKey("");
       await loadLlm();
-      setLlmTest("saved ✓");
+      setLlmTest("Saved.");
       // Guided swap: a just-saved Ollama model that isn't installed would
       // fail at first use — offer the pull (with progress) right here.
       if (llmProvider === "ollama") {
@@ -548,10 +731,47 @@ export default function SettingsModal({
     }
   };
 
+  /** The Claude model select applies at once (the key and endpoint fields
+   *  still need Save). The saved base URL is sent back unchanged. It holds
+   *  llmBusy like Save/Test, and the select is disabled while they run, so
+   *  this write can't land after an Endpoint save and undo it. */
+  const saveClaudeModel = async (model: string) => {
+    if (llmBusy) return;
+    const prev = llmModel;
+    setLlmModel(model);
+    if (!(await confirmCloudProvider("anthropic"))) {
+      setLlmModel(prev);
+      return;
+    }
+    const info = llm?.providers.find((p) => p.id === "anthropic");
+    setLlmBusy(true);
+    try {
+      await api.setLlmSettings({
+        provider: "anthropic",
+        model,
+        base_url: info?.base_url ?? null,
+        api_key: null,
+      });
+      setLlm((s) =>
+        s
+          ? {
+              ...s,
+              providers: s.providers.map((p) => (p.id === "anthropic" ? { ...p, model } : p)),
+            }
+          : s,
+      );
+    } catch (e) {
+      setLlmModel(prev);
+      setLlmTest(String(e));
+    } finally {
+      setLlmBusy(false);
+    }
+  };
+
   const testLlm = async () => {
     if (!(await confirmCloudProvider(llmProvider))) return;
     setLlmBusy(true);
-    setLlmTest("testing…");
+    setLlmTest("Testing…");
     try {
       await api.setLlmSettings({
         provider: llmProvider,
@@ -563,7 +783,7 @@ export default function SettingsModal({
       setLlmTest(await api.testLlmConnection());
       await loadLlm();
     } catch (e) {
-      setLlmTest(`✗ ${e}`);
+      setLlmTest(String(e));
     } finally {
       setLlmBusy(false);
       // Testing the ollama provider may have started the managed server.
@@ -583,78 +803,82 @@ export default function SettingsModal({
     setTemplates(await api.listTemplates());
   };
 
-  const save = async () => {
-    setSaving(true);
-    try {
-      await api.setAsrSettings({
-        tier,
-        model_id: modelId || null,
-        use_groq: useGroq,
-        max_quality: maxQuality,
-        auto_transcribe: autoTranscribe,
-        use_gpu: useGpu,
-        groq_key: groqKey ? groqKey : null,
-      });
-      onClose();
-    } finally {
-      setSaving(false);
-    }
-  };
+  /* ---------------------------------------------------------- calendars */
 
-  // Count of un-extracted meetings behind the backfill button's label; loaded
-  // when Settings opens, refreshed after each run.
-  useEffect(() => {
-    void api
-      .pendingBackfillCount()
-      .then(setBackfillPending)
-      .catch(() => {});
-  }, []);
-
-  const runBackfill = async () => {
-    setBackfillBusy(true);
-    setBackfillMsg(null);
+  const toggleCalendar = async (c: CalendarToggle, enabled: boolean) => {
+    setCalList((list) =>
+      list.map((x) => (x.provider === c.provider && x.id === c.id ? { ...x, enabled } : x)),
+    );
     try {
-      const r = await api.backfillMeetingItems();
-      setBackfillMsg(
-        r.processed === 0
-          ? "All meetings are already extracted."
-          : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
-              (r.failed ? `, ${r.failed} failed` : ""),
+      await api.setCalendarEnabled(c.provider, c.id, enabled);
+    } catch (e) {
+      // revert the optimistic flip on failure
+      setCalList((list) =>
+        list.map((x) =>
+          x.provider === c.provider && x.id === c.id ? { ...x, enabled: !enabled } : x,
+        ),
       );
-    } catch (e) {
-      setBackfillMsg(String(e));
-    } finally {
-      setBackfillBusy(false);
-      void api
-        .pendingBackfillCount()
-        .then(setBackfillPending)
-        .catch(() => {});
+      setCalMsg(String(e));
     }
   };
 
-  const download = async (id: string) => {
-    setDownloading(id);
-    setDownloadErrors((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
+  const saveCal = async () => {
     try {
-      await api.downloadModel(id);
-      await load();
+      await api.setCalendarSettings({
+        google_client_id: googleId,
+        google_client_secret: googleSecret ? googleSecret : null,
+        ms_client_id: msId,
+      });
+      setGoogleSecret("");
+      await loadCal();
+      setCalMsg("Saved.");
     } catch (e) {
-      console.error(e);
-      setDownloadErrors((prev) => ({ ...prev, [id]: String(e) }));
-    } finally {
-      setDownloading(null);
+      setCalMsg(String(e));
     }
   };
+
+  const connectCal = async (provider: string) => {
+    setCalBusy(provider);
+    setCalMsg("A browser window opened. Finish signing in there.");
+    try {
+      await api.setCalendarSettings({
+        google_client_id: googleId,
+        google_client_secret: googleSecret ? googleSecret : null,
+        ms_client_id: msId,
+      });
+      setGoogleSecret("");
+      await api.connectCalendar(provider);
+      setCalMsg(`${CALENDAR_NAMES[provider] ?? provider} connected.`);
+      await loadCal();
+      await loadCalList();
+    } catch (e) {
+      setCalMsg(String(e));
+    } finally {
+      setCalBusy(null);
+    }
+  };
+
+  const disconnectCal = async (provider: string) => {
+    setCalBusy(provider);
+    try {
+      await api.disconnectCalendar(provider);
+      await loadCal();
+      await loadCalList();
+      setCalMsg(`${CALENDAR_NAMES[provider] ?? provider} disconnected.`);
+    } catch (e) {
+      setCalMsg(String(e));
+    } finally {
+      setCalBusy(null);
+    }
+  };
+
+  /* ---------------------------------------------------------- derived */
 
   const asrModels = settings?.models.filter((m) => m.id.startsWith("ggml-")) ?? [];
   // The whisper.cpp engine gets a dedicated, friendlier "Transcription
-  // engine" row below instead of a cryptic binary entry here. Exact-id match:
-  // a prefix filter would also hide whisper-bin-vulkan, the Windows GPU
-  // build the benchmark manages, which must stay visible in this list.
+  // engine" row instead of a cryptic binary entry. Exact-id match: a prefix
+  // filter would also hide whisper-bin-vulkan, the Windows GPU build the
+  // benchmark manages, which must stay visible in this list.
   const otherModels =
     settings?.models.filter((m) => !m.id.startsWith("ggml-") && m.id !== WHISPER_ENGINE_ID) ?? [];
   const engineInstalling = downloading === WHISPER_ENGINE_ID;
@@ -664,1144 +888,1424 @@ export default function SettingsModal({
       : null;
   const enginePct = engineProg ? Math.round((engineProg.downloaded / engineProg.total) * 100) : 0;
 
-  const groqHasKey = !!settings?.has_groq_key || !!groqKey;
-  // The Groq deep-link must land somewhere the user can actually enable it,
-  // so it renders the card even before the toggle/tier is on.
-  const showGroqCard = tier === "cloud" || useGroq || initialFocus === "groq";
+  const tiles = dataTiles(settings, llm);
+  const provider = llm?.providers.find((x) => x.id === llmProvider) ?? null;
+  const providerCloud = !!provider && !provider.is_local;
+  const cloudProvider = providerCloud ? provider : null;
+  const gpuUnavailable = settings?.gpu_available === false;
 
-  return (
-    <Modal
-      open
-      onClose={onClose}
-      title="Settings"
-      width={640}
-      footer={
-        <>
-          <Button variant="outline" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="primary" disabled={saving} onClick={() => void save()}>
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </>
-      }
-    >
-      <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
-        {/* View mode — Simple hides model installs / GPU / OAuth details */}
-        <section className="flex items-center justify-between gap-3">
-          <div>
-            <SectionLabel style={{ display: "block", marginBottom: 3 }}>View</SectionLabel>
-            <span className="text-text-3" style={{ fontSize: "11.5px" }}>
-              Technical adds model installs &amp; OAuth credentials.
+  /* ---------------------------------------------------------- render: rows */
+
+  const groqKeyBlock = settings && draft && draft.madeOn !== "local" && (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <Input
+        type="password"
+        label="Groq API key"
+        hint="Saved in your keychain."
+        autoComplete="off"
+        style={MONO_KEY}
+        placeholder={settings.has_groq_key ? "Saved. Enter a new key to replace it." : "gsk_…"}
+        value={groqKey}
+        onChange={(e) => setGroqKey(e.target.value)}
+      />
+      {!settings.has_groq_key && !groqKey && (
+        <p className="text-warning-text" style={SMALL}>
+          Without a key, transcripts are made on this computer.
+        </p>
+      )}
+      <p className="text-text-3" style={{ ...SMALL, fontSize: 11.5 }}>
+        Who-said-what still runs on this computer. Groq is paced to stay inside its free tier&apos;s
+        hourly limit, and finished parts are saved as they complete, so a quit or restart never
+        transcribes anything twice.
+      </p>
+    </div>
+  );
+
+  const modelsList = settings && (
+    <div>
+      {/* Transcription engine — the whisper.cpp binary that runs the weights
+          below. Weights alone can't transcribe, so its state is explicit. */}
+      <div className={LIST_ROW}>
+        <div className="min-w-0">
+          <div
+            className="truncate text-text"
+            style={{ fontFamily: "var(--font-mono)", fontSize: "12.5px" }}
+          >
+            Transcription engine (whisper.cpp)
+          </div>
+          <div className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
+            {settings.engine_installed
+              ? "Installed. Runs the models below on this computer."
+              : settings.engine_managed
+                ? "Required to transcribe. Downloaded models can't run without it."
+                : "Required to transcribe. Install whisper.cpp yourself: on macOS, brew install whisper-cpp; on Linux, your package manager or build from source."}
+          </div>
+          {downloadErrors[WHISPER_ENGINE_ID] && (
+            <div style={{ fontSize: 11, color: "var(--error-text)" }}>
+              {downloadErrors[WHISPER_ENGINE_ID]}
+            </div>
+          )}
+        </div>
+        <span className="flex shrink-0 items-center gap-2">
+          {settings.engine_installed ? (
+            <Badge tone="success" dot>
+              ready
+            </Badge>
+          ) : engineInstalling ? (
+            engineProg ? (
+              <span className="flex items-center gap-2">
+                <ProgressBar value={enginePct} style={{ width: 96 }} />
+                <span className="text-text-3" style={MONO_SMALL}>
+                  {enginePct}%
+                </span>
+              </span>
+            ) : (
+              <span className="text-text-3" style={MONO_SMALL}>
+                downloading…
+              </span>
+            )
+          ) : settings.engine_managed ? (
+            <Button variant="outline" size="sm" onClick={() => void download(WHISPER_ENGINE_ID)}>
+              Install
+            </Button>
+          ) : (
+            <Badge tone="warning">missing</Badge>
+          )}
+        </span>
+      </div>
+      {[...asrModels, ...otherModels].map((m) => {
+        const prog =
+          downloading === m.id &&
+          modelProgress &&
+          modelProgress.id === m.id &&
+          modelProgress.total > 0
+            ? modelProgress
+            : null;
+        const pct = prog ? Math.round((prog.downloaded / prog.total) * 100) : 0;
+        return (
+          <div key={m.id} className={LIST_ROW}>
+            <div className="min-w-0">
+              <div
+                className="truncate text-text"
+                style={{ fontFamily: "var(--font-mono)", fontSize: "12.5px" }}
+              >
+                {m.display}
+              </div>
+              <div className="text-text-3" style={{ fontSize: 11 }}>
+                {gb(m.bytes)}
+              </div>
+              {downloadErrors[m.id] && (
+                <div style={{ fontSize: 11, color: "var(--error-text)" }}>
+                  {downloadErrors[m.id]}
+                </div>
+              )}
+            </div>
+            <span className="flex shrink-0 items-center gap-2">
+              {m.installed ? (
+                <Badge tone="success" dot>
+                  installed
+                </Badge>
+              ) : downloading === m.id ? (
+                prog ? (
+                  <span className="flex items-center gap-2">
+                    <ProgressBar value={pct} style={{ width: 96 }} />
+                    <span className="text-text-3" style={MONO_SMALL}>
+                      {pct}%
+                    </span>
+                  </span>
+                ) : (
+                  <span className="text-text-3" style={MONO_SMALL}>
+                    downloading…
+                  </span>
+                )
+              ) : (
+                <Button variant="outline" size="sm" onClick={() => void download(m.id)}>
+                  Install
+                </Button>
+              )}
             </span>
           </div>
-          <Segmented
-            value={technical ? "technical" : "simple"}
-            onChange={(v) => setTechnical(v === "technical")}
-            options={[
-              ["simple", "Simple"],
-              ["technical", "Technical"],
-            ]}
-          />
-        </section>
+        );
+      })}
+    </div>
+  );
 
-        {/* Machine info */}
-        {settings && (
-          <div
-            className="bg-bg text-text-2"
-            style={{ borderRadius: 12, padding: "10px 14px", fontSize: 12 }}
-          >
-            This machine: {settings.hw.cpu_cores} cores · {settings.hw.ram_gb} GB RAM — recommended
-            tier: <b className="capitalize text-text">{settings.hw.recommended_tier}</b>
-            {technical && settings.hw.gpu_name && (
-              <span>
-                {" "}
-                · GPU: {settings.hw.gpu_name} ({Math.round((settings.hw.vram_mb ?? 0) / 1024)} GB
-                VRAM)
-              </span>
-            )}
-            {technical && !settings.hw.gpu_name && <span> · no NVIDIA GPU</span>}
-          </div>
-        )}
+  const gpuHelper = (() => {
+    if (gpuMsg) return gpuMsg;
+    if (gpuUnavailable)
+      return "Not available on this Mac. GPU transcription needs Apple Silicon, so this computer uses the CPU.";
+    if (!draft?.useGpu) return "Off. Transcripts are made on the CPU.";
+    const bench = settings?.gpu_bench;
+    if (!bench) return "A one-time speed test runs at the start of the next transcription.";
+    if (bench.verdict === "gpu")
+      return `Speed test: GPU ${bench.gpu_secs?.toFixed(0)} s, CPU ${bench.cpu_secs?.toFixed(0)} s. Transcribing on the GPU.`;
+    if (bench.gpu_secs != null && bench.cpu_secs != null)
+      return `Speed test: GPU ${bench.gpu_secs.toFixed(0)} s, CPU ${bench.cpu_secs.toFixed(0)} s. The CPU is faster here, so it stays on the CPU.`;
+    return "GPU transcription failed on this computer, so it stays on the CPU. Test again to retry.";
+  })();
+  const showGpuTestAgain =
+    !gpuUnavailable && !!settings?.use_gpu && !!settings.gpu_bench && !!draft?.useGpu;
 
-        {/* Appearance */}
-        <section className="flex items-center justify-between gap-3">
-          <SectionLabel>Appearance</SectionLabel>
-          <Segmented
-            value={theme}
-            onChange={(v) => setTheme(v as "system" | "light" | "dark")}
-            options={[
-              ["system", "System"],
-              ["light", "Light"],
-              ["dark", "Dark"],
-            ]}
-          />
-        </section>
+  /* Ollama (local provider) */
+  const effOllamaModel = (llmModel || provider?.default_model || "llama3.1").trim();
+  const ollamaModelReady = !!ollama?.models.some(
+    (m) => m.name === effOllamaModel || m.name.split(":")[0] === effOllamaModel.split(":")[0],
+  );
+  // Progress for the runtime install or the model pull.
+  const ollamaProg =
+    modelProgress &&
+    (modelProgress.id === "ollama-bin" || modelProgress.id === `ollama:${effOllamaModel}`) &&
+    ollamaBusy !== null &&
+    modelProgress.total > 0
+      ? modelProgress
+      : null;
+  const ollamaPct = ollamaProg
+    ? Math.round((ollamaProg.downloaded / ollamaProg.total) * 100)
+    : null;
+  const ollamaServer = !ollama
+    ? "Checking Ollama…"
+    : ollama.running
+      ? ollama.managed
+        ? "Server running (managed by this app)."
+        : "Server running."
+      : ollama.installed
+        ? "Server off. It starts automatically when needed."
+        : "Not installed.";
+  const localModelHelper = !ollama
+    ? "Checking Ollama…"
+    : !ollama.installed
+      ? ollama.can_install
+        ? "Ollama isn't installed yet. It runs AI on this computer, with no API key."
+        : "Install Ollama from ollama.com, then press Test."
+      : ollamaModelReady
+        ? `${effOllamaModel} is ready.`
+        : ollama.running
+          ? `${effOllamaModel} isn't downloaded yet. Ask and Enhance need it.`
+          : "Ollama starts automatically when needed.";
 
-        {/* Microphone */}
-        <section className="flex items-center justify-between gap-3">
-          <SectionLabel>Microphone</SectionLabel>
-          <Select
-            style={{ maxWidth: "20rem" }}
-            value={micId}
-            onChange={(e) => {
-              setMicId(e.target.value);
-              void api.setAppSetting("capture.mic_device_id", e.target.value);
-            }}
-          >
-            <option value="">System default</option>
-            {mics.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-                {m.is_default ? " (default)" : ""}
-              </option>
-            ))}
-          </Select>
-        </section>
-
-        {/* Hardware tier (transcription) */}
-        <section className="space-y-3">
-          {technical ? (
-            <>
-              <SectionLabel>Hardware tier</SectionLabel>
-              <div className="flex flex-col">
-                {TIERS.map((t) => (
-                  <Checkbox
-                    key={t.id}
-                    type="radio"
-                    name="tier"
-                    checked={tier === t.id}
-                    onChange={() => setTier(t.id)}
-                    label={t.label}
-                    description={t.desc}
-                    style={{ padding: "6px 2px" }}
-                  />
-                ))}
-              </div>
-            </>
-          ) : (
-            <div className="flex items-center justify-between gap-3">
-              <SectionLabel>Hardware tier</SectionLabel>
-              <Segmented
-                value={tier}
-                onChange={setTier}
-                options={TIERS.map(
-                  (t) => [t.id, t.id === "cloud" ? "Cloud" : t.label, t.desc] as SegOption,
-                )}
-              />
-            </div>
-          )}
-
-          {/* Cloud tier / Groq fallback → collect the Groq key here */}
-          {showGroqCard && (
-            <div ref={groqCardRef}>
-              <Card tone="muted" pad="sm" radius="md">
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="text-text" style={{ fontSize: "12.5px", fontWeight: 600 }}>
-                    Groq
-                  </span>
-                  <Badge tone="warning" size="sm">
-                    cloud
-                  </Badge>
-                  <Badge tone={groqHasKey ? "success" : "warning"} size="sm">
-                    {groqHasKey ? "key ✓" : "needs key"}
-                  </Badge>
-                </div>
-                <Input
-                  type="password"
-                  style={MONO_KEY}
-                  placeholder={
-                    settings?.has_groq_key ? "Groq API key saved — enter to replace" : "gsk_…"
-                  }
-                  value={groqKey}
-                  onChange={(e) => setGroqKey(e.target.value)}
-                />
-                <p
-                  className="text-text-3"
-                  style={{ margin: "8px 0 0", fontSize: 11, lineHeight: 1.5 }}
-                >
-                  Cloud transcription uploads meeting audio to Groq — it{" "}
-                  <span style={LEAVES_PILL}>LEAVES</span> this machine. Who-said-what (diarization)
-                  still runs locally. Audio goes to Groq first, paced to stay inside the free
-                  tier&apos;s hourly limit; whenever the quota is busy, this machine&apos;s GPU or
-                  CPU transcribes in the meantime. Finished parts are saved as they complete, so a
-                  quit or restart picks up where it left off — nothing is transcribed twice. Applied
-                  when you press Save.
-                </p>
-              </Card>
-            </div>
-          )}
-
-          {tier !== "cloud" && settings?.gpu_available === false && (
-            <>
-              <Checkbox
-                checked={false}
-                disabled
-                label="Use GPU for transcription when it is faster on this machine"
-              />
-              <p className="pl-7 text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-                Not available on this Mac — GPU transcription needs Apple Silicon, so this machine
-                transcribes on the CPU.
-              </p>
-            </>
-          )}
-          {tier !== "cloud" && settings?.gpu_available !== false && (
-            <>
-              <Checkbox
-                checked={useGpu}
-                onChange={(e) => setUseGpu(e.target.checked)}
-                label="Use GPU for transcription when it is faster on this machine"
-              />
-              {useGpu && settings?.gpu_bench && (
-                <p className="pl-7 text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-                  {settings.gpu_bench.verdict === "gpu"
-                    ? `Speed test: GPU ${settings.gpu_bench.gpu_secs?.toFixed(0)} s vs CPU ${settings.gpu_bench.cpu_secs?.toFixed(0)} s — transcribing on the GPU.`
-                    : settings.gpu_bench.gpu_secs != null && settings.gpu_bench.cpu_secs != null
-                      ? `Speed test: GPU ${settings.gpu_bench.gpu_secs.toFixed(0)} s vs CPU ${settings.gpu_bench.cpu_secs.toFixed(0)} s — CPU is faster here, so it stays on CPU.`
-                      : "GPU transcription failed on this machine — staying on CPU. Toggle off and on to test again."}
-                </p>
-              )}
-              {useGpu && !settings?.gpu_bench && (
-                <p className="pl-7 text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-                  A one-time speed test runs at the start of the next transcription.
-                </p>
-              )}
-            </>
-          )}
-
-          <Checkbox
-            checked={autoTranscribe}
-            onChange={(e) => setAutoTranscribe(e.target.checked)}
-            label="Transcribe automatically when a recording stops"
-          />
-
-          {technical && (
-            <Checkbox
-              checked={useGroq}
-              onChange={(e) => setUseGroq(e.target.checked)}
-              label="Use Groq for transcription (cloud first, local fills in)"
-              description="Uploads meeting audio to Groq while the free tier's hourly quota lasts; when it's busy, your GPU or CPU transcribes instead of waiting. Finished parts are checkpointed — a restart never re-transcribes them. Diarization stays local. Bring your own key."
-            />
-          )}
-        </section>
-
-        {/* Transcription model (Technical) */}
-        {technical && (
-          <section className="space-y-3">
-            <SectionLabel>Transcription model</SectionLabel>
-            <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-              A specific choice here overrides the Hardware tier and “Maximum quality” settings.
-              “Auto (per tier)” uses the tier’s default.
-            </p>
-            <Select
-              style={{ maxWidth: "20rem" }}
-              value={modelId}
-              onChange={(e) => setModelId(e.target.value)}
+  const calendarRow = (prov: "google" | "msgraph") => {
+    const connected = prov === "google" ? !!cal?.google_connected : !!cal?.ms_connected;
+    const configured = prov === "google" ? !!cal?.google_configured : !!cal?.ms_configured;
+    const list = calList.filter((c) => c.provider === prov);
+    return (
+      <SettingsRow
+        key={prov}
+        title={CALENDAR_NAMES[prov]}
+        helper={
+          connected
+            ? "Connected"
+            : configured
+              ? "Not connected"
+              : "Add your own OAuth app under More options to connect."
+        }
+        helperTone={connected ? "success" : "default"}
+        control={
+          connected ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={calBusy !== null}
+              onClick={() => void disconnectCal(prov)}
             >
-              <option value="">Auto (per tier)</option>
-              {asrModels.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.display}
-                </option>
-              ))}
-            </Select>
-            <Checkbox
-              checked={maxQuality}
-              onChange={(e) => setMaxQuality(e.target.checked)}
-              label="Maximum quality (full large-v3 — slower, ~1 GB download)"
-            />
-          </section>
-        )}
-
-        {/* Models on disk (Technical) */}
-        {technical && (
-          <section className="space-y-2">
-            <SectionLabel>Models</SectionLabel>
-            <div>
-              {/* Transcription engine — the whisper.cpp binary that actually
-                  runs the weights below. Weights alone can't transcribe, so its
-                  state is surfaced explicitly rather than failing at run time. */}
-              {settings && (
-                <div
-                  ref={engineRowRef}
-                  className="flex items-center justify-between gap-3 border-t border-line-2 py-2"
-                >
-                  <div className="min-w-0">
-                    <div
-                      className="truncate text-text"
-                      style={{ fontFamily: "var(--font-mono)", fontSize: "12.5px" }}
-                    >
-                      Transcription engine (whisper.cpp)
-                    </div>
-                    <div className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-                      {settings.engine_installed
-                        ? "Installed — runs the models above on this machine."
-                        : settings.engine_managed
-                          ? "Required to transcribe. Downloaded weights can't run without it."
-                          : "Required to transcribe. Install whisper.cpp yourself — macOS: brew install whisper-cpp; Linux: your package manager or build from source."}
-                    </div>
-                    {downloadErrors[WHISPER_ENGINE_ID] && (
-                      <div style={{ fontSize: 11, color: "var(--error-text)" }}>
-                        {downloadErrors[WHISPER_ENGINE_ID]}
-                      </div>
-                    )}
-                  </div>
-                  <span className="flex shrink-0 items-center gap-2">
-                    {settings.engine_installed ? (
-                      <Badge tone="success" dot>
-                        ready
-                      </Badge>
-                    ) : engineInstalling ? (
-                      engineProg ? (
-                        <span className="flex items-center gap-2">
-                          <ProgressBar value={enginePct} style={{ width: 96 }} />
-                          <span
-                            className="text-text-3"
-                            style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
-                          >
-                            {enginePct}%
-                          </span>
-                        </span>
-                      ) : (
-                        <span
-                          className="text-text-3"
-                          style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
-                        >
-                          downloading…
-                        </span>
-                      )
-                    ) : settings.engine_managed ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void download(WHISPER_ENGINE_ID)}
-                      >
-                        Install
-                      </Button>
-                    ) : (
-                      <Badge tone="warning">missing</Badge>
-                    )}
-                  </span>
-                </div>
-              )}
-              {[...asrModels, ...otherModels].map((m) => {
-                const prog =
-                  downloading === m.id &&
-                  modelProgress &&
-                  modelProgress.id === m.id &&
-                  modelProgress.total > 0
-                    ? modelProgress
-                    : null;
-                const pct = prog ? Math.round((prog.downloaded / prog.total) * 100) : 0;
-                return (
-                  <div
-                    key={m.id}
-                    className="flex items-center justify-between gap-3 border-t border-line-2 py-2"
-                  >
-                    <div className="min-w-0">
-                      <div
-                        className="truncate text-text"
-                        style={{ fontFamily: "var(--font-mono)", fontSize: "12.5px" }}
-                      >
-                        {m.display}
-                      </div>
-                      <div className="text-text-3" style={{ fontSize: 11 }}>
-                        {gb(m.bytes)}
-                      </div>
-                      {downloadErrors[m.id] && (
-                        <div style={{ fontSize: 11, color: "var(--error-text)" }}>
-                          {downloadErrors[m.id]}
-                        </div>
-                      )}
-                    </div>
-                    <span className="flex shrink-0 items-center gap-2">
-                      {m.installed ? (
-                        <Badge tone="success" dot>
-                          installed
-                        </Badge>
-                      ) : downloading === m.id ? (
-                        prog ? (
-                          <span className="flex items-center gap-2">
-                            <ProgressBar value={pct} style={{ width: 96 }} />
-                            <span
-                              className="text-text-3"
-                              style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
-                            >
-                              {pct}%
-                            </span>
-                          </span>
-                        ) : (
-                          <span
-                            className="text-text-3"
-                            style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
-                          >
-                            downloading…
-                          </span>
-                        )
-                      ) : (
-                        <Button variant="outline" size="sm" onClick={() => void download(m.id)}>
-                          Install
-                        </Button>
-                      )}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
-
-        {/* AI provider */}
-        <section className="space-y-2">
-          <SectionLabel>AI provider (for Enhance &amp; Ask)</SectionLabel>
-          <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-            Ollama runs entirely on this machine. OpenAI, Anthropic, and NVIDIA NIM send your notes
-            + transcript to their APIs when you use Enhance or Ask.
-          </p>
-          {llm && llm.providers.length > 0 && (
-            <Segmented
-              full
-              value={llmProvider}
-              onChange={pickProvider}
-              options={llm.providers.map((p) => [p.id, p.id] as SegOption)}
-            />
-          )}
-          {(() => {
-            const p = llm?.providers.find((x) => x.id === llmProvider);
-            if (!p) return null;
-            const hasKey = p.has_key || !!llmKey;
-            return (
-              <Card tone="muted" pad="sm" radius="md">
-                <div
-                  className="flex items-center gap-2"
-                  style={{ marginBottom: p.is_local ? 0 : 8 }}
-                >
-                  <span className="text-text" style={{ fontSize: "12.5px", fontWeight: 600 }}>
-                    {p.id}
-                  </span>
-                  <Badge tone={p.is_local ? "success" : "warning"} size="sm">
-                    {p.is_local ? "local" : "cloud"}
-                  </Badge>
-                  {!p.is_local && (
-                    <Badge tone={hasKey ? "success" : "warning"} size="sm">
-                      {hasKey ? "key ✓" : "needs key"}
-                    </Badge>
-                  )}
-                </div>
-                {p.is_local ? (
-                  (() => {
-                    // Managed Ollama block: install → auto-managed server → model.
-                    const effModel = (llmModel || p.default_model || "llama3.1").trim();
-                    const modelReady = !!ollama?.models.some(
-                      (m) => m.name === effModel || m.name.split(":")[0] === effModel.split(":")[0],
-                    );
-                    // Progress for the runtime install or the model pull.
-                    const prog =
-                      modelProgress &&
-                      (modelProgress.id === "ollama-bin" ||
-                        modelProgress.id === `ollama:${effModel}`) &&
-                      ollamaBusy !== null &&
-                      modelProgress.total > 0
-                        ? modelProgress
-                        : null;
-                    const pct = prog ? Math.round((prog.downloaded / prog.total) * 100) : null;
-                    return (
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {ollama ? (
-                            <>
-                              <Badge tone={ollama.running ? "success" : "neutral"} size="sm">
-                                {ollama.running
-                                  ? ollama.managed
-                                    ? "server running (managed by app)"
-                                    : "server running"
-                                  : ollama.installed
-                                    ? "server off — starts automatically"
-                                    : "not installed"}
-                              </Badge>
-                              {ollama.running && (
-                                <Badge tone={modelReady ? "success" : "warning"} size="sm">
-                                  {modelReady ? `${effModel} ready` : `${effModel} not downloaded`}
-                                </Badge>
-                              )}
-                            </>
-                          ) : (
-                            <span className="text-text-3" style={{ fontSize: 12 }}>
-                              checking Ollama…
-                            </span>
-                          )}
-                        </div>
-                        <span className="block text-text-2" style={{ fontSize: 12 }}>
-                          Runs entirely on this machine — no API key needed. The app starts and
-                          stops the server for you and keeps its models in the app data folder.
-                        </span>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {ollama && !ollama.installed && ollama.can_install && (
-                            <Button
-                              variant="primary"
-                              size="sm"
-                              disabled={ollamaBusy !== null}
-                              onClick={() => void installOllama()}
-                            >
-                              {ollamaBusy === "install"
-                                ? "Installing…"
-                                : "Install Ollama (1.5 GB download)"}
-                            </Button>
-                          )}
-                          {ollama && !ollama.installed && !ollama.can_install && (
-                            <span className="text-text-2" style={{ fontSize: 12 }}>
-                              Install Ollama from ollama.com, then Test connection.
-                            </span>
-                          )}
-                          {ollama && ollama.installed && !modelReady && (
-                            <Button
-                              variant="primary"
-                              size="sm"
-                              disabled={ollamaBusy !== null}
-                              onClick={() => void pullOllamaModel(effModel)}
-                            >
-                              {ollamaBusy === "pull"
-                                ? "Downloading…"
-                                : `Download ${effModel} model`}
-                            </Button>
-                          )}
-                          {ollamaMsg && (
-                            <span className="text-text-2" style={{ fontSize: 12 }}>
-                              {ollamaMsg}
-                            </span>
-                          )}
-                        </div>
-                        {pct !== null && (
-                          <div className="flex items-center gap-2">
-                            <ProgressBar value={pct} style={{ width: 180 }} />
-                            <span className="text-text-3" style={{ fontSize: 11 }}>
-                              {pct}%
-                            </span>
-                          </div>
-                        )}
-                        {swapOffer && !modelReady && (
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-text-2" style={{ fontSize: 12 }}>
-                              “{swapOffer.to}” isn’t downloaded yet — Enhance and Ask would fail
-                              until it is.
-                            </span>
-                            <Button
-                              variant="primary"
-                              size="sm"
-                              disabled={ollamaBusy !== null}
-                              onClick={() => void pullOllamaModel(swapOffer.to)}
-                            >
-                              {ollamaBusy === "pull" ? "Downloading…" : `Download ${swapOffer.to}`}
-                            </Button>
-                            <Button variant="ghost" size="sm" onClick={() => setSwapOffer(null)}>
-                              Later
-                            </Button>
-                          </div>
-                        )}
-                        {deleteOffer && (
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-text-2" style={{ fontSize: 12 }}>
-                              Switched models — delete “{deleteOffer.name}” to free{" "}
-                              {gb(deleteOffer.size)}?
-                            </span>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => {
-                                const d = deleteOffer;
-                                setDeleteOffer(null);
-                                void deleteOllamaModel(d.name);
-                              }}
-                            >
-                              Delete
-                            </Button>
-                            <Button variant="ghost" size="sm" onClick={() => setDeleteOffer(null)}>
-                              Keep
-                            </Button>
-                          </div>
-                        )}
-                        {ollama && ollama.running && ollama.models.length > 0 && (
-                          <div className="space-y-1">
-                            <span className="block text-text-3" style={{ fontSize: 11 }}>
-                              Models on disk
-                            </span>
-                            {ollama.models.map((m) => {
-                              const inUse =
-                                m.name === effModel ||
-                                m.name.split(":")[0] === effModel.split(":")[0];
-                              return (
-                                <div key={m.name} className="flex items-center gap-2">
-                                  <span className="text-text-2" style={{ fontSize: 12 }}>
-                                    {m.name}
-                                  </span>
-                                  <span className="text-text-3" style={{ fontSize: 11 }}>
-                                    {gb(m.size)}
-                                  </span>
-                                  {inUse ? (
-                                    <Badge tone="neutral" size="sm">
-                                      in use
-                                    </Badge>
-                                  ) : (
-                                    <Button
-                                      variant="ghost"
-                                      size="xs"
-                                      disabled={ollamaBusy !== null}
-                                      title="Remove this model from disk"
-                                      onClick={() => void deleteOllamaModel(m.name)}
-                                    >
-                                      Delete
-                                    </Button>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()
-                ) : (
-                  <Input
-                    type="password"
-                    style={MONO_KEY}
-                    placeholder={
-                      p.has_key ? "API key saved — enter to replace" : `Paste your ${p.id} API key`
-                    }
-                    value={llmKey}
-                    onChange={(e) => setLlmKey(e.target.value)}
-                  />
-                )}
-                {llmProvider === "anthropic" && (
-                  <Select
-                    className="mt-2"
-                    style={{ maxWidth: "22rem" }}
-                    aria-label="Claude model"
-                    value={llmModel || p.default_model || ANTHROPIC_MODELS[0].value}
-                    onChange={(e) => setLlmModel(e.target.value)}
-                  >
-                    {ANTHROPIC_MODELS.map((m) => (
-                      <option key={m.value} value={m.value}>
-                        {m.label}
-                      </option>
-                    ))}
-                    {llmModel && !ANTHROPIC_MODELS.some((m) => m.value === llmModel) && (
-                      <option value={llmModel}>Custom: {llmModel}</option>
-                    )}
-                  </Select>
-                )}
-                {technical && (
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <Input
-                      placeholder={`model (default: ${p.default_model ?? ""})`}
-                      value={llmModel}
-                      onChange={(e) => setLlmModel(e.target.value)}
-                    />
-                    <Input
-                      placeholder={
-                        llmProvider === "ollama"
-                          ? "base URL (default: localhost:11434)"
-                          : "base URL (optional)"
-                      }
-                      value={llmBaseUrl}
-                      onChange={(e) => setLlmBaseUrl(e.target.value)}
-                    />
-                  </div>
-                )}
-                <div className="mt-3 flex items-center gap-2">
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={() => void saveLlm()}
-                    disabled={llmBusy}
-                  >
-                    {hasKey && !p.is_local ? "Update" : "Save provider"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void testLlm()}
-                    disabled={llmBusy}
-                  >
-                    Test connection
-                  </Button>
-                  {llmTest && (
-                    <span className="text-text-2" style={{ fontSize: 12 }}>
-                      {llmTest}
-                    </span>
-                  )}
-                </div>
-              </Card>
-            );
-          })()}
-        </section>
-
-        {/* Calendars */}
-        <section className="space-y-2">
-          <SectionLabel>Calendars</SectionLabel>
-          <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-            Connect in one click with the built-in app — or bring your own OAuth app (Technical): a
-            Google Cloud "Desktop app" client (ID + secret) and/or an Azure app registration with a
-            public client + loopback redirect. Tokens are stored in the Windows keychain. See the
-            README for a step-by-step.
-          </p>
-          <Card tone="surface" pad="md">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-text" style={{ fontSize: 13 }}>
-                Google Calendar
-              </span>
-              {cal?.google_connected ? (
-                <span className="flex items-center gap-2">
-                  <Badge tone="success" dot>
-                    connected
-                  </Badge>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="hover:text-rec"
-                    disabled={calBusy !== null}
-                    onClick={() => void disconnectCal("google")}
-                  >
-                    disconnect
-                  </Button>
-                </span>
-              ) : (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={calBusy !== null || !cal?.google_configured}
-                  onClick={() => void connectCal("google")}
-                >
-                  {calBusy === "google" ? "waiting for browser…" : "Connect"}
-                </Button>
-              )}
-            </div>
-            {technical && (
-              <div className="mt-2.5 grid grid-cols-2 gap-2">
-                <Input
-                  style={MONO_KEY}
-                  placeholder="Client ID (….apps.googleusercontent.com)"
-                  value={googleId}
-                  onChange={(e) => setGoogleId(e.target.value)}
-                />
-                <Input
-                  type="password"
-                  style={MONO_KEY}
-                  placeholder={
-                    cal?.google_has_secret
-                      ? "Client secret saved — enter to replace"
-                      : "Client secret"
-                  }
-                  value={googleSecret}
-                  onChange={(e) => setGoogleSecret(e.target.value)}
-                />
-              </div>
-            )}
-          </Card>
-          <Card tone="surface" pad="md">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-text" style={{ fontSize: 13 }}>
-                Microsoft 365 / Outlook
-              </span>
-              {cal?.ms_connected ? (
-                <span className="flex items-center gap-2">
-                  <Badge tone="success" dot>
-                    connected
-                  </Badge>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="hover:text-rec"
-                    disabled={calBusy !== null}
-                    onClick={() => void disconnectCal("msgraph")}
-                  >
-                    disconnect
-                  </Button>
-                </span>
-              ) : (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={calBusy !== null || !cal?.ms_configured}
-                  onClick={() => void connectCal("msgraph")}
-                >
-                  {calBusy === "msgraph" ? "waiting for browser…" : "Connect"}
-                </Button>
-              )}
-            </div>
-            {technical && (
-              <div className="mt-2.5">
-                <Input
-                  style={MONO_KEY}
-                  placeholder="Application (client) ID — no secret needed"
-                  value={msId}
-                  onChange={(e) => setMsId(e.target.value)}
-                />
-              </div>
-            )}
-          </Card>
-          {calList.length > 0 && (
-            <div className="space-y-1.5 pt-1">
-              <SectionLabel style={{ display: "block" }}>Calendars in “Up next”</SectionLabel>
-              <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-                Meetings from the calendars you enable here feed the sidebar. Only events with a
-                join link are shown.
-              </p>
-              {calList.map((c) => (
-                <div
-                  key={`${c.provider}-${c.id}`}
-                  className="flex items-center justify-between gap-2"
-                >
-                  <Checkbox
-                    checked={c.enabled}
-                    onChange={(e) => void toggleCalendar(c, e.target.checked)}
-                    label={c.name}
-                  />
-                  <span className="flex flex-none items-center gap-1.5">
-                    {c.primary && (
-                      <Badge tone="neutral" size="sm">
-                        primary
-                      </Badge>
-                    )}
-                    <Badge tone="neutral" size="sm">
-                      {c.provider === "google" ? "Google" : "Outlook"}
-                    </Badge>
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          {technical && (
-            <div className="flex items-center gap-2">
-              <Button variant="primary" size="sm" onClick={() => void saveCal()}>
-                Save calendar config
-              </Button>
-              {calMsg && (
-                <span className="text-text-2" style={{ fontSize: 12 }}>
-                  {calMsg}
-                </span>
-              )}
-            </div>
-          )}
-        </section>
-
-        {/* Note templates */}
-        <section className="space-y-2">
-          <div className="flex items-center justify-between">
-            <SectionLabel>Note templates</SectionLabel>
+              Disconnect
+            </Button>
+          ) : (
             <Button
               variant="outline"
               size="sm"
-              startIcon={<Plus size={14} strokeWidth={1.75} />}
-              onClick={() =>
-                setEditingTpl({
-                  id: "",
-                  name: "New template",
-                  system_prompt: "You are an expert meeting-notes editor. Never invent facts.",
-                  structure_hint: "## Summary\n## Action items",
-                  built_in: false,
-                })
-              }
+              disabled={calBusy !== null || !configured}
+              onClick={() => void connectCal(prov)}
             >
-              New
+              {calBusy === prov ? "Waiting for browser…" : "Connect"}
             </Button>
-          </div>
-          {editingTpl ? (
-            <Card tone="surface" pad="md">
-              <div className="space-y-2">
-                <Input
-                  value={editingTpl.name}
-                  onChange={(e) => setEditingTpl({ ...editingTpl, name: e.target.value })}
-                  placeholder="Template name"
-                />
-                <textarea
-                  value={editingTpl.system_prompt}
-                  onChange={(e) => setEditingTpl({ ...editingTpl, system_prompt: e.target.value })}
-                  rows={3}
-                  style={TEXTAREA}
-                  placeholder="System prompt"
-                />
-                <textarea
-                  value={editingTpl.structure_hint}
-                  onChange={(e) => setEditingTpl({ ...editingTpl, structure_hint: e.target.value })}
-                  rows={3}
-                  style={{ ...TEXTAREA, fontFamily: "var(--font-mono)" }}
-                  placeholder="Structure hint (markdown headings)"
-                />
-                <div className="flex gap-2">
-                  <Button variant="primary" size="sm" onClick={() => void saveTpl()}>
-                    Save template
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => setEditingTpl(null)}>
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            </Card>
-          ) : (
-            <div>
-              {templates.map((t) => (
-                <div
-                  key={t.id}
-                  className="flex items-center justify-between rounded-lg px-2 py-1.5 hover:bg-surface-3"
-                  style={{ fontSize: "13px" }}
-                >
-                  <span className="text-text">{t.name}</span>
-                  <span className="flex items-center gap-2">
-                    {t.built_in && (
-                      <Badge tone="neutral" size="sm">
-                        built-in
-                      </Badge>
-                    )}
-                    <Button variant="ghost" size="sm" onClick={() => setEditingTpl(t)}>
-                      edit
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="hover:text-rec"
-                      onClick={() => void removeTpl(t.id)}
-                    >
-                      delete
-                    </Button>
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* MCP */}
-        <section className="space-y-2">
-          {/* SectionLabel's inline margin:0 overrides the space-y-2 gap
-              (Tailwind v4 puts it on the label as margin-bottom), leaving the
-              label flush against the dark card — restore the 8px here */}
-          <SectionLabel style={{ display: "block", marginBottom: 8 }}>
-            Chat with your notes (MCP)
-          </SectionLabel>
-          <Card
-            pad="lg"
-            style={{
-              background: "var(--brand-ink)",
-              color: "#fff",
-              border: "1px solid transparent",
-            }}
-          >
-            <p
-              style={{
-                margin: "0 0 12px",
-                fontSize: 13,
-                lineHeight: 1.5,
-                color: "rgba(255,255,255,.72)",
-              }}
-            >
-              Fly on the Wall ships a local MCP server. Add this to your MCP client (Claude
-              Desktop's{" "}
-              <code
-                style={{
-                  borderRadius: 4,
-                  background: "rgba(255,255,255,.1)",
-                  padding: "1px 4px",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 11,
-                }}
-              >
-                claude_desktop_config.json
-              </code>
-              , or any client) to search and read your notes and transcripts. The server runs on
-              this machine, but whatever it returns is sent to the AI model your client uses (for
-              Claude Desktop, Anthropic&apos;s cloud) under that client&apos;s terms.
+          )
+        }
+      >
+        {list.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <p className="text-text-3" style={{ ...SMALL, fontSize: 11.5, marginBottom: 4 }}>
+              Show in Up next. Only events with a join link appear there.
             </p>
-            {mcpJson && (
-              <div style={{ position: "relative" }}>
-                <pre
-                  style={{
-                    margin: 0,
-                    overflowX: "auto",
-                    whiteSpace: "pre",
-                    borderRadius: 10,
-                    border: "1px solid rgba(255,255,255,.15)",
-                    background: "rgba(255,255,255,.08)",
-                    padding: 12,
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 12,
-                    color: "#fff",
-                  }}
-                >
-                  {mcpJson}
-                </pre>
-                <span style={{ position: "absolute", right: 8, top: 8 }}>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    startIcon={
-                      mcpCopied ? (
-                        <Check size={14} strokeWidth={1.75} />
-                      ) : (
-                        <Copy size={14} strokeWidth={1.75} />
-                      )
-                    }
-                    onClick={() => {
-                      void navigator.clipboard.writeText(mcpJson).then(() => {
-                        setMcpCopied(true);
-                        window.setTimeout(() => setMcpCopied(false), 1500);
-                      });
-                    }}
-                  >
-                    {mcpCopied ? "Copied" : "Copy"}
-                  </Button>
+            {list.map((c) => (
+              <div
+                key={`${c.provider}-${c.id}`}
+                className="flex items-center justify-between gap-3"
+                style={{ padding: "4px 0" }}
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate text-text" style={{ fontSize: 13 }}>
+                    {c.name}
+                  </span>
+                  {c.primary && (
+                    <Badge tone="neutral" size="sm">
+                      primary
+                    </Badge>
+                  )}
                 </span>
+                <Switch
+                  label={`Show ${c.name} in Up next`}
+                  checked={c.enabled}
+                  onChange={(v) => void toggleCalendar(c, v)}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </SettingsRow>
+    );
+  };
+
+  const updatesRow = (() => {
+    const title = `Version ${appVersion ?? "…"}`;
+    if (!updater.supported) {
+      return (
+        <SettingsRow
+          title={title}
+          helper="Auto-update isn't available for this install (deb packages are managed by apt). New versions are published on the GitHub releases page."
+        />
+      );
+    }
+    const u = updater;
+    const helper =
+      u.phase === "checking"
+        ? "Checking for updates…"
+        : u.phase === "upToDate"
+          ? "You're on the latest version."
+          : u.phase === "available"
+            ? `Version ${u.version} is available.`
+            : u.phase === "downloading"
+              ? "Downloading the update…"
+              : u.phase === "ready"
+                ? recordingActive
+                  ? "Update downloaded."
+                  : "Update downloaded. Restart when you're ready."
+                : u.phase === "installing"
+                  ? "Installing. Fly on the Wall will restart…"
+                  : u.phase === "error"
+                    ? (u.error ?? "Couldn't check for updates.")
+                    : "Updates install only when you choose.";
+    return (
+      <SettingsRow
+        title={title}
+        helper={helper}
+        helperTone={u.phase === "upToDate" ? "success" : u.phase === "error" ? "error" : "default"}
+        control={
+          <>
+            {(u.phase === "idle" || u.phase === "upToDate" || u.phase === "error") && (
+              <Button variant="outline" size="sm" onClick={u.check}>
+                Check now
+              </Button>
+            )}
+            {u.phase === "checking" && (
+              <Button variant="outline" size="sm" disabled>
+                Checking…
+              </Button>
+            )}
+            {u.phase === "available" && (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={recordingActive}
+                onClick={u.downloadAndInstall}
+              >
+                Download and install v{u.version}
+              </Button>
+            )}
+            {u.phase === "downloading" && (
+              <span className="flex items-center gap-2">
+                <ProgressBar
+                  value={u.progress == null ? null : Math.round(u.progress * 100)}
+                  style={{ width: 96 }}
+                />
+                <span className="text-text-3" style={MONO_SMALL}>
+                  {u.progress == null ? "downloading…" : `${Math.round(u.progress * 100)}%`}
+                </span>
+              </span>
+            )}
+            {u.phase === "ready" && (
+              <Button variant="primary" size="sm" disabled={recordingActive} onClick={u.restart}>
+                Restart now
+              </Button>
+            )}
+          </>
+        }
+      >
+        {recordingActive && (u.phase === "available" || u.phase === "ready") && (
+          <p className="text-text-2" style={SMALL}>
+            Recording in progress. The update waits until you&apos;re done.
+          </p>
+        )}
+      </SettingsRow>
+    );
+  })();
+
+  const mcpCmd = mcpCommand(mcpJson);
+
+  /* ---------------------------------------------------------- render */
+
+  return (
+    <div
+      ref={overlayRef}
+      className="fly-settings"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="fly-settings-title"
+    >
+      {/* Layers opened from inside Settings (the discard prompt, future
+          popovers) sit above it in the Esc stack. */}
+      <EscapeLayerScope depth={escDepth}>
+        <header className="fly-settings-head">
+          <Button
+            variant="ghost"
+            size="sm"
+            startIcon={<ArrowLeft size={15} strokeWidth={1.75} />}
+            onClick={requestClose}
+          >
+            Back
+          </Button>
+          <h1 id="fly-settings-title" className="fly-settings-title">
+            Settings
+          </h1>
+          <Button variant="primary" size="sm" onClick={requestClose}>
+            Done
+          </Button>
+        </header>
+
+        <div className="fly-settings-frame">
+          <nav className="fly-settings-nav" aria-label="Settings sections">
+            <input
+              ref={searchRef}
+              data-autofocus={initialFocus ? undefined : ""}
+              type="search"
+              className="fly-settings-search"
+              placeholder="Search settings"
+              aria-label="Search settings"
+              value={query}
+              onChange={(e) => onQuery(e.target.value)}
+              onKeyDown={(e) => {
+                // First Esc clears the search; the next one closes Settings.
+                if (e.key === "Escape" && query) {
+                  e.preventDefault();
+                  onQuery("");
+                }
+              }}
+            />
+            {visible.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                className="fly-settings-navitem"
+                aria-current={active === s.id ? "true" : undefined}
+                onClick={() => goSection(s.id)}
+              >
+                {s.title}
+              </button>
+            ))}
+            {visible.length === 0 && (
+              <span className="fly-settings-nomatch">No settings match.</span>
+            )}
+          </nav>
+
+          <div className="fly-settings-main">
+            <div ref={scrollRef} className="fly-settings-scroll" onScroll={onScroll}>
+              <div className="fly-settings-content">
+                <div className="fly-settings-section">
+                  <h2 className="fly-settings-label">Where your data goes</h2>
+                  <div className="fly-settings-tiles">
+                    {tiles.map((t) => (
+                      <button
+                        key={t.section}
+                        type="button"
+                        className="fly-settings-tile"
+                        onClick={() => {
+                          if (!show(t.section)) {
+                            setQuery("");
+                            window.requestAnimationFrame(() => goSection(t.section));
+                          } else goSection(t.section);
+                        }}
+                      >
+                        <span style={{ fontSize: 12, color: "var(--text-2)" }}>{t.label}</span>
+                        <span
+                          className="flex items-center"
+                          style={{
+                            gap: 6,
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: t.cloud ? "var(--warning-text)" : "var(--success-text)",
+                          }}
+                        >
+                          <span
+                            aria-hidden="true"
+                            style={{
+                              width: 7,
+                              height: 7,
+                              borderRadius: 999,
+                              background: "currentColor",
+                              flex: "none",
+                            }}
+                          />
+                          {t.where}
+                        </span>
+                        {t.note && (
+                          <span style={{ fontSize: 11.5, lineHeight: 1.4, color: "var(--text-3)" }}>
+                            {t.note}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {visible.length === 0 && (
+                  <p className="text-text-3" style={{ margin: 0, fontSize: 13 }}>
+                    No settings match.
+                  </p>
+                )}
+
+                <Section id="recording" hidden={!show("recording")} title="Recording">
+                  <SettingsGroup>
+                    <SettingsRow
+                      title="Microphone"
+                      helper="Records your side of the call."
+                      control={
+                        <Select
+                          aria-label="Microphone"
+                          style={{ width: 240, maxWidth: "100%" }}
+                          value={micId}
+                          onChange={(e) => {
+                            setMicId(e.target.value);
+                            void api.setAppSetting("capture.mic_device_id", e.target.value);
+                          }}
+                        >
+                          <option value="">System default</option>
+                          {mics.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.name}
+                              {m.is_default ? " (default)" : ""}
+                            </option>
+                          ))}
+                        </Select>
+                      }
+                    />
+                    <SettingsRow
+                      title="Transcribe when I stop"
+                      helper={autoMsg ?? "Starts the transcript as soon as a recording stops."}
+                      helperTone={autoMsg ? "error" : "default"}
+                      control={
+                        <Switch
+                          label="Transcribe when I stop"
+                          checked={autoTranscribe}
+                          disabled={!settings || asrBusy}
+                          onChange={(v) => void setAutoNow(v)}
+                        />
+                      }
+                    />
+                  </SettingsGroup>
+                </Section>
+
+                <Section id="transcripts" hidden={!show("transcripts")} title="Transcripts">
+                  {!settings || !draft ? (
+                    <SettingsGroup>
+                      <SettingsRow title="Loading…" />
+                    </SettingsGroup>
+                  ) : (
+                    <SettingsGroup
+                      expanded={!!advOpen.transcripts}
+                      onExpandedChange={(v) => setAdv("transcripts", v)}
+                      advanced={
+                        <>
+                          <SettingsRow
+                            title="This computer"
+                            helperTone="mono"
+                            helper={
+                              `${settings.hw.cpu_cores} cores · ${settings.hw.ram_gb} GB RAM · ` +
+                              (settings.hw.gpu_name
+                                ? `${settings.hw.gpu_name} (${Math.round((settings.hw.vram_mb ?? 0) / 1024)} GB VRAM)`
+                                : "no NVIDIA GPU") +
+                              ` · recommended quality: ${TIER_NAMES[settings.hw.recommended_tier] ?? settings.hw.recommended_tier}`
+                            }
+                          />
+                          {(() => {
+                            const eff = effectiveModel(draft, settings.models);
+                            return (
+                              <SettingsRow
+                                title="Model in use"
+                                helperTone="mono"
+                                helper={
+                                  eff.model
+                                    ? `${eff.model.display} · ${gb(eff.model.bytes)}${eff.model.installed ? "" : " · downloads on first use"}`
+                                    : eff.id
+                                }
+                              />
+                            );
+                          })()}
+                          <SettingsRow
+                            title="Model"
+                            helper="Auto follows Quality. A specific model overrides Quality and Maximum quality."
+                            control={
+                              <Select
+                                aria-label="Transcription model"
+                                style={{ width: 230, maxWidth: "100%" }}
+                                value={draft.modelId}
+                                onChange={(e) => patchDraft({ modelId: e.target.value })}
+                              >
+                                <option value="">Auto (follows Quality)</option>
+                                {asrModels.map((m) => (
+                                  <option key={m.id} value={m.id}>
+                                    {m.display}
+                                  </option>
+                                ))}
+                              </Select>
+                            }
+                          />
+                          <SettingsRow
+                            title="Maximum quality"
+                            helper="Full large-v3. Slower, and about a 1 GB download."
+                            control={
+                              <Switch
+                                label="Maximum quality"
+                                checked={draft.maxQuality}
+                                onChange={(v) => patchDraft({ maxQuality: v })}
+                              />
+                            }
+                          />
+                          <SettingsRow
+                            title="Use the graphics card"
+                            helper={gpuHelper}
+                            helperTone={gpuMsg ? "error" : "default"}
+                            control={
+                              <>
+                                {showGpuTestAgain && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={asrBusy}
+                                    onClick={() => void testGpuAgain()}
+                                  >
+                                    {gpuBusy ? "Resetting…" : "Test again"}
+                                  </Button>
+                                )}
+                                <Switch
+                                  label="Use the graphics card"
+                                  checked={!gpuUnavailable && draft.useGpu}
+                                  disabled={gpuUnavailable}
+                                  onChange={(v) => patchDraft({ useGpu: v })}
+                                />
+                              </>
+                            }
+                          />
+                          <SettingsRow
+                            id="settings-row-engine"
+                            className={flash === "engine" ? "fly-settings-flash" : undefined}
+                            title="Models on this computer"
+                            helper="The speech engine and models this app downloads."
+                          >
+                            {modelsList}
+                          </SettingsRow>
+                        </>
+                      }
+                    >
+                      <SettingsRow
+                        title="Quality"
+                        helper={
+                          draft.madeOn === "groq"
+                            ? "Not used with Groq: if it needs help, this computer uses its default model (More options)."
+                            : qualityHelper(draft.quality, settings.hw.recommended_tier)
+                        }
+                        control={
+                          <Segmented
+                            label="Quality"
+                            value={draft.quality}
+                            disabled={draft.madeOn === "groq"}
+                            onChange={(q) => patchDraft({ quality: q })}
+                            options={QUALITY_OPTIONS.map((o) =>
+                              o.value === settings.hw.recommended_tier
+                                ? { ...o, title: "Recommended for this computer" }
+                                : o,
+                            )}
+                          />
+                        }
+                      />
+                      <SettingsRow
+                        id="settings-row-groq"
+                        className={flash === "groq" ? "fly-settings-flash" : undefined}
+                        title="Made on"
+                        badge={
+                          draft.madeOn !== "local" && (
+                            <Badge tone="warning" size="md">
+                              Audio leaves this computer
+                            </Badge>
+                          )
+                        }
+                        helper={madeOnHelper(draft.madeOn)}
+                        control={
+                          <Segmented
+                            label="Made on"
+                            value={draft.madeOn}
+                            onChange={(m) => patchDraft({ madeOn: m })}
+                            options={MADE_ON_OPTIONS}
+                          />
+                        }
+                      >
+                        {groqKeyBlock}
+                      </SettingsRow>
+                    </SettingsGroup>
+                  )}
+                </Section>
+
+                <Section id="ai" hidden={!show("ai")} title="Ask and Enhance">
+                  {
+                    <SettingsGroup
+                      expanded={!!advOpen.ai}
+                      onExpandedChange={(v) => setAdv("ai", v)}
+                      advanced={
+                        <>
+                          <SettingsRow
+                            title="Endpoint and model"
+                            helper="Leave blank for the defaults. Custom OpenAI-compatible servers go here."
+                          >
+                            <div className="grid grid-cols-2 gap-2">
+                              <Input
+                                aria-label="Model name"
+                                placeholder={`Model (default: ${provider?.default_model ?? ""})`}
+                                value={llmModel}
+                                onChange={(e) => setLlmModel(e.target.value)}
+                              />
+                              <Input
+                                aria-label="Base URL"
+                                placeholder={
+                                  llmProvider === "ollama"
+                                    ? "Base URL (default: localhost:11434)"
+                                    : "Base URL (optional)"
+                                }
+                                value={llmBaseUrl}
+                                onChange={(e) => setLlmBaseUrl(e.target.value)}
+                              />
+                            </div>
+                            <div className="mt-2 flex items-center gap-2">
+                              <Button
+                                variant="primary"
+                                size="sm"
+                                disabled={llmBusy}
+                                onClick={() => void saveLlm()}
+                              >
+                                Save
+                              </Button>
+                            </div>
+                          </SettingsRow>
+                          {provider?.is_local && (
+                            <SettingsRow title="Local models" helper={ollamaServer}>
+                              {ollama && ollama.running && ollama.models.length > 0 && (
+                                <div>
+                                  {ollama.models.map((m) => {
+                                    const inUse =
+                                      m.name === effOllamaModel ||
+                                      m.name.split(":")[0] === effOllamaModel.split(":")[0];
+                                    return (
+                                      <div key={m.name} className={LIST_ROW}>
+                                        <span className="flex min-w-0 items-center gap-2">
+                                          <span
+                                            className="truncate text-text"
+                                            style={{
+                                              fontFamily: "var(--font-mono)",
+                                              fontSize: 12.5,
+                                            }}
+                                          >
+                                            {m.name}
+                                          </span>
+                                          <span className="text-text-3" style={{ fontSize: 11 }}>
+                                            {gb(m.size)}
+                                          </span>
+                                        </span>
+                                        {inUse ? (
+                                          <Badge tone="neutral" size="sm">
+                                            in use
+                                          </Badge>
+                                        ) : (
+                                          <Button
+                                            variant="ghost"
+                                            size="xs"
+                                            disabled={ollamaBusy !== null}
+                                            title="Remove this model from disk"
+                                            onClick={() => void deleteOllamaModel(m.name)}
+                                          >
+                                            Delete
+                                          </Button>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </SettingsRow>
+                          )}
+                        </>
+                      }
+                    >
+                      <SettingsRow
+                        title="Runs on"
+                        badge={
+                          providerCloud && (
+                            <Badge tone="warning" size="md">
+                              Text leaves this computer
+                            </Badge>
+                          )
+                        }
+                        helper={
+                          !llm
+                            ? (llmLoadError ?? "Loading…")
+                            : !provider
+                              ? `Unknown provider “${llmProvider}”. Pick one to continue.`
+                              : providerCloud
+                                ? `Notes and transcripts go to ${providerVendor(provider.id)} for Ask, Enhance, transcript cleanup and action items. Audio stays here, and so do notes you keep local.`
+                                : "Nothing leaves this computer. Slower on long meetings."
+                        }
+                        helperTone={llm ? "default" : llmLoadError ? "error" : "default"}
+                        control={
+                          llm && (
+                            <>
+                              <Select
+                                aria-label="Runs on"
+                                disabled={llmBusy}
+                                style={{ width: 210, maxWidth: "100%" }}
+                                value={llmProvider}
+                                onChange={(e) => void pickProvider(e.target.value)}
+                              >
+                                {!provider && <option value={llmProvider}>{llmProvider}</option>}
+                                {llm.providers.map((p) => (
+                                  <option key={p.id} value={p.id}>
+                                    {providerLabel(p.id)}
+                                  </option>
+                                ))}
+                              </Select>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={llmBusy}
+                                onClick={() => void testLlm()}
+                              >
+                                Test
+                              </Button>
+                            </>
+                          )
+                        }
+                      >
+                        {(cloudProvider || llmTest) && (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {cloudProvider && (
+                              <div className="flex flex-wrap items-end gap-2">
+                                <div style={{ flex: "1 1 240px", minWidth: 0 }}>
+                                  <Input
+                                    type="password"
+                                    label={`${providerVendor(cloudProvider.id)} API key`}
+                                    hint="Saved in your keychain."
+                                    autoComplete="off"
+                                    style={MONO_KEY}
+                                    placeholder={
+                                      cloudProvider.has_key
+                                        ? "Saved. Enter a new key to replace it."
+                                        : `Paste your ${providerVendor(cloudProvider.id)} API key`
+                                    }
+                                    value={llmKey}
+                                    onChange={(e) => setLlmKey(e.target.value)}
+                                  />
+                                </div>
+                                <div style={{ paddingBottom: 22 }}>
+                                  <Button
+                                    variant="primary"
+                                    size="md"
+                                    disabled={llmBusy || !llmKey}
+                                    onClick={() => void saveLlm()}
+                                  >
+                                    {cloudProvider.has_key ? "Update" : "Save"}
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+                            {cloudProvider && !cloudProvider.has_key && !llmKey && (
+                              <p className="text-warning-text" style={SMALL}>
+                                No key saved yet. Ask, Enhance and cleanup won&apos;t work until you
+                                add one.
+                              </p>
+                            )}
+                            {llmTest && (
+                              <p role="status" className="text-text-2" style={SMALL}>
+                                {llmTest}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </SettingsRow>
+
+                      {llmProvider === "anthropic" && (
+                        <SettingsRow
+                          title="Model"
+                          helper="The Claude model used for Ask, Enhance and cleanup."
+                          control={
+                            <Select
+                              aria-label="Claude model"
+                              disabled={llmBusy}
+                              style={{ width: 260, maxWidth: "100%" }}
+                              value={
+                                llmModel || provider?.default_model || ANTHROPIC_MODELS[0].value
+                              }
+                              onChange={(e) => void saveClaudeModel(e.target.value)}
+                            >
+                              {ANTHROPIC_MODELS.map((m) => (
+                                <option key={m.value} value={m.value}>
+                                  {m.label}
+                                </option>
+                              ))}
+                              {llmModel && !ANTHROPIC_MODELS.some((m) => m.value === llmModel) && (
+                                <option value={llmModel}>Custom: {llmModel}</option>
+                              )}
+                            </Select>
+                          }
+                        />
+                      )}
+
+                      {provider?.is_local && (
+                        <SettingsRow
+                          title="Local model"
+                          helper={localModelHelper}
+                          helperTone={
+                            ollama?.running && ollamaModelReady
+                              ? "success"
+                              : ollama?.running && !ollamaModelReady
+                                ? "warning"
+                                : "default"
+                          }
+                          control={
+                            <>
+                              {ollama && !ollama.installed && ollama.can_install && (
+                                <Button
+                                  variant="primary"
+                                  size="sm"
+                                  disabled={ollamaBusy !== null}
+                                  onClick={() => void installOllama()}
+                                >
+                                  {ollamaBusy === "install"
+                                    ? "Installing…"
+                                    : "Install Ollama (1.5 GB download)"}
+                                </Button>
+                              )}
+                              {ollama && ollama.installed && !ollamaModelReady && (
+                                <Button
+                                  variant="primary"
+                                  size="sm"
+                                  disabled={ollamaBusy !== null}
+                                  onClick={() => void pullOllamaModel(effOllamaModel)}
+                                >
+                                  {ollamaBusy === "pull"
+                                    ? "Downloading…"
+                                    : `Download ${effOllamaModel}`}
+                                </Button>
+                              )}
+                            </>
+                          }
+                        >
+                          {(ollamaPct !== null || ollamaMsg || swapOffer || deleteOffer) && (
+                            <div className="space-y-2">
+                              {ollamaPct !== null && (
+                                <div className="flex items-center gap-2">
+                                  <ProgressBar value={ollamaPct} style={{ width: 180 }} />
+                                  <span className="text-text-3" style={{ fontSize: 11 }}>
+                                    {ollamaPct}%
+                                  </span>
+                                </div>
+                              )}
+                              {ollamaMsg && (
+                                <p role="status" className="text-text-2" style={SMALL}>
+                                  {ollamaMsg}
+                                </p>
+                              )}
+                              {swapOffer && !ollamaModelReady && (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-text-2" style={{ fontSize: 12 }}>
+                                    “{swapOffer.to}” isn’t downloaded yet. Enhance and Ask would
+                                    fail until it is.
+                                  </span>
+                                  <Button
+                                    variant="primary"
+                                    size="sm"
+                                    disabled={ollamaBusy !== null}
+                                    onClick={() => void pullOllamaModel(swapOffer.to)}
+                                  >
+                                    {ollamaBusy === "pull"
+                                      ? "Downloading…"
+                                      : `Download ${swapOffer.to}`}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setSwapOffer(null)}
+                                  >
+                                    Later
+                                  </Button>
+                                </div>
+                              )}
+                              {deleteOffer && (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-text-2" style={{ fontSize: 12 }}>
+                                    Switched models. Delete “{deleteOffer.name}” to free{" "}
+                                    {gb(deleteOffer.size)}?
+                                  </span>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                      const d = deleteOffer;
+                                      setDeleteOffer(null);
+                                      void deleteOllamaModel(d.name);
+                                    }}
+                                  >
+                                    Delete
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setDeleteOffer(null)}
+                                  >
+                                    Keep
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </SettingsRow>
+                      )}
+
+                      <SettingsRow
+                        title="Changes to your notes"
+                        helper="Ask reads freely. It only writes when you click Insert."
+                        control={
+                          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-2)" }}>
+                            Always asks first
+                          </span>
+                        }
+                      />
+
+                      <SettingsRow
+                        title="Note templates"
+                        helper="Saved prompts that shape Enhance."
+                        control={
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            aria-expanded={templatesOpen}
+                            // An open edit is saved or cancelled in the editor,
+                            // never dropped by collapsing the list.
+                            disabled={!!editingTpl}
+                            title={editingTpl ? "Save or cancel the template first" : undefined}
+                            onClick={() => setTemplatesOpen((o) => !o)}
+                          >
+                            {templatesOpen ? "Close" : `Manage · ${templates.length}`}
+                          </Button>
+                        }
+                      >
+                        {templatesOpen &&
+                          (editingTpl ? (
+                            <Card tone="muted" pad="md">
+                              <div className="space-y-2">
+                                <Input
+                                  aria-label="Template name"
+                                  value={editingTpl.name}
+                                  onChange={(e) =>
+                                    setEditingTpl({ ...editingTpl, name: e.target.value })
+                                  }
+                                  placeholder="Template name"
+                                />
+                                <textarea
+                                  aria-label="System prompt"
+                                  value={editingTpl.system_prompt}
+                                  onChange={(e) =>
+                                    setEditingTpl({ ...editingTpl, system_prompt: e.target.value })
+                                  }
+                                  rows={3}
+                                  style={TEXTAREA}
+                                  placeholder="System prompt"
+                                />
+                                <textarea
+                                  aria-label="Structure hint"
+                                  value={editingTpl.structure_hint}
+                                  onChange={(e) =>
+                                    setEditingTpl({
+                                      ...editingTpl,
+                                      structure_hint: e.target.value,
+                                    })
+                                  }
+                                  rows={3}
+                                  style={{ ...TEXTAREA, fontFamily: "var(--font-mono)" }}
+                                  placeholder="Structure hint (markdown headings)"
+                                />
+                                <div className="flex gap-2">
+                                  <Button
+                                    variant="primary"
+                                    size="sm"
+                                    onClick={() => void saveTpl()}
+                                  >
+                                    Save template
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => setEditingTpl(null)}
+                                  >
+                                    Cancel
+                                  </Button>
+                                </div>
+                              </div>
+                            </Card>
+                          ) : (
+                            <div>
+                              {templates.map((t) => (
+                                <div key={t.id} className={LIST_ROW} style={{ fontSize: 13 }}>
+                                  <span className="flex min-w-0 items-center gap-2">
+                                    <span className="truncate text-text">{t.name}</span>
+                                    {t.built_in && (
+                                      <Badge tone="neutral" size="sm">
+                                        built-in
+                                      </Badge>
+                                    )}
+                                  </span>
+                                  <span className="flex flex-none items-center gap-1.5">
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => setEditingTpl(t)}
+                                    >
+                                      Edit
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="hover:text-rec"
+                                      onClick={() => void removeTpl(t.id)}
+                                    >
+                                      Delete
+                                    </Button>
+                                  </span>
+                                </div>
+                              ))}
+                              <div style={{ marginTop: 8 }}>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  startIcon={<Plus size={14} strokeWidth={1.75} />}
+                                  onClick={() =>
+                                    setEditingTpl({
+                                      id: "",
+                                      name: "New template",
+                                      system_prompt:
+                                        "You are an expert meeting-notes editor. Never invent facts.",
+                                      structure_hint: "## Summary\n## Action items",
+                                      built_in: false,
+                                    })
+                                  }
+                                >
+                                  New template
+                                </Button>
+                              </div>
+                            </div>
+                          ))}
+                      </SettingsRow>
+                    </SettingsGroup>
+                  }
+                </Section>
+
+                <Section id="calendars" hidden={!show("calendars")} title="Calendars">
+                  <SettingsGroup
+                    expanded={!!advOpen.calendars}
+                    onExpandedChange={(v) => setAdv("calendars", v)}
+                    advanced={
+                      <SettingsRow
+                        title="Your own OAuth app"
+                        helper="Optional. A Google Cloud “Desktop app” client (ID and secret) and/or an Azure app registration with a public client and loopback redirect. Sign-ins are kept in your system keychain; the README has a step-by-step."
+                      >
+                        <div className="grid grid-cols-2 gap-2">
+                          <Input
+                            aria-label="Google client ID"
+                            style={MONO_KEY}
+                            placeholder="Google client ID (….apps.googleusercontent.com)"
+                            value={googleId}
+                            onChange={(e) => setGoogleId(e.target.value)}
+                          />
+                          <Input
+                            aria-label="Google client secret"
+                            type="password"
+                            autoComplete="off"
+                            style={MONO_KEY}
+                            placeholder={
+                              cal?.google_has_secret
+                                ? "Google secret saved. Enter to replace."
+                                : "Google client secret"
+                            }
+                            value={googleSecret}
+                            onChange={(e) => setGoogleSecret(e.target.value)}
+                          />
+                          <div className="col-span-2">
+                            <Input
+                              aria-label="Outlook application (client) ID"
+                              style={MONO_KEY}
+                              placeholder="Outlook application (client) ID. No secret needed."
+                              value={msId}
+                              onChange={(e) => setMsId(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-2">
+                          <Button variant="primary" size="sm" onClick={() => void saveCal()}>
+                            Save
+                          </Button>
+                        </div>
+                      </SettingsRow>
+                    }
+                  >
+                    {calendarRow("google")}
+                    {calendarRow("msgraph")}
+                  </SettingsGroup>
+                  {calMsg && (
+                    <p role="status" className="text-text-2" style={{ ...SMALL, paddingLeft: 4 }}>
+                      {calMsg}
+                    </p>
+                  )}
+                </Section>
+
+                <Section id="files" hidden={!show("files")} title="Your files and privacy">
+                  <PrivacySection recordingActive={recordingActive}>
+                    <SettingsRow
+                      title="Where your files are"
+                      helperTone="mono"
+                      helper={appInfo?.data_dir ?? "…"}
+                      control={
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void api.revealDataDir().catch(console.error)}
+                        >
+                          Show folder
+                        </Button>
+                      }
+                    />
+                    <SettingsRow
+                      title="Search index"
+                      helper="Pulls decisions and action items out of meetings recorded before this existed, so Ask and other AI apps can find them. Uses your Ask and Enhance provider."
+                      control={
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={backfillBusy || backfillPending === 0}
+                          onClick={() => void runBackfill()}
+                        >
+                          {backfillBusy
+                            ? "Extracting…"
+                            : backfillPending === 0
+                              ? "All meetings indexed"
+                              : backfillPending === null
+                                ? "Index older meetings"
+                                : `Index ${backfillPending} meeting${backfillPending === 1 ? "" : "s"}`}
+                        </Button>
+                      }
+                    >
+                      {backfillMsg && (
+                        <p role="status" className="text-text-2" style={SMALL}>
+                          {backfillMsg}
+                        </p>
+                      )}
+                    </SettingsRow>
+                  </PrivacySection>
+                </Section>
+
+                <Section id="apps" hidden={!show("apps")} title="Other AI apps">
+                  <SettingsGroup
+                    expanded={!!advOpen.apps}
+                    onExpandedChange={(v) => setAdv("apps", v)}
+                    advanced={
+                      <SettingsRow
+                        title="Claude Code, Cursor and VS Code"
+                        helper="They run the same local server."
+                      >
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          {mcpCmd && (
+                            <SnippetCard label="Claude Code" text={claudeCodeCommand(mcpCmd)} />
+                          )}
+                          <p className="text-text-2" style={SMALL}>
+                            Cursor: add the Claude Desktop block to{" "}
+                            <code style={MONO_SMALL}>~/.cursor/mcp.json</code>. VS Code: add the
+                            same server under <code style={MONO_SMALL}>&quot;servers&quot;</code> in{" "}
+                            <code style={MONO_SMALL}>.vscode/mcp.json</code> with{" "}
+                            <code style={MONO_SMALL}>&quot;type&quot;: &quot;stdio&quot;</code>.
+                          </p>
+                        </div>
+                      </SettingsRow>
+                    }
+                  >
+                    <SettingsRow
+                      title="Claude Desktop"
+                      helper="Lets Claude search and read your meetings. The server runs on this computer."
+                      control={
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          aria-expanded={mcpSetupOpen}
+                          onClick={() => setMcpSetupOpen((o) => !o)}
+                        >
+                          {mcpSetupOpen ? "Hide" : "Set up"}
+                        </Button>
+                      }
+                    >
+                      {mcpSetupOpen && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                          <ol
+                            className="text-text-2"
+                            style={{ ...SMALL, paddingLeft: 18, listStyle: "decimal" }}
+                          >
+                            <li>
+                              In Claude Desktop, open Settings › Developer › Edit Config
+                              {appInfo?.os === "macos" && (
+                                <>
+                                  {" "}
+                                  (
+                                  <code style={MONO_SMALL}>
+                                    ~/Library/Application Support/Claude/claude_desktop_config.json
+                                  </code>
+                                  )
+                                </>
+                              )}
+                              .
+                            </li>
+                            <li>Add this to the file, then restart Claude Desktop.</li>
+                          </ol>
+                          {mcpJson ? (
+                            <SnippetCard label="claude_desktop_config.json" text={mcpJson} />
+                          ) : (
+                            <p className="text-text-3" style={SMALL}>
+                              Loading the snippet…
+                            </p>
+                          )}
+                          <p className="text-text-3" style={{ ...SMALL, fontSize: 11.5 }}>
+                            Fly on the Wall never edits Claude&apos;s files itself.
+                          </p>
+                        </div>
+                      )}
+                    </SettingsRow>
+                    <SettingsRow
+                      title="What it can see"
+                      helper="Whatever the server returns goes to the AI model your app uses (for Claude Desktop, Anthropic's cloud) under that app's terms. It can read every note, including notes you keep local."
+                    />
+                  </SettingsGroup>
+                </Section>
+
+                <Section id="general" hidden={!show("general")} title="General">
+                  <SettingsGroup
+                    expanded={!!advOpen.general}
+                    onExpandedChange={(v) => setAdv("general", v)}
+                    advanced={
+                      <SettingsRow
+                        title="Diagnostics"
+                        helper="Local log files from the last few days, for troubleshooting. Nothing leaves this computer."
+                        control={
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void api.revealLogsDir()}
+                          >
+                            Open logs folder
+                          </Button>
+                        }
+                      />
+                    }
+                  >
+                    <SettingsRow
+                      title="Appearance"
+                      control={
+                        <Segmented
+                          label="Appearance"
+                          value={theme}
+                          onChange={(v) => setTheme(v)}
+                          options={[
+                            { value: "system", label: "System" },
+                            { value: "light", label: "Light" },
+                            { value: "dark", label: "Dark" },
+                          ]}
+                        />
+                      }
+                    />
+                    {updatesRow}
+                  </SettingsGroup>
+                </Section>
+              </div>
+            </div>
+
+            {asrDirty && (
+              <div
+                className="fly-settings-savebar"
+                role="region"
+                aria-label="Unsaved transcript settings"
+              >
+                <span style={{ flex: 1, minWidth: 200, fontSize: 13 }}>
+                  {saveError ? (
+                    <span className="text-error-text">Couldn&apos;t save: {saveError}</span>
+                  ) : (
+                    <span className="text-text">
+                      Your transcript changes aren&apos;t saved yet.
+                    </span>
+                  )}
+                </span>
+                <Button variant="ghost" size="sm" disabled={asrBusy} onClick={discard}>
+                  Discard
+                </Button>
+                <Button variant="primary" size="sm" disabled={asrBusy} onClick={() => void save()}>
+                  {saving ? "Saving…" : "Save changes"}
+                </Button>
               </div>
             )}
-            {/* On-demand backfill: meetings transcribed before item
-                extraction existed get their decisions/action items/figures
-                extracted with the selected AI provider. New meetings are
-                extracted automatically after transcription. */}
-            <div className="flex items-center gap-3" style={{ marginTop: 12 }}>
+          </div>
+        </div>
+
+        <Modal
+          open={confirmClose}
+          onClose={() => setConfirmClose(false)}
+          title="Save your transcript changes?"
+          width={440}
+          footer={
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmClose(false)}>
+                Keep editing
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
-                disabled={backfillBusy || backfillPending === 0}
-                style={{
-                  // On this always-dark card the outline variant's light-mode
-                  // surface background would put white text on white — force a
-                  // transparent background so the white text works in both themes.
-                  color: "#fff",
-                  borderColor: "rgba(255,255,255,.3)",
-                  background: "transparent",
+                disabled={asrBusy}
+                onClick={() => {
+                  discard();
+                  setConfirmClose(false);
+                  onClose();
                 }}
-                onClick={() => void runBackfill()}
               >
-                {backfillBusy
-                  ? "Extracting…"
-                  : backfillPending === 0
-                    ? "All meetings indexed"
-                    : backfillPending === null
-                      ? "Backfill meetings not indexed"
-                      : `Backfill ${backfillPending} meeting${backfillPending === 1 ? "" : "s"} not indexed`}
+                Discard
               </Button>
-              {backfillMsg && (
-                <span style={{ fontSize: 11.5, color: "rgba(255,255,255,.72)" }}>
-                  {backfillMsg}
-                </span>
-              )}
-            </div>
-          </Card>
-        </section>
-
-        {/* Privacy — encryption notice, audio retention, delete all my data */}
-        <PrivacySection recordingActive={recordingActive} />
-
-        {/* Diagnostics (Technical) — where the rolling log files live */}
-        {technical && (
-          <section className="flex items-center justify-between gap-3">
-            <div>
-              <SectionLabel>Diagnostics</SectionLabel>
-              <p className="text-text-3" style={{ margin: 0, fontSize: 11, lineHeight: 1.5 }}>
-                The app writes local log files (last few days) for troubleshooting. Nothing leaves
-                this machine.
-              </p>
-            </div>
-            <Button variant="outline" size="sm" onClick={() => void api.revealLogsDir()}>
-              Open logs folder
-            </Button>
-          </section>
-        )}
-
-        {/* App updates */}
-        <section className="space-y-2">
-          {updater.supported ? (
-            <Card tone="surface" pad="md">
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-text-2" style={{ fontSize: 13 }}>
-                    Current version{" "}
-                    <span className="font-semibold text-text">v{appVersion ?? "…"}</span>
-                  </span>
-                  {(updater.phase === "idle" ||
-                    updater.phase === "upToDate" ||
-                    updater.phase === "error") && (
-                    <Button variant="outline" size="sm" onClick={updater.check}>
-                      Check for updates
-                    </Button>
-                  )}
-                  {updater.phase === "checking" && (
-                    <Button variant="outline" size="sm" disabled>
-                      Checking…
-                    </Button>
-                  )}
-                  {updater.phase === "available" && (
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      disabled={recordingActive}
-                      onClick={updater.downloadAndInstall}
-                    >
-                      Download &amp; install v{updater.version}
-                    </Button>
-                  )}
-                  {updater.phase === "downloading" && (
-                    <span className="flex items-center gap-2">
-                      <ProgressBar
-                        value={updater.progress == null ? null : Math.round(updater.progress * 100)}
-                        style={{ width: 96 }}
-                      />
-                      <span
-                        className="text-text-3"
-                        style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
-                      >
-                        {updater.progress == null
-                          ? "downloading…"
-                          : `${Math.round(updater.progress * 100)}%`}
-                      </span>
-                    </span>
-                  )}
-                  {updater.phase === "ready" && (
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      disabled={recordingActive}
-                      onClick={updater.restart}
-                    >
-                      Restart now
-                    </Button>
-                  )}
-                  {updater.phase === "installing" && (
-                    <span className="text-text-2" style={{ fontSize: 12 }}>
-                      Installing — Fly on the Wall will restart…
-                    </span>
-                  )}
-                </div>
-                {updater.phase === "upToDate" && (
-                  <p className="text-success-text" style={{ fontSize: 12, fontWeight: 500 }}>
-                    You're on the latest version ✓
-                  </p>
-                )}
-                {updater.phase === "error" && (
-                  <p className="text-error-text" style={{ fontSize: 12 }}>
-                    ✗ {updater.error}
-                  </p>
-                )}
-                {updater.phase === "ready" && !recordingActive && (
-                  <p className="text-text-2" style={{ fontSize: 12 }}>
-                    Update downloaded — restart when you're ready.
-                  </p>
-                )}
-                {recordingActive &&
-                  (updater.phase === "available" || updater.phase === "ready") && (
-                    <p className="text-text-2" style={{ fontSize: 12 }}>
-                      Recording in progress — the update waits until you're done.
-                    </p>
-                  )}
-              </div>
-            </Card>
-          ) : (
-            <p className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-              Auto-update isn't available for this install (deb packages are managed by apt) — new
-              versions are published on the GitHub releases page.
-            </p>
-          )}
-        </section>
-      </div>
-    </Modal>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={asrBusy}
+                onClick={() =>
+                  void save().then((ok) => {
+                    setConfirmClose(false);
+                    if (ok) onClose();
+                  })
+                }
+              >
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </>
+          }
+        >
+          <p className="text-text-2" style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55 }}>
+            Quality, Made on, model and graphics-card changes only apply when you save them.
+          </p>
+        </Modal>
+      </EscapeLayerScope>
+    </div>
   );
 }

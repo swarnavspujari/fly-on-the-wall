@@ -59,10 +59,12 @@ const click = (el: Element | null) => {
 };
 
 describe("Switch", () => {
-  it("exposes its state with aria-pressed and its name with aria-label", () => {
+  it("is a WAI-ARIA switch: role=switch, aria-checked and an aria-label", () => {
     const { host } = render(<Switch checked={false} label="Transcribe when I stop" />);
     const btn = host.querySelector("button")!;
-    expect(btn.getAttribute("aria-pressed")).toBe("false");
+    expect(btn.getAttribute("role")).toBe("switch");
+    expect(btn.getAttribute("aria-checked")).toBe("false");
+    expect(btn.hasAttribute("aria-pressed")).toBe(false);
     expect(btn.getAttribute("aria-label")).toBe("Transcribe when I stop");
     expect(btn.getAttribute("type")).toBe("button");
   });
@@ -75,9 +77,9 @@ describe("Switch", () => {
     const { host } = render(<Harness />);
     const btn = host.querySelector("button")!;
     click(btn);
-    expect(btn.getAttribute("aria-pressed")).toBe("true");
+    expect(btn.getAttribute("aria-checked")).toBe("true");
     click(btn);
-    expect(btn.getAttribute("aria-pressed")).toBe("false");
+    expect(btn.getAttribute("aria-checked")).toBe("false");
   });
 
   it("does nothing while disabled", () => {
@@ -134,6 +136,37 @@ describe("Segmented", () => {
     expect(checked()).toBe("Fast");
     click(host.querySelectorAll('[role="radio"]')[2]);
     expect(checked()).toBe("Best");
+  });
+
+  it("runs a caller's onKeyDown first and lets it claim the key", () => {
+    const onChange = vi.fn();
+    const callerKeyDown = vi.fn((e: { key: string; preventDefault: () => void }) => {
+      if (e.key === "ArrowRight") e.preventDefault();
+    });
+    const { host } = render(
+      <Segmented
+        label="Quality"
+        value="light"
+        onChange={onChange}
+        options={options}
+        onKeyDown={callerKeyDown}
+      />,
+    );
+    const group = host.querySelector('[role="radiogroup"]')!;
+    act(() => {
+      group.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(callerKeyDown).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+    act(() => {
+      group.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(callerKeyDown).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenCalledWith("best");
   });
 
   it("does not re-fire onChange for the current value", () => {
@@ -308,6 +341,48 @@ describe("layered Escape", () => {
     expect(closeBelow).not.toHaveBeenCalled();
   });
 
+  it("a layer nested in the same render sits above its parent", () => {
+    // React runs the Sheet's effect before the Modal's; depth, not effect
+    // order, decides which one Esc closes.
+    const closeModal = vi.fn();
+    const closeSheet = vi.fn();
+    const { rerender } = render(
+      <Modal title="Settings" onClose={closeModal}>
+        <Sheet title="Answer" onClose={closeSheet}>
+          body
+        </Sheet>
+      </Modal>,
+    );
+    pressEscape();
+    expect(closeSheet).toHaveBeenCalledTimes(1);
+    expect(closeModal).not.toHaveBeenCalled();
+    rerender(
+      <Modal title="Settings" onClose={closeModal}>
+        <Sheet open={false} title="Answer" onClose={closeSheet}>
+          body
+        </Sheet>
+      </Modal>,
+    );
+    pressEscape();
+    expect(closeModal).toHaveBeenCalledTimes(1);
+    expect(closeSheet).toHaveBeenCalledTimes(1);
+  });
+
+  it("a deeper layer wins even when an unrelated layer opened later", () => {
+    const calls: string[] = [];
+    const offOuter = pushEscapeLayer(() => calls.push("outer"), 1);
+    const offInner = pushEscapeLayer(() => calls.push("inner"), 2);
+    const offLater = pushEscapeLayer(() => calls.push("later-top-level"), 1);
+    pressEscape();
+    expect(calls).toEqual(["inner"]);
+    offInner();
+    pressEscape();
+    // same depth: the newest wins
+    expect(calls).toEqual(["inner", "later-top-level"]);
+    offLater();
+    offOuter();
+  });
+
   it("a closed Modal holds no layer", () => {
     render(
       <Modal open={false} onClose={() => {}}>
@@ -362,7 +437,102 @@ describe("Sheet", () => {
   });
 });
 
+describe("dialog focus", () => {
+  const tab = (target: Element, shift = false) => {
+    const e = new KeyboardEvent("keydown", {
+      key: "Tab",
+      shiftKey: shift,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      target.dispatchEvent(e);
+    });
+    return e;
+  };
+
+  function Harness({ sheet = false, modal = true }: { sheet?: boolean; modal?: boolean }) {
+    const [open, setOpen] = useState(false);
+    const body = (
+      <>
+        <button>First</button>
+        <button>Last</button>
+      </>
+    );
+    return (
+      <>
+        <button onClick={() => setOpen(true)}>Open</button>
+        {sheet ? (
+          <Sheet open={open} modal={modal} title="Answer" onClose={() => setOpen(false)}>
+            {body}
+          </Sheet>
+        ) : (
+          <Modal open={open} title="Dialog" onClose={() => setOpen(false)}>
+            {body}
+          </Modal>
+        )}
+      </>
+    );
+  }
+
+  const byText = (host: HTMLElement, text: string) =>
+    [...host.querySelectorAll("button")].find((b) => b.textContent === text)!;
+
+  it("Modal moves focus in (past the close button), traps Tab, and returns focus on close", () => {
+    const { host } = render(<Harness />);
+    const trigger = byText(host, "Open");
+    trigger.focus();
+    click(trigger);
+    const dialog = host.querySelector('[role="dialog"]')!;
+    expect(dialog.getAttribute("aria-labelledby")).toBe(host.querySelector(".fly-modal-title")!.id);
+    expect(document.activeElement).toBe(byText(host, "First"));
+    // Tab past the last control wraps to the first (the close button)
+    byText(host, "Last").focus();
+    expect(tab(byText(host, "Last")).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(host.querySelector('[aria-label="Close"]'));
+    // Shift+Tab from the first wraps to the last
+    expect(tab(document.activeElement!, true).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(byText(host, "Last"));
+    // a Tab in the middle is left to the browser
+    byText(host, "First").focus();
+    expect(tab(byText(host, "First")).defaultPrevented).toBe(false);
+    pressEscape();
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("a modal Sheet traps Tab; a docked Sheet moves focus in but doesn't trap", () => {
+    const modal = render(<Harness sheet />);
+    const trigger = byText(modal.host, "Open");
+    trigger.focus();
+    click(trigger);
+    expect(document.activeElement).toBe(byText(modal.host, "First"));
+    byText(modal.host, "Last").focus();
+    expect(tab(byText(modal.host, "Last")).defaultPrevented).toBe(true);
+    click(modal.host.querySelector('[aria-label="Close"]'));
+    expect(document.activeElement).toBe(trigger);
+    modal.unmount();
+
+    const docked = render(<Harness sheet modal={false} />);
+    const t2 = byText(docked.host, "Open");
+    t2.focus();
+    click(t2);
+    expect(document.activeElement).toBe(byText(docked.host, "First"));
+    byText(docked.host, "Last").focus();
+    expect(tab(byText(docked.host, "Last")).defaultPrevented).toBe(false);
+  });
+});
+
 describe("NoticeStack", () => {
+  it("is one region without its own live announcement (each Notice announces itself)", () => {
+    const { host } = render(
+      <NoticeStack notices={[{ id: "a", priority: 1, node: <Notice title="Update ready" /> }]} />,
+    );
+    const region = host.querySelector('[role="region"]')!;
+    expect(region.hasAttribute("aria-live")).toBe(false);
+    expect(host.querySelectorAll('[role="status"],[role="alert"],[aria-live]')).toHaveLength(1);
+  });
+
   it("orders by priority, keeping insertion order for ties", () => {
     const ordered = orderNotices([
       { id: "update", priority: 1 },

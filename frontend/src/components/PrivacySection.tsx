@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { ShieldAlert, X } from "lucide-react";
 import { api } from "../api";
@@ -15,12 +16,19 @@ import {
   type RestartRequiredDetail,
 } from "../privacy";
 import type { DiskEncryption, PrivacySettings } from "../types";
-import { Button, Card, Checkbox, Input, SectionLabel, Select } from "./ui";
+import { Button, Card, Checkbox, Input, Select, SettingsGroup, SettingsRow } from "./ui";
 
-/** Settings → Privacy: disk-encryption notice, audio retention, and the
- *  "Delete all my data" danger zone. Every control saves on its own (no
- *  dependency on the modal's Save button). */
-export default function PrivacySection({ recordingActive }: { recordingActive: boolean }) {
+/** Settings › Your files and privacy: the disk-encryption notice (top row),
+ *  the caller's rows (`children`: file location, search index), audio
+ *  retention, and "Delete all my data" (last row, two-step). Every control
+ *  saves on its own; none waits for the Transcripts save bar. */
+export default function PrivacySection({
+  recordingActive,
+  children,
+}: {
+  recordingActive: boolean;
+  children?: ReactNode;
+}) {
   const [settings, setSettings] = useState<PrivacySettings | null>(null);
   const [encryption, setEncryption] = useState<DiskEncryption | null>(null);
   const [bannerDismissed, setBannerDismissed] = useState<string | null>("true");
@@ -64,12 +72,12 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
       setRetentionMsg(
         r.meetings > 0
           ? `Deleted audio from ${r.meetings} meeting${r.meetings === 1 ? "" : "s"} (${formatBytes(r.bytes_removed)} freed).`
-          : "Saved ✓",
+          : "Saved.",
       );
       if (r.meetings_failed > 0) {
         setRetentionMsg(
           (m) =>
-            `${m ?? ""} ${r.meetings_failed} couldn't be deleted (files in use) — retried tomorrow.`,
+            `${m ?? ""} ${r.meetings_failed} couldn't be deleted (files in use). They're retried tomorrow.`,
         );
       }
     } catch (e) {
@@ -108,7 +116,7 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
         /* storage may be unavailable */
       }
       // From here the app must restart before anything else happens: the
-      // App-level RestartRequired screen takes over (outlives this modal).
+      // App-level RestartRequired screen takes over (outlives Settings).
       window.dispatchEvent(
         new CustomEvent<RestartRequiredDetail>(RESTART_REQUIRED_EVENT, {
           detail: { report, includeModels: wipeModels },
@@ -129,154 +137,125 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
     setWipeError(null);
   };
 
+  const lastWipe = settings?.last_wipe ?? null;
+
   return (
-    <section className="space-y-3">
-      <SectionLabel style={{ display: "block", marginBottom: 8 }}>Privacy</SectionLabel>
-
+    <SettingsGroup>
       {encryption && showEncryptionBanner(encryption, bannerDismissed) && (
-        <div
+        <SettingsRow
           role="status"
-          className="flex items-start gap-2.5 rounded-xl border border-line bg-warning-soft px-3.5 py-3 text-[12.5px] leading-[1.5] text-text"
-        >
-          <ShieldAlert
-            size={16}
-            strokeWidth={1.75}
-            className="mt-[1px] flex-none"
-            style={{ color: "var(--warning-text)" }}
-          />
-          <span className="min-w-0 flex-1">{encryptionBannerText(encryption)}</span>
-          <button
-            title="Dismiss"
-            aria-label="Dismiss disk encryption notice"
-            className="flex-none cursor-pointer rounded p-0.5 text-text-3 hover:text-text"
-            onClick={() => {
-              setBannerDismissed("true");
-              void api.setAppSetting(ENCRYPTION_BANNER_DISMISSED_KEY, "true");
-            }}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-      )}
-
-      {settings?.last_wipe && (
-        <div className="flex items-start gap-2.5 rounded-xl border border-line bg-surface-2 px-3.5 py-3 text-[12.5px] leading-[1.5] text-text-2">
-          <span className="min-w-0 flex-1">
-            {settings.last_wipe.notes.map((n) => (
-              <span key={n} className="block">
-                {n}
-              </span>
-            ))}
-            {settings.last_wipe.failed.length > 0 && (
-              <>
-                The last “Delete all my data” couldn't remove {settings.last_wipe.failed.length}{" "}
-                item
-                {settings.last_wipe.failed.length === 1 ? "" : "s"} (another program had them open):{" "}
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
-                  {settings.last_wipe.failed.slice(0, 5).join(", ")}
-                  {settings.last_wipe.failed.length > 5 ? "…" : ""}
-                </span>
-                . Delete them from the data folder by hand.
-              </>
-            )}
-          </span>
-          <button
-            title="Dismiss"
-            className="flex-none cursor-pointer rounded p-0.5 text-text-3 hover:text-text"
-            onClick={() => {
-              setSettings((s) => (s ? { ...s, last_wipe: null } : s));
-              void api.dismissWipeReport();
-            }}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-      )}
-
-      {/* Retention */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <span className="text-text" style={{ fontSize: 13, fontWeight: 500 }}>
-            Delete recording audio
-          </span>
-          <p className="text-text-3" style={{ margin: "2px 0 0", fontSize: 11.5, lineHeight: 1.5 }}>
-            Transcripts and notes are always kept. Checked on startup and daily.
-          </p>
-        </div>
-        <Select
-          aria-label="Delete recording audio after"
-          style={{ maxWidth: "12rem" }}
-          disabled={!settings || retentionBusy}
-          value={pending ? String(pending.days) : String(settings?.audio_retention_days ?? "")}
-          onChange={(e) => void onRetentionChange(e.target.value)}
-          options={retentionOptions(choices)}
-        />
-      </div>
-      {pending && (
-        <Card tone="muted" pad="sm">
-          <p className="text-text" style={{ margin: "0 0 8px", fontSize: 12.5, lineHeight: 1.5 }}>
-            {pending.warning}
-          </p>
-          <div className="flex gap-2">
+          style={{ background: "var(--warning-soft)" }}
+          title={
+            <>
+              <ShieldAlert
+                size={16}
+                strokeWidth={1.75}
+                aria-hidden="true"
+                style={{ color: "var(--warning-text)" }}
+              />
+              Disk encryption looks off
+            </>
+          }
+          helper={encryptionBannerText(encryption)}
+          control={
             <Button
-              variant="contrast"
+              variant="ghost"
               size="sm"
-              disabled={retentionBusy}
-              onClick={() => void applyRetention(pending.days)}
+              aria-label="Dismiss disk encryption notice"
+              onClick={() => {
+                setBannerDismissed("true");
+                void api.setAppSetting(ENCRYPTION_BANNER_DISMISSED_KEY, "true");
+              }}
             >
-              {retentionBusy ? "Deleting…" : "Delete audio"}
+              Dismiss
             </Button>
-            <Button variant="outline" size="sm" onClick={() => setPending(null)}>
-              Cancel
-            </Button>
-          </div>
-        </Card>
-      )}
-      {settings?.retention_held != null && settings.audio_retention_days != null && !pending && (
-        <Card tone="muted" pad="sm">
-          <p className="text-text" style={{ margin: "0 0 8px", fontSize: 12.5, lineHeight: 1.5 }}>
-            Retention is paused: {settings.retention_held} meetings would lose their audio at once,
-            which can mean the clock changed. If that's expected, confirm to delete it.
-          </p>
-          <Button
-            variant="contrast"
-            size="sm"
-            disabled={retentionBusy}
-            onClick={() => void applyRetention(settings.audio_retention_days)}
-          >
-            {retentionBusy ? "Deleting…" : "Delete audio"}
-          </Button>
-        </Card>
-      )}
-      {retentionMsg && (
-        <p className="text-text-2" style={{ margin: 0, fontSize: 12 }}>
-          {retentionMsg}
-        </p>
+          }
+        />
       )}
 
-      {/* Danger zone */}
-      <div
-        className="rounded-xl px-3.5 py-3"
-        style={{ border: "1px solid var(--error)", background: "var(--surface)" }}
+      {children}
+
+      <SettingsRow
+        title="Delete audio after"
+        helper="Transcripts and notes are always kept. Checked on startup and daily."
+        control={
+          <Select
+            aria-label="Delete recording audio after"
+            style={{ width: 190 }}
+            disabled={!settings || retentionBusy}
+            value={pending ? String(pending.days) : String(settings?.audio_retention_days ?? "")}
+            onChange={(e) => void onRetentionChange(e.target.value)}
+            options={retentionOptions(choices)}
+          />
+        }
       >
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <span className="text-error-text" style={{ fontSize: 13, fontWeight: 600 }}>
-              Delete all my data
-            </span>
-            <p
-              className="text-text-3"
-              style={{ margin: "2px 0 0", fontSize: 11.5, lineHeight: 1.5 }}
-            >
-              Erases every recording, transcript, note, attachment, setting and log on this
-              computer, plus saved API keys and calendar sign-ins. Then the app restarts.
-            </p>
+        {(pending ||
+          (settings?.retention_held != null && settings.audio_retention_days != null) ||
+          retentionMsg) && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {pending && (
+              <Card tone="muted" pad="sm">
+                <p
+                  className="text-text"
+                  style={{ margin: "0 0 8px", fontSize: 12.5, lineHeight: 1.5 }}
+                >
+                  {pending.warning}
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="contrast"
+                    size="sm"
+                    disabled={retentionBusy}
+                    onClick={() => void applyRetention(pending.days)}
+                  >
+                    {retentionBusy ? "Deleting…" : "Delete audio"}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setPending(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </Card>
+            )}
+            {settings?.retention_held != null &&
+              settings.audio_retention_days != null &&
+              !pending && (
+                <Card tone="muted" pad="sm">
+                  <p
+                    className="text-text"
+                    style={{ margin: "0 0 8px", fontSize: 12.5, lineHeight: 1.5 }}
+                  >
+                    Retention is paused: {settings.retention_held} meetings would lose their audio
+                    at once, which can mean the clock changed. If that's expected, confirm to delete
+                    it.
+                  </p>
+                  <Button
+                    variant="contrast"
+                    size="sm"
+                    disabled={retentionBusy}
+                    onClick={() => void applyRetention(settings.audio_retention_days)}
+                  >
+                    {retentionBusy ? "Deleting…" : "Delete audio"}
+                  </Button>
+                </Card>
+              )}
+            {retentionMsg && (
+              <p role="status" className="text-text-2" style={{ margin: 0, fontSize: 12 }}>
+                {retentionMsg}
+              </p>
+            )}
           </div>
-          {!wipeOpen && (
+        )}
+      </SettingsRow>
+
+      <SettingsRow
+        tone="danger"
+        title="Delete all my data"
+        helper="Erases every recording, transcript, note, attachment, setting and log on this computer, plus saved API keys and calendar sign-ins. Then the app restarts."
+        control={
+          !wipeOpen && (
             <Button
               variant="outline"
               size="sm"
-              className="flex-none"
               style={{ color: "var(--error-text)", borderColor: "var(--error)" }}
               disabled={recordingActive}
               title={recordingActive ? "Stop the recording first" : undefined}
@@ -284,51 +263,90 @@ export default function PrivacySection({ recordingActive }: { recordingActive: b
             >
               Delete all…
             </Button>
-          )}
-        </div>
-
-        {wipeOpen && (
-          <div className="space-y-2.5" style={{ marginTop: 12 }}>
-            <Checkbox
-              checked={wipeAck}
-              onChange={(e) => setWipeAck(e.target.checked)}
-              label="I understand this can't be undone"
-              description="There's no backup. Export anything you want to keep first."
-            />
-            <Checkbox
-              checked={wipeModels}
-              onChange={(e) => setWipeModels(e.target.checked)}
-              label="Also delete downloaded models and engines"
-              description="Frees disk space; they download again when needed."
-            />
-            <Input
-              label={`Type "${WIPE_CONFIRMATION}" to confirm`}
-              value={wipeTyped}
-              autoComplete="off"
-              spellCheck={false}
-              onChange={(e) => setWipeTyped(e.target.value)}
-            />
-            {wipeError && (
-              <p className="text-error-text" style={{ margin: 0, fontSize: 12 }}>
-                ✗ {wipeError}
-              </p>
+          )
+        }
+      >
+        {(lastWipe || wipeOpen) && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {lastWipe && (
+              <div className="flex items-start gap-2.5 rounded-xl border border-line bg-surface-2 px-3.5 py-3 text-[12.5px] leading-[1.5] text-text-2">
+                <span className="min-w-0 flex-1">
+                  {lastWipe.notes.map((n) => (
+                    <span key={n} className="block">
+                      {n}
+                    </span>
+                  ))}
+                  {lastWipe.failed.length > 0 && (
+                    <>
+                      The last “Delete all my data” couldn't remove {lastWipe.failed.length} item
+                      {lastWipe.failed.length === 1 ? "" : "s"} (another program had them open):{" "}
+                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                        {lastWipe.failed.slice(0, 5).join(", ")}
+                        {lastWipe.failed.length > 5 ? "…" : ""}
+                      </span>
+                      . Delete them from the data folder by hand.
+                    </>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  title="Dismiss"
+                  aria-label="Dismiss the last delete report"
+                  className="flex-none cursor-pointer rounded p-0.5 text-text-3 hover:text-text"
+                  onClick={() => {
+                    setSettings((s) => (s ? { ...s, last_wipe: null } : s));
+                    void api.dismissWipeReport();
+                  }}
+                >
+                  <X size={14} strokeWidth={2} />
+                </button>
+              </div>
             )}
-            <div className="flex gap-2">
-              <Button
-                variant="record"
-                size="sm"
-                disabled={!canConfirmWipe(wipeAck, wipeTyped) || wipeBusy || recordingActive}
-                onClick={() => void runWipe()}
-              >
-                {wipeBusy ? "Deleting…" : "Delete everything"}
-              </Button>
-              <Button variant="outline" size="sm" disabled={wipeBusy} onClick={closeWipe}>
-                Cancel
-              </Button>
-            </div>
+
+            {wipeOpen && (
+              <div className="space-y-2.5">
+                <Checkbox
+                  checked={wipeAck}
+                  onChange={(e) => setWipeAck(e.target.checked)}
+                  label="I understand this can't be undone"
+                  description="There's no backup. Export anything you want to keep first."
+                />
+                <Checkbox
+                  checked={wipeModels}
+                  onChange={(e) => setWipeModels(e.target.checked)}
+                  label="Also delete downloaded models and engines"
+                  description="Frees disk space; they download again when needed."
+                />
+                <Input
+                  label={`Type "${WIPE_CONFIRMATION}" to confirm`}
+                  value={wipeTyped}
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(e) => setWipeTyped(e.target.value)}
+                />
+                {wipeError && (
+                  <p className="text-error-text" style={{ margin: 0, fontSize: 12 }}>
+                    {wipeError}
+                  </p>
+                )}
+                <div className="flex gap-2">
+                  <Button
+                    variant="record"
+                    size="sm"
+                    disabled={!canConfirmWipe(wipeAck, wipeTyped) || wipeBusy || recordingActive}
+                    onClick={() => void runWipe()}
+                  >
+                    {wipeBusy ? "Deleting…" : "Delete everything"}
+                  </Button>
+                  <Button variant="outline" size="sm" disabled={wipeBusy} onClick={closeWipe}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
         )}
-      </div>
-    </section>
+      </SettingsRow>
+    </SettingsGroup>
   );
 }

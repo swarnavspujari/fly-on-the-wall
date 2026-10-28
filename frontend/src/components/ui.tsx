@@ -4,9 +4,18 @@ import type {
   InputHTMLAttributes,
   KeyboardEvent as ReactKeyboardEvent,
   ReactNode,
+  RefObject,
   SelectHTMLAttributes,
 } from "react";
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 /* ============================================================
    Fly on the Wall — shared primitives
@@ -179,12 +188,12 @@ const CSS = `
 .fly-switch{flex:none;display:inline-flex;align-items:center;width:36px;height:22px;padding:2px;border:0;
   border-radius:var(--radius-pill);background:var(--line-strong);cursor:pointer;
   transition:background-color var(--dur) var(--ease-out)}
-.fly-switch[aria-pressed="true"]{background:var(--primary)}
+.fly-switch[aria-checked="true"]{background:var(--primary)}
 .fly-switch:focus-visible{outline:none;box-shadow:var(--focus-ring)}
 .fly-switch:disabled{opacity:.5;cursor:not-allowed}
 .fly-switch-knob{display:block;width:18px;height:18px;border-radius:var(--radius-pill);background:var(--switch-knob);
-  box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform var(--dur) var(--ease-out)}
-.fly-switch[aria-pressed="true"] .fly-switch-knob{transform:translateX(14px)}
+  box-shadow:var(--switch-knob-shadow);transition:transform var(--dur) var(--ease-out)}
+.fly-switch[aria-checked="true"] .fly-switch-knob{transform:translateX(14px)}
 
 /* Segmented */
 .fly-seg{display:inline-flex;flex:none;gap:2px;padding:3px;max-width:100%;border:1px solid var(--line);
@@ -207,7 +216,7 @@ const CSS = `
   text-align:left;font-family:var(--font-sans);font-size:12.5px;font-weight:var(--fw-semibold);color:var(--primary-text);cursor:pointer;
   transition:background-color var(--dur-fast) var(--ease-out)}
 .fly-sgroup-more:hover{background:var(--surface-2)}
-.fly-sgroup-more:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--primary)}
+.fly-sgroup-more:focus-visible{outline:none;box-shadow:inset var(--focus-ring)}
 .fly-srow{padding:14px 18px}
 .fly-srow-main{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px}
 .fly-srow-text{flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:2px}
@@ -802,32 +811,49 @@ export function CitationChip({
 
 /* ------------------------------------------------------------------ layers */
 
-/* Layered Escape: one document listener and a stack of open layers, so Esc
+/* Layered Escape: one document listener and a set of open layers, so Esc
    closes only the topmost one (Settings, then the Ask sheet, then a popover)
-   instead of every open layer at once. Layers stack in the order they open.
+   instead of every open layer at once.
+
+   "Topmost" is the deepest layer in the React tree, then the most recently
+   opened. Depth comes from context (EscapeLayerScope), not from effect
+   order: React runs child effects before parent effects, so a Sheet that
+   mounts inside a Modal in the same render would otherwise register first
+   and end up underneath its own parent.
+
    The listener runs in the bubble phase and skips events that were already
    handled (defaultPrevented), so an inner control that uses Esc itself
    (clearing a search field, closing a native picker) still gets first say. */
 
 interface EscapeLayer {
   id: number;
+  depth: number;
   onEscape: () => void;
 }
 
 const escapeLayers: EscapeLayer[] = [];
 let escapeSeq = 0;
 
+function topEscapeLayer(): EscapeLayer | null {
+  let top: EscapeLayer | null = null;
+  for (const l of escapeLayers) {
+    if (!top || l.depth > top.depth || (l.depth === top.depth && l.id > top.id)) top = l;
+  }
+  return top;
+}
+
 function onEscapeKey(e: KeyboardEvent) {
   if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
-  const top = escapeLayers[escapeLayers.length - 1];
+  const top = topEscapeLayer();
   if (!top) return;
   e.preventDefault();
   top.onEscape();
 }
 
-/** Push an Escape layer; returns the function that removes it. */
-export function pushEscapeLayer(onEscape: () => void): () => void {
-  const layer = { id: ++escapeSeq, onEscape };
+/** Push an Escape layer at a nesting depth (deeper wins; ties go to the
+ *  newest); returns the function that removes it. */
+export function pushEscapeLayer(onEscape: () => void, depth = 1): () => void {
+  const layer = { id: ++escapeSeq, depth, onEscape };
   escapeLayers.push(layer);
   if (escapeLayers.length === 1) document.addEventListener("keydown", onEscapeKey);
   return () => {
@@ -842,9 +868,20 @@ export function escapeLayerDepth(): number {
   return escapeLayers.length;
 }
 
-/** Registers an Escape layer while `active`. The latest `onEscape` is always
- *  called, without re-ordering the stack when the callback identity changes. */
-export function useEscapeLayer(onEscape: (() => void) | null | undefined, active = true) {
+const EscapeDepthContext = createContext(0);
+
+/** Marks everything inside as nested in the layer at `depth` (the value
+ *  useEscapeLayer returned), so inner layers sit above it. */
+export function EscapeLayerScope({ depth, children }: { depth: number; children: ReactNode }) {
+  return <EscapeDepthContext.Provider value={depth}>{children}</EscapeDepthContext.Provider>;
+}
+
+/** Registers an Escape layer while `active` and returns its depth; wrap the
+ *  layer's content in <EscapeLayerScope depth={…}> so nested layers win.
+ *  The latest `onEscape` is always called, without re-ordering the stack
+ *  when the callback identity changes. */
+export function useEscapeLayer(onEscape: (() => void) | null | undefined, active = true): number {
+  const depth = useContext(EscapeDepthContext) + 1;
   const latest = useRef(onEscape);
   useLayoutEffect(() => {
     latest.current = onEscape;
@@ -852,8 +889,81 @@ export function useEscapeLayer(onEscape: (() => void) | null | undefined, active
   const enabled = active && !!onEscape;
   useEffect(() => {
     if (!enabled) return undefined;
-    return pushEscapeLayer(() => latest.current?.());
-  }, [enabled]);
+    return pushEscapeLayer(() => latest.current?.(), depth);
+  }, [enabled, depth]);
+  return depth;
+}
+
+/* Dialog focus: move focus in on open, optionally trap Tab inside, and give
+   focus back to whatever had it on close. */
+
+const FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),' +
+  'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
+function focusablesIn(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+    (el) => !el.closest("[hidden],[inert],[aria-hidden='true']"),
+  );
+}
+
+interface DialogFocusOptions {
+  /** Keep Tab / Shift+Tab inside the dialog (aria-modal dialogs). */
+  trap?: boolean;
+  /** Move focus in on open: [data-autofocus], else the first control that
+   *  isn't the close button, else the close button, else the dialog. */
+  autoFocus?: boolean;
+}
+
+/** Focus management for a dialog-like layer rendered into `ref`. */
+export function useDialogFocus(
+  ref: RefObject<HTMLElement | null>,
+  active: boolean,
+  { trap = false, autoFocus = true }: DialogFocusOptions = {},
+) {
+  useEffect(() => {
+    const root = ref.current;
+    if (!active || !root) return undefined;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (autoFocus && !root.contains(document.activeElement)) {
+      const items = focusablesIn(root);
+      const target =
+        root.querySelector<HTMLElement>("[data-autofocus]") ??
+        items.find((el) => !el.hasAttribute("data-dialog-close")) ??
+        items[0] ??
+        root;
+      if (target === root && !root.hasAttribute("tabindex")) root.setAttribute("tabindex", "-1");
+      target.focus();
+    }
+    // On the dialog itself, so a nested trapped dialog handles Tab first
+    // (it's closer to the target) and marks the event handled.
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!trap || e.key !== "Tab" || e.defaultPrevented) return;
+      const items = focusablesIn(root);
+      if (items.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const at = document.activeElement;
+      if (e.shiftKey && (at === first || !root.contains(at))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (at === last || !root.contains(at))) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    root.addEventListener("keydown", onKeyDown);
+    return () => {
+      root.removeEventListener("keydown", onKeyDown);
+      // Give focus back unless you've deliberately moved it elsewhere.
+      const now = document.activeElement;
+      const lost = !now || now === document.body || root.contains(now) || !root.isConnected;
+      if (lost && previous?.isConnected) previous.focus();
+    };
+  }, [ref, active, trap, autoFocus]);
 }
 
 interface ModalProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
@@ -867,7 +977,8 @@ interface ModalProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
 }
 
 /** Overlay + card shell for dialogs (Settings, consent). Esc / click-outside close.
- *  Esc goes through the layer stack, so it closes only the topmost layer. */
+ *  Esc goes through the layer stack, so it closes only the topmost layer.
+ *  Focus moves in on open, Tab stays inside, and focus returns on close. */
 export function Modal({
   open = true,
   onClose,
@@ -879,41 +990,50 @@ export function Modal({
   children,
   ...rest
 }: ModalProps) {
-  useEscapeLayer(onClose, open);
+  const depth = useEscapeLayer(onClose, open);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open, { trap: true });
+  const titleId = useId();
 
   if (!open) return null;
   return (
     <div className="fly-modal-overlay" onClick={closeOnOverlay ? onClose : undefined}>
       <div
+        ref={dialogRef}
         className={cx("fly-modal", className)}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={title && !rest["aria-label"] ? titleId : undefined}
         style={{ maxWidth: `min(${typeof width === "number" ? `${width}px` : width}, 92vw)` }}
         onClick={(e) => e.stopPropagation()}
         {...rest}
       >
         {(title || onClose) && (
           <div className="fly-modal-head">
-            {title ? <h2 className="fly-modal-title">{title}</h2> : <span />}
+            {title ? (
+              <h2 id={titleId} className="fly-modal-title">
+                {title}
+              </h2>
+            ) : (
+              <span />
+            )}
             {onClose && (
-              <button className="fly-modal-x" onClick={onClose} aria-label="Close">
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                >
-                  <path d="M18 6 6 18M6 6l12 12" />
-                </svg>
+              <button
+                type="button"
+                className="fly-modal-x"
+                onClick={onClose}
+                aria-label="Close"
+                data-dialog-close
+              >
+                <CloseIcon />
               </button>
             )}
           </div>
         )}
-        <div className="fly-modal-body">{children}</div>
-        {footer && <div className="fly-modal-foot">{footer}</div>}
+        <EscapeLayerScope depth={depth}>
+          <div className="fly-modal-body">{children}</div>
+          {footer && <div className="fly-modal-foot">{footer}</div>}
+        </EscapeLayerScope>
       </div>
     </div>
   );
@@ -945,7 +1065,8 @@ interface SwitchProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onC
   label: string;
 }
 
-/** On/off switch (36x22 pill). A toggle button: `aria-pressed` carries the state. */
+/** On/off switch (36x22 pill). WAI-ARIA switch: `role="switch"` +
+ *  `aria-checked`, like the existing switches in Editor and AttendeeEditor. */
 export function Switch({
   checked,
   onChange,
@@ -957,8 +1078,9 @@ export function Switch({
   return (
     <button
       type="button"
+      role="switch"
       className={cx("fly-switch", className)}
-      aria-pressed={checked}
+      aria-checked={checked}
       aria-label={label}
       onClick={(e) => {
         onClick?.(e);
@@ -1003,10 +1125,14 @@ export function Segmented<T extends string>({
   full = false,
   disabled = false,
   className = "",
+  onKeyDown: callerKeyDown,
   ...rest
 }: SegmentedProps<T>) {
   const enabled = options.filter((o) => !o.disabled && !disabled);
+  // A caller's onKeyDown runs first and can claim the key (preventDefault).
   const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    callerKeyDown?.(e);
+    if (e.defaultPrevented) return;
     const keys = ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End"];
     if (!keys.includes(e.key) || enabled.length === 0) return;
     e.preventDefault();
@@ -1187,7 +1313,9 @@ interface SheetProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
 }
 
 /** A panel over part of the screen (the Ask answer sheet). Esc closes it
- *  through the layer stack. Place it inside a `position: relative` region. */
+ *  through the layer stack. Focus moves in on open and returns on close;
+ *  a `modal` sheet also keeps Tab inside. Place it inside a
+ *  `position: relative` region. */
 export function Sheet({
   open = true,
   onClose,
@@ -1201,7 +1329,9 @@ export function Sheet({
   children,
   ...rest
 }: SheetProps) {
-  useEscapeLayer(onClose, open);
+  const depth = useEscapeLayer(onClose, open);
+  const sheetRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(sheetRef, open, { trap: modal });
   const titleId = useId();
   if (!open) return null;
   return (
@@ -1214,6 +1344,7 @@ export function Sheet({
         />
       )}
       <div
+        ref={sheetRef}
         role="dialog"
         aria-modal={modal || undefined}
         aria-labelledby={title && !rest["aria-label"] ? titleId : undefined}
@@ -1230,14 +1361,22 @@ export function Sheet({
               <span />
             )}
             {onClose && (
-              <button type="button" className="fly-modal-x" onClick={onClose} aria-label="Close">
+              <button
+                type="button"
+                className="fly-modal-x"
+                onClick={onClose}
+                aria-label="Close"
+                data-dialog-close
+              >
                 <CloseIcon />
               </button>
             )}
           </div>
         )}
-        <div className="fly-sheet-body">{children}</div>
-        {footer && <div className="fly-sheet-foot">{footer}</div>}
+        <EscapeLayerScope depth={depth}>
+          <div className="fly-sheet-body">{children}</div>
+          {footer && <div className="fly-sheet-foot">{footer}</div>}
+        </EscapeLayerScope>
       </div>
     </>
   );
@@ -1338,7 +1477,9 @@ interface NoticeStackProps extends HTMLAttributes<HTMLDivElement> {
 }
 
 /** One corner for every notice: the most important on top, the rest behind
- *  a "+N more" toggle, so notices never overlap each other. */
+ *  a "+N more" toggle, so notices never overlap each other. The stack itself
+ *  is not a live region: each `Notice` announces itself (role status, or
+ *  alert for danger), so nothing is read twice. */
 export function NoticeStack({
   notices,
   visible = 1,
@@ -1356,7 +1497,6 @@ export function NoticeStack({
     <div
       role="region"
       aria-label={label}
-      aria-live="polite"
       className={cx("fly-notices", `fly-notices--${placement}`, className)}
       {...rest}
     >

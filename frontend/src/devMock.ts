@@ -22,10 +22,20 @@
      fotwMockEncryption = "off" | "on" → disk_encryption_status (default
                                      "unknown": no banner)
      fotwMockAudioDeleted = "1"    → m1's audio reports deleted by retention
+     fotwMockOllama = "missing" | "nomodel" → Settings › Ask and Enhance local
+                                     model row: runtime not installed, or the
+                                     configured model not downloaded
+     fotwMockGpuBench = "gpu" | "cpu" | "failed" → a stored GPU speed-test
+                                     verdict (Settings "Use the graphics card")
+
+   Settings commands are stateful for the session (ASR save bar, provider
+   pick + consent, calendars, templates) and reset on reload.
 
    QA hook: fotwMockEmit(event, payload) fires a mock backend event at the
    app's listeners (pipeline:progress, model:progress, …) from the console.
    ============================================================ */
+
+import { WHISPER_ENGINE_ID } from "./types";
 
 const nowIso = () => new Date().toISOString();
 const ago = (mins: number) => new Date(Date.now() - mins * 60_000).toISOString();
@@ -401,7 +411,7 @@ const transcript = {
   ],
 };
 
-const templates = [
+let templates = [
   { id: "tpl-general", name: "General", system_prompt: "", structure_hint: "", built_in: true },
   { id: "tpl-1on1", name: "1:1", system_prompt: "", structure_hint: "", built_in: true },
   {
@@ -415,16 +425,30 @@ const templates = [
   { id: "tpl-interview", name: "Interview", system_prompt: "", structure_hint: "", built_in: true },
 ];
 
+// fotwMockGpuBench = "gpu" | "cpu" | "failed" seeds a stored speed-test verdict.
+function mockGpuBench() {
+  const v = typeof localStorage === "undefined" ? null : localStorage.getItem("fotwMockGpuBench");
+  if (v === "gpu") return { verdict: "gpu", reason: "", gpu_secs: 11, cpu_secs: 38, model_id: "x" };
+  if (v === "cpu") return { verdict: "cpu", reason: "", gpu_secs: 41, cpu_secs: 30, model_id: "x" };
+  if (v === "failed")
+    return { verdict: "cpu", reason: "failed", gpu_secs: null, cpu_secs: null, model_id: "x" };
+  return null;
+}
+
+// An in-app engine install (download_model "whisper-bin") flips readiness.
+let mockEngineInstalled = false;
+
+// Stateful for the session: set_asr_settings (below) mirrors the backend.
 const asrSettings = {
   tier: "balanced",
-  model_id: "whisper-large-v3-turbo",
+  model_id: null as string | null,
   use_groq: false,
   max_quality: false,
   has_groq_key: false,
   auto_transcribe: true,
   use_gpu: true,
   gpu_available: true,
-  gpu_bench: null,
+  gpu_bench: mockGpuBench() as ReturnType<typeof mockGpuBench>,
   hw: {
     ram_gb: 32,
     cpu_cores: 12,
@@ -432,14 +456,24 @@ const asrSettings = {
     vram_mb: 18000,
     recommended_tier: "best",
   },
+  // Ids match the real model catalog (fly-asr / models.rs): ggml-* weights
+  // feed the Model select; the rest are tools listed under "Models on this
+  // computer".
   models: [
+    { id: "ggml-small-q5_1", display: "Whisper small (Q5)", bytes: 190_000_000, installed: false },
     {
-      id: "whisper-turbo",
-      display: "whisper large-v3-turbo",
-      bytes: 1_600_000_000,
+      id: "ggml-large-v3-turbo-q5_0",
+      display: "Whisper large-v3-turbo (Q5)",
+      bytes: 574_000_000,
       installed: true,
     },
-    { id: "whisper-large", display: "whisper large-v3", bytes: 3_100_000_000, installed: false },
+    {
+      id: "ggml-large-v3-q5_0",
+      display: "Whisper large-v3 (Q5)",
+      bytes: 1_080_000_000,
+      installed: false,
+    },
+    { id: WHISPER_ENGINE_ID, display: "whisper.cpp CLI", bytes: 4_200_000, installed: true },
     { id: "diarize", display: "pyannote-community-1", bytes: 400_000_000, installed: true },
     { id: "embed", display: "bge-small-en", bytes: 100_000_000, installed: true },
     // The engine binary is filtered into its own row; the Vulkan GPU build
@@ -457,7 +491,9 @@ const asrSettings = {
   //   fotwMockEngineUnmanaged = "1" → no managed artifact (manual install UI)
   get engine_installed() {
     return (
-      typeof localStorage === "undefined" || localStorage.getItem("fotwMockEngineMissing") !== "1"
+      mockEngineInstalled ||
+      typeof localStorage === "undefined" ||
+      localStorage.getItem("fotwMockEngineMissing") !== "1"
     );
   },
   get engine_managed() {
@@ -495,23 +531,59 @@ const llmSettings = {
       base_url: null,
     },
     {
-      id: "nvidia-nim",
-      default_model: "nemotron",
+      id: "nim",
+      default_model: "meta/llama-3.1-70b-instruct",
       is_local: false,
       has_key: false,
-      model: null,
-      base_url: null,
+      model: null as string | null,
+      base_url: null as string | null,
     },
-  ],
+  ] as {
+    id: string;
+    default_model: string;
+    is_local: boolean;
+    has_key: boolean;
+    model: string | null;
+    base_url: string | null;
+  }[],
 };
 
 const calendarStatus = {
   google_client_id: "8342••••.apps.googleusercontent.com",
   google_has_secret: true,
   google_connected: true,
+  google_configured: true,
   ms_client_id: "",
   ms_connected: false,
+  ms_configured: true,
 };
+
+let mockCalendars = [
+  { provider: "google", id: "primary", name: "you@example.com", primary: true, enabled: true },
+  { provider: "google", id: "team-cal", name: "Team events", primary: false, enabled: true },
+];
+
+/** set_asr_settings, mirroring asr_commands.rs: GPU off→on clears the
+ *  stored speed test; an empty key deletes it, null keeps it. */
+function setAsrSettings(u: {
+  tier: string;
+  model_id: string | null;
+  use_groq: boolean;
+  max_quality: boolean;
+  auto_transcribe: boolean;
+  use_gpu: boolean;
+  groq_key: string | null;
+}) {
+  asrSettings.tier = u.tier;
+  asrSettings.model_id = u.model_id || null;
+  asrSettings.use_groq = u.use_groq;
+  asrSettings.max_quality = u.max_quality;
+  asrSettings.auto_transcribe = u.auto_transcribe;
+  if (u.use_gpu && !asrSettings.use_gpu) asrSettings.gpu_bench = null;
+  asrSettings.use_gpu = u.use_gpu;
+  if (u.groq_key != null) asrSettings.has_groq_key = u.groq_key !== "";
+  return null;
+}
 
 function upcoming() {
   return {
@@ -592,10 +664,11 @@ const searchHits = (q: string) => [
   },
 ];
 
+// Same shape as commands.rs mcp_config (server key + sidecar file name).
 const mcpSnippet = `{
   "mcpServers": {
-    "fly-on-the-wall": {
-      "command": "C:\\\\Program Files\\\\Fly on the Wall\\\\fly-mcp.exe",
+    "flyonthewall": {
+      "command": "C:\\\\Program Files\\\\Fly on the Wall\\\\flyonthewall-mcp.exe",
       "args": []
     }
   }
@@ -604,13 +677,17 @@ const mcpSnippet = `{
 /* ---- privacy controls ---- */
 const mockFlag = (k: string) =>
   typeof localStorage !== "undefined" ? localStorage.getItem(k) : null;
-const mockUiSettings: Record<string, string> = {};
+// get/set_app_setting store (consent.* / capture.* / ui.* keys). The mock
+// user already accepted Anthropic (the configured provider), so picking
+// OpenAI or NVIDIA NIM shows the cloud-consent confirm.
+const mockUiSettings: Record<string, string> = { "consent.cloud_llm.anthropic": "true" };
 const mockLocalFolders = new Set<string>();
 const mockPrivacy: Record<
   string,
   { keep_local: boolean; participants_notified: boolean; audio_deleted_at: string | null }
 > = {};
 let mockRetentionDays: number | null = null;
+let mockBackfillPending = 3;
 function meetingPrivacy(meetingId: string) {
   const p = (mockPrivacy[meetingId] ??= {
     keep_local: false,
@@ -626,6 +703,29 @@ function meetingPrivacy(meetingId: string) {
   };
 }
 
+/* ---- managed Ollama ---- */
+// fotwMockOllama = "missing" | "nomodel" previews the setup states; install,
+// pull and delete then change this state for the rest of the session.
+let mockOllama: { installed: boolean; models: { name: string; size: number }[] } | null = null;
+function ollamaState() {
+  if (!mockOllama) {
+    const o = mockFlag("fotwMockOllama");
+    mockOllama = {
+      installed: o !== "missing",
+      models:
+        o === "missing"
+          ? []
+          : o === "nomodel"
+            ? [{ name: "qwen3.5:4b", size: 3_650_000_000 }]
+            : [
+                { name: "llama3.1:latest", size: 4_920_000_000 },
+                { name: "qwen3.5:4b", size: 3_650_000_000 },
+              ],
+    };
+  }
+  return mockOllama;
+}
+
 /* ---- command router ---- */
 function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
   switch (cmd) {
@@ -634,7 +734,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "app_info":
       return {
         version: "2.3.0",
-        data_dir: "C:\\Users\\you\\AppData\\Roaming\\Fly on the Wall",
+        data_dir: "C:\\Users\\you\\AppData\\Roaming\\FlyOnTheWall",
         // fotwMockTapDenied demos the macOS-only SystemAudioNotice, which is
         // gated on app_info.os — so the flag flips the reported OS too.
         os:
@@ -791,41 +891,79 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         ? { active: true, note_id: "n1", elapsed_ms: 132_000 }
         : { active: false, note_id: null, elapsed_ms: 0 };
     case "get_asr_settings":
-      return asrSettings;
+      // a copy, like a fresh IPC payload (the UI must not see later mutation)
+      return JSON.parse(JSON.stringify(asrSettings));
+    case "set_asr_settings":
+      return setAsrSettings(args.update as Parameters<typeof setAsrSettings>[0]);
     case "get_llm_settings":
-      return llmSettings;
+      return JSON.parse(JSON.stringify(llmSettings));
     // Stateful so the Settings save/guided-swap flow is testable in the mock.
     case "set_llm_settings": {
       const u = args.update as {
         provider: string;
         model: string | null;
         base_url: string | null;
+        api_key: string | null;
       };
       llmSettings.provider = u.provider;
       const info = llmSettings.providers.find((p) => p.id === u.provider);
       if (info) {
         info.model = u.model;
         info.base_url = u.base_url;
+        if (u.api_key != null) info.has_key = u.api_key !== "";
       }
       return null;
     }
     case "get_calendar_settings":
-      return calendarStatus;
+      return { ...calendarStatus };
+    case "set_calendar_settings": {
+      const u = args.update as {
+        google_client_id: string;
+        google_client_secret: string | null;
+        ms_client_id: string;
+      };
+      calendarStatus.google_client_id = u.google_client_id;
+      calendarStatus.ms_client_id = u.ms_client_id;
+      if (u.google_client_secret) calendarStatus.google_has_secret = true;
+      return null;
+    }
+    case "connect_calendar":
+      if (args.provider === "google") calendarStatus.google_connected = true;
+      if (args.provider === "msgraph") {
+        calendarStatus.ms_connected = true;
+        mockCalendars = [
+          ...mockCalendars.filter((c) => c.provider !== "msgraph"),
+          { provider: "msgraph", id: "cal", name: "Calendar", primary: true, enabled: true },
+        ];
+      }
+      return null;
+    case "disconnect_calendar":
+      if (args.provider === "google") calendarStatus.google_connected = false;
+      if (args.provider === "msgraph") calendarStatus.ms_connected = false;
+      mockCalendars = mockCalendars.filter((c) => c.provider !== args.provider);
+      return null;
     case "list_calendars":
-      return [
-        {
-          provider: "google",
-          id: "primary",
-          name: "you@example.com",
-          primary: true,
-          enabled: true,
-        },
-        { provider: "google", id: "team-cal", name: "Team events", primary: false, enabled: true },
-      ];
+      return mockCalendars.map((c) => ({ ...c }));
+    case "set_calendar_enabled":
+      mockCalendars = mockCalendars.map((c) =>
+        c.provider === args.provider && c.id === args.calendarId
+          ? { ...c, enabled: !!args.enabled }
+          : c,
+      );
+      return null;
     case "upcoming_meetings":
       return upcoming();
     case "list_templates":
-      return templates;
+      return templates.map((t) => ({ ...t }));
+    case "save_template": {
+      const t = args.template as (typeof templates)[number];
+      if (t.id) templates = templates.map((x) => (x.id === t.id ? { ...t } : x));
+      else templates = [...templates, { ...t, id: `tpl-${Date.now()}`, built_in: false }];
+      return null;
+    }
+    case "delete_template":
+      templates = templates.filter((t) => t.id !== args.id);
+      return null;
     case "list_mic_devices":
       return [
         { id: "d1", name: "MacBook Pro Microphone", is_default: true },
@@ -836,23 +974,31 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "ask_meeting":
       return "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
     case "test_llm_connection":
-      return "ok";
-    case "ollama_status":
+      return `Connected to ${llmSettings.provider}. It answered in 0.8 s.`;
+    case "ollama_status": {
+      const o = ollamaState();
       return {
-        installed: true,
+        installed: o.installed,
         can_install: true,
-        running: true,
+        running: o.installed,
         managed: true,
         base_url: "http://localhost:11434",
-        models: [
-          { name: "llama3.1:latest", size: 4_920_000_000 },
-          { name: "qwen3.5:4b", size: 3_650_000_000 },
-        ],
+        models: o.models.map((m) => ({ ...m })),
       };
-    case "ollama_pull":
+    }
+    case "ollama_pull": {
+      const o = ollamaState();
+      const name = String(args.model);
+      if (!o.models.some((m) => m.name.split(":")[0] === name.split(":")[0]))
+        o.models.push({ name: name.includes(":") ? name : `${name}:latest`, size: 4_700_000_000 });
       return null;
-    case "ollama_delete":
+    }
+    case "ollama_delete": {
+      const o = ollamaState();
+      const name = String(args.model);
+      o.models = o.models.filter((m) => m.name !== name && m.name.split(":")[0] !== name);
       return null;
+    }
     case "get_app_setting":
       if (args.key === "consent.recording_notice_accepted") {
         return typeof localStorage !== "undefined" &&
@@ -860,15 +1006,19 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
           ? null
           : "true";
       }
-      if (String(args.key).startsWith("ui.privacy."))
-        return mockUiSettings[String(args.key)] ?? null;
-      return null;
+      return mockUiSettings[String(args.key)] ?? null;
     case "set_app_setting":
       mockUiSettings[String(args.key)] = String(args.value);
       return null;
-    case "download_model":
+    case "download_model": {
+      const m = asrSettings.models.find((x) => x.id === args.id);
+      if (m) m.installed = true;
+      if (args.id === WHISPER_ENGINE_ID) mockEngineInstalled = true;
+      if (args.id === "ollama-bin") ollamaState().installed = true;
       return "";
+    }
     case "reveal_logs_dir":
+    case "reveal_data_dir":
       return null;
     case "list_capture_windows":
       return [
@@ -891,7 +1041,12 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "import_transcribe":
       return importTranscribe((args.order as string[]) ?? []);
     case "pending_backfill_count":
-      return 3;
+      return mockBackfillPending;
+    case "backfill_meeting_items": {
+      const processed = mockBackfillPending;
+      mockBackfillPending = 0;
+      return { processed, extracted: processed * 4, failed: 0 };
+    }
     case "get_meeting_privacy":
       return meetingPrivacy(String(args.meetingId));
     case "set_note_keep_local": {
