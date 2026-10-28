@@ -232,6 +232,7 @@ pub fn run() {
             asr_commands::revert_speaker_assignment,
             asr_commands::speaker_undo_state,
             asr_commands::pipeline_stage,
+            asr_commands::pipeline_failure,
             asr_commands::get_asr_settings,
             asr_commands::set_asr_settings,
             asr_commands::download_model,

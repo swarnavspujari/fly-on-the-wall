@@ -199,6 +199,13 @@ pub fn pipeline_stage(state: State<'_, AppState>, meeting_id: String) -> Option<
         .cloned()
 }
 
+/// Why this meeting's transcription last gave up (None = it didn't). Read
+/// when a note opens: the terminal error event is gone by then.
+#[tauri::command]
+pub fn pipeline_failure(state: State<'_, AppState>, meeting_id: String) -> Option<String> {
+    crate::scheduler::last_failure(&state, &meeting_id)
+}
+
 // ---------------------------------------------------------------------------
 // Settings & models
 // ---------------------------------------------------------------------------

@@ -45,6 +45,10 @@
                         ollama_down | model_missing | offline | timeout |
                         rate_limit | server | other → ask_meeting fails with
                                      the backend's own text for that case
+     fotwMockImportPipelineFail = "1" → a staged import's run fails for good
+                                     at "Detecting speakers" (after ASR);
+                                     pipeline_failure keeps the cause, so the
+                                     queue shows it with Retry on reopen
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -313,6 +317,16 @@ let mockImport: {
   started: boolean;
 } | null = null;
 let mockImportDone = false;
+/** True while the mock import's pipeline is queued or running. */
+let mockImportRunning = false;
+/** A run that gave up keeps its cause, like the backend's parked job row
+ *  (read back by pipeline_failure); Retry (transcribe_meeting) clears it. */
+const mockPipelineFailures: Record<string, string> = {
+  // the seeded "Failed" note (n5): its parked job's cause
+  m5: "whisper-cli exited with status 3221225477",
+};
+const MOCK_PIPELINE_FAILURE =
+  "speaker detection failed: failed to launch sherpa-onnx (The filename or extension is too long. (os error 206))";
 
 const mockEmit = (event: string, payload: unknown) =>
   (window as unknown as { fotwMockEmit?: (e: string, p: unknown) => void }).fotwMockEmit?.(
@@ -328,10 +342,10 @@ function importStage() {
     files: [
       {
         id: "if-1",
-        file_name: "Fuel Bid Meeting 2026-07-09.mp3",
+        file_name: "Planning Sync 2026-01-15.mp3",
         size: 18_400_000,
         kind: "audio",
-        rel_path: "recordings/imp/Fuel Bid Meeting 2026-07-09.mp3",
+        rel_path: "recordings/imp/Planning Sync 2026-01-15.mp3",
         error: null,
       },
       {
@@ -357,7 +371,7 @@ function importStage() {
   if (!noteMeta.some((n) => n.id === IMPORT_NOTE_ID)) {
     noteMeta.unshift({
       id: IMPORT_NOTE_ID,
-      title: "Fuel Bid Meeting 2026-07-09",
+      title: "Planning Sync 2026-01-15",
       folder_id: null,
       meeting_id: IMPORT_MEETING_ID,
       updated_at: nowIso(),
@@ -388,6 +402,7 @@ function importTranscribe(order: string[]) {
     boundaries.push(cum);
   }
   mockImport = { ...mockImport, files, boundaries_ms: boundaries, started: true };
+  mockImportRunning = true;
 
   // simulated backend events: per-file conversion, then the real pipeline shape
   const pipe = (
@@ -429,14 +444,74 @@ function importTranscribe(order: string[]) {
     at((t += 450), () => pipe("transcribing", detail));
   }
   at((t += 500), () => pipe("diarizing"));
+  // fotwMockImportPipelineFail: gives up here, as a sherpa launch failure
+  // ends (the backend tries it three times first; the mock skips to the
+  // end); the queue stays started
+  if (mockFlag("fotwMockImportPipelineFail") === "1") {
+    at((t += 1200), () => {
+      mockImportRunning = false;
+      mockPipelineFailures[IMPORT_MEETING_ID] = MOCK_PIPELINE_FAILURE;
+      pipe("error", null, true, MOCK_PIPELINE_FAILURE);
+    });
+    return mockImport;
+  }
   at((t += 1200), () => pipe("aligning"));
   at((t += 600), () => pipe("saving"));
   at((t += 500), () => pipe("polishing"));
   at((t += 1200), () => {
     mockImportDone = true;
+    mockImportRunning = false;
     pipe("done", null, true);
   });
   return mockImport;
+}
+
+/* ---- after Transcribe: Retry and Cancel (mirror cancel_transcription) ----
+   Retry re-enqueues the joined recording: the failure clears and the run
+   picks up after ASR (checkpointed), then finishes. Cancel with nothing
+   queued or running drops the queue to idle and emits the terminal
+   "cancelled" itself; a running mock run ignores it (no unwinding here). */
+function mockImportRetry() {
+  delete mockPipelineFailures[IMPORT_MEETING_ID];
+  mockImportRunning = true;
+  const pipe = (stage: string, done = false) =>
+    mockEmit("pipeline:progress", {
+      meeting_id: IMPORT_MEETING_ID,
+      stage,
+      detail: null,
+      done,
+      error: null,
+    });
+  let t = 0;
+  const at = (ms: number, fn: () => void) => window.setTimeout(fn, ms);
+  at((t += 100), () => pipe("waiting"));
+  for (const stage of ["starting", "diarizing", "aligning", "saving"]) {
+    at((t += 500), () => pipe(stage));
+  }
+  at((t += 500), () => {
+    mockImportDone = true;
+    mockImportRunning = false;
+    pipe("done", true);
+  });
+}
+
+function mockCancelTranscription(meetingId: string) {
+  if (meetingId === IMPORT_MEETING_ID && mockImportRunning) return null;
+  if (meetingId === IMPORT_MEETING_ID && mockImport) mockImport = { ...mockImport, started: false };
+  // like the backend: a parked failure goes with the run it belongs to
+  delete mockPipelineFailures[meetingId];
+  window.setTimeout(
+    () =>
+      mockEmit("pipeline:progress", {
+        meeting_id: meetingId,
+        stage: "cancelled",
+        detail: null,
+        done: true,
+        error: null,
+      }),
+    0,
+  );
+  return null;
 }
 
 const seg = (id: string, key: string, start: number, text: string) => ({
@@ -924,7 +999,15 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "move_folder":
     case "delete_folder":
     case "move_note":
+      return null;
     case "cancel_transcription":
+      return mockCancelTranscription(String(args.meetingId));
+    case "pipeline_failure":
+      return mockPipelineFailures[String(args.meetingId)] ?? null;
+    case "transcribe_meeting":
+      if (args.meetingId === IMPORT_MEETING_ID && mockImport?.started && !mockImportRunning) {
+        mockImportRetry();
+      }
       return null;
     case "list_recent_notes":
       if (mockFlag("fotwMockNoNotes") === "1") return [];

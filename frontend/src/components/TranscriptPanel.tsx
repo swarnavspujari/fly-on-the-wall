@@ -499,7 +499,7 @@ export default function TranscriptPanel({
               className="mt-2 rounded-lg border border-line px-3 py-2 text-[13px]"
               style={{ background: "var(--error-soft)", color: "var(--error-text)" }}
             >
-              {pipelineError}
+              {briefError(pipelineError)}
             </div>
           )
         )}
