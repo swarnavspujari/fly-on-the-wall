@@ -82,6 +82,7 @@ async function rerender(meeting: Meeting) {
 
 const card = () => host!.querySelector<HTMLElement>('[aria-label="Who\'s on this call"]');
 const popover = () => host!.querySelector<HTMLElement>('[role="dialog"][aria-label="Attendees"]');
+const pill = () => host!.querySelector<HTMLElement>('button[aria-haspopup="dialog"]');
 const button = (text: string, within: Element | null = host) =>
   [...(within?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
     (b) => b.textContent?.trim() === text,
@@ -158,10 +159,15 @@ describe("speaker card", () => {
     vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(m.id));
     const update = vi.spyOn(api, "updateMeetingAttendees");
     await mount(m);
-    await click(button("Edit list", card()));
+    const edit = button("Edit list", card())!;
+    edit.focus(); // as when you Tab to it
+    await click(edit);
     expect(popover()).not.toBeNull();
     expect(card()).toBeNull();
-    expect(popover()!.querySelectorAll("input[data-name-input]")).toHaveLength(SEEDED.length);
+    const names = popover()!.querySelectorAll("input[data-name-input]");
+    expect(names).toHaveLength(SEEDED.length);
+    // the card (and its focused button) is gone: focus moves into the editor
+    expect(document.activeElement).toBe(names[0]);
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -193,9 +199,15 @@ describe("speaker card", () => {
     vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(m.id));
     const update = vi.spyOn(api, "updateMeetingAttendees");
     await mount(m);
-    await click(card()!.querySelector('button[aria-label="Not now"]'));
+    const notNow = card()!.querySelector<HTMLElement>('button[aria-label="Not now"]')!;
+    notNow.focus(); // as when you Tab to it
+    await click(notNow);
     expect(card()).toBeNull();
-    // remounting (switching notes and back) doesn't bring it back
+    expect(document.activeElement).toBe(pill());
+    // switching notes and back (same mount, or a fresh one) doesn't bring it back
+    await rerender(meetingOf());
+    await rerender({ ...m });
+    expect(card()).toBeNull();
     act(() => root!.unmount());
     host!.remove();
     await mount({ ...m });
@@ -203,21 +215,26 @@ describe("speaker card", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
-  it("ignores a stray Esc; Esc from inside hides it only for now", async () => {
-    const m = meetingOf();
-    vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(m.id));
+  it("ignores a stray Esc; Esc from inside hides it until the note opens again", async () => {
+    const a = meetingOf();
+    const b = meetingOf({ note_id: "n2" });
+    vi.spyOn(api, "recordingStatus").mockResolvedValue(recording(a.id));
     const update = vi.spyOn(api, "updateMeetingAttendees");
-    await mount(m);
+    await mount(a);
     // an Esc meant for something else (the notes editor, a rename)
     await key(document.body, "Escape");
     expect(card()).not.toBeNull();
-    // Esc while focus is in the card hides it…
-    await key(button("Looks right", card())!, "Escape");
+    // Esc while focus is in the card hides it, and focus lands on the pill
+    const inside = button("Looks right", card())!;
+    inside.focus();
+    await key(inside, "Escape");
     expect(card()).toBeNull();
-    // …but not for good: it's back next time the note opens
-    act(() => root!.unmount());
-    host!.remove();
-    await mount({ ...m });
+    expect(document.activeElement).toBe(pill());
+    // …but not for good. The app keeps this editor mounted when you open
+    // another note (the meeting prop just changes), so switch on one mount.
+    await rerender(b);
+    expect(card()).toBeNull(); // b isn't the one recording
+    await rerender(a);
     expect(card()).not.toBeNull();
     expect(update).not.toHaveBeenCalled();
   });

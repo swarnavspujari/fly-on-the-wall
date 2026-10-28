@@ -340,7 +340,14 @@ export default function RecordingBar({
   const meetingId = status.active ? status.meeting_id : null;
   const notice = useRecordingNotice(meetingId, noteTitle);
   const stopping = useTranscribesOnStop(meetingId);
+  const noticeRef = useRef<HTMLDivElement>(null);
   if (!status.active) return null;
+  // Esc or Hide removes the reminder and the button you were on; focus moves
+  // to the notice button it hangs from instead of dropping to the page.
+  const closeReminder = () => {
+    noticeRef.current?.querySelector<HTMLElement>("[data-notice-copy]")?.focus();
+    notice.closeReminder();
+  };
   const paused = status.state === "paused";
   const chips = healthChips(status.warnings, paused);
   const warned = chips.filter((c) => c.tone === "warn");
@@ -357,8 +364,10 @@ export default function RecordingBar({
         data-recording-bar-row
         className="flex h-[46px] flex-nowrap items-center gap-3 border-b border-line bg-primary-soft px-4"
       >
+        {/* Overflow valve: ≥ lg the note title truncates first; below lg (title
+            is an icon) the indicator's label truncates. The timer never does. */}
         <RecordingIndicator
-          className="flex-none"
+          className="min-w-0 flex-none max-lg:shrink [&_.fly-rec-label]:min-w-0 [&_.fly-rec-label]:truncate"
           state={paused ? "paused" : "recording"}
           label={paused ? "Recording paused" : "Recording"}
           elapsedMs={status.elapsed_ms}
@@ -402,8 +411,9 @@ export default function RecordingBar({
         )}
         <div className="ml-auto flex flex-none items-center gap-2">
           {status.meeting_id && (
-            <div className="relative flex items-center gap-2">
+            <div ref={noticeRef} className="relative flex items-center gap-2">
               <Button
+                data-notice-copy
                 variant="ghost"
                 size="sm"
                 aria-label={copyLabel}
@@ -435,7 +445,7 @@ export default function RecordingBar({
                 <NoticeReminder
                   copied={notice.copied}
                   onCopy={notice.copy}
-                  onClose={notice.closeReminder}
+                  onClose={closeReminder}
                 />
               )}
             </div>

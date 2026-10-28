@@ -84,6 +84,10 @@ export default function AttendeeEditor({
   const rowKey = useRef(1);
   const popRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
+  const pillRef = useRef<HTMLButtonElement>(null);
+  // "Edit list" unmounts the card and the button you pressed with it; the
+  // editor then focuses its first name so keyboard focus isn't dropped
+  const focusFirstName = useRef(false);
   // Speaker card: shown while THIS meeting is the one recording. Holds the
   // recording meeting's id (not a boolean) so switching notes never flashes
   // the previous meeting's card.
@@ -101,6 +105,10 @@ export default function AttendeeEditor({
     let stale = false;
     setUndoAt(null);
     setToast(false);
+    // Esc on the speaker card hides it only until the note opens again. This
+    // editor stays mounted across notes (only the meeting changes), so reset
+    // here: switching away and back shows the card again.
+    setCardHiddenFor(null);
     api
       .speakerUndoState(meeting.id)
       .then((u) => {
@@ -142,6 +150,12 @@ export default function AttendeeEditor({
   // ever closes the topmost layer
   useEscapeLayer(() => setOpen(false), open);
 
+  useEffect(() => {
+    if (!open || !focusFirstName.current) return;
+    focusFirstName.current = false;
+    rowsRef.current?.querySelector<HTMLInputElement>("input[data-name-input]")?.focus();
+  }, [open]);
+
   // Is this meeting the one recording right now? Re-checked whenever the
   // meeting object changes (start, stop, attendee edits). A confirmed roster
   // never needs the card.
@@ -168,9 +182,20 @@ export default function AttendeeEditor({
     !dismissedCards.has(meeting.id) &&
     cardHiddenFor !== meeting.id &&
     !open;
+  // Closing the card removes the button you pressed; focus moves to the
+  // attendee pill (the card's anchor) instead of dropping to the page.
   const dismissCard = () => {
+    pillRef.current?.focus();
     dismissedCards.add(meeting.id);
     setDismissTick((t) => t + 1);
+  };
+  const hideCard = () => {
+    pillRef.current?.focus();
+    setCardHiddenFor(meeting.id);
+  };
+  const editFromCard = () => {
+    focusFirstName.current = true;
+    openEditor();
   };
 
   // The only paths that confirm a roster from the card: "Looks right" (the
@@ -279,6 +304,7 @@ export default function AttendeeEditor({
 
   const pill = (
     <button
+      ref={pillRef}
       onClick={() => (open ? setOpen(false) : openEditor())}
       title="Attendees — who was on this meeting"
       aria-haspopup="dialog"
@@ -709,9 +735,9 @@ export default function AttendeeEditor({
           busy={cardBusy}
           error={cardError}
           onConfirm={(list) => void confirmRoster(list)}
-          onEdit={openEditor}
+          onEdit={editFromCard}
           onDismiss={dismissCard}
-          onEscape={() => setCardHiddenFor(meeting.id)}
+          onEscape={hideCard}
         />
       )}
     </>

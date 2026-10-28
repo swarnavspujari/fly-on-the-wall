@@ -219,6 +219,17 @@ describe("RecordingBar", () => {
     });
     await flush();
     expect($$('[aria-label="Reminder: let participants know"]')).toHaveLength(0);
+    // focus returns to the notice button the reminder hangs from
+    expect(document.activeElement).toBe(chipButton("Copy recording notice"));
+  });
+
+  it("returns focus to the notice button when you hide the reminder", async () => {
+    await mount(status());
+    const hide = host!.querySelector<HTMLElement>('button[aria-label="Hide the reminder"]')!;
+    hide.focus(); // as when you Tab to it
+    await click(hide);
+    expect($$('[aria-label="Reminder: let participants know"]')).toHaveLength(0);
+    expect(document.activeElement).toBe(chipButton("Copy recording notice"));
   });
 
   it("doesn't remind when 'Remind me' is off", async () => {
