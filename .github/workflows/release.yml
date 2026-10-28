@@ -461,7 +461,7 @@ jobs:
       # manifest: seconds, instead of compiling it with `cargo install`.
       # fallback: none, so a version missing from the manifest fails instead
       # of falling back to an unchecked cargo-binstall download.
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-cyclonedx@0.5.9
           fallback: none
