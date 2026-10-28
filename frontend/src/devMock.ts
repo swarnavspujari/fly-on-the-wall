@@ -32,8 +32,8 @@
                                      in "Downloading", or fails
      fotwMockImportFail = "1"      → the first Transcribe of a staged import
                                      can't convert screen-walkthrough.mp4:
-                                     that row gets its cause + Retry, the
-                                     others convert; Retry then succeeds
+                                     that row shows its cause, the others
+                                     convert; "Retry failed file" succeeds
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -1176,7 +1176,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
    Mirrors import_transcribe's per-file attribution: every file in the order
    is converted, the bad one emits import:progress "failed" with its cause,
    and the call resolves with the queue back at idle (started: false) so the
-   row shows the cause and Retry. Fails once per page load. */
+   row shows its cause and the queue offers Retry. Fails once per page load. */
 let mockImportFailedOnce = false;
 const MOCK_CONVERT_CAUSE = "This file looks damaged or incomplete, so its audio can't be read.";
 function mockImportConvertFailure(order: string[]) {
