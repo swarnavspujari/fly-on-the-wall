@@ -1487,6 +1487,7 @@ name = "fly-storage"
 version = "2.3.0"
 dependencies = [
  "chrono",
+ "dirs 6.0.0",
  "fly-core",
  "rusqlite",
  "serde",

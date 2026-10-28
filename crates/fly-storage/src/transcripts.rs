@@ -9,6 +9,7 @@ use fly_core::{Speaker, Transcript};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
+use crate::atomic::write_atomic;
 use crate::{Result, Storage, StorageError};
 
 /// The speaker-assignment state captured right before a re-diarize overwrote
@@ -105,9 +106,9 @@ impl Storage {
             )));
         }
         let paths = self.transcript_mirror_paths(&cleaned.meeting_id, ".cleaned");
-        std::fs::write(paths.md, cleaned.to_markdown())?;
-        std::fs::write(paths.json, serde_json::to_string_pretty(cleaned)?)?;
-        std::fs::write(paths.vtt, cleaned.to_vtt())?;
+        write_atomic(&paths.md, cleaned.to_markdown())?;
+        write_atomic(&paths.json, serde_json::to_string_pretty(cleaned)?)?;
+        write_atomic(&paths.vtt, cleaned.to_vtt())?;
         Ok(())
     }
 
@@ -283,9 +284,9 @@ impl Storage {
         self.sync_transcript_chunks(t)?;
 
         let paths = self.transcript_mirror_paths(&t.meeting_id, "");
-        std::fs::write(paths.md, t.to_markdown())?;
-        std::fs::write(paths.json, serde_json::to_string_pretty(t)?)?;
-        std::fs::write(paths.vtt, t.to_vtt())?;
+        write_atomic(&paths.md, t.to_markdown())?;
+        write_atomic(&paths.json, serde_json::to_string_pretty(t)?)?;
+        write_atomic(&paths.vtt, t.to_vtt())?;
         Ok(())
     }
 

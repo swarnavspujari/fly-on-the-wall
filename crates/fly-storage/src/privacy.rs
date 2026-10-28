@@ -409,6 +409,9 @@ impl Storage {
             )?;
         }
         tx.commit()?;
+        // Pipeline scratch sits outside the data dir (machine-local cache),
+        // so the data-dir wipe at restart never reaches it.
+        self.remove_all_scratch();
         self.conn.execute_batch("VACUUM;")?;
         // wal_checkpoint returns (busy, log frames, checkpointed frames);
         // busy = 1 means a reader blocked it. A TRUNCATE checkpoint also
@@ -566,6 +569,9 @@ impl Storage {
                 }
             }
         }
+        // 16 kHz copies (and ASR checkpoints) a failed run left in scratch
+        // are this meeting's audio too.
+        self.remove_meeting_scratch(meeting_id);
         if purge.failed.is_empty() {
             self.conn.execute(
                 "UPDATE meetings SET audio_deleted_at = ?1 WHERE id = ?2",

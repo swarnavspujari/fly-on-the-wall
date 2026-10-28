@@ -199,7 +199,10 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
             prompt_tail: String::new(),
         },
     ];
-    let tmp_dir = out_dir.join("live-tmp");
+    // Chunk files go to the machine-local scratch dir keyed by meeting id,
+    // not the meeting folder (which a rename can move mid-recording).
+    let tmp_dir = fly_storage::scratch::meeting_scratch_dir(&data_dir, &meeting_id)
+        .join(fly_storage::scratch::LIVE_TMP_DIR);
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Chunk failures across both channels, reset by any success. Engine

@@ -12,10 +12,14 @@
 //!     recording.manifest.json (portability manifest; see recovery.rs),
 //!     note.json (faithful note mirror: scratchpad + blocks)
 //!   recordings/_unlinked/…            — recordings with no DB row (preserved)
+//!   (pipeline scratch — 16 kHz intermediates, ASR checkpoints, live-caption
+//!   chunks — lives OUTSIDE the data dir, in a machine-local cache folder
+//!   keyed by meeting id; see scratch.rs)
 //!   transcripts/…                     — legacy fallback for transcripts whose
 //!                                       meeting folder is unresolvable
 //!   attachments/<note_id>/…           — attached files, referenced relatively
 
+mod atomic;
 mod attachments;
 pub mod embeddings;
 mod folders;
@@ -29,6 +33,7 @@ mod notes;
 pub mod privacy;
 mod recovery;
 pub mod safe_path;
+pub mod scratch;
 mod search;
 mod settings;
 mod templates;
@@ -188,6 +193,7 @@ impl Storage {
         }
         migrations::rename_legacy_db(data_dir)?;
         let conn = Connection::open(data_dir.join(Self::DB_FILE))?;
+        Self::persist_wal(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Deleted meeting text is overwritten in the database file instead of
@@ -236,6 +242,10 @@ impl Storage {
         conn.busy_timeout(Self::EXISTING_BUSY_TIMEOUT)?;
         // Per-connection settings only. journal_mode is persistent in the
         // file (the app set WAL) and changing it needs an exclusive lock.
+        // Persistent WAL matters most HERE: the MCP server is often the last
+        // connection to close, and the last closer decides whether the
+        // `-wal`/`-shm` files are deleted.
+        Self::persist_wal(&conn)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "secure_delete", "ON")?;
         Self::check_schema(&conn)?;
@@ -248,6 +258,44 @@ impl Storage {
     /// How long [`open_existing`](Self::open_existing) connections wait for
     /// the app's write lock before reporting "database is locked".
     pub const EXISTING_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// WAL size cap after a checkpoint (`journal_size_limit`). Any value
+    /// `>= 0` also makes a persistent WAL truncate to zero bytes when the
+    /// last connection closes, so old page images — text of deleted notes
+    /// included — don't linger in the file between runs.
+    const JOURNAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
+
+    /// Keep `-wal` and `-shm` on disk when the last connection closes
+    /// (`SQLITE_FCNTL_PERSIST_WAL`) instead of deleting and recreating them
+    /// every run. The app and the MCP server share this database, and the
+    /// MCP server is often spawned by Claude Desktop — an MSIX app whose
+    /// AppData overlay once paired a stale copy of the database with the
+    /// real `-wal`/`-shm` ("database disk image is malformed"). Files that
+    /// always exist are opened in place rather than created anew, which
+    /// keeps every process on the same three files. Per-connection: both
+    /// open paths call this.
+    fn persist_wal(conn: &Connection) -> Result<()> {
+        let mut on: std::os::raw::c_int = 1;
+        // SAFETY: `conn.handle()` is the live sqlite3* owned by `conn`, valid
+        // for this call; "main" is a NUL-terminated schema name; and
+        // SQLITE_FCNTL_PERSIST_WAL takes a pointer to one int, which `on`
+        // outlives.
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                conn.handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+                (&mut on as *mut std::os::raw::c_int).cast(),
+            )
+        };
+        if rc != rusqlite::ffi::SQLITE_OK {
+            // A VFS without the control (not the case for the bundled
+            // win32/unix ones) just keeps SQLite's default behavior.
+            tracing::warn!(rc, "SQLite VFS refused persistent WAL; using the default");
+        }
+        conn.pragma_update(None, "journal_size_limit", Self::JOURNAL_SIZE_LIMIT)?;
+        Ok(())
+    }
 
     /// Read-only check that the schema is exactly what this build expects.
     fn check_schema(conn: &Connection) -> Result<()> {
@@ -337,15 +385,31 @@ impl Storage {
 
     fn migrate(conn: &Connection, data_dir: &Path) -> Result<()> {
         let from: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        // Checked BEFORE the baseline tables are created below.
+        let fresh = from == 0 && Self::has_no_tables(conn)?;
         Self::create_baseline(conn)?;
         Self::repair_missing_columns(conn)?;
         // v2: human-readable disk layout (meeting folders + note mirrors
         // named by date + title; transcripts inside their meeting folder).
-        if from < 2 {
+        //
+        // A fresh database has nothing to upgrade, but its data dir may still
+        // hold every meeting folder and note mirror of a lost or replaced
+        // index. Running the v2 orphan sweep there would park all of them
+        // under `_unlinked/` (a mass rename — the 2026-07-13 incident, and on
+        // a synced folder a mass re-upload). Stamp the version instead; the
+        // startup self-heal re-attaches folders in place from their manifests.
+        if from < 2 && !fresh {
             migrations::to_v2(conn, data_dir)?;
         }
         conn.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         Ok(())
+    }
+
+    /// True for a database file with no schema at all: one this open just
+    /// created (fresh install, or a deleted/replaced index file).
+    fn has_no_tables(conn: &Connection) -> Result<bool> {
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))?;
+        Ok(n == 0)
     }
 
     fn create_baseline(conn: &Connection) -> Result<()> {

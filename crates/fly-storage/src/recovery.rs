@@ -6,8 +6,9 @@
 //! nothing but the filesystem, so it exists even when SQLite is corrupted,
 //! locked, or replaced mid-write ("database disk image is malformed").
 //! On every startup `self_heal_recordings` scans `recordings/` AND
-//! `recordings/_unlinked/` (where a fresh database's v2 orphan sweep parks
-//! folders it doesn't recognize) and repairs whatever the manifest proves:
+//! `recordings/_unlinked/` (where the v2 orphan sweep parks folders it
+//! doesn't recognize — older builds also ran it on a fresh database) and
+//! repairs whatever the manifest proves:
 //!
 //! - meeting row exists but has no recording attached → attach it
 //! - meeting row missing entirely (database was recreated) → move the folder
@@ -116,16 +117,18 @@ impl PortableNote {
     }
 }
 
-/// Write the note mirror into a meeting folder (pure filesystem).
+/// Write the note mirror into a meeting folder (pure filesystem; atomic, so
+/// a crash mid-write can't leave a torn `note.json` for self-heal to trip on).
 pub fn write_note_mirror(dir: &Path, note: &PortableNote) -> std::io::Result<()> {
-    std::fs::write(dir.join(NOTE_MIRROR), serde_json::to_string_pretty(note)?)
+    crate::atomic::write_atomic(&dir.join(NOTE_MIRROR), serde_json::to_string_pretty(note)?)
 }
 
 /// Write the manifest into the recording's folder (pure filesystem — safe to
-/// call even when the database is unusable). `dir` is the meeting folder.
+/// call even when the database is unusable; atomic like the note mirror).
+/// `dir` is the meeting folder.
 pub fn write_recording_manifest(dir: &Path, manifest: &RecordingManifest) -> std::io::Result<()> {
-    std::fs::write(
-        dir.join(RECORDING_MANIFEST),
+    crate::atomic::write_atomic(
+        &dir.join(RECORDING_MANIFEST),
         serde_json::to_string_pretty(manifest)?,
     )
 }
@@ -185,15 +188,24 @@ impl Storage {
             }
         }
         report.refreshed = self.refresh_portable_artifacts();
+        // same startup pass: drop pipeline scratch nothing can resume from
+        self.sweep_stale_scratch();
         Ok(report)
     }
 
-    /// Backfill pass, run after healing: (re)write the v2 manifest and the
-    /// note mirror for every meeting that has a recording folder, so folders
-    /// from before the portability feature become portable without the user
-    /// re-saving each note. Content is compared before writing — an
-    /// up-to-date install is a read-only sweep. Per-meeting errors are
-    /// logged and skipped.
+    /// Backfill pass, run after healing: give every meeting that has a
+    /// recording folder a v2 manifest and a note mirror, so folders from
+    /// before the portability feature become portable without the user
+    /// re-saving each note.
+    ///
+    /// The backfill never lets the database overwrite something on disk that
+    /// may be newer than the database (a restored or forked index, a folder
+    /// copied back from another machine, a hand edit). It writes a file only
+    /// when it is missing or provably older — see [`backfill_manifest`] and
+    /// [`backfill_note_mirror`]. Live edits (title, folder, attendees, date)
+    /// rewrite the manifest when they happen, so the backfill isn't what
+    /// keeps current files current. A healthy install is a read-only sweep.
+    /// Per-meeting errors are logged and skipped.
     fn refresh_portable_artifacts(&self) -> Vec<String> {
         let mut refreshed = Vec::new();
         let ids: Vec<String> = match self
@@ -239,15 +251,20 @@ impl Storage {
         if !dir.is_dir() {
             return Ok(false);
         }
-        let mut wrote = write_if_changed(
-            &dir.join(RECORDING_MANIFEST),
-            &serde_json::to_string_pretty(&manifest)?,
-        )?;
+        let mut wrote = false;
+        let manifest_path = dir.join(RECORDING_MANIFEST);
+        if let Some(next) = backfill_manifest(read_mirror(&manifest_path), manifest) {
+            write_recording_manifest(&dir, &next)?;
+            wrote = true;
+        }
         if let Ok(note) = self.get_note(&meeting.note_id) {
-            wrote |= write_if_changed(
-                &dir.join(NOTE_MIRROR),
-                &serde_json::to_string_pretty(&PortableNote::from_note(&note))?,
-            )?;
+            let mirror_path = dir.join(NOTE_MIRROR);
+            if let Some(next) =
+                backfill_note_mirror(read_mirror(&mirror_path), PortableNote::from_note(&note))
+            {
+                write_note_mirror(&dir, &next)?;
+                wrote = true;
+            }
         }
         Ok(wrote)
     }
@@ -282,15 +299,118 @@ impl Storage {
     }
 }
 
-/// Write `content` to `path` only when the file's current content differs
-/// (keeps the startup backfill from rewriting every folder every launch).
-/// Returns whether a write happened.
-fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
-    if std::fs::read_to_string(path).is_ok_and(|cur| cur == content) {
-        return Ok(false);
+/// What the backfill found where a mirror file should be.
+enum OnDisk<T> {
+    Missing,
+    /// Present but not something this build can read (torn by a pre-atomic
+    /// build, hand-edited, or a format from the future). Never overwritten:
+    /// nothing proves the database knows better.
+    Unreadable,
+    Parsed(T),
+}
+
+fn read_mirror<T: serde::de::DeserializeOwned>(path: &Path) -> OnDisk<T> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OnDisk::Missing,
+        Err(_) => OnDisk::Unreadable,
+        Ok(s) => serde_json::from_str(&s).map_or(OnDisk::Unreadable, OnDisk::Parsed),
     }
-    std::fs::write(path, content)?;
-    Ok(true)
+}
+
+/// Backfill rule for `recording.manifest.json`: the manifest has no clock of
+/// its own, so the database may only ADD to it, never replace a value.
+///
+/// - missing → write the database's manifest;
+/// - unreadable, another meeting's, or a newer format → leave it alone;
+/// - otherwise fill in only what the file lacks (`None` portability fields —
+///   v1 manifests and ones stashed while the database was unreadable) and
+///   stamp the current version. Every value already in the file wins, even
+///   when the database disagrees: it may be the newer side.
+///
+/// Returns the manifest to write, or `None` to leave the file as it is.
+fn backfill_manifest(
+    on_disk: OnDisk<RecordingManifest>,
+    from_db: RecordingManifest,
+) -> Option<RecordingManifest> {
+    let cur = match on_disk {
+        OnDisk::Missing => return Some(from_db),
+        OnDisk::Unreadable => {
+            tracing::warn!(
+                meeting_id = from_db.meeting_id,
+                "backfill left an unreadable recording manifest untouched"
+            );
+            return None;
+        }
+        OnDisk::Parsed(cur) => cur,
+    };
+    if cur.version > MANIFEST_VERSION
+        || cur.meeting_id != from_db.meeting_id
+        || cur.note_id != from_db.note_id
+    {
+        tracing::warn!(
+            meeting_id = from_db.meeting_id,
+            on_disk_version = cur.version,
+            "backfill left a recording manifest it doesn't own untouched"
+        );
+        return None;
+    }
+    let next = RecordingManifest {
+        version: MANIFEST_VERSION,
+        title: cur.title.clone().or(from_db.title),
+        started_at: cur.started_at.or(from_db.started_at),
+        attendees: cur.attendees.clone().or(from_db.attendees),
+        attendees_confirmed: cur.attendees_confirmed.or(from_db.attendees_confirmed),
+        folder_path: cur.folder_path.clone().or(from_db.folder_path),
+        ..cur.clone()
+    };
+    (next != cur).then_some(next)
+}
+
+/// Backfill rule for `note.json`: it carries the note's own clock
+/// (`updated_at`, bumped by every note write), so the database may replace
+/// it only when the database is provably newer.
+///
+/// - missing → write;
+/// - unreadable, another note's, or a newer format → leave it alone;
+/// - `updated_at` older than the database row → refresh (an edit the
+///   mirror missed, e.g. a failed write or a folder move);
+/// - same age or newer → leave it: the file was written by this app at that
+///   edit, or later by someone else (another machine, a hand edit).
+///
+/// Returns the mirror to write, or `None` to leave the file as it is.
+fn backfill_note_mirror(
+    on_disk: OnDisk<PortableNote>,
+    from_db: PortableNote,
+) -> Option<PortableNote> {
+    let cur = match on_disk {
+        OnDisk::Missing => return Some(from_db),
+        OnDisk::Unreadable => {
+            tracing::warn!(
+                note_id = from_db.note_id,
+                "backfill left an unreadable note mirror untouched"
+            );
+            return None;
+        }
+        OnDisk::Parsed(cur) => cur,
+    };
+    if cur.version > MANIFEST_VERSION || cur.note_id != from_db.note_id {
+        tracing::warn!(
+            note_id = from_db.note_id,
+            on_disk_version = cur.version,
+            "backfill left a note mirror it doesn't own untouched"
+        );
+        return None;
+    }
+    if cur.updated_at < from_db.updated_at {
+        return Some(from_db);
+    }
+    if cur != from_db && cur.updated_at > from_db.updated_at {
+        tracing::info!(
+            note_id = from_db.note_id,
+            "note mirror on disk is newer than the database; left as is"
+        );
+    }
+    None
 }
 
 /// The scanned folder's own name, which must itself be a plain name.

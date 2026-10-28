@@ -118,6 +118,8 @@ impl Storage {
             .execute("DELETE FROM meetings WHERE id = ?1", [id])?;
         tx.commit()?;
         self.checkpoint_after_delete();
+        // derived audio + partial transcripts of a meeting that's gone
+        self.remove_meeting_scratch(id);
         if let Some(rel) = rec_dir {
             let Some(dir) = contained_recordings_dir(&self.data_dir, &rel) else {
                 tracing::warn!(meeting_id = %id, "refusing to delete a folder outside recordings/");
@@ -193,12 +195,39 @@ impl Storage {
         let Some(rel) = recording_dir_rel(&manifest.recording) else {
             return Ok(());
         };
-        let dir = self.data_dir.join(&rel);
+        // Same guard as the startup backfill: a row healed by an older build
+        // may carry unrebased paths — never write outside `recordings/`.
+        let Some(dir) = contained_recordings_dir(&self.data_dir, &rel) else {
+            return Ok(());
+        };
         if !dir.is_dir() {
             return Ok(());
         }
         crate::recovery::write_recording_manifest(&dir, &manifest)?;
         Ok(())
+    }
+
+    /// Rewrite the manifest of every recorded meeting attached to these
+    /// notes, after an edit that changes what a manifest carries (the note's
+    /// title, the folder path it's filed under). The startup backfill only
+    /// fills gaps, so edits reach the manifests here, when they happen.
+    /// Best-effort like the folder rename: the edit itself is already in the
+    /// database, and a failed write only leaves an older manifest behind.
+    pub(crate) fn refresh_manifests_for_notes(&self, note_ids: &[String]) {
+        for note_id in note_ids {
+            let meetings = match self.meetings_for_note(note_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(note_id, error = %e, "couldn't list meetings to refresh manifests");
+                    continue;
+                }
+            };
+            for meeting in meetings.iter().filter(|m| m.recording.is_some()) {
+                if let Err(e) = self.refresh_recording_manifest(&meeting.id) {
+                    tracing::warn!(meeting_id = meeting.id, error = %e, "couldn't refresh a meeting's manifest");
+                }
+            }
+        }
     }
 
     pub fn get_meeting(&self, id: &str) -> Result<Meeting> {

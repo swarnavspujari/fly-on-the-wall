@@ -459,14 +459,20 @@ pub async fn run_with(
 
     // ---- prepare 16 kHz mono inputs ----
     emit_stage(state, on_stage, meeting_id, "preparing-audio", None);
-    // intermediates live next to the recordings (the meeting's folder)
-    let work_dir = mic_wav
+    // Intermediates (and their ASR checkpoints) live in the machine-local
+    // scratch dir keyed by meeting id, never in the meeting's folder: a
+    // title/date edit can rename that folder mid-run. Scratch an older build
+    // left in the folder is adopted (checkpoints) or dropped first.
+    let meeting_dir = mic_wav
         .as_ref()
         .or(system_wav.as_ref())
         .or(mixed_wav.as_ref())
         .and_then(|p| p.parent())
         .map(Path::to_path_buf)
         .expect("checked above: at least one recording file exists");
+    let work_dir =
+        fly_storage::scratch::prepare_meeting_scratch(&data_dir, meeting_id, Some(&meeting_dir))
+            .map_err(|e| format!("couldn't create the transcription scratch folder: {e}"))?;
     let per_channel = mic_wav.is_some() && system_wav.is_some();
     let mut intermediates: Vec<PathBuf> = Vec::new();
     let prep = |src: &Path, name: &str| -> Result<PathBuf, String> {
@@ -693,15 +699,15 @@ pub async fn run_with(
     }
 
     // 16 kHz intermediates and their ASR checkpoints are pure derived data —
-    // drop them once the transcript is saved so meeting folders hold only
-    // the real recordings. (A failed run keeps both; the retry resumes from
-    // the checkpoint and overwrites the intermediates.)
+    // drop them once the transcript is saved. (A failed run keeps both; the
+    // retry resumes from the checkpoint and overwrites the intermediates.)
     for f in &intermediates {
         if let Err(e) = std::fs::remove_file(f) {
             tracing::warn!(file = %f.file_name().unwrap_or_default().to_string_lossy(), error = %e, "could not remove 16k intermediate");
         }
         let _ = std::fs::remove_file(fly_asr::checkpoint::checkpoint_path_for(f));
     }
+    let _ = std::fs::remove_dir(&work_dir); // only once empty
 
     // release the per-meeting guard (on failure the scheduler clears it)
     state.pipeline_stage.lock().unwrap().remove(meeting_id);
@@ -829,10 +835,10 @@ async fn re_diarize_inner(
         };
 
         emit_stage(state, on_stage, meeting_id, "preparing-audio", None);
-        let work_dir = src
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or("recording has no parent folder")?;
+        // scratch keyed by meeting id, like the full pipeline's
+        let work_dir =
+            fly_storage::scratch::prepare_meeting_scratch(&data_dir, meeting_id, None)
+                .map_err(|e| format!("couldn't create the transcription scratch folder: {e}"))?;
         let track_16k = work_dir.join("rediarize.16k.wav");
         let (samples, rate) = fly_audio::mix::read_wav_mono(&src).map_err(|e| e.to_string())?;
         let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
@@ -847,6 +853,7 @@ async fn re_diarize_inner(
         if let Err(e) = std::fs::remove_file(&track_16k) {
             tracing::warn!(file = %track_16k.file_name().unwrap_or_default().to_string_lossy(), error = %e, "could not remove 16k intermediate");
         }
+        let _ = std::fs::remove_dir(&work_dir); // only once empty
         let turns = fly_diarize::drop_dust_clusters(diarized?);
 
         emit_stage(state, on_stage, meeting_id, "aligning", None);

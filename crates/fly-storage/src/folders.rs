@@ -57,6 +57,8 @@ impl Storage {
         if n == 0 {
             return Err(StorageError::NotFound(format!("folder {id}")));
         }
+        // manifests carry the folder path by name
+        self.refresh_manifests_for_notes(&self.recorded_notes_in_subtree(id)?);
         Ok(())
     }
 
@@ -92,7 +94,25 @@ impl Storage {
         if n == 0 {
             return Err(StorageError::NotFound(format!("folder {id}")));
         }
+        self.refresh_manifests_for_notes(&self.recorded_notes_in_subtree(id)?);
         Ok(())
+    }
+
+    /// Notes with a recorded meeting, filed in `folder_id` or any folder
+    /// below it — the ones whose manifests carry this folder's path.
+    fn recorded_notes_in_subtree(&self, folder_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE sub(id) AS (
+                 SELECT ?1
+                 UNION SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id
+             )
+             SELECT n.id FROM notes n
+              WHERE n.folder_id IN (SELECT id FROM sub)
+                AND EXISTS (SELECT 1 FROM meetings m
+                             WHERE m.note_id = n.id AND m.recording_json IS NOT NULL)",
+        )?;
+        let rows = stmt.query_map([folder_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     /// Folder names from the root down to (and including) `folder_id` —
@@ -146,12 +166,15 @@ impl Storage {
     }
 
     pub fn delete_folder(&self, id: &str) -> Result<()> {
+        // collected first: the delete unfiles them (FK ON DELETE SET NULL)
+        let unfiled = self.recorded_notes_in_subtree(id)?;
         let n = self
             .conn
             .execute("DELETE FROM folders WHERE id = ?1", [id])?;
         if n == 0 {
             return Err(StorageError::NotFound(format!("folder {id}")));
         }
+        self.refresh_manifests_for_notes(&unfiled);
         Ok(())
     }
 }
