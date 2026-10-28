@@ -3,6 +3,7 @@ import {
   MACOS_BUNDLE_ID,
   NOTICE_PRIORITY,
   appErrorCopy,
+  consentSkipsCopy,
   systemAudioCopy,
   updateCopy,
   updateNoticeVisible,
@@ -13,6 +14,30 @@ describe("NOTICE_PRIORITY", () => {
     expect(NOTICE_PRIORITY.appError).toBeGreaterThan(NOTICE_PRIORITY.systemAudio);
     expect(NOTICE_PRIORITY.systemAudio).toBeGreaterThan(NOTICE_PRIORITY.pipeline);
     expect(NOTICE_PRIORITY.pipeline).toBeGreaterThan(NOTICE_PRIORITY.update);
+  });
+
+  it("puts skipped AI cleanup under pipeline errors and above the update", () => {
+    expect(NOTICE_PRIORITY.pipeline).toBeGreaterThan(NOTICE_PRIORITY.consentSkips);
+    expect(NOTICE_PRIORITY.consentSkips).toBeGreaterThan(NOTICE_PRIORITY.update);
+  });
+});
+
+describe("consentSkipsCopy", () => {
+  it("names who needs the OK and what each meeting is missing", () => {
+    const c = consentSkipsCopy(3, "Anthropic");
+    expect(c.title).toBe("Transcript cleanup and action items were skipped");
+    expect(c.cause).toBe(
+      "Anthropic needs your OK before it gets meeting content, so 3 meetings kept the raw transcript and got no action items.",
+    );
+    expect(c.action).toBe("Review and allow");
+  });
+
+  it("once nobody needs to allow anything, it only offers to run them", () => {
+    const c = consentSkipsCopy(1, null);
+    expect(c.cause).toBe(
+      "1 meeting kept the raw transcript and got no action items. You can run them now.",
+    );
+    expect(c.action).toBe("Run them now");
   });
 });
 

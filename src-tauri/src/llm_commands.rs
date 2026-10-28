@@ -58,23 +58,109 @@ pub fn migrate_anthropic_model(storage: &fly_storage::Storage) -> Option<String>
     }
 }
 
-/// One-time: users who already ran a cloud provider before consent was
-/// recorded chose it deliberately, so record that choice instead of breaking
-/// their Enhance/Ask after the update. Guarded by an internal flag (not
-/// writable from the webview) so it can never re-run and launder a later,
-/// unconfirmed switch.
-pub fn grandfather_cloud_consent(storage: &fly_storage::Storage) {
-    const FLAG: &str = "migration.cloud_consent_recorded";
-    if storage.get_setting(FLAG).ok().flatten().is_some() {
-        return;
+/// Internal flag for [`reset_unseen_cloud_consent`]. Not under a webview
+/// prefix (see `commands::is_webview_setting_key`), so no script can clear
+/// it to re-run the reset, or set it to skip one.
+pub const CLOUD_CONSENT_RESET_FLAG: &str = "migration.cloud_consent_reset_v2_4";
+
+/// One-time (v2.4): forget every recorded cloud-LLM consent.
+///
+/// Until v2.4 the consent prompt was `window.confirm`, which
+/// tauri-plugin-dialog turns into an async call the app has no permission
+/// for: no dialog ever showed, and the returned Promise counted as "yes". So
+/// every stored `consent.cloud_llm.*` was written without the disclosure
+/// being seen, including the ones the old `grandfather_cloud_consent`
+/// migration recorded. After this, `build_provider` refuses cloud providers
+/// until the user allows one in the in-app prompt (asked at launch when the
+/// saved provider is a cloud one).
+///
+/// Runs once: the flag is written only after the delete succeeds. If that
+/// flag write itself fails, the reset runs again next launch and clears a
+/// consent given in between, so the user is asked again. That's the safe
+/// direction. Returns how many consents were cleared (`None` when it had
+/// already run or couldn't run).
+pub fn reset_unseen_cloud_consent(storage: &fly_storage::Storage) -> Option<usize> {
+    if storage
+        .get_setting(CLOUD_CONSENT_RESET_FLAG)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
     }
-    if let Some(p) = storage.get_setting("llm.provider").ok().flatten() {
-        let cloud = PROVIDERS.iter().any(|(id, _, local)| *id == p && !*local);
-        if cloud {
-            let _ = storage.set_setting(&format!("consent.cloud_llm.{p}"), "true");
+    match storage.delete_settings_with_prefix("consent.cloud_llm.") {
+        Ok(cleared) => {
+            if let Err(e) = storage.set_setting(CLOUD_CONSENT_RESET_FLAG, "1") {
+                tracing::warn!(error = %e, "could not record the cloud-consent reset");
+            }
+            tracing::info!(
+                cleared,
+                "cleared cloud-AI consents recorded without a prompt"
+            );
+            Some(cleared)
+        }
+        Err(e) => {
+            // Try again next launch; until then the old values stand.
+            tracing::warn!(error = %e, "could not reset cloud-AI consent");
+            None
         }
     }
-    let _ = storage.set_setting(FLAG, "1");
+}
+
+/// Who processes the text, for messages ("Anthropic", "OpenAI", "NVIDIA").
+fn provider_vendor(provider: &str) -> &str {
+    match provider {
+        "anthropic" => "Anthropic",
+        "openai" => "OpenAI",
+        "nim" => "NVIDIA",
+        other => other,
+    }
+}
+
+/// The words every missing-consent refusal carries ([`check_cloud_policy`]);
+/// Ask's error view keys on them too (askModel.ts describeAskError).
+const CONSENT_REFUSAL_MARK: &str = "isn't allowed to receive your meeting content";
+
+/// True when `error` is [`check_cloud_policy`]'s missing-consent refusal.
+pub fn is_consent_refusal(error: &str) -> bool {
+    error.contains(CONSENT_REFUSAL_MARK)
+}
+
+/// Background cleanup / extraction for `meeting_id` failed with `error`:
+/// remember the meeting when the reason was missing consent, so the app can
+/// offer to run it once the user allows the provider. Returns whether it was.
+pub fn record_consent_skip(state: &AppState, meeting_id: &str, error: &str) -> bool {
+    let skipped = is_consent_refusal(error);
+    if skipped {
+        state
+            .consent_skipped
+            .lock()
+            .unwrap()
+            .insert(meeting_id.to_string());
+    }
+    skipped
+}
+
+/// Meetings whose cleanup / action items were skipped for missing consent
+/// this session (the notice catches up on these at mount; later changes
+/// arrive as `llm:consent-skips` events with the same list).
+#[tauri::command]
+pub fn consent_skipped_meetings(state: State<'_, AppState>) -> Vec<String> {
+    state
+        .consent_skipped
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect()
+}
+
+/// Run the skipped cleanup and item extraction now (after the user allowed
+/// the provider), in the background. Each goes through `build_provider`
+/// again, so nothing is sent without consent. Returns how many meetings.
+#[tauri::command]
+pub fn retry_consent_skipped(app: tauri::AppHandle) -> usize {
+    crate::scheduler::retry_consent_skipped(app)
 }
 
 /// Preflight for the local provider: when the user selected Ollama, make
@@ -153,9 +239,14 @@ pub fn check_cloud_policy(
         return Ok(());
     }
     if !consented {
+        // Read as-is by background cleanup / action items (logs), Enhance
+        // and backfill; Ask keys its "Review and allow" button on the first
+        // clause (askModel.ts describeAskError).
+        let who = provider_vendor(provider);
         return Err(format!(
-            "confirm that meeting content may be sent to {provider}: open Settings → AI provider \
-             and select it again"
+            "{who} {CONSENT_REFUSAL_MARK} yet, so nothing was sent. \
+             To allow it, open Settings › Ask and Enhance and click Test. To keep everything \
+             on this computer, switch Runs on to This computer (Ollama)."
         ));
     }
     Ok(())
@@ -188,9 +279,11 @@ pub fn build_provider(
     if let (Some(url), false) = (&base_url, provider == "anthropic") {
         validate_base_url(&provider, url)?;
     }
-    // Cloud processing needs the user's explicit, recorded consent (shown
-    // once per provider in Settings). Enforced here, not only in the UI, so
-    // no path — including a script in the webview — can skip it.
+    // Cloud processing needs the user's recorded consent (the in-app prompt,
+    // once per provider). Checked here, not only in the UI, so no LLM path
+    // can skip the check. Known gap: `consent.` keys are webview-writable
+    // (commands.rs is_webview_setting_key), so a script running in the
+    // webview could forge the record itself.
     let is_local = PROVIDERS
         .iter()
         .any(|(id, _, local)| *id == provider && *local);
@@ -828,6 +921,89 @@ mod security_tests {
         // cloud without keep-local still needs recorded consent
         assert!(check_cloud_policy("openai", false, false, false, false).is_err());
         assert!(check_cloud_policy("openai", false, false, true, false).is_ok());
+    }
+
+    /// Background cleanup and action items only log this, and Enhance shows
+    /// it as-is: it must say who, that nothing went, and both ways forward.
+    /// Ask matches its first clause (askModel.ts describeAskError).
+    #[test]
+    fn missing_consent_says_what_to_do_in_plain_words() {
+        let err = check_cloud_policy("nim", false, false, false, false).unwrap_err();
+        assert!(
+            err.starts_with("NVIDIA isn't allowed to receive your meeting content yet"),
+            "{err}"
+        );
+        assert!(err.contains("nothing was sent"), "{err}");
+        assert!(err.contains("Settings › Ask and Enhance"), "{err}");
+        assert!(err.contains("This computer (Ollama)."), "{err}");
+        assert!(err.ends_with('.'), "Enhance shows it verbatim: {err}");
+    }
+
+    /// Background cleanup / extraction remember a meeting only when consent
+    /// was the reason (the app then offers to run it once allowed).
+    #[test]
+    fn only_the_consent_refusal_counts_as_a_consent_skip() {
+        use super::is_consent_refusal;
+        let consent = check_cloud_policy("anthropic", false, false, false, false).unwrap_err();
+        assert!(is_consent_refusal(&consent), "{consent}");
+        let keep_local = check_cloud_policy("anthropic", false, false, true, true).unwrap_err();
+        assert!(!is_consent_refusal(&keep_local), "{keep_local}");
+        assert!(!is_consent_refusal(
+            "no API key stored for anthropic — add one in Settings"
+        ));
+    }
+
+    #[test]
+    fn consent_reset_clears_every_cloud_consent_once() {
+        use super::{reset_unseen_cloud_consent, CLOUD_CONSENT_RESET_FLAG};
+        let dir = tempfile::tempdir().unwrap();
+        let s = fly_storage::Storage::open(dir.path()).unwrap();
+        s.set_setting("llm.provider", "anthropic").unwrap();
+        for p in ["anthropic", "openai", "nim", "someday"] {
+            s.set_setting(&format!("consent.cloud_llm.{p}"), "true")
+                .unwrap();
+        }
+        s.set_setting("consent.recording_notice_accepted", "true")
+            .unwrap();
+
+        assert_eq!(reset_unseen_cloud_consent(&s), Some(4));
+        for p in ["anthropic", "openai", "nim", "someday"] {
+            let key = format!("consent.cloud_llm.{p}");
+            assert_eq!(s.get_setting(&key).unwrap(), None, "{key}");
+        }
+        // other consents and the provider choice are untouched
+        assert!(s
+            .get_setting("consent.recording_notice_accepted")
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            s.get_setting("llm.provider").unwrap().as_deref(),
+            Some("anthropic")
+        );
+        assert!(s.get_setting(CLOUD_CONSENT_RESET_FLAG).unwrap().is_some());
+
+        // a consent given (in-app) after the reset survives every later launch
+        s.set_setting("consent.cloud_llm.anthropic", "true")
+            .unwrap();
+        assert_eq!(reset_unseen_cloud_consent(&s), None);
+        assert_eq!(reset_unseen_cloud_consent(&s), None);
+        assert_eq!(
+            s.get_setting("consent.cloud_llm.anthropic")
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn consent_reset_flag_is_not_webview_settable() {
+        use super::CLOUD_CONSENT_RESET_FLAG;
+        use crate::commands::is_webview_setting_key;
+        assert!(!is_webview_setting_key(CLOUD_CONSENT_RESET_FLAG));
+        // nor any other migration flag
+        assert!(!is_webview_setting_key("migration.cloud_consent_recorded"));
+        // while the consents themselves stay where the in-app prompt writes them
+        assert!(is_webview_setting_key("consent.cloud_llm.anthropic"));
     }
 
     /// M4: an Ollama on another machine is not "local" for keep-local data

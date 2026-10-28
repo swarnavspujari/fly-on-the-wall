@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { LlmSettings } from "../types";
 import { AskComposer, AskSheet, useAskChat } from "./AskPanel";
+import { ConfirmProvider } from "./confirm";
+import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -98,8 +100,11 @@ function render(ui: React.ReactNode) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
-  act(() => root!.render(ui));
-  return { rerender: (next: React.ReactNode) => act(() => root!.render(next)) };
+  act(() => root!.render(<ConfirmProvider>{ui}</ConfirmProvider>));
+  return {
+    rerender: (next: React.ReactNode) =>
+      act(() => root!.render(<ConfirmProvider>{next}</ConfirmProvider>)),
+  };
 }
 
 beforeEach(() => {
@@ -151,6 +156,12 @@ const openSheet = async () => {
   act(() => input().click());
   await flush();
 };
+const answer = async (yes: boolean) => {
+  act(() => confirmChoice(yes).click());
+  await flush();
+};
+const CONSENT_REFUSED =
+  "Anthropic isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama).";
 
 describe("Ask composer and sheet", () => {
   it("opens on a click, not on focus, and leaves focus in the composer", async () => {
@@ -290,20 +301,27 @@ describe("Ask composer and sheet", () => {
     delete consents["consent.cloud_llm.anthropic"];
     const ask = vi
       .spyOn(api, "askMeeting")
-      .mockRejectedValueOnce(
-        "confirm that meeting content may be sent to anthropic: open Settings → AI provider and select it again",
-      )
+      .mockRejectedValueOnce(CONSENT_REFUSED)
       .mockResolvedValueOnce("Answer after consent.");
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<Harness noteId="n1" />);
     await openSheet();
     type("Status?");
     key(input(), "Enter");
     await flush();
     expect(button("Try again")).toBeUndefined();
+    // Cancel writes nothing and doesn't ask the question again
     act(() => button("Review and allow Anthropic")!.click());
     await flush();
-    expect(confirm.mock.calls[0][0]).toMatch(/^Use Anthropic for Ask and Enhance\?/);
+    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
+    expect(consents["consent.cloud_llm.anthropic"]).toBeUndefined();
+    await answer(false);
+    expect(confirmDialog()).toBeNull();
+    expect(consents["consent.cloud_llm.anthropic"]).toBeUndefined();
+    expect(ask).toHaveBeenCalledTimes(1);
+    // Allow: consent is saved, then the question goes again
+    act(() => button("Review and allow Anthropic")!.click());
+    await flush();
+    await answer(true);
     expect(consents["consent.cloud_llm.anthropic"]).toBe("true");
     expect(ask).toHaveBeenCalledTimes(2);
     expect(sheet()!.textContent).toContain("Answer after consent.");
@@ -372,19 +390,26 @@ describe("Runs on", () => {
   });
 
   it("asks for consent before a new cloud provider, and keeps yours if you decline", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<Harness noteId="n1" />);
     await openSheet();
     choose(runsOn(), "openai");
     await flush();
-    expect(confirm.mock.calls[0][0]).toMatch(/^Use OpenAI for Ask and Enhance\?/);
+    // it waits for the answer: nothing is saved while the question is open
+    expect(confirmTitle()).toBe("Use OpenAI for Ask and Enhance?");
+    expect(confirmDialog()!.textContent).toContain(
+      "full meeting transcripts will be sent to OpenAI",
+    );
+    expect(consents["consent.cloud_llm.openai"]).toBeUndefined();
+    expect(api.setLlmSettings).not.toHaveBeenCalled();
+    await answer(false);
+    expect(consents["consent.cloud_llm.openai"]).toBeUndefined();
     expect(api.setLlmSettings).not.toHaveBeenCalled();
     expect(runsOn().value).toBe("anthropic");
     expect(sheet()!.textContent).toContain("Kept your current provider");
 
-    confirm.mockReturnValue(true);
     choose(runsOn(), "openai");
     await flush();
+    await answer(true);
     expect(api.setLlmSettings).toHaveBeenCalledWith({
       provider: "openai",
       model: null,
@@ -399,13 +424,29 @@ describe("Runs on", () => {
     expect(sheet()!.textContent).toContain("No API key for OpenAI yet");
   });
 
+  it("Esc on its consent question answers only the question; the sheet stays, focus goes back", async () => {
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    act(() => runsOn().focus());
+    await flush();
+    choose(runsOn(), "openai");
+    await flush();
+    expect(confirmTitle()).toBe("Use OpenAI for Ask and Enhance?");
+    key(document.activeElement!, "Escape");
+    await flush();
+    expect(confirmDialog()).toBeNull();
+    expect(sheet()).not.toBeNull();
+    expect(document.activeElement).toBe(runsOn());
+    expect(consents["consent.cloud_llm.openai"]).toBeUndefined();
+    expect(api.setLlmSettings).not.toHaveBeenCalled();
+  });
+
   it("switches to this computer without asking", async () => {
-    const confirm = vi.spyOn(window, "confirm");
     render(<Harness noteId="n1" />);
     await openSheet();
     choose(runsOn(), "ollama");
     await flush();
-    expect(confirm).not.toHaveBeenCalled();
+    expect(confirmDialog()).toBeNull();
     expect(api.setLlmSettings).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "ollama" }),
     );
@@ -413,7 +454,6 @@ describe("Runs on", () => {
   });
 
   it("a stale sheet never undoes a provider change made in Settings", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<Harness noteId="n1" />);
     await openSheet();
     expect(runsOn().value).toBe("anthropic");
@@ -421,19 +461,22 @@ describe("Runs on", () => {
     saved.provider = "ollama";
     choose(model()!, "claude-haiku-5-5");
     await flush();
-    expect(confirm.mock.calls[0][0]).toContain("changed in Settings");
+    expect(confirmTitle()).toBe("Switch to Anthropic (Claude)?");
+    expect(confirmDialog()!.textContent).toContain("changed in Settings");
+    await answer(false);
     expect(api.setLlmSettings).not.toHaveBeenCalled();
     expect(saved.provider).toBe("ollama");
     expect(runsOn().value).toBe("ollama"); // the select now matches what's saved
   });
 
   it("a stale sheet switches back only when you say so", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<Harness noteId="n1" />);
     await openSheet();
     saved.provider = "ollama";
     choose(model()!, "claude-haiku-5-5");
     await flush();
+    expect(api.setLlmSettings).not.toHaveBeenCalled();
+    await answer(true);
     expect(api.setLlmSettings).toHaveBeenCalledWith({
       provider: "anthropic",
       model: "claude-haiku-5-5",
@@ -445,12 +488,13 @@ describe("Runs on", () => {
 
   it("a Claude model pick asks for consent when it isn't recorded", async () => {
     delete consents["consent.cloud_llm.anthropic"];
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<Harness noteId="n1" />);
     await openSheet();
     choose(model()!, "claude-haiku-5-5");
     await flush();
-    expect(confirm.mock.calls[0][0]).toMatch(/^Use Anthropic for Ask and Enhance\?/);
+    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
+    await answer(false);
+    expect(consents["consent.cloud_llm.anthropic"]).toBeUndefined();
     expect(api.setLlmSettings).not.toHaveBeenCalled();
     expect(model()!.value).toBe("claude-sonnet-5-5");
   });
@@ -466,7 +510,6 @@ describe("Runs on", () => {
   });
 
   it("writes nothing when it can't re-read what's saved", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<Harness noteId="n1" />);
     await openSheet();
     vi.mocked(api.getLlmSettings).mockRejectedValue("database is locked");
@@ -475,7 +518,7 @@ describe("Runs on", () => {
     choose(model()!, "claude-haiku-5-5");
     await flush();
     expect(api.setLlmSettings).not.toHaveBeenCalled();
-    expect(confirm).not.toHaveBeenCalled();
+    expect(confirmDialog()).toBeNull();
     expect(sheet()!.textContent).toContain(
       "Couldn't read your current provider, so nothing changed.",
     );
@@ -528,10 +571,10 @@ describe("Runs on", () => {
   });
 
   it("offers Pin to side only when the window is wide enough", async () => {
-    render(<Harness noteId="n1" />);
+    const { rerender } = render(<Harness noteId="n1" />);
     await openSheet();
     expect(button("Pin to side")).toBeUndefined();
-    act(() => root!.render(<Harness noteId="n1" canPin />));
+    rerender(<Harness noteId="n1" canPin />);
     await flush();
     expect(button("Pin to side")).toBeTruthy();
   });

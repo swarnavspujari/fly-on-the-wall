@@ -8,12 +8,18 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
 import { installLinkGuard } from "./safeContent";
+import { CloudConsentOnLaunch } from "./components/CloudConsent";
+import { ConfirmProvider } from "./components/confirm";
 
 // Links anywhere in the app open in the system browser, never in this window.
 installLinkGuard();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    {/* Every confirm in the app is an in-app dialog (useConfirm). */}
+    <ConfirmProvider>
+      <App />
+      <CloudConsentOnLaunch />
+    </ConfirmProvider>
   </React.StrictMode>,
 );

@@ -19,13 +19,14 @@ import {
   CLAUDE_MODELS,
   QUICK_PROMPTS,
   RUNS_ON_HELPER,
-  cloudConsentMessage,
   describeAskError,
   providerName,
   runsOnPlace,
   runsOnSwitched,
 } from "../askModel";
 import { providerLabel } from "../settingsModel";
+import { useCloudConsent } from "./CloudConsent";
+import { useConfirm } from "./confirm";
 import { Button, Notice, Select, Sheet } from "./ui";
 import { SAFE_A, SAFE_IMG } from "./markdownSafe";
 
@@ -86,6 +87,8 @@ export interface AskChat {
    *  question and before Runs on writes, so a change made in Settings is
    *  never undone from a stale copy. */
   llm: LlmSettings | null;
+  /** After a Runs on write: show `next`, and ignore any re-read that started
+   *  before it. */
   setLlm: (next: LlmSettings) => void;
   refreshLlm: () => Promise<LlmSettings | null>;
   /** The answer sheet's id (the composer's aria-controls). */
@@ -124,14 +127,22 @@ export function useAskChat(noteId: string): AskChat {
     setAnnouncement("");
   }, [noteId]);
 
+  // Bumped by every Runs on write: a re-read that started before the last
+  // write is older than what we already show, so it isn't applied.
+  const writes = useRef(0);
   const refreshLlm = useCallback(async () => {
+    const at = writes.current;
     try {
       const s = await api.getLlmSettings();
-      setLlm(s);
+      if (writes.current === at) setLlm(s);
       return s;
     } catch {
       return null;
     }
+  }, []);
+  const setLlmAfterWrite = useCallback((next: LlmSettings) => {
+    writes.current += 1;
+    setLlm(next);
   }, []);
 
   const send = (text: string) => {
@@ -193,7 +204,7 @@ export function useAskChat(noteId: string): AskChat {
     dismissError: () => setError(null),
     markInserted: (i) => setInserted((s) => new Set(s).add(i)),
     llm,
-    setLlm,
+    setLlm: setLlmAfterWrite,
     refreshLlm,
     sheetId,
     announcement,
@@ -300,22 +311,6 @@ export function AskComposer({
   );
 }
 
-/** Ask for consent before a cloud provider first gets meeting text, as
- *  Settings does (same words, same setting); the backend enforces it too. */
-async function confirmCloudProvider(llm: LlmSettings, id: string): Promise<boolean> {
-  const info = llm.providers.find((p) => p.id === id);
-  if (!info || info.is_local) return true;
-  const key = `consent.cloud_llm.${id}`;
-  try {
-    if ((await api.getAppSetting(key)) === "true") return true;
-  } catch {
-    /* fall through to asking */
-  }
-  const ok = window.confirm(cloudConsentMessage(providerName(id)));
-  if (ok) await api.setAppSetting(key, "true").catch(() => {});
-  return ok;
-}
-
 const modelLabel = (model: string) => CLAUDE_MODELS.find((m) => m.value === model)?.label ?? model;
 
 /** "Runs on": every provider (not a local/cloud binary), plus the Claude
@@ -332,6 +327,10 @@ function RunsOn({
   keptLocal: boolean;
 }) {
   const llm = chat.llm!;
+  const confirm = useConfirm();
+  // Consent before a cloud provider first gets meeting text: the same words
+  // and setting as Settings; the backend enforces it too.
+  const askCloudConsent = useCloudConsent();
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; tone: "info" | "error" } | null>(null);
   const selectId = useId();
@@ -393,7 +392,7 @@ function RunsOn({
     setMessage(null);
     const fresh = await readFresh();
     if (!fresh || fresh.provider === id) return;
-    if (!(await confirmCloudProvider(fresh, id))) {
+    if (!(await askCloudConsent(fresh.providers, id))) {
       setMessage({ text: "Kept your current provider. Nothing was sent anywhere.", tone: "info" });
       return;
     }
@@ -411,16 +410,20 @@ function RunsOn({
     const switching = fresh.provider !== "anthropic";
     if (
       switching &&
-      !window.confirm(
-        `Ask now runs on ${providerLabel(fresh.provider)} (changed in Settings).\n\n` +
+      !(await confirm({
+        title: `Switch to ${providerLabel("anthropic")}?`,
+        message:
+          `Ask now runs on ${providerLabel(fresh.provider)} (changed in Settings).\n\n` +
           `Switch Ask, Enhance, transcript cleanup and action items to ` +
           `${providerLabel("anthropic")} with ${modelLabel(model)}?`,
-      )
+        confirmLabel: "Switch",
+        cancelLabel: "Keep current setting",
+      }))
     ) {
       setMessage({ text: `Kept ${providerLabel(fresh.provider)}.`, tone: "info" });
       return;
     }
-    if (!(await confirmCloudProvider(fresh, "anthropic"))) {
+    if (!(await askCloudConsent(fresh.providers, "anthropic"))) {
       setMessage({ text: "Kept your current setting. Nothing was sent anywhere.", tone: "info" });
       return;
     }
@@ -558,6 +561,7 @@ export function AskSheet({
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const { refreshLlm } = chat;
+  const askCloudConsent = useCloudConsent();
 
   // The saved provider may have changed in Settings since last time.
   useEffect(() => {
@@ -585,7 +589,7 @@ export function AskSheet({
   const allowAndRetry = async () => {
     if (!error) return;
     const fresh = await chat.refreshLlm();
-    if (fresh && (await confirmCloudProvider(fresh, error.provider))) chat.retry();
+    if (fresh && (await askCloudConsent(fresh.providers, error.provider))) chat.retry();
     inputRef.current?.focus();
   };
 

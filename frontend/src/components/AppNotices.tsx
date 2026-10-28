@@ -1,8 +1,9 @@
-import { CircleAlert } from "lucide-react";
-import { NOTICE_PRIORITY, appErrorCopy, updateNoticeVisible } from "../notices";
+import { CircleAlert, Sparkles } from "lucide-react";
+import { NOTICE_PRIORITY, appErrorCopy, consentSkipsCopy, updateNoticeVisible } from "../notices";
 import type { PipelineFailure } from "../pipelineFailures";
 import { pipelineFailureCopy, selectPipelineNotice } from "../pipelineNotice";
 import type { Updater } from "../updater";
+import { useConsentSkips } from "./CloudConsent";
 import SystemAudioNotice from "./SystemAudioNotice";
 import UpdateBanner from "./UpdateBanner";
 import { Button, Notice, NoticeStack, type StackedNotice } from "./ui";
@@ -32,7 +33,8 @@ interface Props {
 }
 
 /** Every app-wide notice in one corner (spec §3.7): a failure that answers
- *  the user's click > system audio > pipeline errors > update, the top one
+ *  the user's click > system audio > pipeline errors > skipped AI cleanup >
+ *  update, the top one
  *  shown and the rest behind "+N more", so notices never overlap. Recording
  *  is sacred: the launch-time system-audio warning and the update prompt
  *  wait until it stops (the recording bar carries the live capture
@@ -54,6 +56,7 @@ export default function AppNotices({
   updater,
 }: Props) {
   const notices: StackedNotice[] = [];
+  const skips = useConsentSkips();
 
   if (systemAudioBlocked && !recordingActive) {
     notices.push({
@@ -147,6 +150,40 @@ export default function AppNotices({
                 size="sm"
                 onClick={() => onDismissPipelineFailure(failure.meetingId)}
               >
+                Dismiss
+              </Button>
+            </>
+          }
+        >
+          {copy.cause}
+        </Notice>
+      ),
+    });
+  }
+
+  // Cleanup and action items the backend skipped for missing cloud consent:
+  // ask for it here, then run them. Not urgent, so it waits out a recording.
+  if (skips.count > 0 && !recordingActive) {
+    const copy = consentSkipsCopy(skips.count, skips.vendor);
+    notices.push({
+      id: "consent-skips",
+      priority: NOTICE_PRIORITY.consentSkips,
+      node: (
+        <Notice
+          tone="warning"
+          icon={<Sparkles size={18} strokeWidth={1.75} />}
+          title={copy.title}
+          actions={
+            <>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={skips.busy}
+                onClick={() => void skips.run()}
+              >
+                {copy.action}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={skips.dismiss}>
                 Dismiss
               </Button>
             </>

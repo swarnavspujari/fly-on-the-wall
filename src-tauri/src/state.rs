@@ -43,6 +43,11 @@ pub struct AppState {
     /// this snapshot lets the pane catch up on mount instead of showing an
     /// optimistic "Listening…" forever.
     pub live_status: Mutex<Option<crate::live::LiveStatus>>,
+    /// Meetings whose post-transcription cleanup / item extraction was refused
+    /// because the cloud provider has no recorded consent yet. In memory only:
+    /// the app's notice offers to run them once the user allows the provider
+    /// (`llm_commands::retry_consent_skipped`).
+    pub consent_skipped: Mutex<std::collections::BTreeSet<String>>,
     /// Nudges the embedding worker after a content write (embeddings.rs).
     /// The worker also polls, so a missed nudge only delays indexing.
     pub embed_notify: tokio::sync::Notify,
@@ -84,6 +89,7 @@ impl AppState {
             jobs_notify: tokio::sync::Notify::new(),
             ollama: Mutex::new(None),
             live_status: Mutex::new(None),
+            consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
             embed_notify: tokio::sync::Notify::new(),
         })
     }

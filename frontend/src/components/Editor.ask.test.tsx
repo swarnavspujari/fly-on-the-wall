@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { Note } from "../types";
 import Editor from "./Editor";
+import { ConfirmProvider } from "./confirm";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -78,7 +79,13 @@ const mount = async () => {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
-  act(() => root!.render(<Ed />));
+  act(() =>
+    root!.render(
+      <ConfirmProvider>
+        <Ed />
+      </ConfirmProvider>,
+    ),
+  );
   for (let i = 0; i < 5; i++) await act(async () => {});
 };
 const unmount = () => {

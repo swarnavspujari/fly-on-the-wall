@@ -28,6 +28,19 @@ impl Storage {
             .execute("DELETE FROM settings WHERE key = ?1", [key])?;
         Ok(())
     }
+
+    /// Delete every setting whose key starts with `prefix` (compared
+    /// literally, so `_` and `%` are not wildcards). An empty prefix deletes
+    /// nothing. Returns how many rows went.
+    pub fn delete_settings_with_prefix(&self, prefix: &str) -> Result<usize> {
+        if prefix.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.conn.execute(
+            "DELETE FROM settings WHERE substr(key, 1, length(?1)) = ?1",
+            [prefix],
+        )?)
+    }
 }
 
 #[cfg(test)]
@@ -44,5 +57,37 @@ mod tests {
         s.delete_setting("asr.tier").unwrap();
         assert_eq!(s.get_setting("asr.tier").unwrap(), None);
         s.delete_setting("asr.tier").unwrap(); // deleting a missing key is a no-op
+    }
+
+    #[test]
+    fn prefix_delete_is_literal_and_scoped() {
+        let (_dir, s) = test_storage();
+        for k in [
+            "consent.cloud_llm.anthropic",
+            "consent.cloud_llm.openai",
+            "consent.cloud_llmX", // no dot: not under the prefix
+            "consent.recording_notice_accepted",
+            "llm.provider",
+        ] {
+            s.set_setting(k, "true").unwrap();
+        }
+        assert_eq!(
+            s.delete_settings_with_prefix("consent.cloud_llm.").unwrap(),
+            2
+        );
+        assert_eq!(s.get_setting("consent.cloud_llm.anthropic").unwrap(), None);
+        assert_eq!(s.get_setting("consent.cloud_llm.openai").unwrap(), None);
+        for kept in [
+            "consent.cloud_llmX",
+            "consent.recording_notice_accepted",
+            "llm.provider",
+        ] {
+            assert!(s.get_setting(kept).unwrap().is_some(), "{kept}");
+        }
+        // `_` / `%` aren't LIKE wildcards here, and "" deletes nothing
+        assert_eq!(s.delete_settings_with_prefix("consent.cloud%").unwrap(), 0);
+        assert_eq!(s.delete_settings_with_prefix("consent_").unwrap(), 0);
+        assert_eq!(s.delete_settings_with_prefix("").unwrap(), 0);
+        assert!(s.get_setting("llm.provider").unwrap().is_some());
     }
 }

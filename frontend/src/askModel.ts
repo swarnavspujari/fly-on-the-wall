@@ -28,19 +28,32 @@ export function providerName(id: string): string {
   return id === "ollama" ? "Ollama" : providerVendor(id);
 }
 
-/** The one-time disclosure before a cloud provider first gets meeting text:
- *  the same words Settings shows, so consent means the same thing in both. */
-export function cloudConsentMessage(vendor: string): string {
-  return (
-    `Use ${vendor} for Ask and Enhance?\n\n` +
-    `Your notes and full meeting transcripts will be sent to ${vendor} for processing ` +
-    `whenever you run Enhance or Ask, and automatically for transcript cleanup and ` +
-    `action items after each transcription. Their data-retention terms apply (see their ` +
-    `privacy / data-usage policy).\n\n` +
-    `Recordings themselves stay on this computer, and so do notes you keep local. ` +
-    `Choose This computer (Ollama) to keep everything local.`
-  );
+/** The one-time disclosure before a cloud provider first gets meeting text.
+ *  Settings, Ask's Runs on and the launch check all show these words, so
+ *  consent means the same thing everywhere. */
+export function cloudConsentCopy(vendor: string): {
+  title: string;
+  message: string;
+  confirmLabel: string;
+} {
+  return {
+    title: `Use ${vendor} for Ask and Enhance?`,
+    message:
+      `Your notes and full meeting transcripts will be sent to ${vendor} for processing ` +
+      `whenever you run Enhance or Ask, and automatically for transcript cleanup and ` +
+      `action items after each transcription. Their data-retention terms apply (see their ` +
+      `privacy / data-usage policy).\n\n` +
+      `Recordings themselves stay on this computer, and so do notes you keep local. ` +
+      `Choose This computer (Ollama) to keep everything local.`,
+    confirmLabel: `Use ${vendor}`,
+  };
 }
+
+/** Said first when the app asks at launch: the saved provider is a cloud one
+ *  with no recorded consent (llm_commands.rs reset_unseen_cloud_consent). */
+export const cloudConsentLaunchIntro = (vendor: string) =>
+  `Your AI provider is set to ${vendor}, and nothing is sent there until you allow it. ` +
+  `Until then, Enhance, Ask, transcript cleanup and action items won't run.`;
 
 export interface AskErrorView {
   /** What went wrong, in a few words. */
@@ -73,7 +86,7 @@ export function describeAskError(error: unknown, providerId: string): AskErrorVi
       `Ask won't send it to ${who}. Pick This computer under Runs on, or turn off Keep local for this note.`,
     );
   }
-  if (t.includes("confirm that meeting content may be sent")) {
+  if (t.includes("isn't allowed to receive your meeting content")) {
     return view(
       `${who} isn't confirmed yet`,
       `Ask needs your OK before it sends this note to ${who}.`,
