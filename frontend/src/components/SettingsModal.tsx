@@ -33,6 +33,7 @@ import {
 } from "./ui";
 import { useTheme } from "../theme";
 import PrivacySection from "./PrivacySection";
+import RemindNoticeRow from "./RemindNoticeRow";
 import type { Updater } from "../updater";
 import {
   activeSectionAt,
@@ -1400,6 +1401,7 @@ export default function SettingsModal({
                         />
                       }
                     />
+                    <RemindNoticeRow />
                   </SettingsGroup>
                 </Section>
 

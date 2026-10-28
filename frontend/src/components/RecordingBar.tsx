@@ -1,9 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Megaphone, Square, X } from "lucide-react";
 import { api } from "../api";
 import { recordingNoticeText } from "../privacy";
+import { healthChips, remindNoticeOn, REMIND_NOTICE_KEY, type HealthChip } from "../recordingBar";
 import type { RecordingStatus } from "../types";
-import { Button, Checkbox, RecordingIndicator } from "./ui";
+import {
+  Button,
+  Checkbox,
+  EscapeLayerScope,
+  RecordingIndicator,
+  useDialogFocus,
+  useEscapeLayer,
+} from "./ui";
 
 interface Props {
   status: RecordingStatus;
@@ -31,27 +39,35 @@ export function fmtElapsed(ms: number): string {
     : `${m}:${String(sec).padStart(2, "0")}`;
 }
 
-/** State behind the non-blocking "Let participants know" helper: open at the
- *  start of each recording, collapsible, never gating the capture itself. */
-function useConsentHelper(meetingId: string | null, noteTitle: string | null) {
-  const [open, setOpen] = useState(true);
+/** The recording notice in the bar: one-click copy, the per-meeting
+ *  "participants notified" state, and the start-of-recording reminder
+ *  ("Remind me to tell people", on unless turned off in Settings). None of
+ *  it ever gates the capture itself. */
+function useRecordingNotice(meetingId: string | null, noteTitle: string | null) {
+  const [reminder, setReminder] = useState(false);
   const [notified, setNotified] = useState(false);
   const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
+  const resetCopied = useRef<number | undefined>(undefined);
 
   useEffect(() => {
-    setOpen(true);
+    setReminder(false);
     setNotified(false);
     setCopied("idle");
     if (!meetingId) return;
     let live = true;
-    api
-      .getMeetingPrivacy(meetingId)
-      .then((p) => {
-        if (!live) return;
-        setNotified(p.participants_notified);
-        if (p.participants_notified) setOpen(false);
-      })
-      .catch(() => {});
+    // An unreadable setting counts as on, an unreadable privacy row as "not
+    // yet notified": when in doubt, remind.
+    void Promise.all([
+      api.getAppSetting(REMIND_NOTICE_KEY).catch(() => null),
+      api
+        .getMeetingPrivacy(meetingId)
+        .then((p) => p.participants_notified)
+        .catch(() => false),
+    ]).then(([remind, wasNotified]) => {
+      if (!live) return;
+      setNotified(wasNotified);
+      setReminder(remindNoticeOn(remind) && !wasNotified);
+    });
     return () => {
       live = false;
     };
@@ -62,20 +78,232 @@ function useConsentHelper(meetingId: string | null, noteTitle: string | null) {
       .copyRecordingNotice(recordingNoticeText(noteTitle))
       .then(() => setCopied("copied"))
       .catch(() => setCopied("failed"))
-      .finally(() => window.setTimeout(() => setCopied("idle"), 1800));
+      .finally(() => {
+        window.clearTimeout(resetCopied.current);
+        resetCopied.current = window.setTimeout(() => setCopied("idle"), 1800);
+      });
   };
   const markNotified = (value: boolean) => {
     if (!meetingId) return;
     setNotified(value);
     api.setParticipantsNotified(meetingId, value).catch(() => setNotified(!value));
-    if (value) setOpen(false);
+    if (value) setReminder(false);
   };
-  return { open, setOpen, notified, copied, copy, markNotified };
+  return {
+    reminder,
+    closeReminder: () => setReminder(false),
+    notified,
+    copied,
+    copy,
+    markNotified,
+  };
 }
 
-/** Always-visible recording bar (spec §9): while a capture is live this bar is
- *  pinned above everything on every view, on a violet-soft ground, with the
- *  unmissable "system output muted" warning strip on ink beneath it. */
+/** Whether stopping will start the transcript ("Transcribe when I stop"),
+ *  read when each recording starts so the stop button says what happens. */
+function useTranscribesOnStop(meetingId: string | null) {
+  const [auto, setAuto] = useState(true);
+  useEffect(() => {
+    if (!meetingId) return;
+    let live = true;
+    api
+      .getAsrSettings()
+      .then((s) => {
+        if (live) setAuto(s.auto_transcribe);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [meetingId]);
+  return auto;
+}
+
+/** One side of the call (You = your mic, Others = system audio). With no
+ *  warning it's a quiet status chip; with one it turns ink and opens the
+ *  full cause and fix (there are no live meters yet, spec §3.3.1). */
+function HealthChipView({
+  chip,
+  onOpenPrivacySettings,
+}: {
+  chip: HealthChip;
+  onOpenPrivacySettings?: () => void;
+}) {
+  const warn = chip.tone === "warn";
+  const [open, setOpen] = useState(false);
+  const popRef = useRef<HTMLDivElement>(null);
+  const depth = useEscapeLayer(() => setOpen(false), open && warn);
+  useDialogFocus(popRef, open && warn);
+  // a warning that clears (you unmuted) takes its popover with it
+  useEffect(() => {
+    if (!warn) setOpen(false);
+  }, [warn]);
+
+  const name = chip.side === "you" ? "You" : "Others";
+  if (!warn) {
+    return (
+      <span
+        className="inline-flex flex-none items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-[3px] text-[12px] font-semibold text-text-2"
+        title={
+          chip.tone === "paused"
+            ? "Paused"
+            : chip.side === "you"
+              ? "Your microphone: no problems detected"
+              : "The other participants' audio: no problems detected"
+        }
+      >
+        <span
+          className="h-[7px] w-[7px] flex-none rounded-full"
+          style={{ background: chip.tone === "paused" ? "var(--text-3)" : "var(--success)" }}
+        />
+        {chip.label}
+      </span>
+    );
+  }
+
+  const detail = chip.label.slice(name.length);
+  return (
+    <span className="relative inline-flex flex-none">
+      <button
+        type="button"
+        aria-label={chip.label}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-warning bg-brand-ink px-2.5 py-[3px] text-[12px] font-semibold text-brand-cream hover:opacity-90"
+      >
+        <span className="h-[7px] w-[7px] flex-none rounded-full bg-warning" />
+        {name}
+        <span className="hidden md:inline">{detail}</span>
+      </button>
+      {open && (
+        <>
+          <span className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden="true" />
+          <div
+            ref={popRef}
+            role="dialog"
+            aria-label={
+              chip.side === "you"
+                ? "Your microphone may be missing from this recording"
+                : "The other participants may be missing from this recording"
+            }
+            className="absolute left-0 z-50 w-[360px] max-w-[calc(100vw-32px)] rounded-2xl border border-line bg-surface p-3.5 text-text"
+            style={{ top: "calc(100% + 8px)", boxShadow: "var(--shadow-pop)" }}
+          >
+            <EscapeLayerScope depth={depth}>
+              <div className="flex items-start gap-2">
+                <span className="mt-[5px] h-2 w-2 flex-none rounded-full bg-warning" />
+                <p className="m-0 min-w-0 flex-1 text-[13px] font-semibold">
+                  {chip.side === "you"
+                    ? "Your microphone may be missing from this recording"
+                    : "The other participants may be missing from this recording"}
+                </p>
+                <button
+                  type="button"
+                  data-dialog-close
+                  aria-label="Close"
+                  onClick={() => setOpen(false)}
+                  className="flex-none cursor-pointer rounded p-0.5 text-text-3 hover:text-text"
+                >
+                  <X size={14} strokeWidth={2} />
+                </button>
+              </div>
+              {chip.warnings.map((w) => (
+                <div key={w.text} className="mt-2 pl-4">
+                  <p className="m-0 text-[12.5px] leading-[1.5] text-text-2">{w.text}</p>
+                  {w.privacyPane && onOpenPrivacySettings && (
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      className="mt-2"
+                      onClick={onOpenPrivacySettings}
+                    >
+                      Open Settings
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </EscapeLayerScope>
+          </div>
+        </>
+      )}
+    </span>
+  );
+}
+
+/** Start-of-recording reminder under the notice controls. Never takes focus
+ *  (you may already be typing notes); ticking "Participants notified", the X
+ *  or Esc closes it. */
+function NoticeReminder({
+  copied,
+  onCopy,
+  onClose,
+}: {
+  copied: "idle" | "copied" | "failed";
+  onCopy: () => void;
+  onClose: () => void;
+}) {
+  useEscapeLayer(onClose);
+  return (
+    <div
+      role="region"
+      aria-label="Reminder: let participants know"
+      className="absolute right-0 z-40 w-[330px] max-w-[calc(100vw-32px)] rounded-2xl border border-line bg-surface p-3.5 text-text"
+      style={{ top: "calc(100% + 8px)", boxShadow: "var(--shadow-pop)" }}
+    >
+      <div className="flex items-start gap-2.5">
+        <Megaphone
+          size={15}
+          strokeWidth={1.75}
+          className="mt-px flex-none"
+          style={{ color: "var(--primary-text)" }}
+        />
+        <div className="min-w-0 flex-1">
+          <p className="m-0 text-[13px] font-semibold">
+            Let participants know they&apos;re being recorded
+          </p>
+          <p className="m-0 mt-0.5 text-[12.5px] leading-[1.5] text-text-2">
+            Some places require everyone&apos;s consent. Paste the notice in the meeting chat, then
+            tick Participants notified.
+          </p>
+          <Button
+            variant="soft"
+            size="xs"
+            className="mt-2.5"
+            startIcon={
+              copied === "copied" ? (
+                <Check size={13} strokeWidth={2} />
+              ) : (
+                <Copy size={13} strokeWidth={1.75} />
+              )
+            }
+            onClick={onCopy}
+          >
+            {copied === "copied"
+              ? "Copied — paste it in the meeting chat"
+              : copied === "failed"
+                ? "Couldn't copy"
+                : "Copy recording notice"}
+          </Button>
+        </div>
+        <button
+          type="button"
+          title="Hide"
+          aria-label="Hide the reminder"
+          onClick={onClose}
+          className="flex-none cursor-pointer rounded p-0.5 text-text-3 hover:text-text"
+        >
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Always-visible recording bar (spec §3.3): while a capture is live this one
+ *  fixed-height row is pinned above every view, on a violet-soft ground.
+ *  Capture warnings live in the Others / You chips (click for the full cause
+ *  and fix), so the editor below never moves. */
 export default function RecordingBar({
   status,
   noteTitle,
@@ -87,56 +315,99 @@ export default function RecordingBar({
   onOpenNote,
   onOpenPrivacySettings,
 }: Props) {
-  const consent = useConsentHelper(status.active ? status.meeting_id : null, noteTitle);
+  const meetingId = status.active ? status.meeting_id : null;
+  const notice = useRecordingNotice(meetingId, noteTitle);
+  const transcribesOnStop = useTranscribesOnStop(meetingId);
   if (!status.active) return null;
   const paused = status.state === "paused";
+  const chips = healthChips(status.warnings, paused);
+  const warned = chips.filter((c) => c.tone === "warn");
+  const copyLabel =
+    notice.copied === "copied"
+      ? "Copied"
+      : notice.copied === "failed"
+        ? "Couldn't copy"
+        : "Copy recording notice";
 
   return (
     <div className="print:hidden">
-      <div className="flex flex-wrap items-center gap-3 border-b border-line bg-primary-soft px-4 py-2">
+      <div
+        data-recording-bar-row
+        className="flex h-[46px] flex-nowrap items-center gap-3 border-b border-line bg-primary-soft px-4"
+      >
         <RecordingIndicator
+          className="flex-none"
           state={paused ? "paused" : "recording"}
           label={paused ? "Recording paused" : "Recording"}
           elapsedMs={status.elapsed_ms}
         />
         {noteTitle && (
           <button
-            className="cursor-pointer truncate text-[13px] text-primary-soft-text underline-offset-2 hover:underline"
+            className="hidden min-w-0 cursor-pointer truncate text-[13px] text-primary-soft-text underline-offset-2 hover:underline lg:block"
             onClick={onOpenNote}
+            title={noteTitle}
           >
             {noteTitle}
           </button>
         )}
+        <div className="flex flex-none items-center gap-1.5">
+          {chips.map((c) => (
+            <HealthChipView key={c.side} chip={c} onOpenPrivacySettings={onOpenPrivacySettings} />
+          ))}
+        </div>
+        {/* announce a new capture problem; the chip itself is the visible cue */}
+        <span className="sr-only" role="status" aria-live="polite">
+          {warned.map((c) => c.label).join(". ")}
+        </span>
         {screenActive && (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-[3px] text-[12px] font-semibold text-text-2">
+          <span className="inline-flex flex-none items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-[3px] text-[12px] font-semibold text-text-2">
             <span
               className="h-[7px] w-[7px] flex-none rounded-full bg-rec"
               style={{ animation: "fly-pulse-dot 1.2s ease infinite" }}
             />
-            Screen · {screenSource ?? "recording"}
+            Screen<span className="hidden lg:inline"> · {screenSource ?? "recording"}</span>
           </span>
         )}
-        <div className="ml-auto flex items-center gap-2">
-          {status.meeting_id &&
-            !consent.open &&
-            (consent.notified ? (
-              <button
-                className="inline-flex cursor-pointer items-center gap-1 text-[12px] font-medium text-primary-soft-text"
-                title="You noted that participants were told about the recording"
-                onClick={() => consent.setOpen(true)}
-              >
-                <Check size={13} strokeWidth={2} /> Participants notified
-              </button>
-            ) : (
+        <div className="ml-auto flex flex-none items-center gap-2">
+          {status.meeting_id && (
+            <div className="relative flex items-center gap-2">
               <Button
                 variant="ghost"
                 size="sm"
-                startIcon={<Megaphone size={13} strokeWidth={1.75} />}
-                onClick={() => consent.setOpen(true)}
+                aria-label={copyLabel}
+                title={recordingNoticeText(noteTitle)}
+                startIcon={
+                  notice.copied === "copied" ? (
+                    <Check size={13} strokeWidth={2} />
+                  ) : (
+                    <Megaphone size={13} strokeWidth={1.75} />
+                  )
+                }
+                onClick={notice.copy}
               >
-                Let participants know
+                <span className="hidden xl:inline">{copyLabel}</span>
               </Button>
-            ))}
+              <Checkbox
+                aria-label="Participants notified"
+                title="You told everyone about the recording"
+                checked={notice.notified}
+                onChange={(e) => notice.markNotified(e.target.checked)}
+                label={
+                  <span className="text-[12.5px] font-medium text-primary-soft-text">
+                    <span className="hidden xl:inline">Participants notified</span>
+                    <span className="hidden sm:inline xl:hidden">Notified</span>
+                  </span>
+                }
+              />
+              {notice.reminder && (
+                <NoticeReminder
+                  copied={notice.copied}
+                  onCopy={notice.copy}
+                  onClose={notice.closeReminder}
+                />
+              )}
+            </div>
+          )}
           {paused ? (
             <Button variant="outline" size="sm" onClick={onResume}>
               Resume
@@ -150,82 +421,13 @@ export default function RecordingBar({
             variant="contrast"
             size="sm"
             onClick={onStop}
+            title={transcribesOnStop ? "Stop recording and start the transcript" : "Stop recording"}
             startIcon={<Square size={11} strokeWidth={1.75} />}
           >
-            Stop
+            {transcribesOnStop ? "Stop and transcribe" : "Stop"}
           </Button>
         </div>
       </div>
-      {status.meeting_id && consent.open && (
-        <div
-          role="region"
-          aria-label="Let participants know"
-          className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line bg-surface px-4 py-1.5"
-        >
-          <Megaphone
-            size={14}
-            strokeWidth={1.75}
-            className="flex-none"
-            style={{ color: "var(--primary-text)" }}
-          />
-          <span className="min-w-0 flex-1 text-[12.5px] text-text-2">
-            Let participants know they're being recorded. Some places require everyone's consent.
-          </span>
-          <Button
-            variant="soft"
-            size="xs"
-            startIcon={
-              consent.copied === "copied" ? (
-                <Check size={13} strokeWidth={2} />
-              ) : (
-                <Copy size={13} strokeWidth={1.75} />
-              )
-            }
-            title={recordingNoticeText(noteTitle)}
-            onClick={consent.copy}
-          >
-            {consent.copied === "copied"
-              ? "Copied — paste it in the meeting chat"
-              : consent.copied === "failed"
-                ? "Couldn't copy"
-                : "Copy recording notice"}
-          </Button>
-          <Checkbox
-            checked={consent.notified}
-            onChange={(e) => consent.markNotified(e.target.checked)}
-            label={<span className="text-[12.5px]">Participants notified</span>}
-          />
-          <button
-            title="Hide"
-            aria-label="Hide the participants notice"
-            className="flex-none cursor-pointer rounded p-0.5 text-text-3 hover:text-text"
-            onClick={() => consent.setOpen(false)}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-      )}
-      {status.warnings.length > 0 && (
-        <div className="bg-brand-ink px-4 py-1.5">
-          {status.warnings.map((w) => (
-            <p
-              key={w}
-              className="flex items-center gap-2 text-[12.5px] font-medium text-brand-cream"
-            >
-              <span className="h-2 w-2 flex-none rounded-full bg-warning" />
-              <span className="min-w-0 flex-1">{w}</span>
-              {onOpenPrivacySettings && w.includes("Screen & System Audio Recording") && (
-                <button
-                  className="flex-none cursor-pointer rounded-md border border-brand-cream/40 px-2 py-[2px] text-[11.5px] font-semibold text-brand-cream hover:bg-brand-cream/10"
-                  onClick={onOpenPrivacySettings}
-                >
-                  Open Settings
-                </button>
-              )}
-            </p>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

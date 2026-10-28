@@ -34,6 +34,12 @@
                                      can't convert screen-walkthrough.mp4:
                                      that row shows its cause, the others
                                      convert; "Retry failed file" succeeds
+     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "none"
+                                   → with fotwMockRecording, the capture's
+                                     warnings are the exact backend sentence
+                                     for that case (recording bar chips)
+     fotwMockNoAttendees = "1"     → Record starts with no attendees, as with
+                                     no calendar event (speaker card, typed)
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -673,6 +679,8 @@ function upcoming() {
 }
 
 function recordingStatus() {
+  const qa = mockRecordingQa();
+  if (qa) return qa;
   if (typeof localStorage !== "undefined" && localStorage.getItem("fotwMockRecording") === "1") {
     return {
       active: true,
@@ -942,6 +950,13 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
           .map((a) => ({ name: a.name?.trim() || a.email, email: a.email }));
         mockAttendeesConfirmed = false;
       }
+      // fotwMockNoAttendees: no calendar event, so the backend starts the
+      // meeting with no attendees (unconfirmed)
+      if (mockFlag("fotwMockNoAttendees") === "1") {
+        mockAttendees = [];
+        mockAttendeesConfirmed = false;
+      }
+      mockRecPaused = false;
       if (typeof localStorage !== "undefined") localStorage.setItem("fotwMockRecording", "1");
       return recordingStatus();
     }
@@ -1185,6 +1200,17 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mockFlag("fotwMockUpdate") === "fail"
         ? Promise.reject(new Error("download failed: connection reset by peer"))
         : new Promise(() => {});
+    case "pause_recording":
+      mockRecPaused = true;
+      return recordingStatus();
+    case "resume_recording":
+      mockRecPaused = false;
+      return recordingStatus();
+    case "stop_recording":
+      // the capture ends; the meeting comes back like the backend's
+      mockRecPaused = false;
+      if (typeof localStorage !== "undefined") localStorage.removeItem("fotwMockRecording");
+      return meeting("n1");
     default:
       return null;
   }
@@ -1236,6 +1262,41 @@ function mockImportConvertFailure(order: string[]) {
       resolve(mockImport);
     }, t + 400);
   });
+}
+
+/* ---- recording bar QA ----
+   fotwMockRecWarning swaps the active capture's warnings for the backend's
+   exact sentences (fly-audio cpal_backend.rs / tap_messages.rs), so each
+   warning chip can be checked; pause_recording / resume_recording round-trip
+   through mockRecPaused. Returns null to keep the original fixture. */
+let mockRecPaused = false;
+const MOCK_REC_WARNINGS: Record<string, string[]> = {
+  none: [],
+  muted: [
+    "System output is muted — the other participants' audio will record as silence. Unmute your speakers.",
+  ],
+  volume: [
+    "System volume is at 0% — the other participants' audio will record as silence. Raise your system volume.",
+  ],
+  loopback: [
+    "System audio capture couldn't start (no default output device) — only your microphone is being recorded, so the other participants won't be in this recording.",
+  ],
+  macos: [
+    "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall. If it already shows as allowed, the grant belongs to a previously installed build: remove Fly on the Wall from that list with the − button and re-add it (or run `tccutil reset ScreenCapture com.flyonthewall.app` in Terminal), then relaunch.",
+  ],
+};
+function mockRecordingQa() {
+  if (mockFlag("fotwMockRecording") !== "1") return null;
+  const which = mockFlag("fotwMockRecWarning");
+  if (which == null && !mockRecPaused) return null;
+  return {
+    active: true,
+    state: mockRecPaused ? "paused" : "recording",
+    elapsed_ms: 154_000,
+    meeting_id: "m1",
+    note_id: "n1",
+    warnings: which != null ? (MOCK_REC_WARNINGS[which] ?? []) : (MOCK_REC_WARNINGS.muted ?? []),
+  };
 }
 
 function installDevMock() {

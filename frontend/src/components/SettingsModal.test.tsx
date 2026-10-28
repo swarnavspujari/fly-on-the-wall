@@ -419,3 +419,23 @@ describe("RestartRequired", () => {
     expect(document.activeElement?.textContent).toBe("Restart now");
   });
 });
+
+describe("Recording › Remind me to tell people", () => {
+  it("is on by default and saves under a ui. key", async () => {
+    const set = vi.spyOn(api, "setAppSetting");
+    await open();
+    const sw = $('[aria-label="Remind me to tell people"]')!;
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    await click(sw);
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    expect(set).toHaveBeenCalledWith("ui.recording.remind_notice", "false");
+    await click(sw);
+    expect(set).toHaveBeenLastCalledWith("ui.recording.remind_notice", "true");
+  });
+
+  it("is found by searching for it", async () => {
+    await open();
+    await type($<HTMLInputElement>("input[type=search]")!, "remind");
+    expect(headings()).toEqual(["Recording"]);
+  });
+});

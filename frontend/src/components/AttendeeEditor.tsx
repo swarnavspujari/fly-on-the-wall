@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Plus, RefreshCw, X } from "lucide-react";
+import { Check, Plus, RefreshCw, Users, X } from "lucide-react";
 import type { Attendee, Meeting, Transcript } from "../types";
 import { api } from "../api";
-import { Avatar } from "./ui";
+import { Avatar, Button, useEscapeLayer } from "./ui";
 
 /* ============================================================
    Attendee pill → popover editor (design: templates/attendee-editor).
@@ -13,12 +13,20 @@ import { Avatar } from "./ui";
         focus; the original email is kept as a quiet caption after rename)
      4. post-save "Re-analyze speakers" offer + undo (toast + footer, 10 min)
      5. (transcript speaker dropdown lives in TranscriptPanel)
+   Plus the speaker card (spec §3.3.2): while this meeting records with an
+   unconfirmed roster, a card under the meta row asks who's on the call.
+   "Looks right" confirms the calendar roster as it is; nothing confirms it
+   by itself, because only a confirmed roster sets num_speakers.
    Keyboard: tab reaches the pill · enter opens · esc closes · ↵ adds a row
    · ⌘Z undoes re-analysis while the undo window is open.
    ============================================================ */
 
 /** How long the undo affordance stays reachable after a re-analyze. */
 const UNDO_WINDOW_MS = 10 * 60_000;
+
+/** Meetings whose speaker card you closed this session (it doesn't come back
+ *  when you switch notes and return). */
+const dismissedCards = new Set<string>();
 
 const displayName = (a: Attendee): string => (a.name.trim() ? a.name.trim() : (a.email ?? ""));
 
@@ -75,6 +83,13 @@ export default function AttendeeEditor({
   const rowKey = useRef(1);
   const popRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
+  // Speaker card: shown while THIS meeting is the one recording. Holds the
+  // recording meeting's id (not a boolean) so switching notes never flashes
+  // the previous meeting's card.
+  const [recordingId, setRecordingId] = useState<string | null>(null);
+  const [, setDismissTick] = useState(0);
+  const [cardBusy, setCardBusy] = useState(false);
+  const [cardError, setCardError] = useState<string | null>(null);
 
   const undoLive = undoAt != null && now - undoAt < UNDO_WINDOW_MS;
 
@@ -121,15 +136,54 @@ export default function AttendeeEditor({
     setOpen(true);
   };
 
-  // esc closes (only the popover — never steals from an open menu elsewhere)
+  // esc closes the popover — through the shared layer stack, so it only
+  // ever closes the topmost layer
+  useEscapeLayer(() => setOpen(false), open);
+
+  // Is this meeting the one recording right now? Re-checked whenever the
+  // meeting object changes (start, stop, attendee edits). A confirmed roster
+  // never needs the card.
   useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+    if (meeting.attendees_confirmed) {
+      setRecordingId(null);
+      return;
+    }
+    let live = true;
+    api
+      .recordingStatus()
+      .then((s) => {
+        if (live) setRecordingId(s.active ? s.meeting_id : null);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
     };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [meeting]);
+
+  const cardOpen =
+    recordingId === meeting.id &&
+    !meeting.attendees_confirmed &&
+    !dismissedCards.has(meeting.id) &&
+    !open;
+  const dismissCard = () => {
+    dismissedCards.add(meeting.id);
+    setDismissTick((t) => t + 1);
+  };
+  useEscapeLayer(dismissCard, cardOpen);
+
+  // The only paths that confirm a roster from the card: "Looks right" (the
+  // list exactly as it is) and "Done" after typing names. Both are clicks.
+  const confirmRoster = async (attendees: Attendee[]) => {
+    setCardBusy(true);
+    setCardError(null);
+    try {
+      onMeetingChanged(await api.updateMeetingAttendees(meeting.id, attendees));
+    } catch (e) {
+      setCardError(String(e));
+    } finally {
+      setCardBusy(false);
+    }
+  };
 
   const revert = useCallback(async () => {
     if (busy) return;
@@ -358,7 +412,7 @@ export default function AttendeeEditor({
   const othersCount = justYou ? 0 : rows.filter((r) => r.name.trim() || r.email).length;
   const seededCount = rows.filter((r) => r.email != null).length;
 
-  return (
+  const main = (
     <span className="relative inline-flex">
       {pill}
 
@@ -640,6 +694,170 @@ export default function AttendeeEditor({
         </div>
       )}
     </span>
+  );
+
+  return (
+    <>
+      {main}
+      {cardOpen && (
+        <SpeakerCard
+          attendees={atts}
+          busy={cardBusy}
+          error={cardError}
+          onConfirm={(list) => void confirmRoster(list)}
+          onSomeoneElse={() => {
+            openEditor();
+            addRow();
+          }}
+          onDismiss={dismissCard}
+        />
+      )}
+    </>
+  );
+}
+
+/** Speaker card v1 (spec §3.3.2). Rendered as the last item of the note's
+ *  meta row, full width, so it sits under the chips and pushes the note down
+ *  instead of covering it. Never takes focus: you may already be typing.
+ *  No "just a count" option: there's no field for one (Meeting.attendees). */
+function SpeakerCard({
+  attendees,
+  busy,
+  error,
+  onConfirm,
+  onSomeoneElse,
+  onDismiss,
+}: {
+  attendees: Attendee[];
+  busy: boolean;
+  error: string | null;
+  onConfirm: (attendees: Attendee[]) => void;
+  onSomeoneElse: () => void;
+  onDismiss: () => void;
+}) {
+  const [names, setNames] = useState<string[]>([]);
+  const [draft, setDraft] = useState("");
+  const hasRoster = attendees.length > 0;
+  const fromCalendar = attendees.some((a) => a.email != null);
+  const typed = draft.trim() ? [...names, draft.trim()] : names;
+
+  const addName = () => {
+    const n = draft.trim();
+    if (!n) return;
+    setNames((ns) => (ns.some((x) => x.toLowerCase() === n.toLowerCase()) ? ns : [...ns, n]));
+    setDraft("");
+  };
+
+  const chip = (label: string, i: number, self = false, onRemove?: () => void) => (
+    <span
+      key={`${i}-${label}`}
+      className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 py-[3px] pl-1 text-[12.5px] text-text"
+      style={{ paddingRight: onRemove ? 4 : 10 }}
+    >
+      <Avatar name={label} self={self} index={i} shape="circle" size="xs" />
+      {label}
+      {onRemove && (
+        <button
+          type="button"
+          aria-label={`Remove ${label}`}
+          onClick={onRemove}
+          className="grid h-4 w-4 cursor-pointer place-items-center rounded-full border-0 bg-transparent p-0 text-text-3 hover:text-text"
+        >
+          <X size={11} strokeWidth={2} />
+        </button>
+      )}
+    </span>
+  );
+
+  return (
+    <div
+      role="region"
+      aria-label="Who's on this call"
+      className="order-last flex w-full basis-full flex-col gap-3 rounded-[14px] border border-line bg-surface px-4 py-3.5"
+      style={{ animation: "fly-fade-up 200ms var(--ease-out)" }}
+    >
+      <div className="flex items-center gap-2.5">
+        <Users
+          size={15}
+          strokeWidth={1.75}
+          className="flex-none"
+          style={{ color: "var(--primary-text)" }}
+        />
+        <span className="flex-none whitespace-nowrap text-[13.5px] font-semibold text-text">
+          {fromCalendar ? "From the invite" : "Who's on this call?"}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-right text-[12px] text-text-3">
+          Optional · helps label speakers
+        </span>
+        <button
+          type="button"
+          title="Not now"
+          aria-label="Not now"
+          onClick={onDismiss}
+          className="grid h-6 w-6 flex-none cursor-pointer place-items-center rounded border-0 bg-transparent text-text-3 hover:bg-surface-3 hover:text-text"
+        >
+          <X size={13} strokeWidth={2} />
+        </button>
+      </div>
+      {hasRoster ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {chip("You", 0, true)}
+          {attendees.map((a, i) => chip(displayName(a), i + 1))}
+          <div className="ml-auto flex gap-1.5">
+            <Button variant="ghost" size="xs" onClick={onSomeoneElse} disabled={busy}>
+              Someone else joined
+            </Button>
+            <Button
+              variant="soft"
+              size="xs"
+              onClick={() => onConfirm(attendees)}
+              disabled={busy}
+              title="Use this list to tell the voices apart"
+            >
+              {busy ? "Saving…" : "Looks right"}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {chip("You", 0, true)}
+          {names.map((n, i) =>
+            chip(n, i + 1, false, () => setNames((ns) => ns.filter((x) => x !== n))),
+          )}
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addName();
+              }
+            }}
+            aria-label="Add a name"
+            placeholder="Add a name, press Enter"
+            className="min-w-[160px] flex-1 rounded-full border border-line bg-surface px-2.5 py-[5px] text-[12.5px] text-text outline-none focus:border-primary"
+          />
+          <Button
+            variant="soft"
+            size="xs"
+            // an empty list would mean "just you": never confirm that from here
+            disabled={busy || typed.length === 0}
+            onClick={() => onConfirm(typed.map((name) => ({ name })))}
+          >
+            {busy ? "Saving…" : "Done"}
+          </Button>
+        </div>
+      )}
+      {error && (
+        <div
+          className="rounded-lg px-2.5 py-1.5 text-[12px]"
+          style={{ background: "var(--error-soft)", color: "var(--error-text)" }}
+          role="alert"
+        >
+          {error}
+        </div>
+      )}
+    </div>
   );
 }
 
