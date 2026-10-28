@@ -348,6 +348,8 @@ function redirects(segment) {
     }
     if (c !== ">" && c !== "<") continue;
     let j = i + 1;
+    // `<<EOF` / `<<<word`: a heredoc or here-string, not an input file.
+    const heredoc = c === "<" && segment[j] === "<";
     while (j < segment.length && /[<>|&]/.test(segment[j])) j++;
     if (segment[j] === "(") {
       i = j; // process substitution
@@ -362,7 +364,7 @@ function redirects(segment) {
     } else {
       while (j < segment.length && !/[\s;|&<>]/.test(segment[j])) t += segment[j++];
     }
-    if (t && !/^\d+$/.test(t)) (c === ">" ? outs : ins).push(t);
+    if (t && !heredoc && !/^\d+$/.test(t)) (c === ">" ? outs : ins).push(t);
     i = j - 1;
   }
   return { outs, ins };
@@ -445,7 +447,25 @@ const LAUNCHERS = new Set([
 // Inline-code flags: shells run their next argument as a command,
 // interpreters as code.
 const SHELL_INLINE = /^(-c|-lc|-ic|-xc|-ec|-command|-c[a-z]*|\/c|\/k)$/i;
-const INTERP_INLINE = /^(-e|-c|-E|--eval|-p|--print|-r)$/;
+// Per interpreter: the flags that take code inline. An interpreter whose
+// flag isn't listed is treated as reading stdin (fail closed): `perl -p`
+// loops over stdin, `ruby -r x` still reads its script from stdin.
+const INLINE_FLAGS = {
+  python: /^-[a-zA-Z]*c$/,
+  py: /^-[a-zA-Z]*c$/,
+  node: /^(-e|--eval|-p|--print)$/,
+  nodejs: /^(-e|--eval|-p|--print)$/,
+  bun: /^(-e|--eval|-p|--print)$/,
+  deno: /^(eval)$/,
+  perl: /^-[a-zA-Z]*[eE]$/,
+  ruby: /^-[a-zA-Z]*e$/,
+  php: /^-r$/,
+  osascript: /^-e$/,
+};
+const inlineFlag = (v, x) => {
+  const key = /^python[0-9.]*$/.test(v) ? "python" : v;
+  return INLINE_FLAGS[key] ? INLINE_FLAGS[key].test(x) : false;
+};
 
 // Package runners whose next word is the real command.
 const WRAPPERS = new Set(["npx", "bunx", "pnpx", "uvx", "sudo", "command", "env", "nohup", "doas"]);
@@ -479,20 +499,36 @@ function skipPrefixes(ws) {
 /** The real verb of a simple command: past prefixes, wrappers and
  * launchers (and their options / numeric arguments). */
 function realVerb(ws) {
-  let k = skipPrefixes(ws);
-  while (k < ws.length && LAUNCHERS.has(verbOf(ws[k]))) {
-    k++;
-    while (k < ws.length && (/^[-+]/.test(ws[k]) || /^\d/.test(ws[k]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k]))) k++;
-  }
+  const k = realVerbIndex(ws);
   return k < ws.length ? verbOf(ws[k]) : "";
 }
 
 /** Index of the real verb (see [`realVerb`]). */
 function realVerbIndex(ws) {
+  // A wrapper or launcher first (`sudo -u x bash`, `env -u X sh`): its
+  // options can take values, so take the first shell or interpreter after
+  // it (fail closed).
+  let k0 = 0;
+  while (k0 < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k0])) k0++;
+  if (k0 < ws.length && (LAUNCHERS.has(verbOf(ws[k0])) || WRAPPERS.has(verbOf(ws[k0])))) {
+    for (let j = k0 + 1; j < ws.length; j++) {
+      const v = verbOf(ws[j]);
+      if (SHELLS.has(v) || isInterpreter(v)) return j;
+    }
+  }
   let k = skipPrefixes(ws);
-  while (k < ws.length && LAUNCHERS.has(verbOf(ws[k]))) {
-    k++;
-    while (k < ws.length && (/^[-+]/.test(ws[k]) || /^\d/.test(ws[k]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k]))) k++;
+  if (k < ws.length && LAUNCHERS.has(verbOf(ws[k]))) {
+    // Launcher options can take values (`sudo -u x`, `timeout -s KILL 5`):
+    // rather than know each one, take the first shell or interpreter after
+    // it (fail closed).
+    for (let j = k + 1; j < ws.length; j++) {
+      const v = verbOf(ws[j]);
+      if (SHELLS.has(v) || isInterpreter(v)) return j;
+    }
+    while (k < ws.length && LAUNCHERS.has(verbOf(ws[k]))) {
+      k++;
+      while (k < ws.length && (/^[-+]/.test(ws[k]) || /^\d/.test(ws[k]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k]))) k++;
+    }
   }
   return k;
 }
@@ -532,7 +568,7 @@ function trustRootViolation(cmd) {
   if (
     /\bgraphql\b/i.test(cmd) &&
     (/\bmutation\b/i.test(cmd) ||
-      /query=@|--input\b|-F\s*\S*=@|\.graphql\b/i.test(cmd) ||
+      /@|--input\b|--data|--post-file|--upload-file|(^|\s)-T\b|\.graphql\b/i.test(cmd) ||
       /(branchProtectionRule|repositoryRuleset|ruleset|bypass|actionsVariable|updateRepository)/i.test(cmd))
   ) {
     return "a GraphQL mutation, or a query that can't be inspected";
@@ -587,6 +623,21 @@ export function commandViolation(command, ctx = {}, depth = 0) {
   // A shell or interpreter reading stdin (`echo "rm evals/x" | bash`,
   // `cat x.py | python -`) runs what the other segments feed it.
   const segs = segments(text);
+  for (const s of segs) {
+    const ws = words(s);
+    const v = verbOf(ws[realVerbIndex(ws)] || "");
+    if (!SHELLS.has(v) && !isInterpreter(v)) continue;
+    for (const src of redirects(s).ins) {
+      const t = safeRead(path.resolve(vctx.cwd, nativePath(expand(src, vctx))));
+      if (SHELLS.has(v)) {
+        if (t === null) return "a file redirected into a shell that couldn't be checked";
+        const why = commandViolation(t, vctx, depth + 1);
+        if (why) return why;
+      } else if (t === null ? looseMention : WRITE_API.test(t) && (mentions(t) || here())) {
+        return `${v} code from a redirected file that writes a protected path`;
+      }
+    }
+  }
   const stdinReaders = segs
     .map((s) => {
       const ws = words(s);
@@ -595,14 +646,21 @@ export function commandViolation(command, ctx = {}, depth = 0) {
       const rest = ws.slice(k + 1);
       const shell = SHELLS.has(v);
       if (!shell && !isInterpreter(v)) return null;
-      if (rest.some((x) => (shell ? SHELL_INLINE : INTERP_INLINE).test(x))) return null;
+      if (rest.some((x) => (shell ? SHELL_INLINE.test(x) : inlineFlag(v, x)))) return null;
       // The script argument, skipping options that take a value (-o x, +o x, -O x).
       let script = null;
       for (let j = 0; j < rest.length; j++) {
-        if (/^[-+][oO]$/.test(rest[j])) {
+        // Options that take a value: shells -o/-O/+o; interpreters
+        // -r/-I/-W/-X/-C/-E/-M (ruby -r json, perl -M x, python -W x) and
+        // --require / --import / --loader.
+        const takesValue = shell
+          ? /^[-+][oO]$/.test(rest[j])
+          : /^(-[rIWXCEM]|--require|--import|--loader|--input-type)$/.test(rest[j]);
+        if (takesValue || /^[0-9&]*(<|>)+\|?$/.test(rest[j])) {
           j++;
           continue;
         }
+        if (/^[0-9&]*[<>]/.test(rest[j])) continue;
         if (!/^[-+]/.test(rest[j])) {
           script = rest[j];
           break;
@@ -628,7 +686,8 @@ export function commandViolation(command, ctx = {}, depth = 0) {
         if (["cat", "type", "get-content", "gc", "tac", "head", "tail"].includes(v)) {
           fed = [];
           // (Redirect tokens aren't files; a heredoc body was checked above.)
-          for (const f of ws.slice(k + 1).filter((x) => !/^-/.test(x) && !/^[0-9&]*[<>]/.test(x))) {
+          const files = ws.slice(k + 1).filter((x) => !/^-/.test(x) && !/^[0-9&]*[<>]/.test(x));
+          for (const f of [...files.filter((x) => !redirects(s).outs.includes(x)), ...redirects(s).ins]) {
             const t = safeRead(path.resolve(vctx.cwd, nativePath(expand(f, vctx))));
             if (t === null) return "a file fed to a shell that couldn't be checked";
             fed.push(t);

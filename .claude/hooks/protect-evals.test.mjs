@@ -235,7 +235,27 @@ test("Bash: writes, moves, deletes and redirects are denied", () => {
     "gh api graphql -F query=@q.graphql",
     "gh api graphql --input body.json",
     "gh api graphql -f query='mutation { addStar(input: {}) { clientMutationId } }'",
+    "curl -X POST https://api.github.com/graphql --data @body.json",
+    "curl https://api.github.com/graphql -d @-",
+    // Interpreters whose flags aren't inline code still read stdin.
+    "echo \"open('evals/x', 'w').write('x')\" | python -E",
+    "echo \"open('evals/x', 'w')\" | perl -p",
+    "echo \"File.write('evals/x', 'x')\" | ruby -r json",
+    // Launchers whose options take values.
+    "echo \"rm evals/thresholds.toml\" | sudo -u nobody bash",
+    "echo \"rm evals/thresholds.toml\" | timeout -s KILL 5 bash",
+    "echo \"rm evals/thresholds.toml\" | env -u FOO sh",
+    // Stdin from a file redirect.
+    "bash < /no/such/script.sh",
+    "cat < /no/such/script.sh | sh",
   ]);
+  // A redirected script the hook can read and that writes a protected path.
+  const bad = path.join(tmpdir(), "bad-script.sh");
+  writeFileSync(bad, "rm -rf evals\n");
+  const good = path.join(tmpdir(), "good-script.sh");
+  writeFileSync(good, "echo hello\n");
+  denies([`bash < ${bad}`, `cat < ${bad} | bash`, `sh -s < ${bad}`]);
+  allows([`bash < ${good}`, `cat < ${good} | bash`]);
   // Already inside a protected folder: relative writes are denied.
   assert.ok(bash("echo x > a.txt", at("evals")));
   assert.ok(bash("rm thresholds.toml", at("evals")));
