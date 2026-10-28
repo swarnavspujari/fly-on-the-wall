@@ -102,10 +102,16 @@ pub(crate) const KEEP_LOCAL_CTE: &str = "WITH RECURSIVE
      ) ";
 
 /// Chunk filter (alias `c`, after [`KEEP_LOCAL_CTE`]): the chunk's owner is
-/// not keep-local. Transcript chunks are owned by meeting id. Only the owner
-/// kinds this filter knows how to check pass — a chunk of any other kind
-/// (e.g. a future `attachment`) fails closed until it's added here.
-pub(crate) const SHAREABLE_CHUNK: &str = "c.owner_kind IN ('note', 'transcript') AND NOT (
+/// not keep-local. Transcript chunks are owned by meeting id. Fails closed:
+/// only the owner kinds this filter knows how to check pass (a chunk of any
+/// other kind, e.g. a future `attachment`, is excluded until it's added
+/// here), and a transcript chunk passes only while its meeting AND that
+/// meeting's note exist — without the note row its privacy can't be
+/// checked. Used by search and by the remote-embedding queue alike.
+pub(crate) const SHAREABLE_CHUNK: &str = "c.owner_kind IN ('note', 'transcript')
+ AND (c.owner_kind != 'transcript' OR c.owner_id IN (
+        SELECT m.id FROM meetings m JOIN notes n ON n.id = m.note_id))
+ AND NOT (
         (c.owner_kind = 'note' AND c.owner_id IN (SELECT id FROM local_notes))
      OR (c.owner_kind = 'transcript' AND c.owner_id IN (
             SELECT m.id FROM meetings m WHERE m.note_id IN (SELECT id FROM local_notes))))";

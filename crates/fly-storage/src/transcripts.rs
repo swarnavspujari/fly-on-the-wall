@@ -73,7 +73,7 @@ impl Storage {
         // Read the old transcript BEFORE it's replaced.
         let reanchor = self.plan_reanchor(transcript).unwrap_or_else(|e| {
             tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "re-anchor planning failed; citations stay changed");
-            vec![]
+            crate::citations::ReanchorPlan::default()
         });
         let json = serde_json::to_string(transcript)?;
         let note = match self.upsert_transcript(transcript, &json, &reanchor) {
@@ -99,7 +99,7 @@ impl Storage {
         &self,
         transcript: &Transcript,
         json: &str,
-        reanchor: &[(String, String)],
+        reanchor: &crate::citations::ReanchorPlan,
     ) -> Result<Option<crate::citations::ReanchoredNote>> {
         self.conn.execute_batch("SAVEPOINT save_transcript")?;
         let res = (|| -> Result<Option<crate::citations::ReanchoredNote>> {
@@ -125,18 +125,19 @@ impl Storage {
                 }
             }
         })();
-        match res {
-            Ok(note) => {
-                self.conn.execute_batch("RELEASE save_transcript")?;
-                Ok(note)
-            }
-            Err(e) => {
-                let _ = self
-                    .conn
-                    .execute_batch("ROLLBACK TO save_transcript; RELEASE save_transcript");
-                Err(e)
-            }
+        // Never leave the savepoint open on the long-lived connection: a
+        // failed RELEASE (e.g. a deferred constraint) rolls back like any
+        // other failure.
+        let res = res.and_then(|note| {
+            self.conn.execute_batch("RELEASE save_transcript")?;
+            Ok(note)
+        });
+        if res.is_err() {
+            let _ = self
+                .conn
+                .execute_batch("ROLLBACK TO save_transcript; RELEASE save_transcript");
         }
+        res
     }
 
     pub fn get_transcript(&self, meeting_id: &str) -> Result<Option<Transcript>> {

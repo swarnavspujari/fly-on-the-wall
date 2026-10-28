@@ -12,7 +12,7 @@ Code: `src/{segments,citations,embeddings,migrations}.rs` and `Storage::SCHEMA_V
 | Chunk text embeds speaker labels (`Dana: …`), so a rename re-embeds the whole meeting. | Chunks are **label-free**: one line per turn. A rename re-embeds nothing. |
 | Chunks store only `start_ms`. | `embedding_chunks` gains `segment_ids_json`, `end_ms` and `variant`. `VectorHit` carries `segment_ids`, `end_ms` and the full `text`. |
 | The polished transcript is never indexed. | Each segment indexes and embeds its **polished** text when the polished transcript has a segment with the same id, otherwise its raw text. A stale polish (old ids) is never used. |
-| `vector_search` ignores `exclude_keep_local` and truncates before callers filter. | The keep-local filter runs **inside SQL, before the limit** (§4.2a #13): the shareable-chunk filter only admits `note` and `transcript` chunks it can check. Chunks whose meeting or note row is gone are never returned. Under `exclude_keep_local`, a transcript chunk whose meeting has no note row is dropped too, because its privacy can't be checked. `search_segments` and `list_meetings_filtered` fail closed the same way. |
+| `vector_search` ignores `exclude_keep_local` and truncates before callers filter. | The keep-local filter runs **inside SQL, before the limit** (§4.2a #13). The shared shareable-chunk filter fails closed: it admits only `note` and `transcript` chunks, and a transcript chunk only while its meeting and that meeting's note exist. The same filter guards the remote-embedding queue (`pending_embedding_chunks_shareable`, `embedding_backlog_shareable`). Chunks whose owner row is gone are never returned. `search_segments` and `list_meetings_filtered` fail closed the same way. |
 | `list_meetings` has no keep-local or `until` filter. | `list_meetings_filtered(&MeetingFilter { since, until, folder_id, exclude_keep_local, limit })`, all applied in SQL. |
 | Citations are bare segment ids, and re-transcribing silently breaks every one. | **`citation_locators`** (see below). |
 
@@ -34,7 +34,7 @@ Code: `src/{segments,citations,embeddings,migrations}.rs` and `Storage::SCHEMA_V
 
 ### Citation locators
 
-Table: `citation_locators(owner_kind, owner_id, note_id, meeting_id, seg_id, start_ms, end_ms, text_hash, speaker_key, status)`, with primary key `(owner_kind, owner_id, seg_id)`.
+Table: `citation_locators(owner_kind, owner_id, note_id, meeting_id, seg_id, start_ms, end_ms, text_hash, speaker_key, status)`, with primary key `(owner_kind, owner_id, seg_id)`. `speaker_key` is also listed in `EXPECTED_COLUMNS`, so a file stamped v3 by an earlier v3 build is repaired on open.
 
 - **The cited hash is taken once and never overwritten.**
   - It's the first 16 hex characters of SHA-256 over the RAW segment text, normalized to lowercased alphanumeric words.
@@ -46,18 +46,25 @@ Table: `citation_locators(owner_kind, owner_id, note_id, meeting_id, seg_id, sta
   - Ask inserts can call `record_citations` (`owner_kind = 'ask_insert'`, reserved).
   - A pair that's already recorded keeps its hash.
   - An id that no transcript of the owner's meetings has (a model citing ids that a re-transcribe replaced while it ran) gets a `changed` placeholder (`text_hash = ''`). Readers must still treat a cited id without a locator as changed.
-- **Status when read:** `ok` or `reanchored` only if the segment exists, has the cited speaker key, and its raw text (or, for older rows, its indexed text) hashes to the cited hash. Otherwise it's `changed`.
+- **Status when read:** `ok` or `reanchored` only if the segment exists, has the cited speaker key, and its raw text hashes to the cited hash. Rows without a speaker key, recorded before raw-text hashing, may match the indexed text instead. Otherwise it's `changed`.
+- **Speaker renumbering is followed, not flagged.**
+  - Keys are numbered by first appearance, so a re-diarize or re-transcribe routinely renumbers a stable speaker (Karim spk_2 → spk_1).
+  - `save_transcript` maps old keys to new keys with the rule `rebuild_speakers` uses: ≥ 80% of the cluster's duration onto one counterpart, in both directions. Weights come from shared segment ids (re-diarize) or from time overlap (re-transcribe).
+  - It rewrites the cited `speaker_key` of the stable pairs.
+  - A line that genuinely moved to another cluster still reads `changed`, even when the clusters were renumbered too.
+  - In a transcript with too little context (a single line), a renumbering and a speaker swap look the same.
 - **No visibility filter.** `citation_locators()` answers for any owner. Callers serving an AI reader (Ask, MCP, a future `segments_by_ids`) must gate on the owner's keep-local status first.
 
 **Re-anchoring** happens in `save_transcript`, while the old transcript is still readable. For each cited segment the new transcript no longer has:
 1. Take candidates overlapping the old span padded by 2 s.
-2. Score each as 0.45 × time IoU + 0.45 × token Jaccard + 0.10 × same speaker key. The pointer moves to the best candidate scoring ≥ 0.6.
+2. Score each as 0.45 × time IoU + 0.45 × token Jaccard + 0.10 × same speaker key (after the renumbering map). The pointer moves to the best candidate scoring ≥ 0.6. Placeholders (no hash) never move.
 3. The status is `reanchored` only when the new raw text hashes to the cited hash and the speaker key matches. Otherwise it's `changed`, still pointing at the best match so zoom-in lands in the right place.
    - "We will ship" → "we will not ship", "four ninety" → "fourteen ninety", and the same words from another speaker are all `changed` (`adversarial_retranscribes_read_as_changed`).
-4. Rewrite the id in `meeting_items.segment_ids_json` and in the note's `BlockOrigin::Ai.source_segment_ids`. Nothing else changes: not block markdown, order or origin kind, not user blocks, and not the note's `updated_at`.
+4. When two cited segments land on the same new one for the same owner, one row survives. If either no longer holds, the survivor reads `changed`.
+5. Rewrite the id in `meeting_items.segment_ids_json` and in the note's `BlockOrigin::Ai.source_segment_ids`. Nothing else changes: not block markdown, order or origin kind, not user blocks, and not the note's `updated_at`.
 
 **Failure handling:**
-- The upsert and the database side of the re-anchor share one savepoint. A re-anchor error rolls back only the re-anchor, through a nested savepoint; citations then stay `changed`, and the save still succeeds.
+- The upsert and the database side of the re-anchor share one savepoint. A re-anchor error rolls back only the re-anchor, through a nested savepoint; citations then stay `changed` on their old ids, and the save still succeeds (`reanchor_db_error_rolls_back_only_the_reanchor`). A failed `RELEASE` rolls back too, so no savepoint is ever left open on the connection.
 - Note mirrors are refreshed afterwards, and their I/O errors are only logged (`reanchor_mirror_failure_never_fails_the_save`).
 
 ## The v3 step (`migrations::to_v3`)
@@ -89,6 +96,8 @@ Every released build (v1.0.3 through v2.4.0) has `SCHEMA_VERSION = 2`, stamps `u
   - a v3 MCP server refuses a v2-stamped file until the v3 app has reopened it.
 
 ## Known follow-ups
+
+- **First-launch progress for large libraries (v2.5 release item, tracked with the re-embed throttling).** The v3 step runs inside `Storage::open` at about 30–50 µs per segment, so about 300k segments take 10–15 s with no progress shown. It needs a splash or progress state.
 
 - **Re-embed pacing (v2.5 release blocker, tracked separately):**
   - the one-time re-embed runs at the worker's normal priority, oldest chunks first (`ORDER BY id`);

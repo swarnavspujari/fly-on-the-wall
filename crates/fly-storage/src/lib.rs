@@ -195,6 +195,10 @@ const EXPECTED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("variant", "TEXT NOT NULL DEFAULT 'raw'"),
         ],
     ),
+    // Added during v3 review: a file stamped v3 by an earlier v3 build has
+    // the table without it. (A file without the table gets it whole from
+    // `create_derived_indexes`; repair skips absent tables.)
+    ("citation_locators", &[("speaker_key", "TEXT")]),
 ];
 
 pub struct Storage {
@@ -631,6 +635,11 @@ impl Storage {
     fn repair_missing_columns(conn: &Connection) -> Result<()> {
         for (table, cols) in EXPECTED_COLUMNS {
             let existing = Self::table_columns(conn, table)?;
+            if existing.is_empty() {
+                // Not created yet (a derived table on an older file): its
+                // CREATE comes later with every column.
+                continue;
+            }
             for (name, decl) in *cols {
                 if !existing.contains(*name) {
                     conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {decl}"))?;

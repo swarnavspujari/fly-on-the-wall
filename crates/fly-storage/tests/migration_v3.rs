@@ -864,6 +864,32 @@ fn keep_local_is_filtered_inside_sql_on_every_read_path() {
         .unwrap()
         .iter()
         .all(|p| !p.text.contains("SECRETATTACHMENT")));
+    // The note-less meeting's chunks never reach the remote-embedding
+    // queue either (nor its backlog count).
+    let backlog_before = s.embedding_backlog_shareable(MODEL).unwrap();
+    db(tmp.path())
+        .execute(
+            "UPDATE embedding_chunks SET embedding = NULL WHERE owner_id = 'm-noteless'",
+            [],
+        )
+        .unwrap();
+    assert!(s.embedding_backlog(MODEL).unwrap() > s.embedding_backlog_shareable(MODEL).unwrap());
+    assert!(s
+        .pending_embedding_chunks_shareable(MODEL, 10_000)
+        .unwrap()
+        .iter()
+        .all(|p| !p.text.contains("SECRETNOTELESS")));
+    assert!(
+        s.pending_embedding_chunks(MODEL, 10_000)
+            .unwrap()
+            .iter()
+            .any(|p| p.text.contains("SECRETNOTELESS")),
+        "fixture chunk is pending"
+    );
+    assert_eq!(
+        s.embedding_backlog_shareable(MODEL).unwrap(),
+        backlog_before
+    );
 
     // A meeting moved under the keep-local folder later disappears at once.
     s.move_note("n-budget", Some("f-cases")).unwrap();
@@ -1064,4 +1090,41 @@ fn erase_all_content_leaves_nothing_in_the_segment_index() {
         .query_row("SELECT COUNT(*) FROM temp.v", [], |r| r.get(0))
         .unwrap();
     assert_eq!(terms, 0);
+}
+
+/// A file stamped v3 by an earlier v3 build (before review) has
+/// `citation_locators` without `speaker_key`. Opening it repairs the column,
+/// so saving AI blocks and items doesn't fail after the data was written.
+#[test]
+fn early_v3_file_without_speaker_key_is_repaired() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (note_id, mid) = {
+        let s = Storage::open(tmp.path()).unwrap();
+        let note = s.create_note("n", None).unwrap();
+        let m = s.create_meeting("n", &note.id, &[]).unwrap();
+        s.save_transcript(&transcript(
+            &m.id,
+            vec![seg("a", "spk_0", 0, "hello there")],
+        ))
+        .unwrap();
+        (note.id, m.id)
+    };
+    db(tmp.path())
+        .execute_batch("ALTER TABLE citation_locators DROP COLUMN speaker_key;")
+        .unwrap();
+    assert_eq!(user_version(tmp.path()), 3);
+
+    let s = Storage::open(tmp.path()).unwrap();
+    let b = NoteBlock::ai("- hi", vec!["a".into()]);
+    s.update_note_blocks(&note_id, std::slice::from_ref(&b))
+        .expect("blocks save after repair");
+    let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+    assert_eq!(
+        (l[0].status, l[0].speaker_key.as_deref()),
+        (CitationStatus::Ok, Some("spk_0"))
+    );
+    // The MCP's read-only open accepts the repaired file.
+    drop(s);
+    assert!(Storage::open_existing(tmp.path()).is_ok());
+    assert!(!mid.is_empty());
 }

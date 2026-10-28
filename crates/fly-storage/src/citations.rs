@@ -205,6 +205,104 @@ fn match_lost(lost: &[Lost], new: &Transcript) -> Vec<(String, String)> {
     out
 }
 
+/// Share of a speaker cluster's duration that must land on ONE counterpart,
+/// in both directions, for two keys to count as the same speaker — the rule
+/// `fly_core::rediarize::rebuild_speakers` uses to carry a label.
+const STABLE_SHARE: f64 = 0.8;
+
+/// Old speaker key → new key for clusters that are the same speaker under a
+/// new number. Keys are numbered by first appearance, so a re-diarize or a
+/// re-transcribe routinely renumbers a stable speaker (Karim spk_2 →
+/// spk_1); a citation must follow that, while a line that genuinely moved
+/// to another cluster still reads `changed`. Weights are segment durations
+/// matched by id when the transcripts share ids (re-diarize), else by time
+/// overlap (re-transcribe). Only stable pairs are listed (identity
+/// included); a cluster that split or merged maps to nothing.
+pub(crate) fn stable_key_map(old: &Transcript, new: &Transcript) -> HashMap<String, String> {
+    let mut weights: HashMap<(String, String), u64> = HashMap::new();
+    let old_by_id: HashMap<&str, &TranscriptSegment> =
+        old.segments.iter().map(|s| (s.id.as_str(), s)).collect();
+    let shared = new
+        .segments
+        .iter()
+        .any(|s| old_by_id.contains_key(s.id.as_str()));
+    if shared {
+        for n in &new.segments {
+            if let Some(o) = old_by_id.get(n.id.as_str()) {
+                let dur = n.end_ms.saturating_sub(n.start_ms).max(1);
+                *weights
+                    .entry((o.speaker_key.clone(), n.speaker_key.clone()))
+                    .or_default() += dur;
+            }
+        }
+    } else {
+        let mut olds: Vec<&TranscriptSegment> = old.segments.iter().collect();
+        let mut news: Vec<&TranscriptSegment> = new.segments.iter().collect();
+        olds.sort_by_key(|s| s.start_ms);
+        news.sort_by_key(|s| s.start_ms);
+        let mut j0 = 0;
+        for o in &olds {
+            while j0 < news.len() && news[j0].end_ms <= o.start_ms {
+                j0 += 1;
+            }
+            for n in news[j0..].iter().take_while(|n| n.start_ms < o.end_ms) {
+                let overlap = o
+                    .end_ms
+                    .min(n.end_ms)
+                    .saturating_sub(o.start_ms.max(n.start_ms));
+                if overlap > 0 {
+                    *weights
+                        .entry((o.speaker_key.clone(), n.speaker_key.clone()))
+                        .or_default() += overlap;
+                }
+            }
+        }
+    }
+    // Each key's dominant counterpart, kept when it holds ≥ STABLE_SHARE of
+    // the key's duration; `reverse` reads the pairs new → old.
+    let dominant = |reverse: bool| {
+        let mut totals: HashMap<&String, u64> = HashMap::new();
+        let mut best: HashMap<&String, (&String, u64)> = HashMap::new();
+        for ((old_key, new_key), w) in &weights {
+            let (from, to) = if reverse {
+                (new_key, old_key)
+            } else {
+                (old_key, new_key)
+            };
+            *totals.entry(from).or_default() += w;
+            let e = best.entry(from).or_insert((to, 0));
+            if *w > e.1 || (*w == e.1 && to < e.0) {
+                *e = (to, *w);
+            }
+        }
+        best.into_iter()
+            .filter(|(from, (_, w))| *w as f64 >= STABLE_SHARE * totals[from] as f64)
+            .map(|(from, (to, _))| (from.clone(), to.clone()))
+            .collect::<HashMap<String, String>>()
+    };
+    let forward = dominant(false);
+    let backward = dominant(true);
+    forward
+        .into_iter()
+        .filter(|(o, n)| backward.get(n) == Some(o))
+        .collect()
+}
+
+/// What `save_transcript` does to citations when a transcript is replaced.
+#[derive(Default)]
+pub(crate) struct ReanchorPlan {
+    /// Renumbered speakers: cited key → its key in the new transcript.
+    key_map: HashMap<String, String>,
+    /// Lost cited segment id → best new segment id.
+    pairs: Vec<(String, String)>,
+}
+
+impl ReanchorPlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.key_map.is_empty() && self.pairs.is_empty()
+    }
+}
+
 fn map_ids(ids: &[String], map: &HashMap<String, String>) -> (Vec<String>, bool) {
     let mut changed = false;
     let mut out: Vec<String> = Vec::with_capacity(ids.len());
@@ -301,11 +399,12 @@ impl Storage {
                     None => false,
                     Some(seg) if !same_speaker(seg) => false,
                     Some(seg) if text_hash(&seg.text) == hash => true,
-                    // Cited before v3 hashed raw text? Accept the indexed
-                    // (polished) variant too.
-                    Some(_) => self
+                    // Rows recorded before raw-text hashing (no speaker key
+                    // either) hashed the indexed (polished) text.
+                    Some(_) if speaker_key.is_none() => self
                         .indexed_segment(&meeting_id, &seg_id)?
                         .is_some_and(|seg| text_hash(&seg.text) == hash),
+                    Some(_) => false,
                 };
                 if !holds {
                     status = CitationStatus::Changed;
@@ -525,12 +624,13 @@ impl Storage {
         }
     }
 
-    /// Before `new` replaces a meeting's transcript: for every cited segment
-    /// it no longer has, find the new segment that best matches the old one
-    /// (old text and speaker read from the transcript about to be replaced).
-    /// Returns old id → new id; cited segments without a match aren't
-    /// listed (they stay `changed`).
-    pub(crate) fn plan_reanchor(&self, new: &Transcript) -> Result<Vec<(String, String)>> {
+    /// Before `new` replaces a meeting's transcript (old transcript still
+    /// readable): work out which cited speakers were merely renumbered, and
+    /// for every cited segment the new transcript no longer has, the new
+    /// segment that best matches it. Cited segments without a match aren't
+    /// listed (they stay `changed`). Skips reading the old transcript when
+    /// every cited segment survives and no speaker key changed.
+    pub(crate) fn plan_reanchor(&self, new: &Transcript) -> Result<ReanchorPlan> {
         let cited: Vec<(String, i64, i64, Option<String>)> = self
             .conn
             .prepare(
@@ -543,42 +643,82 @@ impl Storage {
             })?
             .collect::<std::result::Result<_, _>>()?;
         if cited.is_empty() {
-            return Ok(vec![]);
+            return Ok(ReanchorPlan::default());
         }
-        let new_ids: HashSet<&str> = new.segments.iter().map(|s| s.id.as_str()).collect();
-        let dangling: Vec<_> = cited
-            .into_iter()
-            .filter(|(id, _, _, _)| !new_ids.contains(id.as_str()))
+        let new_keys: HashMap<&str, &str> = new
+            .segments
+            .iter()
+            .map(|s| (s.id.as_str(), s.speaker_key.as_str()))
             .collect();
-        if dangling.is_empty() {
-            return Ok(vec![]);
+        // Fast path: every cited segment survives and no segment of the
+        // meeting changed speaker key (read from the index, which still
+        // holds the OLD transcript: no JSON parse). Any key change at all
+        // may be a renumbering that moves what a cited key means.
+        let dangling = cited
+            .iter()
+            .any(|(id, ..)| !new_keys.contains_key(id.as_str()));
+        if !dangling {
+            let old_keys: HashMap<String, String> = self
+                .conn
+                .prepare(
+                    "SELECT segment_id, speaker_key FROM transcript_segments
+                      WHERE meeting_id = ?1",
+                )?
+                .query_map([&new.meeting_id], |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            let keys_same = old_keys.len() == new.segments.len()
+                && new
+                    .segments
+                    .iter()
+                    .all(|s| old_keys.get(&s.id).is_some_and(|k| k == &s.speaker_key));
+            if keys_same {
+                return Ok(ReanchorPlan::default());
+            }
         }
         let old = self.get_transcript(&new.meeting_id).ok().flatten();
-        let lost: Vec<Lost> = dangling
+        let key_map: HashMap<String, String> = old
+            .as_ref()
+            .map(|o| stable_key_map(o, new))
+            .unwrap_or_default()
             .into_iter()
+            .filter(|(o, n)| o != n)
+            .collect();
+        let lost: Vec<Lost> = cited
+            .into_iter()
+            .filter(|(id, _, _, _)| !new_keys.contains_key(id.as_str()))
             .map(|(seg_id, start, end, speaker_key)| {
                 let old_seg = old
                     .as_ref()
                     .and_then(|t| t.segments.iter().find(|s| s.id == seg_id));
-                match old_seg {
-                    Some(s) => Lost {
-                        span: (s.start_ms, s.end_ms),
-                        words: tokens(&s.text),
-                        speaker_key: Some(s.speaker_key.clone()),
-                        seg_id,
-                    },
+                let (span, words, key) = match old_seg {
+                    Some(s) => (
+                        (s.start_ms, s.end_ms),
+                        tokens(&s.text),
+                        Some(s.speaker_key.clone()),
+                    ),
                     // Unknown text: time + speaker alone stay below the
                     // threshold, so such a citation is left `changed`.
-                    None => Lost {
-                        span: (start.max(0) as u64, end.max(0) as u64),
-                        words: HashSet::new(),
+                    None => (
+                        (start.max(0) as u64, end.max(0) as u64),
+                        HashSet::new(),
                         speaker_key,
-                        seg_id,
-                    },
+                    ),
+                };
+                Lost {
+                    span,
+                    words,
+                    speaker_key: key.map(|k| key_map.get(&k).cloned().unwrap_or(k)),
+                    seg_id,
                 }
             })
             .collect();
-        Ok(match_lost(&lost, new))
+        let pairs = match_lost(&lost, new);
+        Ok(ReanchorPlan { key_map, pairs })
     }
 
     /// After the new transcript is saved, database side only: point the
@@ -592,12 +732,37 @@ impl Storage {
     pub(crate) fn apply_reanchor_db(
         &self,
         new: &Transcript,
-        pairs: &[(String, String)],
+        plan: &ReanchorPlan,
     ) -> Result<Option<ReanchoredNote>> {
+        let meeting_id = new.meeting_id.as_str();
+        // Renumbered speakers first: cited keys follow their cluster, so the
+        // checks below (and every later read) compare like with like. Row by
+        // row, so a swap (spk_0 ↔ spk_1) can't chain.
+        if !plan.key_map.is_empty() {
+            let rows: Vec<(String, String, String, String)> = self
+                .conn
+                .prepare(
+                    "SELECT owner_kind, owner_id, seg_id, speaker_key FROM citation_locators
+                      WHERE meeting_id = ?1 AND speaker_key IS NOT NULL",
+                )?
+                .query_map([meeting_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            for (kind, owner, seg_id, key) in rows {
+                if let Some(to) = plan.key_map.get(&key) {
+                    self.conn.execute(
+                        "UPDATE citation_locators SET speaker_key = ?1
+                          WHERE owner_kind = ?2 AND owner_id = ?3 AND seg_id = ?4",
+                        (to, &kind, &owner, &seg_id),
+                    )?;
+                }
+            }
+        }
+        let pairs = &plan.pairs;
         if pairs.is_empty() {
             return Ok(None);
         }
-        let meeting_id = new.meeting_id.as_str();
         for (old, new_id) in pairs {
             let Some(seg) = new.segments.iter().find(|s| &s.id == new_id) else {
                 continue;
@@ -607,7 +772,7 @@ impl Storage {
                 .conn
                 .prepare(
                     "SELECT owner_kind, owner_id, text_hash, speaker_key FROM citation_locators
-                      WHERE meeting_id = ?1 AND seg_id = ?2",
+                      WHERE meeting_id = ?1 AND seg_id = ?2 AND text_hash != ''",
                 )?
                 .query_map((meeting_id, old), |r| {
                     Ok(LocRow {
@@ -640,6 +805,16 @@ impl Storage {
                     ],
                 )?;
                 if n == 0 {
+                    // The owner already cites that new segment (two old
+                    // segments matched one new one). One row survives; if
+                    // this one no longer holds, the survivor says so.
+                    if !same {
+                        self.conn.execute(
+                            "UPDATE citation_locators SET status = 'changed'
+                              WHERE owner_kind = ?1 AND owner_id = ?2 AND seg_id = ?3",
+                            (&row.kind, &row.owner, new_id),
+                        )?;
+                    }
                     self.conn.execute(
                         "DELETE FROM citation_locators
                           WHERE owner_kind = ?1 AND owner_id = ?2 AND seg_id = ?3",
@@ -1049,20 +1224,45 @@ mod tests {
                 CitationStatus::Reanchored,
             ),
         ];
+        // Both speakers also talk elsewhere, unchanged across the run, so a
+        // single line changing hands is a re-attribution, not a renumbering.
+        let context = |prefix: &str| -> Vec<TranscriptSegment> {
+            (0..6)
+                .flat_map(|i| {
+                    let mut a = seg(
+                        &format!("{prefix}a{i}"),
+                        20_000 + i * 8_000,
+                        "context from zero",
+                    );
+                    a.speaker_key = "spk_0".into();
+                    let mut b = seg(
+                        &format!("{prefix}b{i}"),
+                        24_000 + i * 8_000,
+                        "context from one",
+                    );
+                    b.speaker_key = "spk_1".into();
+                    [a, b]
+                })
+                .collect()
+        };
         for (cited, heard, k0, k1, shift, want) in cases {
             let (_d, s) = test_storage();
             let note = s.create_note("n", None).unwrap();
             let m = s.create_meeting("n", &note.id, &[]).unwrap();
             let mut first = seg("old", 10_000, cited);
             first.speaker_key = k0.into();
-            s.save_transcript(&transcript(&m.id, vec![first])).unwrap();
+            let mut segs = vec![first];
+            segs.extend(context("o"));
+            s.save_transcript(&transcript(&m.id, segs)).unwrap();
             let b = NoteBlock::ai("- claim", vec!["old".into()]);
             s.update_note_blocks(&note.id, std::slice::from_ref(&b))
                 .unwrap();
 
             let mut again = seg("new", 10_000 + shift, heard);
             again.speaker_key = k1.into();
-            s.save_transcript(&transcript(&m.id, vec![again])).unwrap();
+            let mut segs = vec![again];
+            segs.extend(context("n"));
+            s.save_transcript(&transcript(&m.id, segs)).unwrap();
 
             let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
             assert_eq!(l.len(), 1, "{cited:?} → {heard:?}");
@@ -1206,6 +1406,241 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM citation_locators", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// Two speakers, six lines each; the cited line is `b2` (spk_1).
+    fn two_speakers(meeting_id: &str, prefix: &str) -> Transcript {
+        let segs = (0..6)
+            .flat_map(|i| {
+                let mut a = seg(
+                    &format!("{prefix}a{i}"),
+                    i * 8_000,
+                    &format!("dana line {i}"),
+                );
+                a.speaker_key = "spk_0".into();
+                let mut b = seg(
+                    &format!("{prefix}b{i}"),
+                    i * 8_000 + 4_000,
+                    &format!("karim line {i}"),
+                );
+                b.speaker_key = "spk_1".into();
+                [a, b]
+            })
+            .collect();
+        transcript(meeting_id, segs)
+    }
+
+    fn swap_keys(t: &mut Transcript) {
+        for s in &mut t.segments {
+            s.speaker_key = if s.speaker_key == "spk_0" {
+                "spk_1"
+            } else {
+                "spk_0"
+            }
+            .into();
+        }
+    }
+
+    fn cite_karim(s: &Storage, mid: &str, prefix: &str) -> (String, NoteBlock) {
+        let note = s.get_meeting(mid).unwrap().note_id;
+        let b = NoteBlock::ai("- Karim said", vec![format!("{prefix}b2")]);
+        s.update_note_blocks(&note, std::slice::from_ref(&b))
+            .unwrap();
+        (note, b)
+    }
+
+    fn setup_two() -> (tempfile::TempDir, Storage, String) {
+        let (dir, s) = test_storage();
+        let note = s.create_note("1:1", None).unwrap();
+        let m = s.create_meeting("1:1", &note.id, &[]).unwrap();
+        s.save_transcript(&two_speakers(&m.id, "")).unwrap();
+        (dir, s, m.id)
+    }
+
+    #[test]
+    fn stable_key_map_needs_80_percent_both_ways() {
+        let old = two_speakers("m", "");
+        let mut new = old.clone();
+        swap_keys(&mut new);
+        let m = stable_key_map(&old, &new);
+        assert_eq!(m.get("spk_0").map(String::as_str), Some("spk_1"));
+        assert_eq!(m.get("spk_1").map(String::as_str), Some("spk_0"));
+        // One line of six moving keeps both clusters stable (5/6 ≥ 0.8)...
+        let mut moved = old.clone();
+        moved.segments[5].speaker_key = "spk_0".into();
+        assert_eq!(
+            stable_key_map(&old, &moved)
+                .get("spk_1")
+                .map(String::as_str),
+            Some("spk_1")
+        );
+        // ...a cluster split in half maps to nothing.
+        let mut split = old.clone();
+        for s in split
+            .segments
+            .iter_mut()
+            .filter(|s| s.speaker_key == "spk_1")
+            .take(3)
+        {
+            s.speaker_key = "spk_2".into();
+        }
+        assert!(!stable_key_map(&old, &split).contains_key("spk_1"));
+        // Time overlap when ids differ (re-transcribe).
+        let mut renamed = two_speakers("m", "x");
+        swap_keys(&mut renamed);
+        assert_eq!(
+            stable_key_map(&old, &renamed)
+                .get("spk_1")
+                .map(String::as_str),
+            Some("spk_0")
+        );
+    }
+
+    #[test]
+    fn renumbering_rediarize_keeps_citations_ok() {
+        let (_d, s, mid) = setup_two();
+        let (_, b) = cite_karim(&s, &mid, "");
+        let mut t = s.get_transcript(&mid).unwrap().unwrap();
+        swap_keys(&mut t); // Karim spk_1 → spk_0, Dana spk_0 → spk_1
+        s.save_transcript(&t).unwrap();
+        let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+        assert_eq!(
+            (l[0].status, l[0].speaker_key.as_deref()),
+            (CitationStatus::Ok, Some("spk_0"))
+        );
+        // And back again (revert / another re-diarize).
+        swap_keys(&mut t);
+        s.save_transcript(&t).unwrap();
+        let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+        assert_eq!(
+            (l[0].status, l[0].speaker_key.as_deref()),
+            (CitationStatus::Ok, Some("spk_1"))
+        );
+    }
+
+    #[test]
+    fn genuine_reattribution_reads_changed_even_with_renumbering() {
+        // Cited line moves to the other cluster; clusters stay stable.
+        let (_d, s, mid) = setup_two();
+        let (_, b) = cite_karim(&s, &mid, "");
+        let mut t = s.get_transcript(&mid).unwrap().unwrap();
+        let i = t.segments.iter().position(|x| x.id == "b2").unwrap();
+        t.segments[i].speaker_key = "spk_0".into();
+        s.save_transcript(&t).unwrap();
+        assert_eq!(
+            s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap()[0].status,
+            CitationStatus::Changed
+        );
+        // Same, combined with a renumbering of both clusters.
+        let (_d2, s2, mid2) = setup_two();
+        let (_, b2) = cite_karim(&s2, &mid2, "");
+        let mut t2 = s2.get_transcript(&mid2).unwrap().unwrap();
+        swap_keys(&mut t2);
+        let i = t2.segments.iter().position(|x| x.id == "b2").unwrap();
+        t2.segments[i].speaker_key = "spk_1".into(); // stayed on the old number = moved
+        s2.save_transcript(&t2).unwrap();
+        assert_eq!(
+            s2.citation_locators(OWNER_NOTE_BLOCK, &b2.id).unwrap()[0].status,
+            CitationStatus::Changed
+        );
+    }
+
+    #[test]
+    fn renumbering_retranscribe_reanchors() {
+        let (_d, s, mid) = setup_two();
+        let (_, b) = cite_karim(&s, &mid, "");
+        let mut fresh = two_speakers(&mid, "x"); // new ids, same speech
+        swap_keys(&mut fresh);
+        s.save_transcript(&fresh).unwrap();
+        let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+        assert_eq!(
+            (
+                l[0].seg_id.as_str(),
+                l[0].status,
+                l[0].speaker_key.as_deref()
+            ),
+            ("xb2", CitationStatus::Reanchored, Some("spk_0"))
+        );
+    }
+
+    /// Two cited segments re-anchor to the same new one for the same owner:
+    /// one row survives, and if either no longer holds, it reads changed.
+    #[test]
+    fn colliding_reanchors_keep_the_changed_signal() {
+        for order in [["p1", "p2"], ["p2", "p1"]] {
+            let (_d, s) = test_storage();
+            let note = s.create_note("n", None).unwrap();
+            let m = s.create_meeting("n", &note.id, &[]).unwrap();
+            let texts = |id: &str| {
+                if id == "p1" {
+                    "ship it friday"
+                } else {
+                    "ship it friday too"
+                }
+            };
+            let segs: Vec<_> = order
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let mut x = seg(id, i as u64 * 2_000, texts(id));
+                    x.end_ms = x.start_ms + 2_000;
+                    x
+                })
+                .collect();
+            s.save_transcript(&transcript(&m.id, segs)).unwrap();
+            let b = NoteBlock::ai("- ship", vec!["p1".into(), "p2".into()]);
+            s.update_note_blocks(&note.id, std::slice::from_ref(&b))
+                .unwrap();
+            let mut merged = seg("q", 0, "ship it friday");
+            merged.end_ms = 4_000;
+            s.save_transcript(&transcript(&m.id, vec![merged])).unwrap();
+            let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+            assert_eq!(l.len(), 1, "{order:?}: {l:?}");
+            assert_eq!(
+                (l[0].seg_id.as_str(), l[0].status),
+                ("q", CitationStatus::Changed),
+                "{order:?}"
+            );
+        }
+    }
+
+    /// A database error inside the re-anchor rolls back only the re-anchor:
+    /// the transcript saves, the citations stay `changed` on their old ids,
+    /// items and blocks are untouched, and no savepoint is left open.
+    #[test]
+    fn reanchor_db_error_rolls_back_only_the_reanchor() {
+        let (_d, s, note_id, mid) = setup();
+        let b = NoteBlock::ai("- Renewal", vec!["a3".into()]);
+        s.update_note_blocks(&note_id, std::slice::from_ref(&b))
+            .unwrap();
+        let it = item(&mid, &["a3"]);
+        s.replace_meeting_items(&mid, std::slice::from_ref(&it))
+            .unwrap();
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER boom BEFORE UPDATE ON meeting_items
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        s.save_transcript(&transcript(
+            &mid,
+            vec![seg("c3", 4_000, "and we ship the renewal on friday")],
+        ))
+        .expect("save survives a re-anchor failure");
+        assert_eq!(
+            s.get_transcript(&mid).unwrap().unwrap().segments[0].id,
+            "c3"
+        );
+        let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+        assert_eq!(
+            (l[0].seg_id.as_str(), l[0].status),
+            ("a3", CitationStatus::Changed)
+        );
+        assert_eq!(s.get_meeting_items(&mid).unwrap()[0].segment_ids, ["a3"]);
+        let note = s.get_note(&note_id).unwrap();
+        assert!(matches!(&note.blocks[0].origin,
+            BlockOrigin::Ai { source_segment_ids } if source_segment_ids == &["a3".to_string()]));
+        assert!(s.conn.is_autocommit(), "no savepoint left open");
     }
 
     #[test]
