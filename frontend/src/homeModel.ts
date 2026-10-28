@@ -3,7 +3,7 @@
  *  React and IPC so vitest covers them directly. */
 
 import { providerVendor } from "./settingsModel";
-import type { CalendarEvent, LlmSettings, NoteSummary } from "./types";
+import type { CalendarEvent, LlmSettings, NoteSummary, PipelineProgress } from "./types";
 
 /* ------------------------------------------------------------- date groups */
 
@@ -93,6 +93,8 @@ export interface LiveNoteState {
   recordingNoteId: string | null;
   /** Meetings with a transcription in progress (from pipeline events). */
   runningMeetingIds: ReadonlySet<string>;
+  /** Meetings waiting in the transcription queue (stage "waiting"). */
+  queuedMeetingIds: ReadonlySet<string>;
   /** Meetings whose last transcription failed this session. */
   failedMeetingIds: ReadonlySet<string>;
 }
@@ -108,16 +110,26 @@ const CHIP = {
   notesOnly: { label: "Notes only", tone: "neutral" },
 } as const satisfies Record<string, NoteStatus>;
 
+/** What a `pipeline:progress` event says about its meeting: the scheduler
+ *  emits stage "waiting" for a queued job, so not every non-final event is
+ *  a running transcription. */
+export function runStateOf(p: PipelineProgress): "running" | "queued" | null {
+  if (p.done || p.stage === "cancelled") return null;
+  return p.stage === "waiting" ? "queued" : "running";
+}
+
 /** The chip for one row. Live app state (this session's recording and
  *  pipeline events) beats the stored row, which was read at the last list
  *  refresh. Then the stored job: queued ("Queued": waiting, or requeued
  *  after a crash), running, failed. Then what the note has: an enhanced doc,
- *  a transcript, audio still to transcribe. A meeting with none of those
- *  (no audio left, nothing queued) shows no chip. */
+ *  a transcript, or neither ("Not transcribed", e.g. a staged import or
+ *  auto-transcribe off). A summary that doesn't say (cached before these
+ *  fields existed) shows no chip. */
 export function noteStatus(n: NoteSummary, live: LiveNoteState): NoteStatus | null {
   if (live.recordingNoteId === n.id) return CHIP.recording;
   const m = n.meeting_id;
   if (m && live.runningMeetingIds.has(m)) return CHIP.transcribing;
+  if (m && live.queuedMeetingIds.has(m)) return CHIP.queued;
   if (m && live.failedMeetingIds.has(m)) return CHIP.failed;
   if (m && n.job_status === "running") return CHIP.transcribing;
   if (m && n.job_status === "queued") return CHIP.queued;
@@ -125,7 +137,7 @@ export function noteStatus(n: NoteSummary, live: LiveNoteState): NoteStatus | nu
   if (n.has_enhanced_doc) return CHIP.enhanced;
   if (n.has_transcript) return CHIP.ready;
   if (!m) return CHIP.notesOnly;
-  if (n.has_recording) return CHIP.notTranscribed;
+  if (n.has_transcript === false) return CHIP.notTranscribed;
   return null;
 }
 
@@ -256,6 +268,8 @@ export interface PrivacySummary {
 
 /** AI features that go to the configured LLM provider. */
 export const AI_USES = ["Ask", "Enhance", "Transcript cleanup", "Action items"];
+/** Semantic search's embeddings (always the Ollama server). */
+export const SEARCH_USE = "Search index";
 
 /** The sidebar pill: where meeting content goes, from the SAVED settings
  *  (never a Settings draft). Every provider counts, not only Anthropic:
@@ -291,6 +305,16 @@ export function privacySummary(
   if (asr.tier === "cloud" || asr.use_groq) {
     cloud = true;
     uses.push({ where: "Groq", what: ["Transcription (audio)"] });
+  }
+
+  // Semantic search embeds note text through the Ollama server whatever
+  // the AI provider is (embeddings.rs → ollama::root_url).
+  const ollama = llm.providers.find((x) => x.id === "ollama");
+  if (ollama?.base_url && !isLoopbackUrl(ollama.base_url)) {
+    const where = urlHost(ollama.base_url) ?? ollama.base_url;
+    const same = uses.find((u) => u.where === where);
+    if (same) same.what = [...same.what, SEARCH_USE];
+    else uses.push({ where, what: [SEARCH_USE] });
   }
 
   const offDevice = uses.length > 0;

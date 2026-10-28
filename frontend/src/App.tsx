@@ -25,8 +25,8 @@ import type {
 } from "./types";
 import { readNotesCache, writeNotesCache } from "./notesCache";
 import { useTheme } from "./theme";
-import { privacySummary, type LiveNoteState } from "./homeModel";
-import { useDeferredDelete } from "./deferredDelete";
+import { privacySummary, runStateOf, type LiveNoteState } from "./homeModel";
+import { useNoteDeletion } from "./noteDeletion";
 import Sidebar, { type Selection } from "./components/Sidebar";
 import NoteList from "./components/NoteList";
 import Editor from "./components/Editor";
@@ -118,8 +118,9 @@ export default function App() {
   // Which calendars are connected (Up next's "connect a calendar" prompt);
   // null until the first fetch.
   const [calendarStatus, setCalendarStatus] = useState<CalendarStatus | null>(null);
-  // Provider whose OAuth window is open (connect or reconnect).
-  const [calendarBusy, setCalendarBusy] = useState<string | null>(null);
+  // Providers whose sign-in window is open (connect or reconnect). Nothing
+  // is disabled by it: an abandoned sign-in can take minutes to time out.
+  const [calendarBusy, setCalendarBusy] = useState<ReadonlySet<string>>(() => new Set());
   const refreshCalendarStatus = useCallback(() => {
     api.getCalendarSettings().then(setCalendarStatus).catch(console.error);
   }, []);
@@ -129,9 +130,12 @@ export default function App() {
   const refreshLlmSettings = useCallback(() => {
     api.getLlmSettings().then(setLlmSettings).catch(console.error);
   }, []);
-  // Meetings with a transcription running (any note), for the list's chips.
-  const [runningMeetings, setRunningMeetings] = useState<ReadonlySet<string>>(() => new Set());
-  const runningMeetingsRef = useRef(new Set<string>());
+  // Meetings with a transcription running or queued (any note), from
+  // pipeline events, for the list's chips.
+  const [liveRuns, setLiveRuns] = useState<ReadonlyMap<string, "running" | "queued">>(
+    () => new Map(),
+  );
+  const liveRunsRef = useRef(new Map<string, "running" | "queued">());
   const refreshUpcoming = useCallback(() => {
     api
       .upcomingMeetings()
@@ -152,7 +156,7 @@ export default function App() {
   // status so the prompt / Reconnect row clears on success.
   const connectCalendar = useCallback(
     (provider: "google" | "msgraph") => {
-      setCalendarBusy(provider);
+      setCalendarBusy((s) => new Set(s).add(provider));
       void api
         .connectCalendar(provider)
         .then(() => {
@@ -160,7 +164,13 @@ export default function App() {
           refreshCalendarStatus();
         })
         .catch((e) => setError(String(e)))
-        .finally(() => setCalendarBusy(null));
+        .finally(() =>
+          setCalendarBusy((s) => {
+            const next = new Set(s);
+            next.delete(provider);
+            return next;
+          }),
+        );
     },
     [refreshUpcoming, refreshCalendarStatus],
   );
@@ -351,19 +361,19 @@ export default function App() {
           .catch(() => add(undefined));
       }
     };
-    // Track which meetings are mid-transcription (list status chips). Only a
-    // change of membership re-renders, not every progress tick.
-    const markRunning = (meetingId: string, running: boolean) => {
-      const set = runningMeetingsRef.current;
-      if (set.has(meetingId) === running) return;
-      if (running) set.add(meetingId);
-      else set.delete(meetingId);
-      setRunningMeetings(new Set(set));
+    // Track which meetings are queued or mid-transcription (list status
+    // chips). Only a change of state re-renders, not every progress tick.
+    const markRun = (meetingId: string, run: "running" | "queued" | null) => {
+      const runs = liveRunsRef.current;
+      if ((runs.get(meetingId) ?? null) === run) return;
+      if (run) runs.set(meetingId, run);
+      else runs.delete(meetingId);
+      setLiveRuns(new Map(runs));
     };
     const unPipeline = listen<PipelineProgress>("pipeline:progress", (e) => {
       const p = e.payload;
       trackFailures(p);
-      markRunning(p.meeting_id, !(p.done || p.stage === "cancelled"));
+      markRun(p.meeting_id, runStateOf(p));
       // A finished run changes the stored chip state (job, transcript):
       // re-read the list so it never shows a stale "Transcribing".
       if (p.done || p.stage === "cancelled") void refreshNotesRef.current().catch(console.error);
@@ -488,38 +498,70 @@ export default function App() {
   // only the newest one may write state (otherwise note B can end up showing
   // note A's meeting/transcript).
   const openSeq = useRef(0);
-  const openNoteById = useCallback(async (id: string) => {
-    const seq = ++openSeq.current;
-    const fresh = () => openSeq.current === seq;
-    const note = await api.getNote(id);
-    if (!fresh()) return;
-    setOpenNote(note);
-    const meetings = await api.getMeetingsForNote(id).catch(() => [] as Meeting[]);
-    if (!fresh()) return;
-    setNoteMeetings(meetings);
-    const meeting = meetings[0] ?? null; // newest is the primary
-    setOpenMeeting(meeting);
-    setPipelineError(null);
-    setPipeDetail(null);
-    if (meeting) {
-      const [raw, cleaned, stage, staged] = await Promise.all([
-        api.getTranscript(meeting.id),
-        api.getCleanedTranscript(meeting.id).catch(() => null),
-        api.pipelineStage(meeting.id),
-        api.importState(meeting.id).catch(() => null),
-      ]);
-      if (!fresh()) return;
-      setTranscript(raw);
-      setCleanedTranscript(cleaned);
-      setPipeStage(stage);
-      setImportStaged(staged);
-    } else {
-      setTranscript(null);
-      setCleanedTranscript(null);
-      setPipeStage(null);
-      setImportStaged(null);
-    }
+
+  const closeEditor = useCallback(() => {
+    openSeq.current++; // invalidate any in-flight openNoteById
+    setOpenNote(null);
+    setOpenMeeting(null);
+    setNoteMeetings([]);
+    setTranscript(null);
+    setCleanedTranscript(null);
+    setImportStaged(null);
   }, []);
+
+  // Undo toast = deferred delete (spec §3.2.5, noteDeletion.ts): the note
+  // disappears now and stays hidden until the delete and the list refresh
+  // land; the delete command runs only when the toast expires or closes.
+  // Undo restores it; closing the app while it waits deletes nothing.
+  const deletion = useNoteDeletion({
+    remove: api.deleteNote,
+    refresh: refreshNotes,
+    onDeleted: (id) => {
+      dispatchFailures({ type: "noteDeleted", noteId: id });
+      if (openNoteIdRef.current === id) closeEditor();
+    },
+    onError: setError,
+  });
+  const { isHidden: isDeleted } = deletion;
+
+  const openNoteById = useCallback(
+    async (id: string) => {
+      // A deleted note (waiting on Undo, or gone) never comes back into the
+      // editor, even from a stale caller.
+      if (isDeleted(id)) return;
+      const seq = ++openSeq.current;
+      const fresh = () => openSeq.current === seq && !isDeleted(id);
+      const note = await api.getNote(id);
+      if (!fresh()) return;
+      setOpenNote(note);
+      const meetings = await api.getMeetingsForNote(id).catch(() => [] as Meeting[]);
+      if (!fresh()) return;
+      setNoteMeetings(meetings);
+      const meeting = meetings[0] ?? null; // newest is the primary
+      setOpenMeeting(meeting);
+      setPipelineError(null);
+      setPipeDetail(null);
+      if (meeting) {
+        const [raw, cleaned, stage, staged] = await Promise.all([
+          api.getTranscript(meeting.id),
+          api.getCleanedTranscript(meeting.id).catch(() => null),
+          api.pipelineStage(meeting.id),
+          api.importState(meeting.id).catch(() => null),
+        ]);
+        if (!fresh()) return;
+        setTranscript(raw);
+        setCleanedTranscript(cleaned);
+        setPipeStage(stage);
+        setImportStaged(staged);
+      } else {
+        setTranscript(null);
+        setCleanedTranscript(null);
+        setPipeStage(null);
+        setImportStaged(null);
+      }
+    },
+    [isDeleted],
+  );
 
   const newNote = async () => {
     const folderId = selection.view === "folder" ? selection.id : null;
@@ -536,44 +578,28 @@ export default function App() {
     setImportStaged(null);
   };
 
-  // Undo toast = deferred delete (spec §3.2.5): the note disappears now,
-  // and the delete command runs only when the toast expires. Undo cancels
-  // it; closing the app while it waits deletes nothing.
-  const commitDelete = useCallback(
-    (item: { id: string; title: string }) => {
-      api
-        .deleteNote(item.id)
-        .then(() => dispatchFailures({ type: "noteDeleted", noteId: item.id }))
-        .catch((e) => setError(`Couldn’t delete “${item.title}”: ${String(e)}`))
-        .finally(() => void refreshNotes().catch(console.error));
-    },
-    [refreshNotes],
-  );
-  const pendingDelete = useDeferredDelete<{ id: string; title: string; wasOpen: boolean }>(
-    commitDelete,
-  );
-
   const deleteNote = (id: string) => {
+    // The list hides its trash on the recording note; the backend refuses
+    // too (the purge would delete the files the capture is writing).
+    if (recStatus.active && recStatus.note_id === id) {
+      setError("Stop the recording before deleting this note.");
+      return;
+    }
     const title =
       notes.find((n) => n.id === id)?.title ??
       (openNote?.id === id ? openNote.title : null) ??
       "Untitled";
     const wasOpen = openNote?.id === id;
-    if (wasOpen) {
-      openSeq.current++;
-      setOpenNote(null);
-      setOpenMeeting(null);
-      setNoteMeetings([]);
-      setTranscript(null);
-      setCleanedTranscript(null);
-      setImportStaged(null);
-    }
-    pendingDelete.schedule({ id, title, wasOpen });
+    if (wasOpen) closeEditor();
+    deletion.request({ id, title, wasOpen });
   };
 
+  // Undo restores every waiting note; it reopens the one that was open only
+  // if the user hasn't opened another note since.
   const undoDelete = () => {
-    const item = pendingDelete.undo();
-    if (item?.wasOpen) void openNoteById(item.id);
+    const items = deletion.undo();
+    const reopen = items.find((i) => i.wasOpen);
+    if (reopen && !openNoteIdRef.current) void openNoteById(reopen.id);
   };
 
   const moveOpenNote = async (folderId: string | null) => {
@@ -591,6 +617,9 @@ export default function App() {
   };
 
   const onNoteChanged = (note: Note) => {
+    // A save that lands after the note was deleted (the editor's debounced
+    // save outlives it) must not put it back on screen.
+    if (isDeleted(note.id)) return;
     setOpenNote(note);
     void refreshNotes();
   };
@@ -818,27 +847,38 @@ export default function App() {
         (openNote?.id === recStatus.note_id ? openNote.title : null))
       : null;
 
-  // A note waiting on its Undo toast is already gone from every list.
-  const pendingDeleteId = pendingDelete.pending?.id ?? null;
-  const listedNotes = pendingDeleteId ? notes.filter((n) => n.id !== pendingDeleteId) : notes;
-  const listedHits = pendingDeleteId
-    ? searchHits.filter((h) => h.note_id !== pendingDeleteId)
+  // A deleted note (waiting on Undo, or gone) is out of every list, search
+  // result and notice at once, and never flashes back while it commits.
+  const deletedIds = deletion.hiddenIds;
+  const listedNotes = deletedIds.size ? notes.filter((n) => !deletedIds.has(n.id)) : notes;
+  const listedHits = deletedIds.size
+    ? searchHits.filter((h) => !deletedIds.has(h.note_id))
     : searchHits;
+  const shownFailures = deletedIds.size
+    ? pipelineFailures.filter((f) => !f.noteId || !deletedIds.has(f.noteId))
+    : pipelineFailures;
 
   // Status chips: recording, transcribing (any meeting) and failed runs.
   const openMeetingId = openMeeting?.id ?? null;
   const liveNotes = useMemo<LiveNoteState>(() => {
-    const running = new Set(runningMeetings);
-    if (openMeetingId && pipeStage) running.add(openMeetingId);
+    const running = new Set<string>();
+    const queued = new Set<string>();
+    for (const [id, run] of liveRuns) (run === "queued" ? queued : running).add(id);
+    // The open meeting's stage also comes from pipelineStage() on open; the
+    // scheduler's "waiting" means queued, not transcribing.
+    if (openMeetingId && pipeStage) {
+      (pipeStage === "waiting" ? queued : running).add(openMeetingId);
+    }
     const failed = new Set(pipelineFailures.map((f) => f.meetingId));
     if (openMeetingId && pipelineError) failed.add(openMeetingId);
     return {
       recordingNoteId: recStatus.active ? recStatus.note_id : null,
       runningMeetingIds: running,
+      queuedMeetingIds: queued,
       failedMeetingIds: failed,
     };
   }, [
-    runningMeetings,
+    liveRuns,
     openMeetingId,
     pipeStage,
     pipelineFailures,
@@ -1029,7 +1069,7 @@ export default function App() {
         onDismissSystemAudio={() => setTapDenied(false)}
         appError={error}
         onDismissAppError={() => setError(null)}
-        pipelineFailures={pipelineFailures}
+        pipelineFailures={shownFailures}
         engine={engine}
         onOpenFailedNote={(f) => {
           if (!f.noteId) return;
@@ -1048,11 +1088,11 @@ export default function App() {
         }}
         updater={updater}
       />
-      {pendingDelete.pending && (
+      {deletion.pending.length > 0 && (
         <UndoToast
-          title={pendingDelete.pending.title}
+          titles={deletion.pending.map((i) => i.title)}
           onUndo={undoDelete}
-          onDismiss={pendingDelete.flush}
+          onDismiss={deletion.flush}
         />
       )}
       {/* after "Delete all my data": blocks the app until it restarts */}

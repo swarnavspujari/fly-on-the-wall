@@ -30,8 +30,9 @@ interface Props {
   /** Calendar connection status; null until loaded. With nothing connected,
    *  Up next shows a prompt to connect one. */
   calendar?: CalendarStatus | null;
-  /** Provider whose sign-in window is open (connect or reconnect). */
-  calendarBusy?: string | null;
+  /** Providers whose sign-in window is open (connect or reconnect): their
+   *  buttons say so but stay clickable. */
+  calendarBusy?: ReadonlySet<string>;
   /** Where meeting content goes (footer pill); null until settings load. */
   privacy?: PrivacySummary | null;
   selection: Selection;
@@ -143,6 +144,8 @@ function buildTree(folders: Folder[]): TreeNode[] {
 type FolderMeta = { color?: string; emoji?: string };
 const META_KEY = "fotw-folder-meta";
 
+const NO_BUSY: ReadonlySet<string> = new Set();
+
 const ROW =
   "group flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13.5px] font-medium text-text";
 const INPUT =
@@ -154,7 +157,7 @@ export default function Sidebar({
   calendarNeedsReconnect = [],
   onReconnectCalendar,
   calendar = null,
-  calendarBusy = null,
+  calendarBusy = NO_BUSY,
   privacy = null,
   selection,
   onSelect,
@@ -451,10 +454,9 @@ export default function Sidebar({
               variant="soft"
               size="xs"
               title={`Reconnect ${provider === "google" ? "Google Calendar" : "Outlook"}`}
-              disabled={calendarBusy !== null}
               onClick={() => onReconnectCalendar?.(provider)}
             >
-              {calendarBusy === provider ? "Waiting…" : "Reconnect"}
+              {calendarBusy.has(provider) ? "Waiting…" : "Reconnect"}
             </Button>
           </div>
         ))}
@@ -472,10 +474,9 @@ export default function Sidebar({
                         variant="outline"
                         size="xs"
                         title={`Connect ${CALENDAR_NAMES[p]}`}
-                        disabled={calendarBusy !== null}
                         onClick={() => onReconnectCalendar?.(p)}
                       >
-                        {calendarBusy === p
+                        {calendarBusy.has(p)
                           ? "Waiting…"
                           : `Connect ${p === "google" ? "Google" : "Outlook"}`}
                       </Button>

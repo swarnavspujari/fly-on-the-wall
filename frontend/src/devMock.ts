@@ -600,9 +600,6 @@ const calendarStatus = {
 // a reconnect (no events from it, like the backend); "empty" → connected,
 // but no video meetings left today. fotwMockNoNotes = "1" → no notes (Home's
 // empty state).
-if (typeof localStorage !== "undefined" && localStorage.getItem("fotwMockCalendar") === "none") {
-  calendarStatus.google_connected = false;
-}
 
 let mockCalendars = [
   { provider: "google", id: "primary", name: "you@example.com", primary: true, enabled: true },
@@ -814,7 +811,6 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "move_folder":
     case "delete_folder":
     case "move_note":
-    case "delete_note":
     case "cancel_transcription":
       return null;
     case "list_recent_notes":
@@ -1189,6 +1185,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
 }
 
 function installDevMock() {
+  // fotwMockCalendar = "none": start with no calendar connected (see above).
+  if (mockFlag("fotwMockCalendar") === "none") calendarStatus.google_connected = false;
   const callbacks: Record<number, (payload: unknown) => void> = {};
   const listeners: Record<string, number[]> = {};
   let cbId = 1;

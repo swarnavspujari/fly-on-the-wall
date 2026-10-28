@@ -10,12 +10,14 @@ import {
   nextVideoEvent,
   noteStatus,
   privacySummary,
+  runStateOf,
+  SEARCH_USE,
   rowDateLabel,
   upNextState,
   upNextWhen,
   type LiveNoteState,
 } from "./homeModel";
-import type { CalendarEvent, LlmSettings, NoteSummary } from "./types";
+import type { CalendarEvent, LlmSettings, NoteSummary, PipelineProgress } from "./types";
 
 // Local-time constructors keep these independent of the runner's timezone.
 const NOW = new Date(2026, 9, 27, 14, 0); // Tue Oct 27 2026, 2:00 PM
@@ -97,11 +99,15 @@ describe("noteStatus", () => {
   const idle: LiveNoteState = {
     recordingNoteId: null,
     runningMeetingIds: new Set(),
+    queuedMeetingIds: new Set(),
     failedMeetingIds: new Set(),
   };
   const meeting = (over: Partial<NoteSummary> = {}): NoteSummary => ({
     ...note("n1", NOW.toISOString(), "m1"),
     has_recording: true,
+    has_transcript: false,
+    has_enhanced_doc: false,
+    job_status: null,
     ...over,
   });
   const label = (n: NoteSummary, live: LiveNoteState = idle) => noteStatus(n, live)?.label ?? null;
@@ -124,7 +130,11 @@ describe("noteStatus", () => {
       meeting({ has_recording: false, has_transcript: true }),
       "Ready to enhance",
     ],
-    ["meeting with no audio and nothing else", meeting({ has_recording: false }), null],
+    [
+      "staged import: no audio attached yet, no job",
+      meeting({ has_recording: false }),
+      "Not transcribed",
+    ],
     ["summary cached before the fields existed", note("n1", NOW.toISOString(), "m1"), null],
   ])("stored: %s → %s", (_what, n, expected) => {
     expect(label(n)).toBe(expected);
@@ -139,7 +149,19 @@ describe("noteStatus", () => {
 
   describe("live state beats the stored row", () => {
     const running = { ...idle, runningMeetingIds: new Set(["m1"]) };
+    const queued = { ...idle, queuedMeetingIds: new Set(["m1"]) };
     const failed = { ...idle, failedMeetingIds: new Set(["m1"]) };
+
+    it("a waiting (queued) event shows Queued, not Transcribing", () => {
+      expect(label(meeting(), queued)).toBe("Queued");
+      expect(label(meeting({ has_transcript: true }), queued)).toBe("Queued");
+      // a run that started beats the queue
+      expect(label(meeting(), { ...queued, runningMeetingIds: new Set(["m1"]) })).toBe(
+        "Transcribing",
+      );
+      // a retry queued after this session's failure
+      expect(label(meeting(), { ...queued, failedMeetingIds: new Set(["m1"]) })).toBe("Queued");
+    });
 
     it("recording beats everything", () => {
       const n = meeting({ job_status: "failed", has_enhanced_doc: true });
@@ -261,6 +283,33 @@ describe("Up next", () => {
   });
 });
 
+describe("runStateOf", () => {
+  const p = (over: Partial<PipelineProgress>): PipelineProgress => ({
+    meeting_id: "m1",
+    stage: "transcribing",
+    detail: null,
+    done: false,
+    error: null,
+    ...over,
+  });
+
+  it("the scheduler's 'waiting' stage means queued", () => {
+    expect(runStateOf(p({ stage: "waiting" }))).toBe("queued");
+  });
+
+  it("any other live stage means running", () => {
+    for (const stage of ["starting", "transcribing", "diarizing", "polishing"]) {
+      expect(runStateOf(p({ stage }))).toBe("running");
+    }
+  });
+
+  it("done, failed or cancelled ends it", () => {
+    expect(runStateOf(p({ stage: "done", done: true }))).toBeNull();
+    expect(runStateOf(p({ stage: "error", done: true, error: "x" }))).toBeNull();
+    expect(runStateOf(p({ stage: "cancelled", done: true }))).toBeNull();
+  });
+});
+
 describe("greeting", () => {
   it.each([
     [8, "Good morning"],
@@ -349,6 +398,28 @@ describe("privacySummary", () => {
     const s = privacySummary(local, llm("ollama", "http://192.168.1.20:11434"))!;
     expect(s.offDevice).toBe(true);
     expect(s.label).toBe("Off this computer · 192.168.1.20:11434");
+  });
+
+  it("a remote Ollama gets the search index even with a cloud provider", () => {
+    const settings: LlmSettings = {
+      provider: "anthropic",
+      providers: providers.map((p) =>
+        p.id === "ollama" ? { ...p, base_url: "http://gpu-box.lan:11434" } : p,
+      ),
+    };
+    const s = privacySummary(local, settings)!;
+    expect(s.uses).toEqual([
+      { where: "Anthropic", what: AI_USES },
+      { where: "gpu-box.lan:11434", what: [SEARCH_USE] },
+    ]);
+    expect(s.label).toBe("Cloud on · Anthropic, gpu-box.lan:11434");
+  });
+
+  it("a remote Ollama is never 'On this computer', even with local transcription", () => {
+    const s = privacySummary(local, llm("ollama", "http://192.168.1.20:11434"))!;
+    // the AI uses and the search index go to the same host: one row
+    expect(s.uses).toEqual([{ where: "192.168.1.20:11434", what: [...AI_USES, SEARCH_USE] }]);
+    expect(s.label).not.toBe("On this computer");
   });
 
   it("a provider this build doesn't list is assumed off-device", () => {

@@ -2,17 +2,20 @@ import { X } from "lucide-react";
 import { Button } from "./ui";
 
 interface Props {
-  /** What was deleted, e.g. the note title. */
-  title: string;
+  /** Titles of the notes waiting to be deleted, oldest first. */
+  titles: string[];
+  /** Restore every waiting note. */
   onUndo: () => void;
-  /** Close the toast now: the delete runs right away. */
+  /** Close the toast now: the deletes run right away. */
   onDismiss: () => void;
 }
 
-/** "Deleted … · Undo" after a note delete (bottom-left, clear of the notice
- *  stack in the bottom-right). The delete itself waits for the toast to
- *  expire (deferredDelete.ts), so Undo restores the note untouched. */
-export default function UndoToast({ title, onUndo, onDismiss }: Props) {
+/** "Deleted … · Undo" after note deletes (bottom-left, clear of the notice
+ *  stack in the bottom-right). The deletes wait for the toast to expire
+ *  (noteDeletion.ts), so Undo restores the notes untouched; several deletes
+ *  share one toast and one Undo. */
+export default function UndoToast({ titles, onUndo, onDismiss }: Props) {
+  const several = titles.length > 1;
   return (
     <div
       role="status"
@@ -20,7 +23,15 @@ export default function UndoToast({ title, onUndo, onDismiss }: Props) {
       style={{ boxShadow: "var(--shadow-lg)" }}
     >
       <span className="min-w-0 flex-1 truncate">
-        Deleted <b className="font-semibold">“{title}”</b>
+        {several ? (
+          <>
+            Deleted <b className="font-semibold">{titles.length} notes</b>
+          </>
+        ) : (
+          <>
+            Deleted <b className="font-semibold">“{titles[0]}”</b>
+          </>
+        )}
       </span>
       <Button variant="soft" size="sm" onClick={onUndo}>
         Undo

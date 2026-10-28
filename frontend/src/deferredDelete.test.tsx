@@ -23,7 +23,7 @@ function Harness({
 }) {
   const dd = useDeferredDelete(commit, delay);
   useImperativeHandle(ref, () => dd, [dd]);
-  return <span data-pending={dd.pending?.id ?? ""} />;
+  return <span data-pending={dd.pending.map((i) => i.id).join(",")} />;
 }
 
 function mount(commit: (i: Item) => void, delay = 1000) {
@@ -66,47 +66,65 @@ describe("useDeferredDelete", () => {
     expect(pendingId()).toBe("");
   });
 
-  it("Undo cancels the delete and hands the item back", () => {
+  it("Undo cancels the delete and hands the items back", () => {
     const commit = vi.fn();
     mount(commit);
     act(() => api.schedule({ id: "a" }));
-    let restored: Item | null = null;
+    let restored: Item[] = [];
     act(() => {
       restored = api.undo();
     });
-    expect(restored).toEqual({ id: "a" });
+    expect(restored).toEqual([{ id: "a" }]);
     act(() => vi.advanceTimersByTime(5000));
     expect(commit).not.toHaveBeenCalled();
     expect(pendingId()).toBe("");
   });
 
-  it("a second delete runs the first right away (its toast is replaced)", () => {
+  it("a second delete joins the first behind one toast; neither runs early", () => {
+    const commit = vi.fn();
+    mount(commit);
+    act(() => api.schedule({ id: "a" }));
+    act(() => vi.advanceTimersByTime(600));
+    act(() => api.schedule({ id: "b" }));
+    expect(pendingId()).toBe("a,b");
+    // the first one's original expiry passes: still waiting (timer restarted)
+    act(() => vi.advanceTimersByTime(600));
+    expect(commit).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(400));
+    expect(commit.mock.calls).toEqual([[{ id: "a" }], [{ id: "b" }]]);
+    expect(pendingId()).toBe("");
+  });
+
+  it("Undo restores every waiting note", () => {
     const commit = vi.fn();
     mount(commit);
     act(() => api.schedule({ id: "a" }));
     act(() => api.schedule({ id: "b" }));
-    expect(commit).toHaveBeenCalledTimes(1);
-    expect(commit).toHaveBeenCalledWith({ id: "a" });
-    expect(pendingId()).toBe("b");
-    act(() => vi.advanceTimersByTime(1000));
-    expect(commit).toHaveBeenCalledTimes(2);
-    expect(commit).toHaveBeenLastCalledWith({ id: "b" });
+    let restored: Item[] = [];
+    act(() => {
+      restored = api.undo();
+    });
+    expect(restored).toEqual([{ id: "a" }, { id: "b" }]);
+    act(() => vi.advanceTimersByTime(5000));
+    expect(commit).not.toHaveBeenCalled();
   });
 
-  it("closing the toast deletes now, once", () => {
+  it("closing the toast deletes every waiting note now, once", () => {
     const commit = vi.fn();
     mount(commit);
     act(() => api.schedule({ id: "a" }));
+    act(() => api.schedule({ id: "b" }));
     act(() => api.flush());
-    expect(commit).toHaveBeenCalledTimes(1);
+    expect(commit).toHaveBeenCalledTimes(2);
     act(() => vi.advanceTimersByTime(5000));
-    expect(commit).toHaveBeenCalledTimes(1);
+    expect(commit).toHaveBeenCalledTimes(2);
   });
 
   it("the app closing while the toast waits deletes NOTHING", () => {
     const commit = vi.fn();
     mount(commit);
     act(() => api.schedule({ id: "a" }));
+    act(() => api.schedule({ id: "b" }));
     act(() => root!.unmount());
     root = null;
     act(() => vi.advanceTimersByTime(60_000));
@@ -116,11 +134,11 @@ describe("useDeferredDelete", () => {
   it("undo with nothing waiting is a no-op", () => {
     const commit = vi.fn();
     mount(commit);
-    let restored: Item | null = { id: "x" };
+    let restored: Item[] = [{ id: "x" }];
     act(() => {
       restored = api.undo();
     });
-    expect(restored).toBeNull();
+    expect(restored).toEqual([]);
     expect(commit).not.toHaveBeenCalled();
   });
 });

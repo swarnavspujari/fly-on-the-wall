@@ -80,7 +80,7 @@ function homeProps(over: Partial<HomeProps> = {}): HomeProps {
     upcoming: [],
     calendar: CONNECTED,
     needsReconnect: [],
-    calendarBusy: null,
+    calendarBusy: new Set(),
     hasNotes: true,
     onRecord: vi.fn(),
     onStartFromEvent: vi.fn(),
@@ -137,11 +137,17 @@ describe("Home", () => {
     expect(p.onOpenSettings).toHaveBeenCalledTimes(1);
   });
 
-  it("while the sign-in window is open, connect buttons wait", () => {
-    const host = render(<Home {...homeProps({ calendar: NONE, calendarBusy: "google" })} />);
+  it("an open sign-in says so but locks nothing (an abandoned one takes minutes)", () => {
+    const p = homeProps({ calendar: NONE, calendarBusy: new Set(["google"]) });
+    const host = render(<Home {...p} />);
     const waiting = button(host, "Waiting for browser…");
-    expect(waiting?.hasAttribute("disabled")).toBe(true);
-    expect(button(host, "Connect Outlook")?.hasAttribute("disabled")).toBe(true);
+    expect(waiting?.hasAttribute("disabled")).toBe(false);
+    expect(button(host, "Connect Outlook")?.hasAttribute("disabled")).toBe(false);
+    click(button(host, "Connect Outlook"));
+    expect(p.onConnectCalendar).toHaveBeenCalledWith("msgraph");
+    // and the waiting one can be clicked again to reopen the sign-in
+    click(waiting);
+    expect(p.onConnectCalendar).toHaveBeenCalledWith("google");
   });
 
   it("expired calendar: a banner with Reconnect, and no connect prompt", () => {
@@ -213,6 +219,7 @@ describe("NoteList", () => {
     live: {
       recordingNoteId: null,
       runningMeetingIds: new Set(["m1"]),
+      queuedMeetingIds: new Set(),
       failedMeetingIds: new Set(["m2"]),
     },
     ...over,
@@ -246,6 +253,7 @@ describe("NoteList", () => {
           live: {
             recordingNoteId: null,
             runningMeetingIds: new Set(),
+            queuedMeetingIds: new Set(),
             failedMeetingIds: new Set(),
           },
         })}
@@ -264,6 +272,33 @@ describe("NoteList", () => {
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(p.onOpenNote).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
+  });
+
+  it("the trash is in the tab order (invisible until hover or focus), not display:none", () => {
+    const host = render(<NoteList {...listProps()} />);
+    const trash = host.querySelector('[aria-label="Delete note “Board prep”"]')!;
+    expect(trash.className).not.toMatch(/(^|\s)hidden(\s|$)/);
+    expect(trash.className).toContain("opacity-0");
+    expect(trash.className).toContain("focus-visible:opacity-100");
+    (trash as HTMLElement).focus();
+    expect(document.activeElement).toBe(trash);
+  });
+
+  it("the note that's recording has no trash", () => {
+    const host = render(
+      <NoteList
+        {...listProps({
+          live: {
+            recordingNoteId: "n1",
+            runningMeetingIds: new Set(),
+            queuedMeetingIds: new Set(),
+            failedMeetingIds: new Set(),
+          },
+        })}
+      />,
+    );
+    expect(host.querySelector('[aria-label="Delete note “Acme renewal”"]')).toBeNull();
+    expect(host.querySelector('[aria-label="Delete note “Board prep”"]')).not.toBeNull();
   });
 
   it("search results stay ungrouped", () => {
@@ -347,10 +382,19 @@ describe("PrivacyPill", () => {
 });
 
 describe("UndoToast", () => {
+  it("several deletes share one toast", () => {
+    const host = render(
+      <UndoToast titles={["Acme renewal", "Board prep"]} onUndo={vi.fn()} onDismiss={vi.fn()} />,
+    );
+    expect(host.textContent).toContain("Deleted 2 notes");
+  });
+
   it("names the note; Undo and close call back", () => {
     const onUndo = vi.fn();
     const onDismiss = vi.fn();
-    const host = render(<UndoToast title="Acme renewal" onUndo={onUndo} onDismiss={onDismiss} />);
+    const host = render(
+      <UndoToast titles={["Acme renewal"]} onUndo={onUndo} onDismiss={onDismiss} />,
+    );
     expect(host.textContent).toContain("Deleted “Acme renewal”");
     click(button(host, "Undo"));
     expect(onUndo).toHaveBeenCalledTimes(1);

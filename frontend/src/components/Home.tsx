@@ -20,8 +20,9 @@ interface Props {
   /** null until the first calendar-status fetch. */
   calendar: CalendarStatus | null;
   needsReconnect: Provider[];
-  /** Provider whose sign-in window is open. */
-  calendarBusy: string | null;
+  /** Providers whose sign-in window is open. Their buttons say so but stay
+   *  clickable (an abandoned sign-in takes minutes to time out). */
+  calendarBusy: ReadonlySet<string>;
   /** false only when the user has no notes at all (the empty state). */
   hasNotes: boolean | null;
   onRecord: () => void;
@@ -109,13 +110,8 @@ export default function Home({
               <b className="font-semibold">{CALENDAR_NAMES[p]} disconnected.</b> Sign in again to
               keep Up next current.
             </span>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={calendarBusy !== null}
-              onClick={() => onConnectCalendar(p)}
-            >
-              {calendarBusy === p ? "Waiting for browser…" : "Reconnect"}
+            <Button variant="outline" size="sm" onClick={() => onConnectCalendar(p)}>
+              {calendarBusy.has(p) ? "Waiting for browser…" : "Reconnect"}
             </Button>
           </div>
         ))}
@@ -160,10 +156,9 @@ export default function Home({
                             key={p}
                             variant="outline"
                             size="sm"
-                            disabled={calendarBusy !== null}
                             onClick={() => onConnectCalendar(p)}
                           >
-                            {calendarBusy === p
+                            {calendarBusy.has(p)
                               ? "Waiting for browser…"
                               : `Connect ${CALENDAR_NAMES[p]}`}
                           </Button>

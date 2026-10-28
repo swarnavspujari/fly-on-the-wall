@@ -62,11 +62,10 @@ export default function NoteList({
   onDeleteNote,
   live,
 }: Props) {
-  // Clock for the date groups (Today rolls over at midnight), refreshed each
-  // minute so render stays pure.
-  const [now, setNow] = useState<number | null>(null);
+  // Clock for the date groups (Today rolls over at midnight), read once at
+  // mount so rows paint on the first frame, then refreshed each minute.
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    setNow(Date.now());
     const t = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(t);
   }, []);
@@ -150,7 +149,6 @@ export default function NoteList({
             Create one with “New note”.
           </div>
         ) : (
-          now != null &&
           groupNotesByDate(notes, new Date(now)).map((g) => (
             <Fragment key={g.label}>
               <SectionLabel as="div" className="px-2.5 pb-1 pt-2.5" role="heading" aria-level={3}>
@@ -187,17 +185,23 @@ export default function NoteList({
                 <Mic size={12} strokeWidth={1.75} className="flex-none text-text-3" />
               )}
             </span>
-            <button
-              title="Delete note"
-              aria-label={`Delete note “${n.title}”`}
-              className="hidden flex-none cursor-pointer rounded-[var(--radius-sm)] p-1 text-text-3 hover:bg-surface-3 hover:text-rec focus-visible:inline-flex group-hover:inline-flex"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDeleteNote(n.id);
-              }}
-            >
-              <Trash2 size={13} strokeWidth={1.75} />
-            </button>
+            {/* Invisible until hover or keyboard focus, but always in the tab
+                order. Not offered on the note that's recording (deleting it
+                would purge the files being written). */}
+            {live.recordingNoteId !== n.id && (
+              <button
+                type="button"
+                title="Delete note"
+                aria-label={`Delete note “${n.title}”`}
+                className="inline-flex flex-none cursor-pointer rounded-[var(--radius-sm)] p-1 text-text-3 opacity-0 hover:bg-surface-3 hover:text-rec focus-visible:opacity-100 group-hover:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDeleteNote(n.id);
+                }}
+              >
+                <Trash2 size={13} strokeWidth={1.75} />
+              </button>
+            )}
           </div>
           <div className="mt-0.5 flex items-center justify-between gap-2">
             {/* happened_at fallback: pre-feature summaries in the localStorage cache */}
