@@ -702,11 +702,14 @@ mod tests {
         let (_d, s, note_id, mid) = setup();
         let b1 = NoteBlock::ai("- Bid", vec!["a1".into()]);
         let b2 = NoteBlock::ai("- Legal", vec!["a2".into(), "a3".into()]);
-        s.update_note_blocks(&note_id, &[b1.clone(), b2.clone()])
+        let mine = NoteBlock::user("- my own line");
+        s.update_note_blocks(&note_id, &[b1.clone(), b2.clone(), mine.clone()])
             .unwrap();
         let it = item(&mid, &["a1", "a3"]);
         s.replace_meeting_items(&mid, std::slice::from_ref(&it))
             .unwrap();
+        let note_before = s.get_note(&note_id).unwrap();
+        let item_before = s.get_meeting_items(&mid).unwrap().remove(0);
 
         // New run: new ids, slightly shifted times; a1/a3 same speech, a2
         // decoded as something else entirely.
@@ -752,8 +755,38 @@ mod tests {
             vec!["b1".to_string(), "b3".to_string()]
         );
 
-        // note.json mirror follows; a re-save of the same blocks keeps the
-        // re-anchored locators as they are (no reset to `ok`).
+        // Re-anchoring rewrites ONLY the segment ids: block ids, order,
+        // markdown and origin kind, user blocks, the note's updated_at, and
+        // every other item field stay exactly as they were.
+        assert_eq!(
+            note.updated_at, note_before.updated_at,
+            "no updated_at bump"
+        );
+        assert_eq!(note.title, note_before.title);
+        assert_eq!(note.scratchpad, note_before.scratchpad);
+        assert_eq!(note.blocks.len(), note_before.blocks.len());
+        for (after, before) in note.blocks.iter().zip(&note_before.blocks) {
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.markdown, before.markdown);
+            assert_eq!(
+                std::mem::discriminant(&after.origin),
+                std::mem::discriminant(&before.origin),
+                "origin kind unchanged"
+            );
+        }
+        assert_eq!(note.blocks[2], mine, "user block untouched");
+        let item_after = &items[0];
+        assert_eq!(
+            fly_core::MeetingItem {
+                segment_ids: item_before.segment_ids.clone(),
+                ..item_after.clone()
+            },
+            item_before,
+            "only segment_ids changed on the item"
+        );
+
+        // A re-save of the same blocks keeps the re-anchored locators as
+        // they are (no reset to `ok`).
         s.update_note_blocks(&note_id, &note.blocks).unwrap();
         assert_eq!(
             s.citation_locators(OWNER_NOTE_BLOCK, &b1.id).unwrap()[0].status,
