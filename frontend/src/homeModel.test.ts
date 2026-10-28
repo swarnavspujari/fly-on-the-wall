@@ -99,43 +99,83 @@ describe("noteStatus", () => {
     runningMeetingIds: new Set(),
     failedMeetingIds: new Set(),
   };
+  const meeting = (over: Partial<NoteSummary> = {}): NoteSummary => ({
+    ...note("n1", NOW.toISOString(), "m1"),
+    has_recording: true,
+    ...over,
+  });
+  const label = (n: NoteSummary, live: LiveNoteState = idle) => noteStatus(n, live)?.label ?? null;
 
-  it("recording wins over everything", () => {
-    const live = { ...idle, recordingNoteId: "n1", runningMeetingIds: new Set(["m1"]) };
-    expect(noteStatus(note("n1", NOW.toISOString(), "m1"), live)).toEqual({
-      label: "Recording",
-      tone: "live",
-    });
+  it.each([
+    ["no meeting", note("n1", NOW.toISOString()), "Notes only"],
+    ["recorded, nothing queued", meeting(), "Not transcribed"],
+    ["queued (waiting or requeued after a crash)", meeting({ job_status: "queued" }), "Queued"],
+    ["running", meeting({ job_status: "running" }), "Transcribing"],
+    ["failed", meeting({ job_status: "failed" }), "Failed"],
+    [
+      "done with a transcript",
+      meeting({ job_status: "done", has_transcript: true }),
+      "Ready to enhance",
+    ],
+    ["no job, transcript", meeting({ has_transcript: true }), "Ready to enhance"],
+    ["enhanced", meeting({ has_transcript: true, has_enhanced_doc: true }), "Enhanced"],
+    [
+      "audio deleted, transcript kept",
+      meeting({ has_recording: false, has_transcript: true }),
+      "Ready to enhance",
+    ],
+    ["meeting with no audio and nothing else", meeting({ has_recording: false }), null],
+    ["summary cached before the fields existed", note("n1", NOW.toISOString(), "m1"), null],
+  ])("stored: %s → %s", (_what, n, expected) => {
+    expect(label(n)).toBe(expected);
   });
 
-  it("a note without a meeting is notes only", () => {
-    expect(noteStatus(note("n1", NOW.toISOString()), idle)).toEqual({
-      label: "Notes only",
-      tone: "neutral",
-    });
+  it("tones: failed is danger, enhanced success, ready primary, recording live", () => {
+    expect(noteStatus(meeting({ job_status: "failed" }), idle)?.tone).toBe("danger");
+    expect(noteStatus(meeting({ has_enhanced_doc: true }), idle)?.tone).toBe("success");
+    expect(noteStatus(meeting({ has_transcript: true }), idle)?.tone).toBe("primary");
+    expect(noteStatus(meeting(), { ...idle, recordingNoteId: "n1" })?.tone).toBe("live");
   });
 
-  it("transcribing, then a failed run", () => {
-    const n = note("n1", NOW.toISOString(), "m1");
-    expect(noteStatus(n, { ...idle, runningMeetingIds: new Set(["m1"]) })?.label).toBe(
-      "Transcribing",
-    );
-    expect(noteStatus(n, { ...idle, failedMeetingIds: new Set(["m1"]) })).toEqual({
-      label: "Transcription failed",
-      tone: "danger",
-    });
-    // a retry in flight beats the old failure
-    expect(
-      noteStatus(n, {
-        ...idle,
-        runningMeetingIds: new Set(["m1"]),
-        failedMeetingIds: new Set(["m1"]),
-      })?.label,
-    ).toBe("Transcribing");
-  });
+  describe("live state beats the stored row", () => {
+    const running = { ...idle, runningMeetingIds: new Set(["m1"]) };
+    const failed = { ...idle, failedMeetingIds: new Set(["m1"]) };
 
-  it("a meeting with nothing going on has no chip", () => {
-    expect(noteStatus(note("n1", NOW.toISOString(), "m1"), idle)).toBeNull();
+    it("recording beats everything", () => {
+      const n = meeting({ job_status: "failed", has_enhanced_doc: true });
+      expect(label(n, { ...running, recordingNoteId: "n1" })).toBe("Recording");
+    });
+
+    it("a run in progress beats a stored failure, queue or finished doc", () => {
+      for (const n of [
+        meeting({ job_status: "failed" }),
+        meeting({ job_status: "queued" }),
+        meeting({ job_status: "done", has_transcript: true, has_enhanced_doc: true }),
+      ]) {
+        expect(label(n, running)).toBe("Transcribing");
+      }
+    });
+
+    it("a retry in flight beats this session's failure", () => {
+      expect(label(meeting(), { ...running, failedMeetingIds: new Set(["m1"]) })).toBe(
+        "Transcribing",
+      );
+    });
+
+    it("this session's failure beats a stored queued/running job and an old transcript", () => {
+      for (const n of [
+        meeting({ job_status: "running" }),
+        meeting({ job_status: "queued" }),
+        meeting({ has_transcript: true, has_enhanced_doc: true }),
+      ]) {
+        expect(label(n, failed)).toBe("Failed");
+      }
+    });
+
+    it("live state for another meeting doesn't touch this row", () => {
+      const other = { ...idle, runningMeetingIds: new Set(["m9"]), recordingNoteId: "n9" };
+      expect(label(meeting({ has_transcript: true }), other)).toBe("Ready to enhance");
+    });
   });
 });
 

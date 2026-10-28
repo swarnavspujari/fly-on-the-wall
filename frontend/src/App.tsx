@@ -232,6 +232,12 @@ export default function App() {
     }
   }, [selection]);
 
+  // For event listeners registered once: always the current selection's fetch.
+  const refreshNotesRef = useRef(refreshNotes);
+  useEffect(() => {
+    refreshNotesRef.current = refreshNotes;
+  }, [refreshNotes]);
+
   // Notes first: this effect stays ahead of the others so the notes query
   // is the first invoke the backend sees on launch.
   useEffect(() => {
@@ -358,6 +364,9 @@ export default function App() {
       const p = e.payload;
       trackFailures(p);
       markRunning(p.meeting_id, !(p.done || p.stage === "cancelled"));
+      // A finished run changes the stored chip state (job, transcript):
+      // re-read the list so it never shows a stale "Transcribing".
+      if (p.done || p.stage === "cancelled") void refreshNotesRef.current().catch(console.error);
       if (p.meeting_id !== openMeetingIdRef.current) return;
       // Cancelled is terminal but neither success nor failure: clear the
       // progress UI and drop a staged import queue back to idle (the backend

@@ -97,16 +97,35 @@ export interface LiveNoteState {
   failedMeetingIds: ReadonlySet<string>;
 }
 
-/** The chip for one row, most urgent first. Recording, transcribing and a
- *  failed transcription come from live app state; a note with no meeting
- *  reads "Notes only"; a meeting with none of those shows no chip. */
+const CHIP = {
+  recording: { label: "Recording", tone: "live" },
+  transcribing: { label: "Transcribing", tone: "warning" },
+  queued: { label: "Queued", tone: "neutral" },
+  failed: { label: "Failed", tone: "danger" },
+  enhanced: { label: "Enhanced", tone: "success" },
+  ready: { label: "Ready to enhance", tone: "primary" },
+  notTranscribed: { label: "Not transcribed", tone: "neutral" },
+  notesOnly: { label: "Notes only", tone: "neutral" },
+} as const satisfies Record<string, NoteStatus>;
+
+/** The chip for one row. Live app state (this session's recording and
+ *  pipeline events) beats the stored row, which was read at the last list
+ *  refresh. Then the stored job: queued ("Queued": waiting, or requeued
+ *  after a crash), running, failed. Then what the note has: an enhanced doc,
+ *  a transcript, audio still to transcribe. A meeting with none of those
+ *  (no audio left, nothing queued) shows no chip. */
 export function noteStatus(n: NoteSummary, live: LiveNoteState): NoteStatus | null {
-  if (live.recordingNoteId === n.id) return { label: "Recording", tone: "live" };
-  if (!n.meeting_id) return { label: "Notes only", tone: "neutral" };
-  if (live.runningMeetingIds.has(n.meeting_id)) return { label: "Transcribing", tone: "warning" };
-  if (live.failedMeetingIds.has(n.meeting_id)) {
-    return { label: "Transcription failed", tone: "danger" };
-  }
+  if (live.recordingNoteId === n.id) return CHIP.recording;
+  const m = n.meeting_id;
+  if (m && live.runningMeetingIds.has(m)) return CHIP.transcribing;
+  if (m && live.failedMeetingIds.has(m)) return CHIP.failed;
+  if (m && n.job_status === "running") return CHIP.transcribing;
+  if (m && n.job_status === "queued") return CHIP.queued;
+  if (m && n.job_status === "failed") return CHIP.failed;
+  if (n.has_enhanced_doc) return CHIP.enhanced;
+  if (n.has_transcript) return CHIP.ready;
+  if (!m) return CHIP.notesOnly;
+  if (n.has_recording) return CHIP.notTranscribed;
   return null;
 }
 

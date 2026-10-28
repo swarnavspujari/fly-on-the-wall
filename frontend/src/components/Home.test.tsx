@@ -226,12 +226,33 @@ describe("NoteList", () => {
     expect(headings).toEqual(["Today", "Yesterday", "Previous 7 days"]);
   });
 
-  it("shows a status chip per meeting", () => {
+  it("shows a status chip per meeting: live state, then the stored row", () => {
     const host = render(<NoteList {...listProps()} />);
     const text = host.textContent ?? "";
     expect(text).toContain("Transcribing");
-    expect(text).toContain("Transcription failed");
+    expect(text).toContain("Failed");
     expect(text).toContain("Notes only");
+  });
+
+  it("stored states: enhanced, ready, queued", () => {
+    const host = render(
+      <NoteList
+        {...listProps({
+          notes: [
+            { ...notes[0], has_transcript: true, has_enhanced_doc: true },
+            { ...notes[1], has_transcript: true },
+            { ...notes[2], meeting_id: "m3", has_recording: true, job_status: "queued" },
+          ],
+          live: {
+            recordingNoteId: null,
+            runningMeetingIds: new Set(),
+            failedMeetingIds: new Set(),
+          },
+        })}
+      />,
+    );
+    const chips = Array.from(host.querySelectorAll(".fly-badge")).map((b) => b.textContent);
+    expect(chips).toEqual(["Enhanced", "Ready to enhance", "Queued"]);
   });
 
   it("delete asks no confirm(): the Undo toast covers it", () => {
