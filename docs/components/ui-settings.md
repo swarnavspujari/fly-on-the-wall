@@ -1,7 +1,7 @@
 # Settings (`ui-settings`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: the consent-hardening session (branch `claude/musing-franklin-6c560c`) changes how Settings' consent prompts record consent (they go through `useCloudConsent`). PR #86 (open, v2.5) adds a dormant Parakeet ASR engine, and any engine choice would land in the Transcripts section (inferred; #86 has no Settings change today). PR #92: none.
+> In flight: the consent hardening (#102, open) changes how Settings' consent prompts record consent (they go through `useCloudConsent`). #86 (merged) added a dormant Parakeet ASR engine behind the internal `asr.engine` flag, with no Settings row. A user-facing engine choice would land in the Transcripts section. PR #92: none.
 
 ## Purpose
 The full-window Settings overlay: seven sections (Recording, Transcripts, Ask and Enhance, Calendars, Your files and privacy, Other AI apps, General). It has search, scroll-spy and a "Where your data goes" summary built from the **saved** settings. Transcript settings are a draft that saves all-or-nothing (`set_asr_settings`) from a save bar. Every other control applies at once. Any control that sends meeting content to a cloud provider asks for consent first.

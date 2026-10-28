@@ -29,15 +29,15 @@ Called by other src-tauri modules:
 |---|---|---|---|
 | `get_meeting_privacy` | `meeting_id: String` | `Result<MeetingPrivacy, String>` (`keep_local`, `keep_local_from_folder`, `participants_notified`, `audio_deleted_at`) | `ui-editor` (`Editor.tsx:1034`), `ui-recording-bar` (`RecordingBar.tsx:64`), via `api.getMeetingPrivacy` |
 | `set_note_keep_local` | `note_id: String, keep_local: bool` | `Result<(), String>` (errors on unknown note; sets every meeting of the note) | `ui-editor` (`Editor.tsx:1050`), via `api.setNoteKeepLocal` |
-| `set_folder_keep_local` | `folder_id: String, keep_local: bool` | `Result<(), String>` | `ui-app-shell` (`Sidebar.tsx:222`, inferred owner), via `api.setFolderKeepLocal` |
-| `list_local_only_folders` | — | `Result<Vec<String>, String>` (folders flagged themselves) | `ui-app-shell` (`Sidebar.tsx:196`, inferred owner), via `api.listLocalOnlyFolders` |
+| `set_folder_keep_local` | `folder_id: String, keep_local: bool` | `Result<(), String>` | `ui-home` (`Sidebar.tsx:222`), via `api.setFolderKeepLocal` |
+| `list_local_only_folders` | — | `Result<Vec<String>, String>` (folders flagged themselves) | `ui-home` (`Sidebar.tsx:196`), via `api.listLocalOnlyFolders` |
 | `set_participants_notified` | `meeting_id: String, notified: bool` | `Result<(), String>` | `ui-recording-bar` (`RecordingBar.tsx:90`), via `api.setParticipantsNotified` |
 | `copy_recording_notice` | `text: String` (1–2000 chars) | `Result<(), String>` | `ui-recording-bar` (`RecordingBar.tsx:79`), via `api.copyRecordingNotice` |
 | `get_privacy_settings` | — | `Result<PrivacySettings, String>` (`audio_retention_days`, `retention_choices`, `retention_held`, `last_wipe`) | `ui-settings` (`PrivacySection.tsx:51`), via `api.getPrivacySettings` |
 | `preview_audio_retention` | `days: u32` (7/30/90/365) | `Result<usize, String>` (meetings that would lose audio now) | `ui-settings` (`PrivacySection.tsx:98`), via `api.previewAudioRetention` |
 | `set_audio_retention` | `days: Option<u32>` | `Result<SweepReport, String>` (saves, then runs an explicit sweep) | `ui-settings` (`PrivacySection.tsx:70`), via `api.setAudioRetention` |
 | `dismiss_wipe_report` | — | `Result<(), String>` | `ui-settings` (`PrivacySection.tsx:298`), via `api.dismissWipeReport` |
-| `delete_all_data` | `include_models: bool, confirmation: String` (must be `"delete everything"`) | `Result<WipeReport, String>` | `ui-settings` (`PrivacySection.tsx:111`); retry from `ui-app-shell` (`RestartRequired.tsx:75`, inferred owner); via `api.deleteAllData` |
+| `delete_all_data` | `include_models: bool, confirmation: String` (must be `"delete everything"`) | `Result<WipeReport, String>` | `ui-settings` (`PrivacySection.tsx:111`); retry from `ui-notices` (`RestartRequired.tsx:75`); via `api.deleteAllData` |
 | `disk_encryption_status` | — | `Result<DiskEncryption, String>` (`state` on/off/unknown, `method`, `volume`) | `ui-settings` (`PrivacySection.tsx:55`), via `api.diskEncryptionStatus` |
 
 All 12 are registered at `src-tauri/src/lib.rs:275-286` and mirrored in `frontend/src/devMock.ts:1376-1437`. Drift: the mock's `delete_all_data` rejects a wrong phrase with `"confirmation mismatch"` (backend: `"confirmation text doesn't match — nothing was deleted"`), never refuses for busy work, and always returns `last_wipe: null`; `set_note_keep_local` doesn't error on an unknown note.

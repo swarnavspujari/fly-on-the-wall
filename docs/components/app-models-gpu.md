@@ -1,7 +1,7 @@
 # Artifacts, GPU selection and hardware detection (`app-models-gpu`)
 
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0).
-> In flight: PR #86 (open, v2.5) adds `ENGINE_MODELS` (Parakeet TDT 0.6B v3 weights from huggingface.co, SHA-256 pinned) outside `registry()`, plus `engine_artifact`, `ensure_engine_model`, `PARAKEET_CLI_NAME`, `parakeet_cli_beside`, and splits `ensure_with` into `ensure_artifact`. By design, `download_model` and `artifact()` never resolve the new ids.
+> In flight: None. #86 (merged) added `ENGINE_MODELS` (Parakeet TDT 0.6B v3 weights from huggingface.co, SHA-256 pinned) outside `registry()`, plus `engine_artifact`, `ensure_engine_model`, `PARAKEET_CLI_NAME`, `parakeet_cli_beside`, and split `ensure_with` into `ensure_artifact`. By design, `download_model` and `artifact()` never resolve the new ids. The Parakeet weights (`ggml-org/parakeet-GGUF` on huggingface.co, pinned by commit and SHA-256) are downloaded only when the pipeline enables Parakeet.
 
 ## Purpose
 `models.rs` is the artifact manager: every sidecar binary (whisper.cpp, the Vulkan whisper build, sherpa-onnx, ffmpeg, Ollama) and every model weight (whisper ggml files, pyannote, CAM++) is downloaded on first use into `<data_dir>`, streamed with progress, accepted only if its SHA-256 matches a pin in source, and extracted in-process with path, link and size checks. `gpu.rs` decides, per machine and model, whether post-meeting transcription runs on the pinned Vulkan build (Windows), based on a one-time measured benchmark; any GPU failure pins the machine back to CPU. `hw.rs` detects RAM, cores and GPU to recommend an ASR tier.
@@ -52,7 +52,7 @@
 | `hw.cache` | R/W (`hw.rs:24-41`; also `asr_commands.rs:267`) | No | JSON `HwInfo` from the last detection; refreshed in the background each launch |
 | `asr.use_gpu` | R here (`gpu.rs:38-45`); written by `set_asr_settings` | No | GPU transcription opt-out; default on (anything but `"false"`) |
 | `asr.gpu_bench` | R/W (`gpu.rs:47-82`); cleared by `set_asr_settings` on off→on (`asr_commands.rs:372-377`) | No | JSON `GpuBench` verdict per (machine, model) |
-| env `FLYONTHEWALL_NO_HF_MIRROR` | R (`models.rs:474-476`) | n/a | Any value but empty / `"0"` disables the hf-mirror.com fallback |
+| env `FLYONTHEWALL_NO_HF_MIRROR` | R (`models::hf_mirror_disabled`) | n/a | Any value but empty / `"0"` disables the hf-mirror.com fallback |
 
 ### Database
 | Table | Columns | Read / write |
@@ -136,4 +136,4 @@ None.
 - **Error wording:** the two markers are matched by `scheduler.rs` and `pipelineNotice.ts`; change all three together.
 - **GPU verdict shape** is persisted JSON in `asr.gpu_bench`; renaming fields silently resets every machine to "no verdict" (`stored` drops unparsable JSON). devMock's `fotwMockGpuBench` mirrors the shape (`devMock.ts:602-610`).
 - **Spawning new console tools on Windows:** set `CREATE_NO_WINDOW` (as `hw.rs:113` does and `hw.rs:78` doesn't).
-- PR #86 adds a second, separate registry (`ENGINE_MODELS`); keep `download_model` and `best_installed_asr_model` blind to it.
+- `ENGINE_MODELS` (from #86) is a second, separate registry. Keep `download_model` and `best_installed_asr_model` blind to it. Engine weights are fetched only through `ensure_engine_model`, when the pipeline enables Parakeet.

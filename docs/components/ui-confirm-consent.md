@@ -1,7 +1,7 @@
 # In-app confirm and cloud consent (`ui-confirm-consent`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: the consent-hardening session ("Make cloud consent unforgeable from the webview", branch `claude/musing-franklin-6c560c`, no commits yet) targets `CloudConsent.tsx`, the settings allowlist in `commands.rs` and `llm_commands.rs`. Today any script in the webview can write `consent.cloud_llm.<id>` through `set_app_setting`; that write path is what changes. PR #92 and PR #86 don't touch this component.
+> In flight: the consent hardening (#102, open) targets `CloudConsent.tsx`, the settings allowlist in `commands.rs` and `llm_commands.rs`. Today any script in the webview can write `consent.cloud_llm.<id>` through `set_app_setting`; that write path is what changes. PR #92 and PR #86 don't touch this component.
 
 ## Purpose
 `confirm.tsx` is the app's only yes/no dialog. It replaced `window.confirm`, which tauri-plugin-dialog makes async (a Promise is always truthy, so `if (confirm(...))` never waited). `CloudConsent.tsx` is the one place the UI asks before a cloud LLM provider first gets meeting content: from Settings, Ask's Runs on, the launch check and the skipped-cleanup notice. The backend (`build_provider`) enforces the recorded consent. The UI only asks for it and records it.
@@ -47,7 +47,7 @@ Behaviour details:
 ### Settings keys
 | Key (or prefix) | Read / write | Webview-settable? (`is_webview_setting_key`) | Meaning |
 |---|---|---|---|
-| `consent.cloud_llm.<provider>` | read + write (`CloudConsent.tsx:48`, `:61`, `:164`) | **Yes** (`consent.` prefix; `commands.rs:59-66`; asserted by `llm_commands.rs:1006`) | `"true"` = you allowed this cloud provider. `build_provider` reads it (`llm_commands.rs:290`). Any webview script can set it today, bypassing the prompt (the consent-hardening session fixes this). |
+| `consent.cloud_llm.<provider>` | read + write (`CloudConsent.tsx:48`, `:61`, `:164`) | **Yes** (`consent.` prefix; `commands.rs:59-66`; asserted by `llm_commands.rs:1006`) | `"true"` = you allowed this cloud provider. `build_provider` reads it (`llm_commands.rs:290`). Any webview script can set it today, bypassing the prompt (the consent hardening (#102) fixes this). |
 | `migration.cloud_consent_reset_v2_4` | not touched by UI | No | Backend flag for the one-time v2.4 reset (`llm_commands.rs:61-64`, `:82-104`, run from `lib.rs:115`). |
 
 localStorage keys: none. devMock toggles: `fotwMockConsentReset="1"` (no consent recorded, so the launch check asks), `fotwMockConsentSkips="1"` (the skipped-cleanup notice shows). Test-only export `resetMockAppSettings()` (`devMock.ts:877`).

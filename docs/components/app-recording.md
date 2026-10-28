@@ -1,7 +1,7 @@
 # Recording, capture and live captions (`app-recording`)
 
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0).
-> In flight: None (PR #86, PR #92 and the consent-hardening session don't touch `recording.rs` or `live.rs`).
+> In flight: None. #86 (merged), PR #92 and the consent hardening (#102) don't touch `recording.rs` or `live.rs`.
 
 ## Purpose
 This feature turns a Record press into a meeting row plus a meeting folder of per-channel WAVs, using the [fly-audio](fly-audio.md) backend. Only one capture runs at a time. Stop writes a filesystem-only manifest first and then attaches the recording in SQLite, so a broken database can't lose the audio. While a recording runs, a live-caption loop transcribes newly appended audio with a small whisper model and streams "you" / "them" partials to the UI. It also owns meeting lookups for a note, the meeting date edit, mic listing, and the macOS system-audio consent probe.
@@ -47,7 +47,7 @@ This feature turns a Record press into a meeting row plus a meeting folder of pe
 | `list_mic_devices` | none | `Result<Vec<AudioDevice>, String>` | `ui-settings` (`SettingsModal.tsx:376`), via `api.listMicDevices` |
 | `preflight_system_audio` | none | `Result<SystemAudioPreflight, String>` | `ui-app-shell` (`App.tsx:273-292`, macOS only, after consent), via `api.preflightSystemAudio` |
 | `open_privacy_settings` | none | `Result<(), String>` (`Err` off macOS) | `ui-recording-bar` (`App.tsx:987-991`) and `ui-notices` (`AppNotices`, `App.tsx:1099`), via `api.openPrivacySettings` |
-| `live_status` | `meeting_id: String` | `Option<LiveStatus>` (not a `Result`) | `ui-editor` (`LivePane.tsx:45-52`, catch-up on mount), via `api.liveStatus` |
+| `live_status` | `meeting_id: String` | `Option<LiveStatus>` (not a `Result`) | `ui-recording-bar` (`LivePane.tsx:45-52`, catch-up on mount), via `api.liveStatus` |
 
 devMock mirrors all 12 (`devMock.ts:1088-1094,1140-1144,1172-1203,1284-1288,1452-1462`). Where it drifts:
 - start, pause, resume and stop never fail: there is no "a recording is already in progress" or "no active recording" error.

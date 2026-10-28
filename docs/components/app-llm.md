@@ -1,7 +1,7 @@
 # LLM: Enhance, Ask, polish, extraction (`app-llm`)
 
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0).
-> In flight: **Consent hardening** (session "Make cloud consent unforgeable from the webview", branch `claude/musing-franklin-6c560c`, no commits yet) changes how `build_provider` decides `consented` (today it reads the webview-writable `consent.cloud_llm.<id>` row, `src-tauri/src/llm_commands.rs:290`) and the test that pins that key as webview-settable (`llm_commands.rs:1006`). The Ask harness (PR 3.3, not open yet) will add an agentic Ask caller over the dormant fly-context/fly-llm tool loop; it must go through `build_provider` too.
+> In flight: **Consent hardening** (#102, open) changes how `build_provider` decides `consented` (today it reads the webview-writable `consent.cloud_llm.<id>` row, `src-tauri/src/llm_commands.rs:290`) and the test that pins that key as webview-settable (`llm_commands.rs:1006`). The Ask harness (PR 3.3, not open yet) will add an agentic Ask caller over the dormant fly-context/fly-llm tool loop; it must go through `build_provider` too.
 
 ## Purpose
 Every LLM call the app makes: Enhance (scratchpad + transcript → provenance-tagged blocks), Ask (ephemeral chat over one note), transcript polish (a cleaned variant stored next to the raw one), and structured item extraction into `meeting_items`. It owns `build_provider`, the only place a provider is constructed, and so the only place cloud consent and **Keep local** are enforced (spec §2 item 1). It also owns templates, the block-level edit/keep commands, and two startup migrations of LLM settings.
@@ -147,7 +147,7 @@ Background AI pass after every successful transcription (`scheduler.rs:169-173`)
 
 ## Invariants
 - `build_provider` is the only LLM constructor. Spec §2 item 1. Enforced by `llm_commands.rs:312-340`, the only `OpenAiCompatProvider::`/`AnthropicProvider::new` call sites in `src-tauri/src`.
-- Cloud processing needs recorded per-provider consent, checked in the backend, not only the UI. THREAT_MODEL T10. Enforced at `llm_commands.rs:290`, `241-251`. **Gap:** the consent row is webview-writable (`commands.rs:60`), so the check can be forged by a script in the webview (T2/T3 interplay). The consent-hardening session fixes this.
+- Cloud processing needs recorded per-provider consent, checked in the backend, not only the UI. THREAT_MODEL T10. Enforced at `llm_commands.rs:290`, `241-251`. **Gap:** the consent row is webview-writable (`commands.rs:60`), so the check can be forged by a script in the webview (T2/T3 interplay). The consent hardening (#102) fixes this.
 - Keep-local data never goes to a cloud provider or to an Ollama on another machine, and unknown/failed lookups count as keep-local. T10. Enforced at `llm_commands.rs:235-237,293-300` and `fly-storage/src/privacy.rs:209-241`.
 - The keep-local check runs before the consent check, and both run before any key is read (`llm_commands.rs:235-251,301-310`).
 - A stored key never goes to a plain-HTTP non-loopback host: checked on save (`llm_commands.rs:858`) and again on use (279-281). Anthropic's host is fixed (333-336). T4.

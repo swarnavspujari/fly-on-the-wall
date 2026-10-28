@@ -1,7 +1,7 @@
 # Transcription pipeline and scheduler (`app-pipeline`)
 
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0).
-> In flight: PR #92 (draft, v2.5): storage schema v3 changes what `save_transcript` writes (per-segment `transcript_segments`/`segments_fts`, `citation_locators` re-anchored on re-transcribe). `run_with` and `re_diarize_with` call it unchanged, but re-diarize's "segment ids never change" contract becomes load-bearing for citations. PR #86 (open, v2.5) adds a dormant Parakeet engine to [fly-asr](fly-asr.md); the engine chain below does not use it.
+> In flight: PR #92 (draft, v2.5): storage schema v3 changes what `save_transcript` writes (per-segment `transcript_segments`/`segments_fts`, `citation_locators` re-anchored on re-transcribe). `run_with` and `re_diarize_with` call it unchanged, but re-diarize's "segment ids never change" contract becomes load-bearing for citations. #86 (merged) added a dormant Parakeet engine to [fly-asr](fly-asr.md). The chain below leads with Parakeet tiers only when the internal `asr.engine` flag (or `FLYONTHEWALL_ASR_ENGINE`) says `parakeet` and the meeting is transcribed as English (`use_parakeet`, `parakeet_tiers`). Otherwise it is unchanged.
 
 ## Purpose
 Turns a meeting's recorded WAVs into a saved, diarized transcript, then runs the best-effort AI pass (transcript cleanup, then item extraction). Jobs live in a persistent queue (`transcription_jobs`). One worker drains it, one job at a time, and never starts a job while audio or screen capture is active. Also owns the transcript read/edit commands, attendee confirmation, "Re-analyze speakers" with one-level undo, the ASR settings, and cooperative cancel.
@@ -84,6 +84,8 @@ All are registered in `src-tauri/src/lib.rs` (`cancel_transcription` at `lib.rs:
 | `asr.use_gpu` (`gpu::USE_GPU_KEY`) | R/W | No | GPU switch. Turning it off then on clears `asr.gpu_bench` (`asr_commands.rs:372-377`) |
 | `asr.gpu_bench` (`gpu::BENCH_KEY`) | R; W via `gpu::record_runtime_failure` after a GPU tier failure (`pipeline.rs:670-673`) | No | per-model GPU/CPU verdict; `cpu` pins the chain to CPU (`pipeline.rs:1313-1315`) |
 | `hw.cache` (`hw::CACHE_KEY`) | R/W (`asr_commands.rs:255-271`) | No | cached hardware profile |
+| `asr.engine` (`pipeline::ENGINE_SETTING_KEY`) | R only (`run_with`) | No | Internal engine selector (#86). `parakeet` leads with Parakeet tiers on the fully local path, for English only. No Settings row and no command writes it; the harness and hardware tests set it. The environment variable `FLYONTHEWALL_ASR_ENGINE` wins over it. |
+| `asr.xtalk_window_ms` (`pipeline::XTALK_WINDOW_SETTING_KEY`) | R only | No | Internal override of the cross-talk dedup window, for engine re-tuning (#86). No writer in the app. |
 
 The pipeline reads per-meeting/folder Keep local through `storage.get_meeting_privacy(..).effective_keep_local()` (`pipeline.rs:177-193`). That is a column, not a setting.
 

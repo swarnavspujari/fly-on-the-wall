@@ -1,7 +1,7 @@
 # App shell, IPC seam and primitives (`ui-app-shell`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: the consent-hardening session (branch `claude/musing-franklin-6c560c`, no commits yet) changes how cloud consent is recorded (`llm_commands.rs`, the settings allowlist, `CloudConsent.tsx`). Expect a new command: `api.ts` gains a wrapper and `devMock.ts` must mirror it, including its consent store (`frontend/src/devMock.ts:867-880`, `:1326-1336`). PR #92 and PR #86 change nothing here.
+> In flight: the consent hardening (#102, open) changes how cloud consent is recorded (`llm_commands.rs`, the settings allowlist, `CloudConsent.tsx`). Expect a new command: `api.ts` gains a wrapper and `devMock.ts` must mirror it, including its consent store (`frontend/src/devMock.ts:867-880`, `:1326-1336`). PR #92 and PR #86 change nothing here.
 
 ## Purpose
 The React entry point, the `App` orchestrator that owns almost all cross-feature state, the single IPC seam (`api.ts`), the in-browser fake backend (`devMock.ts`), the shared UI primitives (`ui.tsx`), the theme store and the TypeScript mirror of the Rust IPC types. Every other `ui-*` component is mounted from here and talks to the backend through `api.ts`.
@@ -104,7 +104,7 @@ None. API keys go one way through `set_llm_settings` / `set_asr_settings` and ne
 ### What `App.tsx` holds
 | Kind | Items |
 |---|---|
-| State (38 `useState` + 1 `useReducer`) | `info`, `tapDenied`, `folders`, `selection`, `notes`, `openNote`, `openMeeting`, `noteMeetings`, `transcript`, `cleanedTranscript`, `pipeStage`, `pipeDetail`, `pipelineError`, `pipelineFailures` (reducer), `importStaged`, `modelProgress`, `engine`, `installingEngine`, `searchQuery`, `searchHits`, `recStatus`, `screenStatus`, `screenSource`, `autoTranscribe`, `templates`, `upcoming`, `calendarNeedsReconnect`, `calendarStatus`, `calendarBusy`, `llmSettings`, `asrPrivacy`, `liveRuns`, `showSettings`, `settingsFocus`, `showFirstRun`, `error`, `narrow`, `drawerOpen` (`App.tsx:63-182`) |
+| State (37 `useState` + 1 `useReducer`) | `info`, `tapDenied`, `folders`, `selection`, `notes`, `openNote`, `openMeeting`, `noteMeetings`, `transcript`, `cleanedTranscript`, `pipeStage`, `pipeDetail`, `pipelineError`, `pipelineFailures` (reducer), `importStaged`, `modelProgress`, `engine`, `installingEngine`, `searchQuery`, `searchHits`, `recStatus`, `screenStatus`, `screenSource`, `autoTranscribe`, `templates`, `upcoming`, `calendarNeedsReconnect`, `calendarStatus`, `calendarBusy`, `llmSettings`, `asrPrivacy`, `liveRuns`, `showSettings`, `settingsFocus`, `showFirstRun`, `error`, `narrow`, `drawerOpen` (`App.tsx:63-182`) |
 | Refs (11) | `failureSeqRef`, `liveRunsRef`, `openMeetingIdRef`, `openNoteIdRef`, `importStagedRef`, `notesRef`, `firstNotesLogged`, `notesSeq`, `refreshNotesRef`, `searchSeq`, `openSeq` |
 | Effects | notes fetch first (`:253-255`); startup loads (`:257-271`); macOS consent probe (`:279-291`); Up next every 5 min (`:294-298`); recording + screen status poll every 1 s (`:301-307`); narrow resize (`:311-322`); Ctrl/Cmd+K (`:325-334`); event listeners (`:337-455`); two-pass search, FTS at 200 ms then hybrid at 450 ms (`:462-495`) |
 | Children wired | `RecordingBar` (`:983`), narrow menu bar (`:998`), `Sidebar` (`:924`), `NoteList` (`:961`), `Editor` or `Home` (`:1017-1072`), narrow drawer (`:1074`), `AppNotices` (`:1095`), `UndoToast` (`:1122`), `RestartRequired` (`:1130`), `FirstRunNotice` (`:1131`), `SettingsModal` (`:1139`) |

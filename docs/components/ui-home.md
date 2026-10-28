@@ -1,7 +1,7 @@
 # Home, note list and sidebar (`ui-home`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: None. (PR #92 changes storage, not the list summary shape; the consent-hardening session doesn't touch these files.)
+> In flight: None. (PR #92 changes storage, not the list summary shape; the consent hardening (#102) doesn't touch these files.)
 
 ## Purpose
 What you see when no note is open, plus the two left columns that are always there: the sidebar (folders, Up next, privacy pill, Import, Settings) and the note list (date groups, status chips, search results, delete with Undo). Home's rules live in the pure `homeModel.ts`; deletion is deferred behind an Undo toast.

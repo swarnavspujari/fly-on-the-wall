@@ -1,7 +1,7 @@
 # Media import (`app-import`)
 
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0).
-> In flight: None directly. PR #86 adds engines to [fly-asr](fly-asr.md) and PR #92 changes transcript storage; imports reuse [app-pipeline](app-pipeline.md) unchanged.
+> In flight: None directly. #86 (merged) added a dormant engine to [fly-asr](fly-asr.md), and PR #92 changes transcript storage; imports reuse [app-pipeline](app-pipeline.md) unchanged.
 
 ## Purpose
 Turns existing audio or video files into a normal note in three steps. **Stage:** pick files, create the note and meeting, copy each original into the meeting folder. **Review:** the note opens on an import queue where the user reorders or removes files. **Transcribe:** each file is converted to a 16 kHz mono intermediate (pure Rust for PCM WAV, ffmpeg otherwise) and the results are joined, with 1 s of silence between files, into one `recording.mixed.wav`, which is queued on the same pipeline a live recording uses. If any file fails to convert, the queue pauses before transcribing, with the cause on that file, because a file skipped now can never be added to the single transcript later.
@@ -21,7 +21,7 @@ Turns existing audio or video files into a normal note in three steps. **Stage:*
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
 |---|---|---|---|
-| `import_stage` | none (opens the native multi-file picker) | `Result<Option<ImportStaged>, String>`; `None` when the picker is cancelled | `ui-app-shell` (`Sidebar.tsx:598` "Import media as a note"), `ui-home` (`Home.tsx:201` "Import recordings"), both → `App.tsx:645-654` `importMedia`, via `api.importStage` |
+| `import_stage` | none (opens the native multi-file picker) | `Result<Option<ImportStaged>, String>`; `None` when the picker is cancelled | `ui-home` (`Sidebar.tsx:598` "Import media as a note"), `ui-home` (`Home.tsx:201` "Import recordings"), both → `App.tsx:645-654` `importMedia`, via `api.importStage` |
 | `import_state` | `meeting_id: String` | `Result<Option<ImportStaged>, String>`. Deletes the manifest and returns `None` once the meeting has a transcript. | `ui-app-shell` (`App.tsx:558` on note open; `App.tsx:388-398` after `cancelled`; `App.tsx:670` after a failed transcribe), via `api.importState` |
 | `import_transcribe` | `meeting_id: String, order: Vec<String>` (file ids) | `Result<ImportStaged, String>`. `started: true` once enqueued; `started: false` with `convert_error`s when paused. | `ui-import` (`ImportQueue` Transcribe/Retry → `App.tsx:658-673`), via `api.importTranscribe` |
 

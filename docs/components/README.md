@@ -2,7 +2,9 @@
 
 Fly on the Wall is a modular monolith: one desktop process (Tauri 2) plus one sidecar binary (the MCP server). This catalog makes the modules explicit. It gives each one a doc covering what it owns, everything it touches, the rules it must keep, and the tests that cover it. You can then change, test or extract one component without reading the whole codebase.
 
-Described at main `82b7edf` (v2.4.0, 2026-10-28). [In-flight work](#in-flight-work) lists what's about to change.
+Written against main `82b7edf` (v2.4.0, 2026-10-28), then refreshed after #86 merged (`f2b8981`). [In-flight work](#in-flight-work) lists what's about to change.
+
+"Spec" throughout means the [UX rollout and platform design](../superpowers/specs/2026-10-27-ux-rollout-and-platform-design.md). Its §2 lists the invariants every PR must keep.
 
 - **Start here:** find your component in the [index](#index). Its doc's **Surface area** section lists every command, event, settings key, table, file, host, process and secret it touches.
 - **Changing something?** Read the component's **Invariants** and **Changing it safely** first. Then check the [boundary rules](#boundary-assessment).
@@ -223,7 +225,7 @@ Every host the app or its child processes contact. Detail and gates are in each 
 | `localhost:11434`, or `llm.ollama.base_url` (which can be another machine) | Yes | Same tasks with Ollama; embeddings and search queries | No consent (local kind). Keep-local content is refused or skipped when the URL isn't loopback. | [app-llm](app-llm.md), [app-search](app-search.md), [app-ollama](app-ollama.md) |
 | `api.groq.com` | Yes (audio) | Transcription with Groq on and a key stored | Groq setting + key; skipped for Keep local | [fly-asr](fly-asr.md), [app-pipeline](app-pipeline.md) |
 | `accounts.google.com`, `oauth2.googleapis.com`, `www.googleapis.com`, `login.microsoftonline.com`, `graph.microsoft.com` | No (reads calendar data in) | Connect, refresh, upcoming meetings | User connects a calendar | [fly-calendar](fly-calendar.md), [app-calendar](app-calendar.md) |
-| `github.com` releases (whisper.cpp, sherpa-onnx, FFmpeg builds, Ollama, this repo's tool builds), `huggingface.co`, optional `hf-mirror.com` | No | First use of a model or tool | SHA-256 pinned | [app-models-gpu](app-models-gpu.md) |
+| `github.com` releases (whisper.cpp, sherpa-onnx, FFmpeg builds, Ollama, this repo's tool builds), `huggingface.co`, and `hf-mirror.com` (on by default, tried after 2 failed huggingface.co attempts; `FLYONTHEWALL_NO_HF_MIRROR` turns it off) | No | First use of a model or tool | SHA-256 pinned | [app-models-gpu](app-models-gpu.md) |
 | `registry.ollama.ai` (from the Ollama child process) | No | Model pull, including the embedding model | — | [app-ollama](app-ollama.md), [app-search](app-search.md) |
 | `github.com/…/releases/latest/download/latest.json` and the release assets | No | Update check 5 s after launch; Update now | Minisign-verified | [app-updater](app-updater.md) |
 | `127.0.0.1:<ephemeral>` (inbound) | — | OAuth redirect | One-shot listener with a `state` check | [fly-calendar](fly-calendar.md) |
@@ -247,10 +249,10 @@ The rules on this page are **proposals**. This PR changes no code.
 
 ### Where boundaries leak
 
-1. **One app crate holds 15 components.** `fly-app` is about 13,700 lines in 23 modules. Every module can reach every other module's `pub` items, and the feature modules call each other in both directions (see the back-edges under the component map). `state.rs` imports four feature modules, which inverts the layering.
+1. **One app crate holds 15 components.** `fly-app` is about 14,100 lines in 23 modules. Every module can reach every other module's `pub` items, and the feature modules call each other in both directions (see the back-edges under the component map). `state.rs` imports four feature modules, which inverts the layering.
    - Command bodies take Tauri's `State`/`AppHandle`, so integration tests can't call them. Several tests rebuild the command's logic by hand instead (for example `src-tauri/tests/enhance_flow.rs` versus `enhance_note`), and pass even when the shipped code changes.
    - `run_polish` shows the alternative: it takes `&AppState`, so a test can call the shipped function directly.
-2. **Shared mutable `AppState`** (`src-tauri/src/state.rs`): 12 fields.
+2. **Shared mutable `AppState`** (`src-tauri/src/state.rs`): 13 fields.
    - `storage` is **one SQLite connection behind one `Mutex`**. It is locked at about 59 sites in 15 modules, including the background workers (scheduler, embeddings, retention, self-heal), so UI commands queue behind long holds. The one-time embedding-chunk backfill holds the lock for its whole run.
    - `pipeline_stage` is touched by 6 modules, `recording` by 5 and `secrets` by 6.
    - `consent_skipped` is written from 3 modules, but only one of them emits `llm:consent-skips`.
@@ -265,9 +267,9 @@ The rules on this page are **proposals**. This PR changes no code.
    - Refusal text, recording-warning sentences and pipeline stage names are matched by substring in TypeScript.
    - `devMock.ts` (1,609 lines) handles 95 of the 104 commands and returns `null` for any command it doesn't know.
    - CI path gating runs the Rust tests and vitest on disjoint sets of changed files. A Rust-only change to a command, event or error string never runs the frontend tests, and vice versa.
-6. **`App.tsx` orchestrates everything:** 1,159 lines, 38 `useState`, 15 `useEffect`, 6 event subscriptions. Fourteen files import `api` directly, and `safeContent.ts` calls `invoke` itself.
+6. **`App.tsx` orchestrates everything:** 1,159 lines, 37 `useState`, 14 `useEffect`, 4 event subscriptions (2 Tauri `listen`, plus window `resize` and `keydown`). Fourteen files import `api` directly, and `safeContent.ts` calls `invoke` itself.
    - Large frontend files: `SettingsModal.tsx` 2,328 lines, `Editor.tsx` 1,614, `ui.tsx` 1,593.
-   - Large backend files: `pipeline.rs` 1,972, `models.rs` 1,917, `privacy.rs` 1,462, `import_commands.rs` 1,346.
+   - Large backend files: `pipeline.rs` 2,203, `models.rs` 2,036, `privacy.rs` 1,462, `import_commands.rs` 1,346.
 7. **Delete-all and path containment are split across layers.**
    - fly-storage removes the scratch root, which is outside the data folder, and knows the pipeline's and import's scratch file names. The app deletes content folders and finishes the wipe at the next start.
    - Containment checks are applied per call site rather than where paths are built.
@@ -314,12 +316,14 @@ Each extraction moves its component doc with it, and the doc's **Tests** section
 | Work | Status | Components it changes |
 |---|---|---|
 | **#92** storage schema v3: a per-segment FTS index, spanned and label-free embedding chunks, `citation_locators` with re-anchoring on re-transcribe, keep-local inside SQL for `vector_search`, `list_meetings_filtered` | Draft, v2.5; merges after the v2.4 tag | [fly-storage](fly-storage.md), [fly-context](fly-context.md), [app-search](app-search.md) (snippets lose speaker prefixes; the corpus re-embeds once), [fly-mcp](fly-mcp.md) (an old binary refuses a v3 file) |
-| **#86** multi-engine ASR harness and a dormant Parakeet engine | Open, v2.5 | [fly-asr](fly-asr.md), [fly-core](fly-core.md) (`model.rs`), [app-pipeline](app-pipeline.md) |
-| **Consent hardening**: make cloud consent unforgeable from the webview | In progress, no commits yet | [app-settings-consent](app-settings-consent.md), [app-llm](app-llm.md), [ui-confirm-consent](ui-confirm-consent.md). Today `consent.cloud_llm.<id>` sits under the webview-settable `consent.` prefix. |
+| **#86** multi-engine ASR harness and a dormant Parakeet engine | **Merged** (`f2b8981`); the docs below describe it | [fly-asr](fly-asr.md) (`batch.rs`, `parakeet.rs`), [app-pipeline](app-pipeline.md) (the internal `asr.engine` flag), [app-models-gpu](app-models-gpu.md) (`ENGINE_MODELS`), [fly-core](fly-core.md) (engine strings) |
+| **#102** consent hardening: only the backend records cloud-AI consent | Open | [app-settings-consent](app-settings-consent.md), [app-llm](app-llm.md), [ui-confirm-consent](ui-confirm-consent.md). Today `consent.cloud_llm.<id>` sits under the webview-settable `consent.` prefix. |
+| **#103** immutable system-evals foundation (`evals/`, lock and run scripts) | Open, v2.5 | Test infrastructure; no component's surface changes |
 | **Ask harness (PR 3.3)** wires [fly-context](fly-context.md) and the fly-llm tool loop into Ask | Planned, v2.5 | [app-llm](app-llm.md), [ui-ask](ui-ask.md) |
 
 ## Keeping this catalog current
 
 - A PR that adds or removes a command, event, settings key, table, written path, network host, external process or keychain entry updates the owning component's doc in the same PR.
-- Docs describe `main`. In-flight work goes in the doc's `In flight:` line, not in the body.
+- Docs describe `main`. In-flight work goes in the doc's `In flight:` line, citing PR numbers rather than branch names, not in the body.
+- `file:line` references are as of `82b7edf` unless a doc says otherwise; #86 shifted `pipeline.rs` and `models.rs`, and `fly-asr.md` was rewritten around symbol names. When a line reference drifts, the symbol named beside it is authoritative. In new text, prefer a symbol name and keep `file:line` only where it adds precision.
 - This repository is public: use synthetic examples only ("Weekly sync", "Dana", "Speaker 1"), and write `<data_dir>` instead of a real path.

@@ -1,7 +1,7 @@
 # App notices (`ui-notices`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: the consent-hardening session (branch `claude/musing-franklin-6c560c`, no commits yet) changes how cloud consent is recorded. The skipped-cleanup notice reads and asks for that consent through `useConsentSkips` (`frontend/src/components/CloudConsent.tsx:118-197`), so it and its tests (`AppNotices.test.tsx:367-453`) will change with it.
+> In flight: the consent hardening (#102, open) changes how cloud consent is recorded. The skipped-cleanup notice reads and asks for that consent through `useConsentSkips` (`frontend/src/components/CloudConsent.tsx:118-197`), so it and its tests (`AppNotices.test.tsx:367-453`) will change with it.
 
 ## Purpose
 Every app-wide notice in one bottom-right corner: a failed user action, the macOS system-audio block, transcription failures for notes that aren't open, skipped AI cleanup, and the update prompt. The top notice shows and the rest sit behind "+N more", so notices never overlap. The pure modules decide priority, copy and which failures are held. Also owns the blocking restart screen after "Delete all my data" and the "Remind me to tell people" settings row.

@@ -1,7 +1,7 @@
 # Ask (`ui-ask`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: the consent-hardening session (branch `claude/musing-franklin-6c560c`) changes how consent is recorded. That affects Runs on and "Review and allow", which call `useCloudConsent`. The Ask harness (spec PR 3.3) will wire the dormant `fly-context` / `fly-llm` tool loop behind `ask_meeting`, which may change its error strings, and `describeAskError` matches those strings. PR #92 / #86: none here.
+> In flight: the consent hardening (#102, open) changes how consent is recorded. That affects Runs on and "Review and allow", which call `useCloudConsent`. The Ask harness (spec PR 3.3) will wire the dormant `fly-context` / `fly-llm` tool loop behind `ask_meeting`, which may change its error strings, and `describeAskError` matches those strings. PR #92 / #86: none here.
 
 ## Purpose
 Ask a question about the open note or meeting. A composer docks next to the view switcher. Answers appear in a sheet over the note, or pinned beside it on wide windows. The chat is ephemeral: it clears on a note switch, and nothing reaches the note until you click "Insert into note". Every question goes through the backend's one LLM path (`ask_meeting` → `build_provider`), which enforces cloud consent and Keep local. "Runs on" changes the **global** saved LLM provider, the same setting Settings writes, and says so.

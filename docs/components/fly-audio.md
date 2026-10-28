@@ -1,7 +1,7 @@
 # Audio capture and DSP (`fly-audio`)
 
 > Layer: crate. Described at main `82b7edf` (v2.4.0).
-> In flight: None. PR #86's fly-asr work calls `mix` and `vad` but changes no file in this crate (checked against the PR #86 branch).
+> In flight: None. #86 (merged) made fly-asr's new `batch.rs` call `mix` and `vad`, but changed no file in this crate.
 
 ## Purpose
 This crate defines the `AudioCapture` / `CaptureSession` traits and the one real implementation. It records the microphone and the system output ("them") as separate mono WAV channels, then renders a 16 kHz mixdown for ASR and a native-rate playback mix. It also ships pure audio helpers (WAV I/O, resampling, peak normalizing, an adaptive energy VAD with stitching) that fly-asr, the pipeline and import reuse. Finally, it has the macOS system-audio consent probe and the user-facing text for macOS TCC (privacy permission) problems.

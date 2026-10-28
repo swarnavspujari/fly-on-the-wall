@@ -1,7 +1,7 @@
 # LLM providers (`fly-llm`)
 
 > Layer: crate. Described at main `82b7edf` (v2.4.0).
-> In flight: None in this crate. The tool loop, `converse()` / `chat_stream()` and capability probing are merged but **dormant** (no app caller); the Ask harness PR 3.3 will wire them. The consent-hardening session (`claude/musing-franklin-6c560c`) changes the gate in the app's `build_provider`, not this crate.
+> In flight: None in this crate. The tool loop, `converse()` / `chat_stream()` and capability probing are merged but **dormant** (no app caller); the Ask harness PR 3.3 will wire them. The consent hardening (#102) changes the gate in the app's `build_provider`, not this crate.
 
 ## Purpose
 The `LLMProvider` trait and its two HTTP implementations: `AnthropicProvider` (`/v1/messages`) and `OpenAiCompatProvider` (OpenAI, NVIDIA NIM, and Ollama's native `/api/chat`). Today every feature (Enhance, Ask, transcript polish, item extraction, Test connection) uses only the text-only `chat()` call, whose request bodies are frozen by a golden test. The block-structured `converse()` / `chat_stream()` surface, the bounded tool loop, and small-model tool-call repair are there for the agentic Ask harness. The crate holds no policy: consent, Keep local and base-URL checks live in the app's `build_provider`.

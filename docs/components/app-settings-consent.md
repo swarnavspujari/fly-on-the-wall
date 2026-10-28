@@ -1,7 +1,7 @@
 # Settings and cloud consent (`app-settings-consent`)
 
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0).
-> In flight: **Consent hardening** (session "Make cloud consent unforgeable from the webview", branch `claude/musing-franklin-6c560c`, no commits yet) targets `commands.rs` `is_webview_setting_key`, `llm_commands.rs` (`build_provider`'s consent read, `reset_unseen_cloud_consent`) and `frontend/src/components/CloudConsent.tsx`. Today `consent.cloud_llm.<id>` sits under the webview-settable `consent.` prefix, so any script in the webview can record cloud consent through `set_app_setting` without the in-app prompt. Expect a dedicated consent command and a narrowed allowlist.
+> In flight: **Consent hardening** (#102, open) targets `commands.rs` `is_webview_setting_key`, `llm_commands.rs` (`build_provider`'s consent read, `reset_unseen_cloud_consent`) and `frontend/src/components/CloudConsent.tsx`. Today `consent.cloud_llm.<id>` sits under the webview-settable `consent.` prefix, so any script in the webview can record cloud consent through `set_app_setting` without the in-app prompt. Expect a dedicated consent command and a narrowed allowlist.
 
 ## Purpose
 The cross-cutting store of non-secret settings: the generic `get_app_setting` / `set_app_setting` pair and the allowlist that limits what the webview may touch, the LLM provider settings (`get_llm_settings` / `set_llm_settings`, including keychain writes for API keys), and the cloud-consent bookkeeping: the in-memory list of meetings whose background AI pass was refused for missing consent, and the command that re-runs them. This doc also holds the **settings-key registry for the whole app**.
@@ -56,7 +56,7 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 
 | Key (or prefix) | Owner | Reader(s) | Writer(s) | Webview-settable? |
 |---|---|---|---|---|
-| **`consent.cloud_llm.<provider>`** | app-settings-consent | `build_provider` (`llm_commands.rs:290`); UI `CloudConsent.tsx:48,164` | UI `CloudConsent.tsx:61` (the only writer in code); bulk delete `reset_unseen_cloud_consent` (`llm_commands.rs:91`) | **yes: the open gap.** A script can grant consent without the prompt; `llm_commands.rs:1006` and `commands.rs:690` assert it stays settable. Being changed by the consent-hardening session. |
+| **`consent.cloud_llm.<provider>`** | app-settings-consent | `build_provider` (`llm_commands.rs:290`); UI `CloudConsent.tsx:48,164` | UI `CloudConsent.tsx:61` (the only writer in code); bulk delete `reset_unseen_cloud_consent` (`llm_commands.rs:91`) | **yes: the open gap.** A script can grant consent without the prompt; `llm_commands.rs:1006` and `commands.rs:690` assert it stays settable. Being changed by the consent hardening (#102). |
 | `consent.recording_notice_accepted` | ui-app-shell | `App.tsx:268,282` | `App.tsx:1135` | yes |
 | `capture.mic_device_id` | app-recording | `recording.rs:168`; `SettingsModal.tsx:379` | `SettingsModal.tsx:1385` | yes |
 | `ui.ask.pinned` | ui-ask | `Editor.tsx:997` | `Editor.tsx:1005` | yes |
@@ -71,7 +71,9 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 | `asr.use_groq` | app-pipeline | `asr_commands.rs:297`, `pipeline.rs:231` | `asr_commands.rs:349` | no |
 | `asr.max_quality` | app-pipeline | `asr_commands.rs:298`, `pipeline.rs:232` | `asr_commands.rs:355` | no |
 | `asr.auto_transcribe` | app-pipeline | `asr_commands.rs:305` (UI acts on it) | `asr_commands.rs:361` | no |
-| `asr.language` | app-pipeline | `pipeline.rs:234` | none in code (inferred: set by hand) | no |
+| `asr.language` | app-pipeline | `pipeline::run_with` | none in code (inferred: set by hand) | no |
+| `asr.engine` (`pipeline::ENGINE_SETTING_KEY`) | app-pipeline | `pipeline::run_with`; `FLYONTHEWALL_ASR_ENGINE` wins over it | none in the app; the accuracy harness sets it | no (pinned by a test in `pipeline.rs`) |
+| `asr.xtalk_window_ms` (`pipeline::XTALK_WINDOW_SETTING_KEY`) | app-pipeline | `pipeline::run_with` | none in the app; the accuracy harness sets it | no (pinned by a test in `pipeline.rs`) |
 | `asr.use_gpu` (`gpu::USE_GPU_KEY`) | app-models-gpu | `gpu.rs:40` | `asr_commands.rs:378-381` | no |
 | `asr.gpu_bench` (`gpu::BENCH_KEY`) | app-models-gpu | `gpu.rs:49` | `gpu.rs:58`; cleared `asr_commands.rs:375` | no |
 | `hw.cache` (`hw::CACHE_KEY`) | app-models-gpu | `hw.rs:26` | `hw.rs:36`, `asr_commands.rs:267` | no |

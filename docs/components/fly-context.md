@@ -1,7 +1,7 @@
 # Meeting context for AI readers (`fly-context`)
 
 > Layer: crate. Described at main `82b7edf` (v2.4.0).
-> In flight: **PR #92** (draft, v2.5, `claude/context-schema-3.2b-0e8caf`) rewires this crate onto storage schema v3:
+> In flight: **PR #92** (draft, v2.5) rewires this crate onto storage schema v3:
 > - `vector_search` filters Keep local (and orphan chunks) inside SQL before its limit. Unscoped searches then ask for 200 hits instead of every hit.
 > - Vector hits map to windows by the chunk's `segment_ids`, falling back to `start_ms`.
 > - `list_meetings` uses `list_meetings_filtered(&MeetingFilter)`, with date, folder and Keep-local filters in SQL.
