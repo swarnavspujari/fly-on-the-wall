@@ -14,28 +14,53 @@ use futures_util::{Stream, StreamExt};
 use crate::conversation::{ChatResponse, ContentBlock, StopReason, StreamEvent, Usage};
 use crate::{ChatStream, LlmError, Result};
 
+/// Longest single line accepted from a provider stream. Real lines are a
+/// JSON event (a few KB; a whole Ollama tool call at most); anything bigger
+/// is a broken or hostile server, and buffering it would grow without bound.
+pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Splits a byte stream into complete lines. Bytes are decoded only once a
 /// whole line has arrived, so a UTF-8 character split across network chunks
-/// survives.
+/// survives. Each byte is scanned once (the scan resumes where the last one
+/// stopped), and completed lines are drained in one move per push.
 #[derive(Debug, Default)]
 pub struct LineBuffer {
     buf: Vec<u8>,
+    /// Bytes of `buf` already known to hold no newline.
+    scanned: usize,
 }
 
 impl LineBuffer {
     /// Feed bytes; returns every line completed by them (without `\r\n`).
-    pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+    /// Errors when a line grows past [`MAX_LINE_BYTES`].
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
         self.buf.extend_from_slice(bytes);
         let mut lines = Vec::new();
-        while let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
-            let mut line: Vec<u8> = self.buf.drain(..=pos).collect();
-            line.pop();
+        let mut start = 0usize;
+        let mut i = self.scanned;
+        while let Some(off) = self.buf[i..].iter().position(|b| *b == b'\n') {
+            let end = i + off;
+            let mut line = &self.buf[start..end];
             if line.last() == Some(&b'\r') {
-                line.pop();
+                line = &line[..line.len() - 1];
             }
-            lines.push(String::from_utf8_lossy(&line).into_owned());
+            lines.push(String::from_utf8_lossy(line).into_owned());
+            start = end + 1;
+            i = start;
         }
-        lines
+        if start > 0 {
+            self.buf.drain(..start);
+        }
+        self.scanned = self.buf.len();
+        if self.buf.len() > MAX_LINE_BYTES {
+            self.buf.clear();
+            self.scanned = 0;
+            return Err(LlmError::Provider(format!(
+                "the provider sent a stream line longer than {} MB",
+                MAX_LINE_BYTES / (1024 * 1024)
+            )));
+        }
+        Ok(lines)
     }
 
     /// The unterminated tail, if any (a body that doesn't end in `\n`).
@@ -45,6 +70,7 @@ impl LineBuffer {
         }
         let tail = String::from_utf8_lossy(&self.buf).trim_end().to_string();
         self.buf.clear();
+        self.scanned = 0;
         (!tail.is_empty()).then_some(tail)
     }
 }
@@ -111,12 +137,15 @@ where
                 return None;
             }
             match st.body.next().await {
-                Some(Ok(chunk)) => {
-                    for line in st.lines.push(chunk.as_ref()) {
-                        let r = st.decoder.line(&line);
-                        push_all(&mut st.pending, r);
+                Some(Ok(chunk)) => match st.lines.push(chunk.as_ref()) {
+                    Ok(lines) => {
+                        for line in lines {
+                            let r = st.decoder.line(&line);
+                            push_all(&mut st.pending, r);
+                        }
                     }
-                }
+                    Err(e) => st.pending.push_back(Err(e)),
+                },
                 Some(Err(e)) => st
                     .pending
                     .push_back(Err(LlmError::Network(format!("stream interrupted: {e}")))),
@@ -257,10 +286,38 @@ mod tests {
         let bytes = "data: héllo\r\nnext".as_bytes();
         // split inside the two-byte é
         let (a, b) = bytes.split_at(8);
-        assert!(lb.push(a).is_empty());
-        assert_eq!(lb.push(b), vec!["data: héllo".to_string()]);
+        assert!(lb.push(a).unwrap().is_empty());
+        assert_eq!(lb.push(b).unwrap(), vec!["data: héllo".to_string()]);
         assert_eq!(lb.finish().as_deref(), Some("next"));
         assert_eq!(lb.finish(), None);
+    }
+
+    #[test]
+    fn line_buffer_splits_many_lines_per_chunk_and_bounds_line_length() {
+        let mut lb = LineBuffer::default();
+        assert_eq!(
+            lb.push(b"a\nb\r\n\nc").unwrap(),
+            vec!["a".to_string(), "b".to_string(), String::new()]
+        );
+        assert_eq!(lb.push(b"d\n").unwrap(), vec!["cd".to_string()]);
+        // A line that never ends is cut off at the cap instead of growing.
+        let mut lb = LineBuffer::default();
+        let chunk = vec![b'x'; 1024 * 1024];
+        let mut failed = false;
+        for _ in 0..(MAX_LINE_BYTES / chunk.len() + 2) {
+            if lb.push(&chunk).is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "unbounded line must be refused");
+        // Many small chunks of one long (legal) line: the work stays linear
+        // because each byte is scanned once.
+        let mut lb = LineBuffer::default();
+        for _ in 0..100_000 {
+            assert!(lb.push(b"0123456789").unwrap().is_empty());
+        }
+        assert_eq!(lb.push(b"\n").unwrap()[0].len(), 1_000_000);
     }
 
     #[test]

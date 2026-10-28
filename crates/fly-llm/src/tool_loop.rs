@@ -60,7 +60,10 @@ pub enum LoopEnd {
     MaxTokens,
 }
 
-/// One tool execution, for the run log. Deliberately content-free.
+/// One tool execution, for the run log. Deliberately content-free: `name`
+/// is always a declared tool's name, or [`UNKNOWN_TOOL`] when the model
+/// asked for one that doesn't exist (its invented name is model output and
+/// never recorded).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallRecord {
     pub name: String,
@@ -87,6 +90,12 @@ pub struct ToolLoopOutcome {
 /// Runs a tool: `Ok(observation)` or `Err(message shown to the model)`.
 pub type ToolExecutor<'a> =
     dyn FnMut(&str, &Value) -> std::result::Result<String, String> + Send + 'a;
+
+/// `ToolCallRecord::name` for a call to a tool that wasn't offered.
+pub const UNKNOWN_TOOL: &str = "<unknown tool>";
+
+/// Longest model-invented tool name echoed back to the model itself.
+const MAX_ECHOED_NAME: usize = 64;
 
 const BUDGET_MESSAGE: &str =
     "Tool budget used up. Answer now using only the information you already have.";
@@ -116,12 +125,21 @@ pub async fn run_tool_loop(
                 TextToolCall::NotACall => {}
                 TextToolCall::Call { name, input } => {
                     repaired_ids += 1;
+                    // Keep provider-opaque blocks (Anthropic thinking): the
+                    // API checks them on the turn that carries tool results.
+                    // The call's text itself is replaced by the call.
+                    let mut blocks: Vec<ContentBlock> = resp
+                        .blocks
+                        .into_iter()
+                        .filter(|b| matches!(b, ContentBlock::Opaque { .. }))
+                        .collect();
+                    blocks.push(ContentBlock::ToolUse {
+                        id: format!("repaired_{repaired_ids}"),
+                        name,
+                        input,
+                    });
                     resp = ChatResponse {
-                        blocks: vec![ContentBlock::ToolUse {
-                            id: format!("repaired_{repaired_ids}"),
-                            name,
-                            input,
-                        }],
+                        blocks,
                         stop_reason: StopReason::ToolUse,
                         usage: resp.usage,
                     };
@@ -132,7 +150,8 @@ pub async fn run_tool_loop(
                         return Err(LlmError::ToolProtocol(reason));
                     }
                     corrected = true;
-                    req.messages.push(Message::assistant(resp.text()));
+                    // The whole reply (opaque blocks included), not just text.
+                    req.messages.push(resp.to_message());
                     req.messages.push(Message::user(format!(
                         "That looked like a tool call, but {reason}. Either call a tool \
                          with valid JSON arguments, or answer in plain text."
@@ -185,13 +204,14 @@ pub async fn run_tool_loop(
             if req.tool(&name).is_none() {
                 results.push(result(
                     format!(
-                        "There is no tool named {name:?}. Available tools: {}.",
+                        "There is no tool named {:?}. Available tools: {}.",
+                        truncate_plain(&name, MAX_ECHOED_NAME),
                         tool_names(&req)
                     ),
                     true,
                 ));
                 calls.push(ToolCallRecord {
-                    name,
+                    name: UNKNOWN_TOOL.into(),
                     ok: false,
                     repaired,
                 });
@@ -240,14 +260,12 @@ pub async fn run_tool_loop(
             let text = resp.text();
             let still_calling = !resp.tool_uses().is_empty()
                 || repair::classify(&text, &req.tools) != TextToolCall::NotACall;
+            // The answer was forced by a budget, so the run is capped, never
+            // `Done` — whatever the model did on this last turn.
             let end = if out_of_calls {
                 LoopEnd::CallBudget
-            } else if still_calling {
-                LoopEnd::RoundBudget
-            } else if resp.stop_reason == StopReason::MaxTokens {
-                LoopEnd::MaxTokens
             } else {
-                LoopEnd::Done
+                LoopEnd::RoundBudget
             };
             let answer = if still_calling { String::new() } else { text };
             // Keep only text: an unanswered tool_use would poison a follow-up.
@@ -271,6 +289,11 @@ fn tool_names(req: &ConverseRequest) -> String {
         .map(|t| t.name.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// At most `max` chars, no marker (for echoing model-supplied names).
+fn truncate_plain(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
 }
 
 /// Cut to at most `max` chars on a char boundary, marking the cut.
@@ -492,8 +515,10 @@ mod tests {
         let out = run_tool_loop(&mock, req(), limits, &mut exec)
             .await
             .unwrap();
-        // Model stopped on its own in the forced turn.
-        assert_eq!(out.end, LoopEnd::Done);
+        // The final answer was forced by the round budget: capped, not Done.
+        assert_eq!(out.end, LoopEnd::RoundBudget);
+        assert_eq!(out.answer, "Done.");
+        assert_eq!(mock.requests()[1].tool_choice, ToolChoice::None);
         let obs = match &mock.requests()[1].messages.last().unwrap().content[0] {
             ContentBlock::ToolResult { content, .. } => content.clone(),
             other => panic!("{other:?}"),
@@ -513,5 +538,85 @@ mod tests {
             .unwrap();
         let log = serde_json::to_string(&out.calls).unwrap();
         assert!(!log.contains("secret"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_names_are_not_recorded_or_echoed_unbounded() {
+        let invented = format!("steal_{}", "x".repeat(500));
+        let mock = MockLLMProvider::scripted(vec![
+            ChatResponse::tool_call("c1", invented.clone(), json!({})),
+            ChatResponse::text_reply("ok"),
+        ]);
+        let mut exec = |_: &str, _: &Value| -> std::result::Result<String, String> {
+            panic!("must not execute")
+        };
+        let out = run_tool_loop(&mock, req(), ToolLoopLimits::default(), &mut exec)
+            .await
+            .unwrap();
+        assert_eq!(out.calls[0].name, UNKNOWN_TOOL);
+        assert!(!serde_json::to_string(&out.calls).unwrap().contains("steal"));
+        match &mock.requests()[1].messages.last().unwrap().content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(content.len() < 200, "{content}");
+                assert!(content.contains("search_passages"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn repaired_call_keeps_thinking_blocks() {
+        let thinking = ContentBlock::Opaque {
+            provider: "anthropic".into(),
+            raw: json!({"type": "thinking", "thinking": "plan", "signature": "sig"}),
+        };
+        let mock = MockLLMProvider::scripted(vec![
+            ChatResponse {
+                blocks: vec![
+                    thinking.clone(),
+                    ContentBlock::text(
+                        r#"<tool_call>{"name": "search_passages", "arguments": {"query": "q"}}</tool_call>"#,
+                    ),
+                ],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+            ChatResponse::text_reply("answer"),
+        ]);
+        let mut exec = search_exec();
+        let out = run_tool_loop(&mock, req(), ToolLoopLimits::default(), &mut exec)
+            .await
+            .unwrap();
+        assert!(out.calls[0].repaired);
+        let second = &mock.requests()[1].messages;
+        let assistant = &second[second.len() - 2];
+        assert_eq!(assistant.content[0], thinking, "thinking block kept first");
+        assert!(matches!(assistant.content[1], ContentBlock::ToolUse { .. }));
+        assert_eq!(assistant.content.len(), 2, "the call text is replaced");
+    }
+
+    #[tokio::test]
+    async fn malformed_turn_is_echoed_with_its_opaque_blocks() {
+        let thinking = ContentBlock::Opaque {
+            provider: "anthropic".into(),
+            raw: json!({"type": "thinking", "thinking": "", "signature": "s"}),
+        };
+        let mock = MockLLMProvider::scripted(vec![
+            ChatResponse {
+                blocks: vec![
+                    thinking.clone(),
+                    ContentBlock::text(r#"<tool_call>{"name": "search_passages""#),
+                ],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+            ChatResponse::text_reply("plain"),
+        ]);
+        let mut exec = search_exec();
+        run_tool_loop(&mock, req(), ToolLoopLimits::default(), &mut exec)
+            .await
+            .unwrap();
+        let second = &mock.requests()[1].messages;
+        assert_eq!(second[second.len() - 2].content[0], thinking);
     }
 }

@@ -332,8 +332,13 @@ pub struct Capabilities {
     pub tools: bool,
     /// `ToolChoice::None` is honored (else tools are omitted instead).
     pub tool_choice_none: bool,
-    /// `ToolChoice::Required` is honored (else it degrades to auto).
+    /// `ToolChoice::Required` is honored with the request's default
+    /// thinking (else it degrades to auto).
     pub tool_choice_required: bool,
+    /// `ToolChoice::Required` is honored when the request also sets
+    /// `ThinkingMode::Disabled` — e.g. Claude Haiku 5.5, which thinks by
+    /// default and only accepts forced tool choice with thinking off.
+    pub tool_choice_required_thinking_off: bool,
     /// Strict (schema-guaranteed) tool arguments.
     pub strict_tools: bool,
     /// Most strict tools one request may declare (0 = no limit known).
@@ -388,6 +393,74 @@ pub(crate) fn closed_schema(schema: &serde_json::Value) -> serde_json::Value {
     }
     let mut s = schema.clone();
     close(&mut s);
+    s
+}
+
+/// The OpenAI strict-function form of a schema: every object closed
+/// (`additionalProperties: false`) and listing EVERY property in
+/// `required`, with the properties that weren't required made nullable —
+/// strict mode rejects a schema with optional properties. Applied
+/// recursively; a schema already in this form is unchanged.
+pub(crate) fn strict_schema(schema: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{json, Value};
+    fn nullable(p: &mut Value) {
+        match p.get("type").cloned() {
+            Some(Value::String(t)) => p["type"] = json!([t, "null"]),
+            Some(Value::Array(mut ts)) => {
+                if !ts.contains(&json!("null")) {
+                    ts.push(json!("null"));
+                }
+                p["type"] = Value::Array(ts);
+            }
+            _ => {
+                *p = json!({ "anyOf": [p.clone(), { "type": "null" }] });
+                return;
+            }
+        }
+        if let Some(values) = p.get_mut("enum").and_then(|e| e.as_array_mut()) {
+            if !values.contains(&Value::Null) {
+                values.push(Value::Null);
+            }
+        }
+    }
+    fn walk(v: &mut Value) {
+        match v {
+            Value::Object(map) => {
+                let required: Vec<String> = map
+                    .get("required")
+                    .and_then(|r| r.as_array())
+                    .map(|r| {
+                        r.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut keys: Option<Vec<String>> = None;
+                if let Some(Value::Object(props)) = map.get_mut("properties") {
+                    for (k, p) in props.iter_mut() {
+                        walk(p);
+                        if !required.contains(k) {
+                            nullable(p);
+                        }
+                    }
+                    keys = Some(props.keys().cloned().collect());
+                }
+                if let Some(keys) = keys {
+                    map.insert("required".into(), json!(keys));
+                    map.insert("additionalProperties".into(), json!(false));
+                }
+                for (k, child) in map.iter_mut() {
+                    if k != "properties" {
+                        walk(child);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    let mut s = schema.clone();
+    walk(&mut s);
     s
 }
 
