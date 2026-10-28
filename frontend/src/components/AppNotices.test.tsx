@@ -9,7 +9,7 @@ import type { Updater, UpdatePhase } from "../updater";
 import type { PipelineFailure } from "../pipelineFailures";
 import AppNotices from "./AppNotices";
 import { ConfirmProvider } from "./confirm";
-import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
+import { answerConsent, consentRequest, holdConsentRequests } from "./cloudConsentTesting";
 
 // Backend events: keep each handler so a test can fire one.
 const eventHandlers: Record<string, (e: { payload: unknown }) => void> = {};
@@ -73,8 +73,14 @@ beforeEach(() => {
   });
   vi.spyOn(api, "getLlmSettings").mockImplementation(async () => structuredClone(llm));
   vi.spyOn(api, "getAppSetting").mockImplementation(async (k) => consents[k] ?? null);
+  // as in the backend, consent can't be set from here: request_cloud_consent
+  // records it
   vi.spyOn(api, "setAppSetting").mockImplementation(async (k, v) => {
+    if (k.startsWith("consent.cloud_llm.")) throw "can't be changed from the app UI";
     consents[k] = v;
+  });
+  holdConsentRequests((p) => {
+    consents[`consent.cloud_llm.${p}`] = "true";
   });
 });
 
@@ -379,8 +385,8 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
     );
     click(button(host, "Review and allow"));
     await flush();
-    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
-    await act(async () => confirmChoice(false).click());
+    expect(consentRequest()).toEqual({ provider: "anthropic", atLaunch: false });
+    await act(async () => answerConsent(false));
     await flush();
     expect(consents["consent.cloud_llm.anthropic"]).toBeUndefined();
     expect(api.retryConsentSkipped).not.toHaveBeenCalled();
@@ -388,7 +394,7 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
 
     click(button(host, "Review and allow"));
     await flush();
-    await act(async () => confirmChoice(true).click());
+    await act(async () => answerConsent(true));
     await flush();
     expect(consents["consent.cloud_llm.anthropic"]).toBe("true");
     expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
@@ -403,7 +409,7 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
     expect(notice(host)!.textContent).toContain("1 meeting kept the raw transcript");
     click(button(host, "Run them now"));
     await flush();
-    expect(confirmDialog()).toBeNull();
+    expect(api.requestCloudConsent).not.toHaveBeenCalled();
     expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
   });
 

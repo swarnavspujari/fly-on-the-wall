@@ -12,7 +12,7 @@ Wires [fly-calendar](fly-calendar.md) to the UI. Resolves which OAuth client to 
 
 ## Surface area
 ### Public API
-- `pub(crate) const GOOGLE_CLIENT_SECRET_KEY = "google_oauth_client_secret"` (`calendar_commands.rs:24`), used by `state.rs:161` (legacy keychain copy) and `privacy.rs:528` (delete-all).
+- `pub(crate) const GOOGLE_CLIENT_SECRET_KEY = "google_oauth_client_secret"` (`calendar_commands.rs:24`), used by `state.rs:166` (legacy keychain copy) and `privacy.rs:528` (delete-all).
 - `calendar_defaults::{GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, MS_CLIENT_ID}` (`calendar_defaults.rs:30-45`), used only by `calendar_commands.rs:36-61`.
 - Serialized types returned to the UI: `CalendarStatus` (`calendar_commands.rs:117-130`), `UpcomingMeetings { events, needs_reconnect }` (`:267-272`), `CalendarToggle` (`:338-347`).
 
@@ -34,7 +34,7 @@ None emitted directly. `start_meeting_from_event` starts the live-caption loop t
 ### Settings keys
 | Key (or prefix) | Read / write | Webview-settable? (`is_webview_setting_key`) | Meaning |
 |---|---|---|---|
-| `calendar.google.client_id` | R/W | No (`commands.rs:695` asserts it) | User's own Google client id; empty = use bundled default |
+| `calendar.google.client_id` | R/W | No (`commands.rs:761` asserts it) | User's own Google client id; empty = use bundled default |
 | `calendar.ms.client_id` | R/W | No | User's own Azure app (client) id; empty = bundled default |
 | `calendar.google.disabled_ids` | R/W | No | JSON array of Google calendar ids toggled off |
 | `calendar.ms.disabled_ids` | R/W | No | JSON array of Graph calendar ids toggled off |
@@ -69,12 +69,12 @@ Service `com.flyonthewall.app` (`fly-secrets`):
 Bundled defaults (`calendar_defaults.rs`): `FOTW_GOOGLE_CLIENT_ID`, `FOTW_GOOGLE_CLIENT_SECRET`, `FOTW_MS_CLIENT_ID`, compiled in from release-workflow secrets (`.github/workflows/release.yml:307-309`); empty in CI and local builds unless exported. The Google desktop secret is treated as non-confidential under PKCE (`calendar_defaults.rs:24-26`). User values always win (`calendar_commands.rs:34-61`).
 
 ## Dependencies
-- **Inbound:** `lib.rs:259-266` (registration); `state.rs:161` and `privacy.rs:528` (the secret key name).
+- **Inbound:** `lib.rs:260-267` (registration); `state.rs:166` and `privacy.rs:528` (the secret key name).
 - **Outbound:** [fly-calendar](fly-calendar.md), [fly-secrets](fly-secrets.md), [fly-storage](fly-storage.md) (settings), [app-recording](app-recording.md) (`seed_attendees`, `start_recording_impl`), `tauri-plugin-opener`, `AppState.storage` / `AppState.secrets` (see [app-shell](app-shell.md)).
 
 ## Invariants
 - **Calendar-seeded attendees stay unconfirmed.** `start_meeting_from_event` passes the event's invitees through `recording::seed_attendees` (drops `is_self` and `declined`, `recording.rs:109-123`) into `create_meeting`, which stores `attendees_confirmed = false` (`crates/fly-storage/src/meetings.rs:53`); only confirmed rosters set `num_speakers` (`pipeline.rs:44`). Source: spec §2 item 7.
-- Calendar client ids and disabled-id lists are **not** webview-settable; only these dedicated commands write them. Source: spec §2 item 2; `commands.rs:59-66`, test `commands.rs:695`.
+- Calendar client ids and disabled-id lists are **not** webview-settable; only these dedicated commands write them. Source: spec §2 item 2; `commands.rs:59-66`, test `commands.rs:761`.
 - `disconnect_calendar` never builds the provider, so it works when the OAuth config is missing or broken (`calendar_commands.rs:236-245`).
 - `upcoming_meetings` never fails because one provider failed; auth failures (`NotConnected` or `Auth`) become `needs_reconnect` entries, others are logged (`calendar_commands.rs:274-324`).
 - The window is "now − 30 min" to local midnight; never tomorrow (`calendar_commands.rs:254-262`, `:292-293`).
@@ -91,11 +91,11 @@ Bundled defaults (`calendar_defaults.rs`): `FOTW_GOOGLE_CLIENT_ID`, `FOTW_GOOGLE
 | vitest | `frontend/src/components/Home.test.tsx` | several | Up next card, connect prompt (props only, no IPC) |
 
 **Known gaps:**
-- No command in this file is invoked by any test; there is no Tauri command harness. `start_meeting_from_event` (the spec §2 item 7 entry point) is covered only piecewise: the seeding fn, the storage default, and a devMock copy of the seeding rule (`devMock.ts:1181-1201`) that could drift from `seed_attendees`.
+- No command in this file is invoked by any test; there is no Tauri command harness. `start_meeting_from_event` (the spec §2 item 7 entry point) is covered only piecewise: the seeding fn, the storage default, and a devMock copy of the seeding rule (`devMock.ts:1218-1238`) that could drift from `seed_attendees`.
 - `disconnect_deletes_token_without_provider_config` re-implements the command instead of calling it, so the regression it describes (building the provider first) would pass.
-- **Disconnect can be undone on restart (inferred, untested).** `AppState::init` copies `google_oauth_token`, `ms_oauth_token` and `google_oauth_client_secret` from the pre-rebrand `com.looma.notetaker` keychain whenever the new store lacks them (`state.rs:63-67`, `:167-175`). `disconnect_calendar` deletes only the new-service key (`calendar_commands.rs:244`), so a pre-rebrand user who disconnects is silently reconnected at next launch. Only "Delete all my data" clears the legacy service (`privacy.rs:808`).
+- **Disconnect can be undone on restart (inferred, untested).** `AppState::init` copies `google_oauth_token`, `ms_oauth_token` and `google_oauth_client_secret` from the pre-rebrand `com.looma.notetaker` keychain whenever the new store lacks them (`state.rs:67-71`, `:172-180`). `disconnect_calendar` deletes only the new-service key (`calendar_commands.rs:244`), so a pre-rebrand user who disconnects is silently reconnected at next launch. Only "Delete all my data" clears the legacy service (`privacy.rs:808`).
 - Transient token-endpoint failures (5xx) are `CalendarError::Auth` and show "Reconnect"; no test pins the intended behavior.
-- devMock `connect_calendar` succeeds instantly (`devMock.ts:1247`); the real call blocks until the browser redirect or 5 min, which jsdom tests can't show.
+- devMock `connect_calendar` succeeds instantly (`devMock.ts:1284`); the real call blocks until the browser redirect or 5 min, which jsdom tests can't show.
 
 ## Changing it safely
 - Add a command: register in `lib.rs`, wrap in `frontend/src/api.ts`, mirror in `devMock.ts` (spec §2 item 4), add a row here.

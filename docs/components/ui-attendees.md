@@ -27,7 +27,7 @@ Behaviour:
 ### Tauri commands
 - Calls: `update_meeting_attendees`, `re_diarize_meeting`, `revert_speaker_assignment`, `speaker_undo_state`, `recording_status`. `calendarMatch` feeds `start_recording(noteId, seed)` in `App.tsx` (events come from `upcoming_meetings`).
 - Backend owners: `app-pipeline` (attendees, re-diarize, undo), `app-recording` (`recording_status`, `start_recording`), `app-calendar` (`upcoming_meetings`).
-- devMock mirrors all of them (`devMock.ts:1145-1158`, `recording_status`). It is simplified: `re_diarize_meeting` always reports 3 changed lines, and `update_meeting_attendees` always returns note n1's meeting.
+- devMock mirrors all of them (`devMock.ts:1182-1195`, `recording_status`). It is simplified: `re_diarize_meeting` always reports 3 changed lines, and `update_meeting_attendees` always returns note n1's meeting.
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |

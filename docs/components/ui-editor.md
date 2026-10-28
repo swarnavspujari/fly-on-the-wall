@@ -1,7 +1,7 @@
 # Note editor (`ui-editor`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: PR #92 (draft, v2.5) adds `citation_locators` with re-anchoring on re-transcribe and per-segment storage. That changes when an AI line's cited segment ids still resolve, which is what `enhancedTrust.ts` calls "sourced" / "source not found" (inferred; no frontend file in #92). The consent hardening (#102) doesn't touch these files. PR #86: none.
+> In flight: PR #92 (draft, v2.5) adds `citation_locators` with re-anchoring on re-transcribe and per-segment storage. That changes when an AI line's cited segment ids still resolve, which is what `enhancedTrust.ts` calls "sourced" / "source not found" (inferred; no frontend file in #92). PR #86: none.
 
 ## Purpose
 The open note: title, meta chips (date, template, folder, attendees, Keep local, recording, attachments), and one content region with three views. **Notes** is a WYSIWYG markdown editor. **Transcript** has the audio player, speaker relabel, line edits, VTT export and engine/download notices. **Enhanced** shows AI blocks colored by provenance, with Keep / Remove and source previews. The Ask composer docks in the same floating switcher (see [ui-ask](ui-ask.md)). Untrusted content (AI output, imported notes) is rendered through `safeContent.ts` / `markdownSafe.tsx`, which never fetch remote images and never navigate the app window (THREAT_MODEL T1/T2).
@@ -47,7 +47,7 @@ Keep calls `keep_note_block` and the block becomes yours (`:496-509`). Remove hi
 - Calls (TranscriptPanel): `export_transcript_vtt`. Relabel, segment edit and re-run reach `relabel_speaker`, `edit_transcript_segment`, `transcribe_meeting` through `App.tsx` callbacks.
 - Calls (safeContent): `open_external_url` (`safeContent.ts:39`).
 - Backend owners: `app-notes-library`, `app-privacy`, `app-recording`, `app-pipeline`, `app-llm`, `app-screen-recording`, `app-shell`, `app-settings-consent`.
-- devMock drift: `attach_file`, `remove_attachment`, `open_attachment`, `reveal_attachment` and `open_external_url` aren't mirrored. They fall through to `default: return null` (`devMock.ts:1463-1464`), so on port 1420 `removeAttachment` passes `null` to `onNoteChanged` (`Editor.tsx:1133-1136`) (inferred breakage). devMock's `convertFileSrc` returns the path unchanged (`devMock.ts:1571-1573`), so asset URLs (audio, video, thumbnails) are never exercised in jsdom.
+- devMock drift: `attach_file`, `remove_attachment`, `open_attachment`, `reveal_attachment` and `open_external_url` aren't mirrored. They fall through to `default: return null` (`devMock.ts:1507-1508`), so on port 1420 `removeAttachment` passes `null` to `onNoteChanged` (`Editor.tsx:1133-1136`) (inferred breakage). devMock's `convertFileSrc` returns the path unchanged (`devMock.ts:1615-1617`), so asset URLs (audio, video, thumbnails) are never exercised in jsdom.
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |

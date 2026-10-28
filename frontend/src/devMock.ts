@@ -866,8 +866,8 @@ const mockFlag = (k: string) =>
   typeof localStorage !== "undefined" ? localStorage.getItem(k) : null;
 // get/set_app_setting store (consent.* / capture.* / ui.* keys). The mock
 // user already accepted Anthropic (the configured provider), so picking
-// OpenAI or NVIDIA NIM shows the cloud-consent confirm. fotwMockConsentReset
-// starts with none, as the v2.4 consent reset leaves it.
+// OpenAI or NVIDIA NIM asks for cloud consent (request_cloud_consent).
+// fotwMockConsentReset starts with none, as the v2.4 consent reset leaves it.
 const initialUiSettings = (): Record<string, string> =>
   mockFlag("fotwMockConsentReset") === "1" ? {} : { "consent.cloud_llm.anthropic": "true" };
 const mockUiSettings: Record<string, string> = initialUiSettings();
@@ -982,6 +982,43 @@ function mockConsentRefusal(): string | null {
     return null;
   }
   return MOCK_ASK_ERRORS.consent.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
+}
+
+/* ---- cloud consent ---- */
+// The backend's own dialog words (llm_commands.rs cloud_consent_prompt).
+function mockConsentPrompt(provider: string, atLaunch: boolean) {
+  const vendor = MOCK_VENDORS[provider] ?? provider;
+  const disclosure =
+    `Your notes and full meeting transcripts will be sent to ${vendor} for processing ` +
+    `whenever you run Enhance or Ask, and automatically for transcript cleanup and ` +
+    `action items after each transcription. Their data-retention terms apply (see their ` +
+    `privacy / data-usage policy).\n\n` +
+    `Recordings themselves stay on this computer, and so do notes you keep local. ` +
+    `Choose This computer (Ollama) to keep everything local.`;
+  return {
+    title: `Use ${vendor} for Ask and Enhance?`,
+    message: atLaunch
+      ? `Your AI provider is set to ${vendor}, and nothing is sent there until you allow it. ` +
+        `Until then, Enhance, Ask, transcript cleanup and action items won't run.\n\n${disclosure}`
+      : disclosure,
+  };
+}
+
+/** request_cloud_consent: true without asking for a local provider or one
+ *  already allowed; an unknown id is refused; otherwise ask, and record only
+ *  a yes. The app asks in a native dialog the page can't fake; the stand-in
+ *  here is the browser's own confirm (this mock only runs in a plain
+ *  browser, never under Tauri, where confirm is synchronous and real). */
+function mockRequestCloudConsent(provider: string, atLaunch: boolean): boolean {
+  const info = llmSettings.providers.find((p) => p.id === provider);
+  if (!info) throw `unknown provider '${provider}'`;
+  const key = `consent.cloud_llm.${provider}`;
+  if (info.is_local || mockUiSettings[key] === "true") return true;
+  const { title, message } = mockConsentPrompt(provider, atLaunch);
+  // eslint-disable-next-line no-restricted-properties -- see above: browser-only stand-in
+  if (!window.confirm(`${title}\n\n${message}`)) return false;
+  mockUiSettings[key] = "true";
+  return true;
 }
 
 /* ---- consent skips ---- */
@@ -1299,6 +1336,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return [...mockConsentSkips];
     case "retry_consent_skipped":
       return mockRetryConsentSkipped();
+    case "request_cloud_consent":
+      return mockRequestCloudConsent(String(args.provider), args.atLaunch === true);
     case "ollama_status": {
       const o = ollamaState();
       return {
@@ -1332,6 +1371,11 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       }
       return mockUiSettings[String(args.key)] ?? null;
     case "set_app_setting":
+      // Cloud consent is backend-written (commands.rs
+      // is_webview_writable_setting_key): only request_cloud_consent sets it.
+      if (String(args.key).toLowerCase().startsWith("consent.cloud_llm.")) {
+        throw `setting '${String(args.key)}' can't be changed from the app UI`;
+      }
       mockUiSettings[String(args.key)] = String(args.value);
       return null;
     case "download_model": {

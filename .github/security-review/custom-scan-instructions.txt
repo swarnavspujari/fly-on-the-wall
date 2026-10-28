@@ -21,7 +21,7 @@ Fly on the Wall is a local-first desktop meeting notetaker (Tauri 2). Assets, tr
 - Recursive deletes (remove_dir_all, or remove_file in a loop) outside recordings/<folder> and the documented "Delete all my data" path, or a delete whose target comes from an imported manifest without containment (T7).
 
 **Keys, cloud calls and consent (T4, T10):**
-- An LLM or cloud ASR provider constructed anywhere but build_provider (src-tauri/src/llm_commands.rs), or a path that skips its checks: the per-provider cloud consent (`consent.cloud_llm.<provider>`) and per-note / per-folder Keep local. Groq or any cloud ASR running for a keep-local meeting.
+- An LLM or cloud ASR provider constructed anywhere but build_provider (src-tauri/src/llm_commands.rs), or a path that skips its checks: the per-provider cloud consent (`consent.cloud_llm.<provider>`) and per-note / per-folder Keep local. Anything but request_cloud_consent (llm_commands.rs, after a yes in its native dialog) writing `consent.cloud_llm.*`, or the webview getting a way to write it (commands.rs is_webview_writable_setting_key). Groq or any cloud ASR running for a keep-local meeting.
 - validate_base_url weakened: keyed providers must use https except loopback, checked on save and on use; Anthropic and Groq hosts stay fixed.
 - API keys or OAuth tokens stored outside the OS keychain (crates/fly-secrets), written to logs, files, URLs, error strings or the webview, or sent to any host other than the provider's.
 - A new network destination (telemetry, analytics, crash reporting, update or model hosts, connectors) that isn't opt-in and disclosed to the user before data leaves the machine.

@@ -1,7 +1,7 @@
 # Recording, capture and live captions (`app-recording`)
 
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0).
-> In flight: None. #86 (merged), PR #92 and the consent hardening (#102) don't touch `recording.rs` or `live.rs`.
+> In flight: None. #86 (merged) and PR #92 don't touch `recording.rs` or `live.rs`.
 
 ## Purpose
 This feature turns a Record press into a meeting row plus a meeting folder of per-channel WAVs, using the [fly-audio](fly-audio.md) backend. Only one capture runs at a time. Stop writes a filesystem-only manifest first and then attaches the recording in SQLite, so a broken database can't lose the audio. While a recording runs, a live-caption loop transcribes newly appended audio with a small whisper model and streams "you" / "them" partials to the UI. It also owns meeting lookups for a note, the meeting date edit, mic listing, and the macOS system-audio consent probe.
@@ -29,7 +29,7 @@ This feature turns a Record press into a meeting row plus a meeting folder of pe
 **While a capture is active** (`AppState.recording` is `Some`), other work is held back:
 - The transcription queue doesn't start a job (`scheduler.rs:91-100`, `recording_active` at `scheduler.rs:468-470`).
 - The retention sweep is skipped, and "Delete all my data" refuses (`privacy.rs:258-261,404-406`).
-- The note being recorded can't be deleted (`commands.rs:261-265,298-303`).
+- The note being recorded can't be deleted (`commands.rs:283-287,320-325`).
 - Updates are deferred, but only in the frontend: `updater.ts:10-13,148-163` reads the polled `recStatus.active || screenStatus.active` (`App.tsx:186-187`).
 - `preflight_system_audio` returns `Inconclusive` instead of probing (`recording.rs:345-347`).
 
@@ -49,7 +49,7 @@ This feature turns a Record press into a meeting row plus a meeting folder of pe
 | `open_privacy_settings` | none | `Result<(), String>` (`Err` off macOS) | `ui-recording-bar` (`App.tsx:987-991`) and `ui-notices` (`AppNotices`, `App.tsx:1099`), via `api.openPrivacySettings` |
 | `live_status` | `meeting_id: String` | `Option<LiveStatus>` (not a `Result`) | `ui-recording-bar` (`LivePane.tsx:45-52`, catch-up on mount), via `api.liveStatus` |
 
-devMock mirrors all 12 (`devMock.ts:1088-1094,1140-1144,1172-1203,1284-1288,1452-1462`). Where it drifts:
+devMock mirrors all 12 (`devMock.ts:1125-1131,1177-1181,1209-1240,1321-1325,1496-1506`). Where it drifts:
 - start, pause, resume and stop never fail: there is no "a recording is already in progress" or "no active recording" error.
 - `live_status` always returns `null`, and no `live:segment` events are ever sent.
 - `get_meetings_for_note` returns at most one meeting.
@@ -105,7 +105,7 @@ No meeting audio or text leaves the machine from this component.
 None.
 
 ## Dependencies
-- **Inbound:** `src-tauri/src/lib.rs:214-225` (command registration); `calendar_commands.rs:470-471` (`start_meeting_from_event`). These read `AppState.recording`: `scheduler.rs:468-470`, `privacy.rs:259,405`, `commands.rs:263`, and `live.rs:223-232` itself. `src-tauri/tests/scheduling.rs` injects a fake `ActiveRecording`.
+- **Inbound:** `src-tauri/src/lib.rs:214-225` (command registration); `calendar_commands.rs:470-471` (`start_meeting_from_event`). These read `AppState.recording`: `scheduler.rs:468-470`, `privacy.rs:259,405`, `commands.rs:285`, and `live.rs:223-232` itself. `src-tauri/tests/scheduling.rs` injects a fake `ActiveRecording`.
 - **Outbound:**
   - [fly-audio](fly-audio.md): the capture trait, `preflight_system_audio`, `mix::{resample_linear, write_wav_mono_16}`.
   - [fly-storage](fly-storage.md): `create_note`, `create_meeting`, `allocate_meeting_dir`, `stash_recording_manifest`, `end_meeting`, `get_meeting_for_note`, `meetings_for_note`, `set_meeting_started_at`, `get_setting`, `scratch::meeting_scratch_dir`.
@@ -140,7 +140,7 @@ None.
 | manual | `docs/TESTING.md` (M2, M9, M11, M14, auto-update) | — | real capture; mute warning within ~1 s; live partials within ~20 s; no update banner while recording |
 
 **Known gaps:**
-- **No test drives start, pause, resume or stop through this module.** The commands need an `AppHandle`, and `AppState::init_with` hard-codes `CpalAudioCapture` (`state.rs:81`). So the manifest-before-database ordering, path relativizing, the stop error path and status warnings ordering are untested here.
+- **No test drives start, pause, resume or stop through this module.** The commands need an `AppHandle`, and `AppState::init_with` hard-codes `CpalAudioCapture` (`state.rs:85`). So the manifest-before-database ordering, path relativizing, the stop error path and status warnings ordering are untested here.
 - **Spec §2 item 7 has no CI test at any seam.** The seed test doesn't touch the flag. The storage test checks "unconfirmed" only with an empty list (`meetings.rs:476-478`). `speaker_hint` has no test, and the only confirmed→`num_speakers` check is `#[ignore]`d.
 - **Stop failure orphans the audio (inferred).** If `session.stop()` fails (mixdown or finalize error, dead audio thread), the command returns before the manifest is written (`recording.rs:236-239`). A crash mid-recording is the same. Self-heal only scans folders that have a manifest (`recovery.rs:172-176`), so the WAVs stay in the folder with nothing pointing at them.
 - **Live caption lag and I/O are untested.** `take_chunk` reads the whole growing WAV every 5 s for each channel (`live.rs:334`). That's about 0.35 GB per hour per channel at 48 kHz (inferred). There is no catch-up when transcription runs slower than real time. Partials skip `guard_loops` while feeding the previous text back as the prompt, a known Whisper loop amplifier. The only latency check is the manual "~20 s".

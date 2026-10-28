@@ -65,11 +65,33 @@ pub fn is_webview_setting_key(key: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Keys the webview may also write: [`is_webview_setting_key`] minus the
+/// security records only the backend writes. Cloud-AI consent
+/// (`consent.cloud_llm.*`) is one: `build_provider` trusts it before sending
+/// meeting content off the device, so it's recorded only by
+/// `llm_commands::request_cloud_consent`, after a yes in a native dialog. The
+/// webview can still read it. Compared case-insensitively, so no spelling of
+/// the prefix slips through.
+pub fn is_webview_writable_setting_key(key: &str) -> bool {
+    const BACKEND_ONLY: &[&str] = &[crate::llm_commands::CLOUD_CONSENT_PREFIX];
+    let lower = key.to_ascii_lowercase();
+    is_webview_setting_key(key) && !BACKEND_ONLY.iter().any(|p| lower.starts_with(p))
+}
+
 fn check_webview_setting_key(key: &str) -> CmdResult<()> {
     if is_webview_setting_key(key) {
         Ok(())
     } else {
         Err(format!("setting '{key}' can't be accessed from the app UI"))
+    }
+}
+
+fn check_webview_writable_setting_key(key: &str) -> CmdResult<()> {
+    check_webview_setting_key(key)?;
+    if is_webview_writable_setting_key(key) {
+        Ok(())
+    } else {
+        Err(format!("setting '{key}' can't be changed from the app UI"))
     }
 }
 
@@ -86,7 +108,7 @@ pub async fn get_app_setting(state: State<'_, AppState>, key: String) -> CmdResu
 
 #[tauri::command]
 pub fn set_app_setting(state: State<'_, AppState>, key: String, value: String) -> CmdResult<()> {
-    check_webview_setting_key(&key)?;
+    check_webview_writable_setting_key(&key)?;
     if value.len() > 4096 {
         return Err("setting value too long".into());
     }
@@ -682,6 +704,50 @@ pub async fn search_semantic(
 #[cfg(test)]
 mod security_tests {
     use super::is_webview_setting_key as ok;
+    use super::{check_webview_writable_setting_key, is_webview_writable_setting_key as writable};
+
+    /// Cloud-AI consent is backend-written: a script in the webview can read
+    /// it but can't forge it, under any spelling of the prefix.
+    #[test]
+    fn webview_cannot_write_cloud_consent() {
+        for key in [
+            "consent.cloud_llm.anthropic",
+            "consent.cloud_llm.openai",
+            "consent.cloud_llm.nim",
+            "consent.cloud_llm.ollama",
+            "consent.cloud_llm.",
+            "consent.Cloud_LLM.anthropic",
+            "CONSENT.CLOUD_LLM.anthropic",
+        ] {
+            assert!(!writable(key), "{key}");
+            assert!(check_webview_writable_setting_key(key).is_err(), "{key}");
+        }
+        // still readable, so the UI knows whether to ask
+        assert!(ok("consent.cloud_llm.anthropic"));
+        assert_eq!(
+            check_webview_writable_setting_key("consent.cloud_llm.anthropic").unwrap_err(),
+            "setting 'consent.cloud_llm.anthropic' can't be changed from the app UI"
+        );
+        // the other UI-level settings stay writable, including look-alikes
+        // without the dot: harmless, since build_provider reads only
+        // `consent.cloud_llm.<provider>`
+        for key in [
+            "consent.recording_notice_accepted",
+            "consent.cloud_llm",
+            "consent.cloud_llmX",
+            "capture.mic_device_id",
+            "ui.theme",
+        ] {
+            assert!(writable(key), "{key}");
+            assert!(check_webview_writable_setting_key(key).is_ok(), "{key}");
+        }
+        // and nothing outside the read allowlist becomes writable
+        assert!(!writable("llm.provider"));
+        assert_eq!(
+            check_webview_writable_setting_key("llm.provider").unwrap_err(),
+            "setting 'llm.provider' can't be accessed from the app UI"
+        );
+    }
 
     #[test]
     fn webview_can_only_touch_ui_level_settings() {

@@ -1,7 +1,7 @@
 # Settings (`ui-settings`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: the consent hardening (#102, open) changes how Settings' consent prompts record consent (they go through `useCloudConsent`). #86 (merged) added a dormant Parakeet ASR engine behind the internal `asr.engine` flag, with no Settings row. A user-facing engine choice would land in the Transcripts section. PR #92: none.
+> In flight: #86 (merged) added a dormant Parakeet ASR engine behind the internal `asr.engine` flag, with no Settings row. A user-facing engine choice would land in the Transcripts section. PR #92: none.
 
 ## Purpose
 The full-window Settings overlay: seven sections (Recording, Transcripts, Ask and Enhance, Calendars, Your files and privacy, Other AI apps, General). It has search, scroll-spy and a "Where your data goes" summary built from the **saved** settings. Transcript settings are a draft that saves all-or-nothing (`set_asr_settings`) from a save bar. Every other control applies at once. Any control that sends meeting content to a cloud provider asks for consent first.
@@ -21,7 +21,7 @@ The full-window Settings overlay: seven sections (Recording, Transcripts, Ask an
 | `PrivacySection` (default) | `PrivacySection.tsx:25` | `recordingActive`, `children` (caller rows go between the notice and retention). |
 | `SETTINGS_SECTIONS`, `matchSections`, `activeSectionAt` | `settingsModel.ts:18-89` | |
 | `asrDraftFrom`, `asrUpdateFrom`, `isAsrDirty`, `defaultModelForTier`, `effectiveModel`, `qualityHelper`, `madeOnHelper` | `settingsModel.ts:109-197` | `asrUpdateFrom` sends `groq_key` only when typed, because an empty string would delete the saved key (`:125-145`). `defaultModelForTier` mirrors `src-tauri/src/hw.rs:130-140`. |
-| `providerLabel`, `providerVendor` | `settingsModel.ts:201-216` | `providerVendor` mirrors Rust `provider_vendor` (`src-tauri/src/llm_commands.rs:111-118`). |
+| `providerLabel`, `providerVendor` | `settingsModel.ts:201-216` | `providerVendor` mirrors Rust `provider_vendor` (`src-tauri/src/llm_commands.rs:122-129`). |
 | `dataTiles` | `settingsModel.ts:230-259` | From saved settings, never a draft. |
 | `mcpCommand`, `claudeCodeCommand` | `settingsModel.ts:265-283` | |
 | `WIPE_CONFIRMATION`, `canConfirmWipe`, `retentionOptions`, `parseRetention`, `retentionWarning`, `showEncryptionBanner`, `encryptionBannerText`, `formatBytes`, `wipeOutcome`, `isKeptLocal`, `keepLocalTitle`, `recordingNoticeText`, `ENCRYPTION_BANNER_DISMISSED_KEY`, `PRIVACY_CHANGED_EVENT`, `RESTART_REQUIRED_EVENT`, `RESTART_FAILED_TEXT` | `privacy.ts:8-134` | |
@@ -60,24 +60,24 @@ The full-window Settings overlay: seven sections (Recording, Transcripts, Ask an
 Read on open: `get_asr_settings`, `get_llm_settings`, `ollama_status`, `list_templates`, `get_calendar_settings`, `list_calendars`, `mcp_config`, `list_mic_devices`, `app_info`, `get_app_setting("capture.mic_device_id")`, `pending_backfill_count` (`SettingsModal.tsx:368-387`). PrivacySection adds `get_privacy_settings`, `disk_encryption_status` and the banner key (`PrivacySection.tsx:49-62`).
 
 ### Tauri commands
-- Calls: `get_asr_settings`, `set_asr_settings`, `download_model`, `get_llm_settings`, `set_llm_settings`, `test_llm_connection`, `backfill_meeting_items`, `pending_backfill_count`, `ollama_status`, `ollama_pull`, `ollama_delete`, `list_templates`, `save_template`, `delete_template`, `get_calendar_settings`, `set_calendar_settings`, `connect_calendar`, `disconnect_calendar`, `list_calendars`, `set_calendar_enabled`, `mcp_config`, `list_mic_devices`, `app_info`, `reveal_data_dir`, `reveal_logs_dir`, `get_app_setting`, `set_app_setting`, `get_privacy_settings`, `disk_encryption_status`, `preview_audio_retention`, `set_audio_retention`, `delete_all_data`, `dismiss_wipe_report`.
+- Calls: `get_asr_settings`, `set_asr_settings`, `download_model`, `get_llm_settings`, `set_llm_settings`, `test_llm_connection`, `backfill_meeting_items`, `pending_backfill_count`, `ollama_status`, `ollama_pull`, `ollama_delete`, `list_templates`, `save_template`, `delete_template`, `get_calendar_settings`, `set_calendar_settings`, `connect_calendar`, `disconnect_calendar`, `list_calendars`, `set_calendar_enabled`, `mcp_config`, `list_mic_devices`, `app_info`, `reveal_data_dir`, `reveal_logs_dir`, `get_app_setting`, `set_app_setting`, `request_cloud_consent` (through `useCloudConsent`), `get_privacy_settings`, `disk_encryption_status`, `preview_audio_retention`, `set_audio_retention`, `delete_all_data`, `dismiss_wipe_report`.
 - Backend owners: `app-pipeline` (ASR settings), `app-models-gpu`, `app-llm`, `app-ollama`, `app-calendar`, `app-mcp-sidecar`, `app-shell`, `app-settings-consent`, `app-privacy`.
-- devMock mirrors every one (stateful for the session). Drift: `set_app_setting` / `get_app_setting` accept any key (`devMock.ts:1326-1336`; the backend allowlist is `commands.rs:59-74`). `test_llm_connection` only emulates the consent refusal (`devMock.ts:1293-1297`). `set_llm_settings` does no base-URL validation (the backend's T4 https check, `devMock.ts:1218-1232`). `mcp_config` is a fixed Windows snippet (`devMock.ts:855-862`).
+- devMock mirrors every one (stateful for the session). Drift: `set_app_setting` / `get_app_setting` accept any key, except that `set_app_setting` refuses `consent.cloud_llm.*` like the backend (`devMock.ts:1365-1380`; the backend allowlists are `commands.rs:59-96`). `request_cloud_consent` asks with the browser's `window.confirm`, its stand-in for the native dialog (`devMock.ts:1007-1022`). `test_llm_connection` only emulates the consent refusal (`devMock.ts:1330-1334`). `set_llm_settings` does no base-URL validation (the backend's T4 https check, `devMock.ts:1255-1269`). `mcp_config` is a fixed Windows snippet (`devMock.ts:855-862`).
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
 | `fotw:restart-required` (window `CustomEvent`) | Emits after `delete_all_data` (`PrivacySection.tsx:120-124`). Settings listens and closes (`SettingsModal.tsx:411-415`). | `{report: WipeReport, includeModels}` | `RestartRequired.tsx` (app shell) |
-| `fotw:llm-settings-changed` (window) | Emitted by `api.setLlmSettings` and consent writes | none | skipped-cleanup notice |
+| `fotw:llm-settings-changed` (window) | Emitted by `api.setLlmSettings`, and by `useCloudConsent` after the backend records consent | none | skipped-cleanup notice |
 | `model:progress` (Tauri) | read through the `modelProgress` prop (App listens) | `ModelProgress` | `download_model`, `ollama_pull` |
 
 ### Settings keys
-| Key (or prefix) | Read / write | Webview-settable? (`is_webview_setting_key`) | Meaning |
+| Key (or prefix) | Read / write | Webview-settable? (`is_webview_writable_setting_key`) | Meaning |
 |---|---|---|---|
 | `capture.mic_device_id` | read + write | Yes (`capture.`) | Chosen microphone ("" = system default). |
 | `ui.recording.remind_notice` | read + write (`RemindNoticeRow.tsx`) | Yes (`ui.`) | Record-start reminder on/off (`recordingBar.ts:9`). |
 | `ui.privacy.disk_encryption_banner_dismissed` | read + write | Yes (`ui.`) | Banner dismissed (`privacy.ts:8`). |
-| `consent.cloud_llm.<provider>` | read + write via `useCloudConsent` | Yes (`consent.`), so forgeable today | See [ui-confirm-consent](ui-confirm-consent.md). |
+| `consent.cloud_llm.<provider>` | read via `useCloudConsent`; recorded only by the backend's `request_cloud_consent` | No: read-only to the webview (`is_webview_writable_setting_key`) | See [ui-confirm-consent](ui-confirm-consent.md). |
 | ASR, LLM, calendar, retention settings | via dedicated commands | No (dedicated, validating commands) | spec §2 item 2 |
 
 localStorage keys: `fotw-theme` (written by Appearance); the whole store is cleared after "Delete all my data" (`PrivacySection.tsx:113-117`). devMock toggles that change this screen: `fotwMockConsentReset`, `fotwMockOllama`, `fotwMockGpuBench`, `fotwMockEncryption`, `fotwMockUpdate`, `fotwMockEngineMissing`, `fotwMockEngineUnmanaged`, `fotwMockCalendar`.
@@ -107,8 +107,8 @@ Entered here and passed to commands that store them in the keychain: the Groq AP
 - **Outbound:** [ui-confirm-consent](ui-confirm-consent.md), `ui.tsx` (`SettingsGroup`, `SettingsRow`, `Switch`, `Segmented`, `Select`, `Input`, `Modal`, `useEscapeLayer`, `useDialogFocus`), `theme.ts`, `pipelineNotice.ts` (`briefError`), `updater.ts`, `RemindNoticeRow.tsx`, `RestartRequired.tsx` (via the event).
 
 ## Invariants
-- Consent is asked before any Settings action that sends meeting content or saves a cloud provider: Runs on, Save, Update, Claude model, Test, Search index (`SettingsModal.tsx:555-560`, `:662-705`, `:750`, `:780`). The backend enforces it anyway (spec §2 item 1). The disclosure copy has one source (`askModel.ts:34-50`).
-- Webview-written keys stay under `consent.` / `capture.` / `ui.`. Everything else goes through a dedicated command (spec §2 item 2; `commands.rs:59-66`).
+- Consent is asked before any Settings action that sends meeting content or saves a cloud provider: Runs on, Save, Update, Claude model, Test, Search index (`SettingsModal.tsx:555-560`, `:662-705`, `:750`, `:780`). The backend enforces it anyway (spec §2 item 1). The disclosure copy has one source, the backend's `cloud_consent_prompt` (`src-tauri/src/llm_commands.rs:148-176`), shown in its native dialog.
+- Webview-written keys stay under `consent.` / `capture.` / `ui.`, and never `consent.cloud_llm.*`, which only the backend writes. Everything else goes through a dedicated command (spec §2 item 2; `commands.rs:59-79`).
 - "Where your data goes" reflects saved settings, never the unsaved draft (`settingsModel.ts:229-230`).
 - Transcript settings save all-or-nothing. Instant-apply ASR writes send the saved snapshot and never race the save bar (`SettingsModal.tsx:317-320`, `:483-484`).
 - An empty Groq key is never sent (it would delete the saved one) (`settingsModel.ts:125-126`, `:143`).
@@ -118,14 +118,14 @@ Entered here and passed to commands that store them in the keychain: the Groq AP
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| vitest (devMock backend) | `frontend/src/components/SettingsModal.test.tsx` | 28 | sections / tiles / search / Esc; save bar, discard and close prompt; Transcribe when I stop; consent before a cloud pick (no consent write, no `set_llm_settings` on Cancel); Ollama delete confirm; More options; deep links; Groq key dropped; key-less cloud; hidden forms kept; write locks; MCP snippet; restart hand-over; RestartRequired focus; Remind key; consent before Test / key save / Claude model / backfill (no IPC on Cancel); backfill error copy |
+| vitest (devMock backend) | `frontend/src/components/SettingsModal.test.tsx` | 29 | sections / tiles / search / Esc; save bar, discard and close prompt; Transcribe when I stop; consent before a cloud pick (nothing saved while devMock's stand-in dialog is open, no `set_llm_settings` on a decline, consent recorded by the consent command, never a settings write); Ollama delete confirm; More options; deep links; Groq key dropped; key-less cloud; hidden forms kept; write locks; MCP snippet; restart hand-over; RestartRequired focus; Remind key; consent before Test / key save / Claude model / backfill (no IPC on a decline); backfill error copy; devMock's consent mirror (refuses consent writes, records only a yes) |
 | vitest | `frontend/src/settingsModel.test.ts` | 18 | search, scroll-spy, ASR draft round trip, payloads, empty key, dirty check, effective model, helper copy, data tiles, MCP parsing / quoting |
 | vitest | `frontend/src/privacy.test.ts` | 15 | notice text, retention options / parse / warning, encryption banner, wipe gating, keep-local helpers, bytes, wipe outcome |
 
 **Known gaps:**
 - `PrivacySection` is untested as a component: retention preview → confirm card → `set_audio_retention`, held-retention confirm, the Delete-all flow (gating, `deleteAllData` args, `localStorage.clear`, the event) and the encryption Dismiss.
 - Calendar connect / disconnect / toggle, template save / delete, Ollama install / pull / swap offer, model downloads, and the mic select have no tests.
-- Tests run against devMock, which accepts any setting key and doesn't validate base URLs. A wrong key prefix or an http custom endpoint would pass here and fail in the app.
+- Tests run against devMock, which accepts any setting key (apart from refusing consent writes) and doesn't validate base URLs. A wrong key prefix or an http custom endpoint would pass here and fail in the app.
 - `SnippetCard` copy uses `navigator.clipboard` (absent in jsdom, permission-dependent in WebView2) with no failure path. Untested.
 - "deep link 'engine'" asserts `scrollIntoView` was called on a `vi.fn` installed in `beforeAll`. `vi.restoreAllMocks()` doesn't clear its calls, so under shuffle the "groq" deep-link test can satisfy it (an order risk).
 - Several tests restore devMock state by hand at the end (provider back to Anthropic, ASR tier, a deleted Ollama model is never restored). A failing assertion skips the restore and can cascade to later tests in the file.

@@ -179,6 +179,12 @@ export const api = {
   // re-run once the provider is allowed (background; returns how many).
   consentSkippedMeetings: () => invoke<string[]>("consent_skipped_meetings"),
   retryConsentSkipped: () => invoke<number>("retry_consent_skipped"),
+  // Ask in a native dialog (the backend owns its words) whether `provider`
+  // may receive meeting content, and record a yes. True when it may: local,
+  // allowed before, or allowed now. The only way consent gets recorded;
+  // `consent.cloud_llm.*` can be read but not set from here.
+  requestCloudConsent: (provider: string, atLaunch = false) =>
+    invoke<boolean>("request_cloud_consent", { provider, atLaunch }),
   // structured item extraction (decisions / action items / figures …)
   extractMeetingItems: (meetingId: string) =>
     invoke<number>("extract_meeting_items", { meetingId }),

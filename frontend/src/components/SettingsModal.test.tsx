@@ -5,7 +5,16 @@
 import { resetMockAppSettings } from "../devMock";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from "vitest";
 import { api } from "../api";
 import { RESTART_REQUIRED_EVENT } from "../privacy";
 import type { Updater } from "../updater";
@@ -98,6 +107,21 @@ async function answer(yes: boolean) {
   await flush();
 }
 
+/* The dev mock asks for cloud consent with the browser's confirm: its
+   stand-in for the app's native dialog (request_cloud_consent). Unanswered,
+   it declines. */
+let consentDialog: MockInstance<(message?: string) => boolean>;
+/** Answer the next consent dialog. `whileOpen` runs while it's showing (an
+ *  expect() thrown there would only read as "no", so return what to check). */
+function nextConsent(yes: boolean, whileOpen?: () => void) {
+  consentDialog.mockImplementationOnce(() => {
+    whileOpen?.();
+    return yes;
+  });
+}
+/** What the last consent dialog said. */
+const consentText = () => String(consentDialog.mock.lastCall?.[0] ?? "");
+
 async function choose(select: HTMLSelectElement, value: string) {
   await act(async () => {
     select.value = value;
@@ -114,6 +138,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   // consent given in one test must not leak into the next (module state)
   resetMockAppSettings();
+  consentDialog = vi.spyOn(window, "confirm").mockReturnValue(false);
 });
 
 afterEach(() => {
@@ -264,30 +289,33 @@ describe("Settings overlay", () => {
     const runsOn = $<HTMLSelectElement>('select[aria-label="Runs on"]')!;
     expect(runsOn.value).toBe("anthropic");
 
+    // the question waits for you: nothing is saved while it's open
+    let savedWhileOpen: number | null = null;
+    nextConsent(false, () => {
+      savedWhileOpen = setLlm.mock.calls.length;
+    });
     await choose(runsOn, "openai");
-    // the in-app question waits for you: nothing is saved yet
-    expect(confirmTitle()).toBe("Use OpenAI for Ask and Enhance?");
-    expect(confirmDialog()!.textContent).toContain("transcript cleanup");
-    expect(setSetting).not.toHaveBeenCalled();
-    expect(setLlm).not.toHaveBeenCalled();
-    await answer(false);
-    expect(confirmDialog()).toBeNull();
-    expect(setSetting).not.toHaveBeenCalled();
+    expect(consentDialog).toHaveBeenCalledTimes(1);
+    expect(consentText()).toContain("Use OpenAI for Ask and Enhance?");
+    expect(consentText()).toContain("transcript cleanup");
+    expect(savedWhileOpen).toBe(0);
     expect(await api.getAppSetting("consent.cloud_llm.openai")).toBeNull();
     expect(setLlm).not.toHaveBeenCalled();
     expect(runsOn.value).toBe("anthropic");
     expect(host!.textContent).toContain("Kept your current provider");
 
+    nextConsent(true);
     await choose(runsOn, "openai");
-    await answer(true);
-    expect(setSetting).toHaveBeenCalledWith("consent.cloud_llm.openai", "true");
+    // recorded by the backend's consent command, never by a settings write
+    expect(await api.getAppSetting("consent.cloud_llm.openai")).toBe("true");
+    expect(setSetting).not.toHaveBeenCalled();
     expect(setLlm).toHaveBeenCalledWith(expect.objectContaining({ provider: "openai" }));
     expect(host!.textContent).toContain("Text leaves this computer");
     expect(host!.textContent).toContain("OpenAI API key");
 
     // local needs no consent; restore the mock to Anthropic afterwards
     await choose(runsOn, "ollama");
-    expect(confirmDialog()).toBeNull();
+    expect(consentDialog).toHaveBeenCalledTimes(2);
     expect(host!.textContent).toContain("Nothing leaves this computer");
     await choose(runsOn, "anthropic");
   });
@@ -365,8 +393,8 @@ describe("Settings overlay", () => {
     await open();
     const runsOn = $<HTMLSelectElement>('select[aria-label="Runs on"]')!;
     expect(host!.textContent).not.toContain("No key saved yet");
+    nextConsent(true); // consent first (nothing leaks in from other tests)
     await choose(runsOn, "openai");
-    await answer(true); // consent first (nothing leaks in from other tests)
     expect(host!.textContent).toContain("No key saved yet");
     await choose(runsOn, "anthropic");
   });
@@ -496,15 +524,15 @@ describe("Settings › asking again for cloud consent", () => {
     const setLlm = vi.spyOn(api, "setLlmSettings");
     const test = vi.spyOn(api, "testLlmConnection");
     await open();
+    nextConsent(false);
     await click(byText("button", "Test"));
-    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
-    await answer(false);
+    expect(consentText()).toContain("Use Anthropic for Ask and Enhance?");
     expect(await consent()).toBeNull();
     expect(setLlm).not.toHaveBeenCalled();
     expect(test).not.toHaveBeenCalled();
 
+    nextConsent(true);
     await click(byText("button", "Test"));
-    await answer(true);
     expect(await consent()).toBe("true");
     expect(setLlm).toHaveBeenCalledTimes(1);
     expect(test).toHaveBeenCalledTimes(1);
@@ -516,15 +544,15 @@ describe("Settings › asking again for cloud consent", () => {
     const setLlm = vi.spyOn(api, "setLlmSettings");
     await open();
     await type($<HTMLInputElement>("input[type=password]")!, "sk-test-key");
+    nextConsent(false);
     await click(byText("button", "Update"));
-    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
-    await answer(false);
+    expect(consentText()).toContain("Use Anthropic for Ask and Enhance?");
     expect(await consent()).toBeNull();
     expect(setLlm).not.toHaveBeenCalled();
     expect(host!.textContent).toContain("Not saved. Cloud processing wasn't confirmed.");
 
+    nextConsent(true);
     await click(byText("button", "Update"));
-    await answer(true);
     expect(await consent()).toBe("true");
     expect(setLlm).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "anthropic", api_key: "sk-test-key" }),
@@ -537,15 +565,15 @@ describe("Settings › asking again for cloud consent", () => {
     await open();
     const model = $<HTMLSelectElement>('select[aria-label="Claude model"]')!;
     const before = model.value;
+    nextConsent(false);
     await choose(model, "claude-haiku-5-5");
-    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
-    await answer(false);
+    expect(consentText()).toContain("Use Anthropic for Ask and Enhance?");
     expect(await consent()).toBeNull();
     expect(setLlm).not.toHaveBeenCalled();
     expect(model.value).toBe(before);
 
+    nextConsent(true);
     await choose(model, "claude-haiku-5-5");
-    await answer(true);
     expect(await consent()).toBe("true");
     expect(setLlm).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "anthropic", model: "claude-haiku-5-5" }),
@@ -558,16 +586,16 @@ describe("Settings › asking again for cloud consent", () => {
     const backfill = vi.spyOn(api, "backfillMeetingItems");
     await open();
     const index = () => $$("button").find((b) => b.textContent?.startsWith("Index ")) ?? null;
+    nextConsent(false);
     await click(index());
-    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
-    await answer(false);
+    expect(consentText()).toContain("Use Anthropic for Ask and Enhance?");
     expect(backfill).not.toHaveBeenCalled();
     expect(host!.textContent).toContain(
       "Nothing was extracted. Cloud processing wasn't confirmed.",
     );
 
+    nextConsent(true);
     await click(index());
-    await answer(true);
     expect(await consent()).toBe("true");
     expect(backfill).toHaveBeenCalledTimes(1);
   });
@@ -589,5 +617,33 @@ describe("Settings › asking again for cloud consent", () => {
     );
     const detail = status.querySelector(".text-text-3")!;
     expect(detail.textContent).toBe("no API key stored for anthropic — add one in Settings");
+  });
+});
+
+describe("dev mock › cloud consent mirrors the backend", () => {
+  it("refuses consent writes from the UI and records only a yes to its question", async () => {
+    withoutConsent();
+    const key = "consent.cloud_llm.anthropic";
+    await expect(api.setAppSetting(key, "true")).rejects.toBe(
+      `setting '${key}' can't be changed from the app UI`,
+    );
+    expect(await api.getAppSetting(key)).toBeNull();
+
+    nextConsent(false);
+    expect(await api.requestCloudConsent("anthropic", true)).toBe(false);
+    expect(consentText()).toContain("Your AI provider is set to Anthropic");
+    expect(consentText()).toContain("full meeting transcripts will be sent to Anthropic");
+    expect(await api.getAppSetting(key)).toBeNull();
+
+    nextConsent(true);
+    expect(await api.requestCloudConsent("anthropic")).toBe(true);
+    expect(consentText()).not.toContain("Your AI provider is set to");
+    expect(await api.getAppSetting(key)).toBe("true");
+
+    // allowed now, or local: no question
+    expect(await api.requestCloudConsent("anthropic")).toBe(true);
+    expect(await api.requestCloudConsent("ollama")).toBe(true);
+    expect(consentDialog).toHaveBeenCalledTimes(2);
+    await expect(api.requestCloudConsent("someday")).rejects.toBe("unknown provider 'someday'");
   });
 });

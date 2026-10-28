@@ -1,7 +1,7 @@
 # App notices (`ui-notices`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: the consent hardening (#102, open) changes how cloud consent is recorded. The skipped-cleanup notice reads and asks for that consent through `useConsentSkips` (`frontend/src/components/CloudConsent.tsx:118-197`), so it and its tests (`AppNotices.test.tsx:367-453`) will change with it.
+> In flight: None.
 
 ## Purpose
 Every app-wide notice in one bottom-right corner: a failed user action, the macOS system-audio block, transcription failures for notes that aren't open, skipped AI cleanup, and the update prompt. The top notice shows and the rest sit behind "+N more", so notices never overlap. The pure modules decide priority, copy and which failures are held. Also owns the blocking restart screen after "Delete all my data" and the "Remind me to tell people" settings row.
@@ -32,27 +32,27 @@ Every app-wide notice in one bottom-right corner: a failed user action, the macO
 | `UpdateBanner` | `UpdateBanner.tsx:15` | `updater: Updater`. |
 
 ### Tauri commands
-- Calls through `useConsentSkips` (mounted by `AppNotices.tsx:59`): `consent_skipped_meetings`, `get_llm_settings`, `get_app_setting`, `retry_consent_skipped`; the consent prompt it opens writes through `set_app_setting` today (in flight).
+- Calls through `useConsentSkips` (mounted by `AppNotices.tsx:59`): `consent_skipped_meetings`, `get_llm_settings`, `get_app_setting`, `retry_consent_skipped`, and `request_cloud_consent` (the backend asks in a native dialog and records a yes).
 - `RemindNoticeRow`: `get_app_setting`, `set_app_setting` for `ui.recording.remind_notice` (`RemindNoticeRow.tsx:13-32`).
 - `RestartRequired`: `delete_all_data` on "Try again" (`RestartRequired.tsx:75`); `relaunch()` from `@tauri-apps/plugin-process`.
 - `UpdateBanner`: none directly; its buttons call `useUpdater` (`plugin:updater|check`, download/install, relaunch).
 - Through App callbacks: `transcribe_meeting` (Try again, `App.tsx:1110-1114`), `open_privacy_settings` (`App.tsx:1099`), `get_note` and friends (Open note), and `list_recent_notes` to name a failure whose note isn't in the current list (`App.tsx:357-361`).
-- devMock mirrors all of these, plus `plugin:updater|check` and `plugin:updater|download` (`devMock.ts:1442-1451`). Drift: the consent re-run's final event has `stage: null` (`devMock.ts:1000`) where Rust always sends `"done"` (`src-tauri/src/scheduler.rs:494-502`); `plugin:process|restart` falls to the `null` default.
+- devMock mirrors all of these, plus `plugin:updater|check` and `plugin:updater|download` (`devMock.ts:1486-1495`). Drift: the consent re-run's final event has `stage: null` (`devMock.ts:1037`) where Rust always sends `"done"` (`src-tauri/src/scheduler.rs:494-502`); `plugin:process|restart` falls to the `null` default.
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
-| `llm:consent-skips` | listens, `CloudConsent.tsx:134` (via `AppNotices`) | `string[]` meeting ids | `src-tauri/src/scheduler.rs:208-229` (`ai_pass`) |
-| `fotw:llm-settings-changed` (window) | listens, `CloudConsent.tsx:150-155` | none | `api.ts:9-11`, `CloudConsent.tsx:62` |
+| `llm:consent-skips` | listens, `CloudConsent.tsx:122` (via `AppNotices`) | `string[]` meeting ids | `src-tauri/src/scheduler.rs:208-229` (`ai_pass`) |
+| `fotw:llm-settings-changed` (window) | listens, `CloudConsent.tsx:138-143` | none | `api.ts:9-11`, `CloudConsent.tsx:51` |
 | `fotw:restart-required` (window) | listens, `RestartRequired.tsx:31-35` | `CustomEvent<{report: WipeReport, includeModels}>` | `PrivacySection.tsx:120-124` |
 | `keydown` (window, capture phase) | listens while the restart screen shows, `RestartRequired.tsx:45-55` | — | Blocks app shortcuts; Tab and in-dialog Enter/Space pass |
 | `pipeline:progress` | indirect: App feeds every event to `failuresReducer` (`App.tsx:341-363`) | `PipelineProgress` | see [ui-app-shell](ui-app-shell.md) |
 
 ### Settings keys
-| Key (or prefix) | Read / write | Webview-settable? (`is_webview_setting_key`) | Meaning |
+| Key (or prefix) | Read / write | Webview-settable? (`is_webview_writable_setting_key`) | Meaning |
 |---|---|---|---|
 | `ui.recording.remind_notice` | R/W `RemindNoticeRow.tsx` | yes (`ui.`) | Start-of-recording reminder; on unless `"false"` (`recordingBar.ts:9-14`) |
-| `consent.cloud_llm.<provider>` | R `CloudConsent.tsx:164` (who to name) | yes today (`consent.`); in flight | Cloud consent for the saved provider |
+| `consent.cloud_llm.<provider>` | R `CloudConsent.tsx:152` (who to name) | no: read-only to the webview; only the backend's `request_cloud_consent` records it | Cloud consent for the saved provider |
 | devMock toggles | — | n/a | `fotwMockTapDenied`, `fotwMockUpdate` (`available` / `fail`), `fotwMockConsentSkips`, `fotwMockConsentReset`, `fotwMockWipeDbBusy`, `fotwMockEngineMissing`, `fotwMockEngineUnmanaged` |
 
 ### Database
@@ -84,14 +84,14 @@ None. `RestartRequired` lists keychain entries a wipe couldn't remove (`WipeRepo
 - Raw errors are briefed: no signed URLs, capped length; the full text stays under Details when cut (`pipelineNotice.ts:26-32`, `notices.ts:73-82`).
 - The engine notice is chosen by matching backend text: `/whisper-cli is not installed/i` (`pipelineNotice.ts:36`) ← `"{name} is not installed — …"` (`src-tauri/src/models.rs:292`, `:377-380`); `/download (failed|interrupted)/i` (`pipelineNotice.ts:38`) ← `src-tauri/src/models.rs:293`, `:530-553`, `:711`; `/^engine install failed/i` (`pipelineNotice.ts:42`) ← App's own tag (`App.tsx:749`). No test checks these against the Rust strings.
 - The tccutil command names the bundle id from a TS copy (`notices.ts:32`) of `src-tauri/tauri.conf.json:5` and `crates/fly-audio/src/tap_messages.rs:11`.
-- Skipped cleanup runs only after the in-app consent prompt says yes (async `useConfirm`, not `window.confirm`); Cancel writes nothing (`CloudConsent.tsx:175-189`). The backend enforces consent again in `build_provider` (spec §2 item 1).
+- Skipped cleanup runs only once the provider is allowed: "Run" asks through `request_cloud_consent` (the backend's native dialog) when there's no consent yet, and a decline records nothing and runs nothing (`CloudConsent.tsx:163-176`). The backend enforces consent again in `build_provider` (spec §2 item 1).
 - After a wipe, the restart screen blocks the app until it restarts; a clean wipe relaunches by itself after 1.5 s; other outcomes wait for the user (`RestartRequired.tsx:14-66`; `privacy.ts:127-131`).
 - A failed update check stays in Settings; only a failed download/install shows in the stack (`notices.ts:108-124`).
 
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| vitest (jsdom) | `frontend/src/components/AppNotices.test.tsx` | 24 | Stack order and "+N more", recording rules, each notice's actions, update phases, skipped-cleanup flow with the real in-app confirm (`listen` and `api` mocked) |
+| vitest (jsdom) | `frontend/src/components/AppNotices.test.tsx` | 24 | Stack order and "+N more", recording rules, each notice's actions, update phases, skipped-cleanup flow, with `cloudConsentTesting.ts` standing in for the native consent dialog (`listen` and `api` mocked) |
 | vitest (node) | `frontend/src/notices.test.ts` | 16 | Priorities and copy |
 | vitest (node) | `frontend/src/pipelineFailures.test.ts` | 15 | Reducer transitions, lookup guard |
 | vitest (node) | `frontend/src/pipelineNotice.test.ts` | 20 | Notice selection, briefing, failure copy |
@@ -103,7 +103,7 @@ None. `RestartRequired` lists keychain entries a wipe couldn't remove (`WipeRepo
 - No App-level test of the background-failure path: the async `list_recent_notes` lookup for a note outside the current folder, and the sequence guard against a retry that starts meanwhile, are only covered as pure functions.
 - `MACOS_BUNDLE_ID` isn't checked against `tauri.conf.json`.
 - `SystemAudioNotice` and `UpdateBanner` are only tested through `AppNotices`.
-- The skipped-cleanup tests mock both `listen` and `api`, and assert today's consent write; they'll need rewriting when consent hardening lands.
+- The skipped-cleanup tests mock both `listen` and `api`, and stand in for the native consent dialog, so they never see the real dialog or the backend's consent write.
 
 ## Changing it safely
 - Run `npm --prefix frontend test` (AppNotices, notices, pipelineFailures, pipelineNotice).

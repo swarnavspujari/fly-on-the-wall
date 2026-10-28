@@ -2,11 +2,10 @@
 import { act, StrictMode, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "../api";
+import { api, LLM_SETTINGS_CHANGED_EVENT } from "../api";
 import type { LlmSettings } from "../types";
 import { CloudConsentOnLaunch, useCloudConsent } from "./CloudConsent";
-import { ConfirmProvider } from "./confirm";
-import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
+import { answerConsent, consentRequest, holdConsentRequests } from "./cloudConsentTesting";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -42,8 +41,10 @@ beforeEach(() => {
   stored = {};
   vi.spyOn(api, "getLlmSettings").mockImplementation(async () => structuredClone(saved));
   vi.spyOn(api, "getAppSetting").mockImplementation(async (k) => stored[k] ?? null);
-  vi.spyOn(api, "setAppSetting").mockImplementation(async (k, v) => {
-    stored[k] = v;
+  // consent is never written from the webview any more
+  vi.spyOn(api, "setAppSetting").mockRejectedValue("can't be changed from the app UI");
+  holdConsentRequests((p) => {
+    stored[`consent.cloud_llm.${p}`] = "true";
   });
 });
 
@@ -59,6 +60,11 @@ const flush = async () => {
   for (let i = 0; i < 5; i++) await act(async () => {});
 };
 
+async function answer(yes: boolean) {
+  await act(async () => answerConsent(yes));
+  await flush();
+}
+
 async function launch() {
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -67,9 +73,7 @@ async function launch() {
   act(() =>
     root!.render(
       <StrictMode>
-        <ConfirmProvider>
-          <CloudConsentOnLaunch />
-        </ConfirmProvider>
+        <CloudConsentOnLaunch />
       </StrictMode>,
     ),
   );
@@ -77,51 +81,46 @@ async function launch() {
 }
 
 describe("cloud consent at launch", () => {
-  it("asks once when the saved cloud provider has no consent; Not now saves nothing", async () => {
+  it("asks the backend once, as the launch check, when the saved cloud provider has no consent", async () => {
     await launch();
-    expect(confirmTitle()).toBe("Use Anthropic for Ask and Enhance?");
-    expect(document.querySelectorAll('[data-testid="confirm-dialog"]')).toHaveLength(1);
-    const text = confirmDialog()!.textContent!;
-    expect(text).toContain("Your AI provider is set to Anthropic");
-    expect(text).toContain("full meeting transcripts will be sent to Anthropic");
-    expect(api.setAppSetting).not.toHaveBeenCalled();
+    expect(consentRequest()).toEqual({ provider: "anthropic", atLaunch: true });
+    expect(api.requestCloudConsent).toHaveBeenCalledTimes(1);
 
-    expect(confirmChoice(false).textContent).toBe("Not now");
-    await act(async () => confirmChoice(false).click());
-    await flush();
-    expect(confirmDialog()).toBeNull(); // asked once, not again
-    expect(api.setAppSetting).not.toHaveBeenCalled();
+    await answer(false);
+    expect(consentRequest()).toBeNull(); // asked once, not again
+    expect(api.requestCloudConsent).toHaveBeenCalledTimes(1);
     expect(stored["consent.cloud_llm.anthropic"]).toBeUndefined();
+    expect(api.setAppSetting).not.toHaveBeenCalled();
   });
 
-  it("records consent only on an explicit yes", async () => {
+  it("leaves recording a yes to the backend, and tells the app it changed", async () => {
+    const changed = vi.fn();
+    window.addEventListener(LLM_SETTINGS_CHANGED_EVENT, changed);
     await launch();
-    expect(confirmChoice(true).textContent).toBe("Use Anthropic");
-    await act(async () => confirmChoice(true).click());
-    await flush();
-    expect(api.setAppSetting).toHaveBeenCalledTimes(1);
+    await answer(true);
     expect(stored["consent.cloud_llm.anthropic"]).toBe("true");
+    expect(api.setAppSetting).not.toHaveBeenCalled();
+    expect(changed).toHaveBeenCalledTimes(1);
+    window.removeEventListener(LLM_SETTINGS_CHANGED_EVENT, changed);
   });
 
   it("stays quiet when the provider is local or already allowed", async () => {
     saved = settings("ollama");
     await launch();
-    expect(confirmDialog()).toBeNull();
+    expect(api.requestCloudConsent).not.toHaveBeenCalled();
     act(() => root!.unmount());
     root = null;
 
     saved = settings("anthropic");
     stored["consent.cloud_llm.anthropic"] = "true";
     await launch();
-    expect(confirmDialog()).toBeNull();
-    expect(api.setAppSetting).not.toHaveBeenCalled();
+    expect(api.requestCloudConsent).not.toHaveBeenCalled();
   });
 
   it("stays quiet when the settings can't be read", async () => {
     vi.mocked(api.getLlmSettings).mockRejectedValue("database is locked");
     await launch();
-    expect(confirmDialog()).toBeNull();
-    expect(api.setAppSetting).not.toHaveBeenCalled();
+    expect(api.requestCloudConsent).not.toHaveBeenCalled();
   });
 });
 
@@ -138,13 +137,7 @@ describe("useCloudConsent", () => {
     host = document.createElement("div");
     document.body.appendChild(host);
     root = createRoot(host);
-    act(() =>
-      root!.render(
-        <ConfirmProvider>
-          <Grab />
-        </ConfirmProvider>,
-      ),
-    );
+    act(() => root!.render(<Grab />));
     await flush();
   }
 
@@ -155,8 +148,7 @@ describe("useCloudConsent", () => {
       result = await ask(saved.providers, "someday-cloud");
     });
     expect(result).toBe(false);
-    expect(confirmDialog()).toBeNull();
-    expect(api.setAppSetting).not.toHaveBeenCalled();
+    expect(api.requestCloudConsent).not.toHaveBeenCalled();
   });
 
   it("asks once per provider: a second ask while it's open waits for the same answer", async () => {
@@ -164,16 +156,24 @@ describe("useCloudConsent", () => {
     const results: boolean[] = [];
     await act(async () => {
       void ask(saved.providers, "anthropic").then((ok) => results.push(ok));
-      void ask(saved.providers, "anthropic", { intro: "From the launch check." }).then((ok) =>
-        results.push(ok),
-      );
+      void ask(saved.providers, "anthropic", { atLaunch: true }).then((ok) => results.push(ok));
     });
     await flush();
-    expect(document.querySelectorAll('[data-testid="confirm-dialog"]')).toHaveLength(1);
-    await act(async () => confirmChoice(true).click());
-    await flush();
+    expect(api.requestCloudConsent).toHaveBeenCalledTimes(1);
+    expect(consentRequest()).toEqual({ provider: "anthropic", atLaunch: false });
+    await answer(true);
     expect(results).toEqual([true, true]);
-    expect(api.setAppSetting).toHaveBeenCalledTimes(1);
-    expect(confirmDialog()).toBeNull();
+    expect(consentRequest()).toBeNull();
+  });
+
+  it("counts a failed request as no", async () => {
+    vi.mocked(api.requestCloudConsent).mockRejectedValueOnce("dialog failed");
+    await mount();
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await ask(saved.providers, "anthropic");
+    });
+    expect(result).toBe(false);
+    expect(stored["consent.cloud_llm.anthropic"]).toBeUndefined();
   });
 });
