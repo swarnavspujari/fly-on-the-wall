@@ -1,19 +1,11 @@
 import { CircleAlert } from "lucide-react";
 import { NOTICE_PRIORITY, appErrorCopy, updateNoticeVisible } from "../notices";
+import type { PipelineFailure } from "../pipelineFailures";
 import { pipelineFailureCopy, selectPipelineNotice } from "../pipelineNotice";
 import type { Updater } from "../updater";
 import SystemAudioNotice from "./SystemAudioNotice";
 import UpdateBanner from "./UpdateBanner";
 import { Button, Notice, NoticeStack, type StackedNotice } from "./ui";
-
-/** A transcription that failed while its note wasn't open. Opening the note
- *  hands the error to its inline notice and drops it from the stack. */
-export interface PipelineFailure {
-  meetingId: string;
-  noteId: string | null;
-  noteTitle: string | null;
-  error: string;
-}
 
 interface Props {
   /** AppInfo.os — per-OS copy. */
@@ -31,16 +23,20 @@ interface Props {
   /** Transcription-engine readiness; null until the first settings fetch. */
   engine: { installed: boolean; managed: boolean } | null;
   onOpenFailedNote: (failure: PipelineFailure) => void;
+  /** Re-run transcription for a failure (only offered for a first
+   *  transcription: a re-run could have been a re-analysis). */
+  onRetryFailure: (failure: PipelineFailure) => void;
   onDismissPipelineFailure: (meetingId: string) => void;
   onOpenEngineSettings: () => void;
   updater: Updater;
 }
 
-/** Every app-wide notice in one corner (spec §3.7): system audio > errors >
- *  update, the top one shown and the rest behind "+N more", so notices
- *  never overlap. Recording is sacred: the launch-time system-audio warning
- *  and the update prompt wait until it stops (the recording bar carries the
- *  live capture warnings); errors still show. */
+/** Every app-wide notice in one corner (spec §3.7): a failure that answers
+ *  the user's click > system audio > pipeline errors > update, the top one
+ *  shown and the rest behind "+N more", so notices never overlap. Recording
+ *  is sacred: the launch-time system-audio warning and the update prompt
+ *  wait until it stops (the recording bar carries the live capture
+ *  warnings); errors still show. */
 export default function AppNotices({
   os,
   recordingActive,
@@ -52,6 +48,7 @@ export default function AppNotices({
   pipelineFailures,
   engine,
   onOpenFailedNote,
+  onRetryFailure,
   onDismissPipelineFailure,
   onOpenEngineSettings,
   updater,
@@ -72,8 +69,8 @@ export default function AppNotices({
     });
   }
 
-  // The user's own action failing ranks ahead of a background failure of
-  // the same priority (equal priorities keep this order).
+  // A failure that answers the user's own click outranks everything, so
+  // its alert is never hidden behind "+N more".
   if (appError) {
     const copy = appErrorCopy(appError);
     notices.push({
@@ -108,7 +105,11 @@ export default function AppNotices({
       os,
       engineManaged: engine ? engine.managed : null,
       noteTitle: failure.noteTitle,
+      hadTranscript: failure.hadTranscript,
     });
+    // Only a first transcription can be retried from here: with a transcript
+    // the failed run may have been a speaker re-analysis.
+    const canRetry = failure.hadTranscript === false;
     notices.push({
       id: `pipeline:${failure.meetingId}`,
       priority: NOTICE_PRIORITY.pipeline,
@@ -122,8 +123,17 @@ export default function AppNotices({
           detailsLabel={copy.detailsLabel}
           actions={
             <>
+              {canRetry && (
+                <Button variant="primary" size="sm" onClick={() => onRetryFailure(failure)}>
+                  Try again
+                </Button>
+              )}
               {failure.noteId && (
-                <Button variant="primary" size="sm" onClick={() => onOpenFailedNote(failure)}>
+                <Button
+                  variant={canRetry ? "outline" : "primary"}
+                  size="sm"
+                  onClick={() => onOpenFailedNote(failure)}
+                >
                   Open note
                 </Button>
               )}
@@ -156,7 +166,13 @@ export default function AppNotices({
     });
   }
 
-  return <NoticeStack notices={notices} className="print:hidden" style={STACK_STYLE} />;
+  // The wrapper hides it in print: the primitive's unlayered display rule
+  // beats a print:hidden class on the stack itself.
+  return (
+    <div className="print:hidden">
+      <NoticeStack notices={notices} style={STACK_STYLE} />
+    </div>
+  );
 }
 
 /** Expanded on a short window the stack would run off the top: cap it and

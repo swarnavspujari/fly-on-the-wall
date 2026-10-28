@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { PanelLeft } from "lucide-react";
 import { api } from "./api";
@@ -31,7 +31,14 @@ import Editor from "./components/Editor";
 import RecordingBar from "./components/RecordingBar";
 import SettingsModal from "./components/SettingsModal";
 import FirstRunNotice from "./components/FirstRunNotice";
-import AppNotices, { type PipelineFailure } from "./components/AppNotices";
+import AppNotices from "./components/AppNotices";
+import {
+  failureFrom,
+  failuresReducer,
+  isBackgroundFailure,
+  shouldAddFailure,
+  type PipelineFailure,
+} from "./pipelineFailures";
 import RestartRequired from "./components/RestartRequired";
 import { useUpdater } from "./updater";
 
@@ -69,14 +76,14 @@ export default function App() {
   const [pipeStage, setPipeStage] = useState<string | null>(null);
   const [pipeDetail, setPipeDetail] = useState<string | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
-  // Transcriptions that failed while their note wasn't open — shown in the
-  // notice stack until dismissed or the note is opened (which hands the
-  // error to its inline notice). The open note's own failure stays inline.
-  const [pipelineFailures, setPipelineFailures] = useState<PipelineFailure[]>([]);
-  const pipelineFailuresRef = useRef<PipelineFailure[]>([]);
-  useEffect(() => {
-    pipelineFailuresRef.current = pipelineFailures;
-  }, [pipelineFailures]);
+  // Transcriptions that failed while their note wasn't open, held in the
+  // notice stack until a retry starts, the run succeeds or is cancelled, or
+  // the user dismisses it (pipelineFailures.ts). The open note's own
+  // failures stay inline.
+  const [pipelineFailures, dispatchFailures] = useReducer(failuresReducer, [] as PipelineFailure[]);
+  // Per-meeting event count: an async note lookup only adds its failure if
+  // nothing newer happened to that meeting meanwhile.
+  const failureSeqRef = useRef(new Map<string, number>());
   // Staged (untranscribed) media import for the open note's meeting — while
   // set, the editor shows the import queue instead of the note content.
   const [importStaged, setImportStaged] = useState<ImportStaged | null>(null);
@@ -282,27 +289,21 @@ export default function App() {
 
   // pipeline + model download progress events
   useEffect(() => {
-    // A run for a note that isn't open: a failure goes to the notice stack
-    // (it used to be dropped); any later event for that meeting (a retry
-    // starting, success, cancel) clears it.
-    const trackBackgroundRun = (p: PipelineProgress) => {
-      const drop = () =>
-        setPipelineFailures((list) => list.filter((f) => f.meetingId !== p.meeting_id));
-      if (!(p.done && p.error && p.stage !== "cancelled")) {
-        if (pipelineFailuresRef.current.some((f) => f.meetingId === p.meeting_id)) drop();
-        return;
-      }
-      const error = p.error;
-      const add = (owner: NoteSummary | undefined) =>
-        setPipelineFailures((list) => [
-          ...list.filter((f) => f.meetingId !== p.meeting_id),
-          {
-            meetingId: p.meeting_id,
-            noteId: owner?.id ?? null,
-            noteTitle: owner?.title ?? null,
-            error,
-          },
-        ]);
+    // Every event updates the held failures (pipelineFailures.ts). A failure
+    // for a note that isn't open goes to the notice stack (it used to be
+    // dropped), named from the note list.
+    const trackFailures = (p: PipelineProgress) => {
+      const seqs = failureSeqRef.current;
+      const seq = (seqs.get(p.meeting_id) ?? 0) + 1;
+      seqs.set(p.meeting_id, seq);
+      const open = openMeetingIdRef.current;
+      dispatchFailures({ type: "event", event: p, openMeetingId: open });
+      if (!isBackgroundFailure(p, open)) return;
+      const add = (owner: NoteSummary | undefined) => {
+        const now = seqs.get(p.meeting_id) ?? 0;
+        if (!shouldAddFailure(p.meeting_id, seq, now, openMeetingIdRef.current)) return;
+        dispatchFailures({ type: "add", failure: failureFrom(p, owner) });
+      };
       const known = notesRef.current.find((n) => n.meeting_id === p.meeting_id);
       if (known) {
         add(known);
@@ -316,10 +317,8 @@ export default function App() {
     };
     const unPipeline = listen<PipelineProgress>("pipeline:progress", (e) => {
       const p = e.payload;
-      if (p.meeting_id !== openMeetingIdRef.current) {
-        trackBackgroundRun(p);
-        return;
-      }
+      trackFailures(p);
+      if (p.meeting_id !== openMeetingIdRef.current) return;
       // Cancelled is terminal but neither success nor failure: clear the
       // progress UI and drop a staged import queue back to idle (the backend
       // reset its `started` flag).
@@ -451,15 +450,7 @@ export default function App() {
     setNoteMeetings(meetings);
     const meeting = meetings[0] ?? null; // newest is the primary
     setOpenMeeting(meeting);
-    // A failure the stack was holding for this meeting moves to the note's
-    // inline notice, which has the fix buttons (install, retry, Settings).
-    const held = meeting
-      ? pipelineFailuresRef.current.find((f) => f.meetingId === meeting.id)
-      : undefined;
-    if (held) {
-      setPipelineFailures((list) => list.filter((f) => f.meetingId !== held.meetingId));
-    }
-    setPipelineError(held?.error ?? null);
+    setPipelineError(null);
     setPipeDetail(null);
     if (meeting) {
       const [raw, cleaned, stage, staged] = await Promise.all([
@@ -498,7 +489,7 @@ export default function App() {
 
   const deleteNote = async (id: string) => {
     await api.deleteNote(id);
-    setPipelineFailures((list) => list.filter((f) => f.noteId !== id));
+    dispatchFailures({ type: "noteDeleted", noteId: id });
     if (openNote?.id === id) {
       openSeq.current++;
       setOpenNote(null);
@@ -941,9 +932,12 @@ export default function App() {
           setDrawerOpen(false);
           void openNoteById(f.noteId);
         }}
-        onDismissPipelineFailure={(meetingId) =>
-          setPipelineFailures((list) => list.filter((f) => f.meetingId !== meetingId))
-        }
+        onRetryFailure={(f) => {
+          // The retry starting clears it; a failed start surfaces as an error.
+          dispatchFailures({ type: "retry", meetingId: f.meetingId });
+          api.transcribeMeeting(f.meetingId).catch((e) => setError(String(e)));
+        }}
+        onDismissPipelineFailure={(meetingId) => dispatchFailures({ type: "dismiss", meetingId })}
         onOpenEngineSettings={() => {
           setSettingsFocus("engine");
           setShowSettings(true);

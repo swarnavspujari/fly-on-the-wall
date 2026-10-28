@@ -59,7 +59,9 @@ export default function UpdateBanner({ updater }: Props) {
       {phase === "downloading" && (
         <div className="mt-2 flex items-center gap-2">
           <ProgressBar value={pct} className="flex-1" aria-label="Update download" />
-          <span className="font-mono text-[11px] text-text-3">
+          {/* The bar carries aria-valuenow; the changing text would make the
+              status region re-announce every percent. */}
+          <span className="font-mono text-[11px] text-text-3" aria-hidden="true">
             {pct == null ? "Downloading…" : `${pct}%`}
           </span>
         </div>

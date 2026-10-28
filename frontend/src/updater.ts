@@ -30,6 +30,9 @@ export interface Updater {
   /** 0..1 while downloading; null when the server sent no content length. */
   progress: number | null;
   error: string | null;
+  /** What failed when phase is "error": a check, or a download/install.
+   *  Optional so hand-made Updater objects (tests) needn't set it. */
+  errorSource?: "check" | "install" | null;
   /** False only for Linux deb installs — those update via apt/GitHub Releases. */
   supported: boolean;
   /** True once the banner's "Later" was clicked; Settings keeps working. */
@@ -54,6 +57,7 @@ export function useUpdater(
   const [version, setVersion] = useState<string | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorSource, setErrorSource] = useState<"check" | "install" | null>(null);
   const [dismissed, setDismissed] = useState(false);
 
   const updateRef = useRef<Update | null>(null);
@@ -68,6 +72,7 @@ export function useUpdater(
   const doCheck = useCallback(async (silent: boolean) => {
     setPhase("checking");
     setError(null);
+    setErrorSource(null);
     try {
       const update = await pluginCheck({ timeout: 30_000 });
       if (update) {
@@ -84,6 +89,7 @@ export function useUpdater(
         setPhase("idle");
       } else {
         setError(String(e));
+        setErrorSource("check");
         setPhase("error");
       }
     }
@@ -108,6 +114,7 @@ export function useUpdater(
       await relaunch();
     } catch (e) {
       setError(String(e));
+      setErrorSource("install");
       setPhase("error");
     }
   }, []);
@@ -117,6 +124,8 @@ export function useUpdater(
     if (!update) return;
     setPhase("downloading");
     setProgress(null);
+    setError(null);
+    setErrorSource(null);
     let total = 0;
     let received = 0;
     let lastPct = -1;
@@ -145,6 +154,7 @@ export function useUpdater(
       })
       .catch((e: unknown) => {
         setError(String(e));
+        setErrorSource("install");
         setPhase("error");
       });
   }, [install]);
@@ -162,6 +172,7 @@ export function useUpdater(
     version,
     progress,
     error,
+    errorSource,
     supported,
     dismissed,
     check: checkNow,

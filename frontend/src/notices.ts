@@ -6,11 +6,12 @@
 import { briefError } from "./pipelineNotice";
 import type { UpdatePhase } from "./updater";
 
-/** Stack order (spec §3.7): system audio > pipeline error > update. A failed
- *  action the user just took ranks with pipeline errors. */
+/** Stack order (spec §3.7): system audio > pipeline error > update, with
+ *  a failure that answers the user's own click above them all (its alert
+ *  must not hide behind "+N more" under a standing system-audio notice). */
 export const NOTICE_PRIORITY = {
+  appError: 4,
   systemAudio: 3,
-  appError: 2,
   pipeline: 2,
   update: 1,
 } as const;
@@ -79,15 +80,16 @@ export function appErrorCopy(error: string): NoticeCopy {
   };
 }
 
-/** Phases the update notice is shown in. "error" only once an update was
- *  found (a failed manual check belongs to Settings, which shows it). */
+/** Phases the update notice is shown in. "error" only when the download or
+ *  install failed: a failed check (even after an earlier find) belongs to
+ *  Settings, which shows it. */
 export function updateNoticeVisible(u: {
   phase: UpdatePhase;
   dismissed: boolean;
-  version: string | null;
+  errorSource?: "check" | "install" | null;
 }): boolean {
   if (u.dismissed) return false;
-  if (u.phase === "error") return u.version != null;
+  if (u.phase === "error") return u.errorSource === "install";
   return (
     u.phase === "available" ||
     u.phase === "downloading" ||
@@ -106,7 +108,7 @@ export function updateCopy(
     case "available":
       return {
         title: "Update available",
-        cause: `${v} is ready. Fly on the Wall restarts once to apply it.`,
+        cause: `${v} is available. Fly on the Wall restarts once to apply it.`,
       };
     case "downloading":
       return { title: "Downloading update", cause: `${v}. You can keep working.` };

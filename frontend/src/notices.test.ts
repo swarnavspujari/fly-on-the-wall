@@ -9,10 +9,10 @@ import {
 } from "./notices";
 
 describe("NOTICE_PRIORITY", () => {
-  it("orders system audio > errors > update (spec §3.7)", () => {
+  it("orders the user's own failed action > system audio > pipeline errors > update", () => {
+    expect(NOTICE_PRIORITY.appError).toBeGreaterThan(NOTICE_PRIORITY.systemAudio);
     expect(NOTICE_PRIORITY.systemAudio).toBeGreaterThan(NOTICE_PRIORITY.pipeline);
     expect(NOTICE_PRIORITY.pipeline).toBeGreaterThan(NOTICE_PRIORITY.update);
-    expect(NOTICE_PRIORITY.appError).toBe(NOTICE_PRIORITY.pipeline);
   });
 });
 
@@ -68,7 +68,7 @@ describe("appErrorCopy", () => {
 });
 
 describe("updateNoticeVisible", () => {
-  const base = { dismissed: false, version: "2.4.0" };
+  const base = { dismissed: false };
 
   it("shows from available through installing", () => {
     for (const phase of ["available", "downloading", "ready", "installing"] as const) {
@@ -86,16 +86,18 @@ describe("updateNoticeVisible", () => {
     expect(updateNoticeVisible({ ...base, phase: "ready", dismissed: true })).toBe(false);
   });
 
-  it("an error shows only once an update was found (a failed check belongs to Settings)", () => {
-    expect(updateNoticeVisible({ ...base, phase: "error" })).toBe(true);
-    expect(updateNoticeVisible({ ...base, phase: "error", version: null })).toBe(false);
+  it("an error shows only for a failed download/install (a failed check belongs to Settings)", () => {
+    expect(updateNoticeVisible({ ...base, phase: "error", errorSource: "install" })).toBe(true);
+    // a manual "Check for updates" failing after an earlier find
+    expect(updateNoticeVisible({ ...base, phase: "error", errorSource: "check" })).toBe(false);
+    expect(updateNoticeVisible({ ...base, phase: "error" })).toBe(false);
   });
 });
 
 describe("updateCopy", () => {
   it("names the version and what happens next", () => {
     expect(updateCopy("available", "2.4.0", null).cause).toBe(
-      "Version 2.4.0 is ready. Fly on the Wall restarts once to apply it.",
+      "Version 2.4.0 is available. Fly on the Wall restarts once to apply it.",
     );
     expect(updateCopy("ready", "2.4.0", null).title).toBe("Update ready");
     expect(updateCopy("ready", "2.4.0", null).cause).toBe(

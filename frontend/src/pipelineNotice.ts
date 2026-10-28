@@ -81,6 +81,9 @@ export interface PipelineFailureCopyInput {
   engineManaged: boolean | null;
   /** Title of the failed recording's note, when the list knows it. */
   noteTitle: string | null;
+  /** The note already had a transcript (so this was a re-run: transcription
+   *  or a speaker re-analysis). null = unknown. */
+  hadTranscript: boolean | null;
 }
 
 export interface PipelineFailureCopy {
@@ -91,37 +94,41 @@ export interface PipelineFailureCopy {
   details: string;
 }
 
-/** Copy for a transcription that failed while its note wasn't open (the
- *  open note shows the inline, actionable notice instead). Opening the note
- *  moves the failure there, so the steps point at its buttons. */
+/** Copy for a run that failed while its note wasn't open; the notice stays
+ *  in the stack until a retry starts or it's dismissed.
+ *  - First transcription (`hadTranscript === false`): the notice has Try
+ *    again, so the steps end there.
+ *  - A re-run, or unknown: the failed run may have been re-transcription or
+ *    re-analyzing speakers (both end the same way), so the copy says the
+ *    existing transcript is kept and points to the note to run it again. */
 export function pipelineFailureCopy({
   kind,
   error,
   os,
   engineManaged,
   noteTitle,
+  hadTranscript,
 }: PipelineFailureCopyInput): PipelineFailureCopy {
-  const what = noteTitle ? `“${noteTitle}” wasn’t transcribed.` : "A recording wasn’t transcribed.";
-  const transcribe = "Open the note and choose Transcribe recording.";
+  const first = hadTranscript === false;
+  const name = noteTitle ? `“${noteTitle}”` : null;
+  const what = first
+    ? `${name ?? "A recording"} wasn’t transcribed. The recording is saved.`
+    : hadTranscript
+      ? `${name ?? "A meeting"} didn’t finish processing. Its transcript is unchanged.`
+      : `${name ?? "A meeting"} didn’t finish processing. The recording and any transcript are kept.`;
+  const last = first ? "Choose Try again." : "Open the note and run it again from its transcript.";
   const details = briefError(error);
   if (kind === "engine-missing") {
-    let steps: string[];
-    if (engineManaged !== false) {
-      steps = ["Open the note and choose Install engine.", "Transcribe the recording."];
-    } else if (os === "macos") {
-      steps = ["In Terminal, run: brew install whisper-cpp", transcribe];
-    } else if (os === "linux") {
-      steps = [
-        "Install whisper.cpp from your package manager, or build it from source.",
-        transcribe,
-      ];
-    } else {
-      steps = ["Set up the engine in Settings › Transcripts.", transcribe];
-    }
+    let install: string;
+    if (engineManaged !== false) install = "Install the engine in Settings › Transcripts.";
+    else if (os === "macos") install = "In Terminal, run: brew install whisper-cpp";
+    else if (os === "linux") {
+      install = "Install whisper.cpp from your package manager, or build it from source.";
+    } else install = "Set up the engine in Settings › Transcripts.";
     return {
       title: "Transcription engine isn’t installed",
-      cause: `${what} The recording is saved, but the engine that transcribes it is missing.`,
-      steps,
+      cause: `${what} The engine that transcribes it is missing.`,
+      steps: [install, last],
       detailsLabel: "Details",
       details,
     };
@@ -129,16 +136,16 @@ export function pipelineFailureCopy({
   if (kind === "download-failed") {
     return {
       title: "Model download didn’t finish",
-      cause: `${what} The speech model didn’t download, so transcription couldn’t start.`,
-      steps: ["Check that you’re online.", "Open the note and choose Try again."],
+      cause: `${what} A model it needs didn’t download.`,
+      steps: ["Check that you’re online.", last],
       detailsLabel: "Details",
       details,
     };
   }
   return {
-    title: "Transcription didn’t finish",
-    cause: `${what} The recording is saved.`,
-    steps: ["Open the note and transcribe it again."],
+    title: first ? "Transcription didn’t finish" : "Processing didn’t finish",
+    cause: what,
+    steps: [last],
     detailsLabel: "Details",
     details,
   };

@@ -27,6 +27,9 @@
                                      configured model not downloaded
      fotwMockGpuBench = "gpu" | "cpu" | "failed" → a stored GPU speed-test
                                      verdict (Settings "Use the graphics card")
+     fotwMockUpdate = "available" | "fail" → the startup update check (5 s
+                                     after load) finds v2.4.0; Update now hangs
+                                     in "Downloading", or fails
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.

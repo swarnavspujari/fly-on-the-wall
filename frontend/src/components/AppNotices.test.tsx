@@ -4,7 +4,8 @@ import type { ComponentProps, ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Updater, UpdatePhase } from "../updater";
-import AppNotices, { type PipelineFailure } from "./AppNotices";
+import type { PipelineFailure } from "../pipelineFailures";
+import AppNotices from "./AppNotices";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -58,6 +59,7 @@ const FAILURE: PipelineFailure = {
   noteId: "n2",
   noteTitle: "Weekly 1:1 with Dana",
   error: "groq returned 413 Payload Too Large",
+  hadTranscript: false,
 };
 
 type Props = ComponentProps<typeof AppNotices>;
@@ -74,6 +76,7 @@ function props(over: Partial<Props> = {}): Props {
     pipelineFailures: [],
     engine: { installed: true, managed: true },
     onOpenFailedNote: vi.fn(),
+    onRetryFailure: vi.fn(),
     onDismissPipelineFailure: vi.fn(),
     onOpenEngineSettings: vi.fn(),
     updater: fakeUpdater("idle"),
@@ -93,7 +96,7 @@ describe("AppNotices", () => {
     expect(host.querySelector('[role="region"]')).toBeNull();
   });
 
-  it("all four at once: system audio on top, the rest behind +3 more, in priority order", () => {
+  it("all four at once: the failed action on top, the rest behind +3 more, in priority order", () => {
     const { host } = render(
       <AppNotices
         {...props({
@@ -104,16 +107,21 @@ describe("AppNotices", () => {
         })}
       />,
     );
-    expect(shownIds(host)).toEqual(["system-audio"]);
+    expect(shownIds(host)).toEqual(["app-error"]);
+    // its alert renders (not hidden behind "+N more")
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("Microphone is busy");
     const more = host.querySelector(".fly-notices-more");
     expect(more?.textContent).toBe("+3 more");
     click(more);
-    expect(shownIds(host)).toEqual(["system-audio", "app-error", "pipeline:m2", "update"]);
+    expect(shownIds(host)).toEqual(["app-error", "system-audio", "pipeline:m2", "update"]);
     expect(host.querySelector(".fly-notices-more")?.textContent).toBe("Show fewer");
   });
 
   it.each([
     [{ appError: "x", updater: fakeUpdater("available") }, ["app-error"], "+1 more"],
+    // a stale macOS grant must not hide a failed Record start
+    [{ systemAudioBlocked: true, appError: "x" }, ["app-error"], "+1 more"],
+    [{ appError: "x", pipelineFailures: [FAILURE] }, ["app-error"], "+1 more"],
     [{ pipelineFailures: [FAILURE], updater: fakeUpdater("ready") }, ["pipeline:m2"], "+1 more"],
     [{ systemAudioBlocked: true, updater: fakeUpdater("ready") }, ["system-audio"], "+1 more"],
     [{ systemAudioBlocked: true, pipelineFailures: [FAILURE] }, ["system-audio"], "+1 more"],
@@ -188,6 +196,28 @@ describe("AppNotices", () => {
     expect(p.onDismissPipelineFailure).toHaveBeenCalledWith("m2");
   });
 
+  it("a first transcription failure offers Try again (it stays until the retry starts)", () => {
+    const p = props({ pipelineFailures: [FAILURE] });
+    const { host } = render(<AppNotices {...p} />);
+    click(button(host, "Try again"));
+    expect(p.onRetryFailure).toHaveBeenCalledWith(FAILURE);
+    expect(button(host, "Open note")?.className).toContain("fly-btn--outline");
+  });
+
+  it("a failed re-run (transcript exists) has no Try again: it may have been a re-analysis", () => {
+    const rerun = { ...FAILURE, hadTranscript: true };
+    const { host } = render(<AppNotices {...props({ pipelineFailures: [rerun] })} />);
+    expect(button(host, "Try again")).toBeUndefined();
+    expect(button(host, "Open note")?.className).toContain("fly-btn--primary");
+    expect(host.textContent).toContain("Its transcript is unchanged.");
+    expect(host.textContent).not.toContain("wasn’t transcribed");
+  });
+
+  it("the stack is hidden in print (wrapper, since the primitive's display wins)", () => {
+    const { host } = render(<AppNotices {...props({ appError: "x" })} />);
+    expect(host.querySelector('[role="region"]')?.parentElement?.className).toBe("print:hidden");
+  });
+
   it("an engine failure offers Settings; an unknown note has no Open note", () => {
     const failure = {
       ...FAILURE,
@@ -227,6 +257,11 @@ describe("AppNotices", () => {
       );
       expect(host.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("42");
       expect(host.textContent).toContain("42%");
+      // the bar announces progress; the changing text is hidden from AT
+      const pctText = Array.from(host.querySelectorAll("span")).find(
+        (s) => s.textContent === "42%",
+      );
+      expect(pctText?.getAttribute("aria-hidden")).toBe("true");
       expect(host.querySelectorAll(".fly-notice button")).toHaveLength(0);
     });
 
@@ -237,8 +272,19 @@ describe("AppNotices", () => {
       expect(updater.restart).toHaveBeenCalledTimes(1);
     });
 
+    it("available says available, not ready", () => {
+      const { host } = render(<AppNotices {...props({ updater: fakeUpdater("available") })} />);
+      expect(host.textContent).toContain("Version 2.4.0 is available.");
+    });
+
+    it("a failed manual check (even after an earlier find) stays in Settings", () => {
+      const updater = fakeUpdater("error", { error: "timeout", errorSource: "check" });
+      const { host } = render(<AppNotices {...props({ updater })} />);
+      expect(shownIds(host)).toEqual([]);
+    });
+
     it("a failed download stays visible with Try again and the error under Details", () => {
-      const updater = fakeUpdater("error", { error: "connection reset" });
+      const updater = fakeUpdater("error", { error: "connection reset", errorSource: "install" });
       const { host } = render(<AppNotices {...props({ updater })} />);
       expect(host.querySelector(".fly-notice-title")?.textContent).toBe("Update didn’t install");
       expect(host.querySelector(".fly-notice-details-body")?.textContent).toBe("connection reset");
