@@ -76,10 +76,64 @@ jobs:
             changed=$(git -c core.quotePath=true diff --name-only "$BASE_SHA" "$HEAD_SHA" -- "${paths[@]}" || true)
           fi
 
-          # Another workflow must not impersonate an eval check.
+          # Another workflow must not impersonate an eval check. A tripwire,
+          # not a proof (GitHub matches required checks by name, and
+          # expressions can't be fully evaluated here): the literal names
+          # anywhere, plus each parsed job's id and name, with the string
+          # pieces inside expressions joined, and its matrix values.
           impostors=$(git grep -nE 'evals-(lock|security|quality)\b|evals-\$\{\{' "$HEAD_SHA" -- \
             '.github/workflows/*.yml' '.github/workflows/*.yaml' \
             ':!.github/workflows/evals.yml' ':!.github/workflows/evals-guard.yml' || true)
+          parsed=$(python3 - <<'PY'
+          import glob, os, re, sys
+          try:
+              import yaml
+          except ImportError:
+              print("PyYAML is missing on the runner, so job names couldn't be parsed")
+              sys.exit(0)
+          LOCKED = {".github/workflows/evals.yml", ".github/workflows/evals-guard.yml"}
+          NAMES = ("evals-lock", "evals-security", "evals-quality")
+
+          def strings(x):
+              if isinstance(x, str):
+                  yield x
+              elif isinstance(x, dict):
+                  for k, v in x.items():
+                      yield from strings(k)
+                      yield from strings(v)
+              elif isinstance(x, list):
+                  for v in x:
+                      yield from strings(v)
+
+          def suspicious(text, matrix):
+              t = text.lower()
+              literals = "".join(re.findall(r"'([^']*)'", t))
+              bare = re.sub(r"\$\{\{.*?\}\}", "", t)
+              if any(n in s for n in NAMES for s in (t, literals, bare, bare + literals)):
+                  return True
+              # An expression name next to anything spelling "eval".
+              # ("$" + "{{": a literal one here would be an Actions expression.)
+              return ("$" + "{{") in t and "eval" in (t + literals + matrix)
+
+          for path in sorted(glob.glob(".github/workflows/*.y*ml")):
+              rel = path.replace(os.sep, "/")
+              if rel in LOCKED:
+                  continue
+              try:
+                  wf = yaml.safe_load(open(path, encoding="utf-8")) or {}
+              except Exception as e:
+                  print(f"{rel}: not parseable ({e})")
+                  continue
+              jobs = wf.get("jobs") if isinstance(wf, dict) else None
+              for jid, job in (jobs or {}).items() if isinstance(jobs, dict) else []:
+                  job = job if isinstance(job, dict) else {}
+                  name = str(job.get("name", jid))
+                  matrix = "".join(strings((job.get("strategy") or {}).get("matrix"))).lower()
+                  if suspicious(str(jid), matrix) or suspicious(name, matrix):
+                      print(f"{rel}: job {jid} (name: {name})")
+          PY
+          )
+          impostors=$(printf '%s\n%s' "$impostors" "$parsed" | sed '/^$/d')
 
           {
             echo "### Eval lock"
