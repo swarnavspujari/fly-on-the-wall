@@ -30,11 +30,18 @@ use crate::{Result, Storage};
 /// expressions for its meeting id, raw JSON and polished JSON. Used by the
 /// triggers (`new.*`).
 ///
+/// **Total**: it must return rows (possibly none) for ANY stored value,
+/// because it runs inside every build's transcript write: an error here
+/// fails that write. `json_valid` guards the document; `type = 'object'`
+/// guards each element (`json_extract` on a string element raises
+/// "malformed JSON"); every column is COALESCEd or nullable.
+///
 /// `LIMIT -1` is load-bearing: it stops SQLite from flattening the polished
 /// subquery into the join, which would re-parse the polished JSON once per
 /// raw segment (measured: 42 s for a 3,000-segment transcript). With it the
 /// subquery is materialized once and joined through an automatic index
-/// (~30 ms). Triggers can't use a CTE, hence this form.
+/// (~30 ms). Triggers can't use a CTE, hence this form. `GROUP BY` keeps
+/// duplicate polished ids from fanning out into duplicate rows.
 fn segment_rows_select(meeting_id: &str, raw: &str, cleaned: &str) -> String {
     format!(
         "SELECT {meeting_id},
@@ -47,60 +54,77 @@ fn segment_rows_select(meeting_id: &str, raw: &str, cleaned: &str) -> String {
                 COALESCE(c.text, json_extract(r.value, '$.text'), '')
            FROM json_each(CASE WHEN json_valid({raw}) THEN {raw} ELSE '{{}}' END, '$.segments') r
            LEFT JOIN (SELECT json_extract(value, '$.id') AS id,
-                             json_extract(value, '$.text') AS text
+                             MAX(json_extract(value, '$.text')) AS text
                         FROM json_each(CASE WHEN json_valid({cleaned}) THEN {cleaned} ELSE '{{}}' END,
                                        '$.segments')
+                       WHERE type = 'object'
+                       GROUP BY 1
                        LIMIT -1) c
-             ON c.id = json_extract(r.value, '$.id')"
+             ON c.id = json_extract(r.value, '$.id')
+          WHERE r.type = 'object'"
     )
 }
 
-/// DDL for the segment index: table, external-content FTS5 index, and the
-/// triggers that keep both in step with `transcripts`. Idempotent.
-pub(crate) fn schema_sql() -> String {
+/// Every trigger this module owns, dropped and re-created on each open (see
+/// [`install`]).
+const TRIGGERS: &[&str] = &[
+    "transcript_segments_fts_insert",
+    "transcript_segments_fts_delete",
+    "transcript_segments_fts_update",
+    "transcripts_segments_insert",
+    "transcripts_segments_update",
+    "transcripts_segments_delete",
+];
+
+/// Tables and indexes, created once. No NOT NULL / UNIQUE / FK constraints:
+/// the triggers write these rows inside other builds' transcript writes,
+/// and a constraint violation would fail them (see `Storage::SCHEMA_VERSION`).
+const TABLES_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS transcript_segments (
+        id          INTEGER PRIMARY KEY,
+        meeting_id  TEXT,
+        seq         INTEGER,          -- position in the transcript
+        segment_id  TEXT,
+        speaker_key TEXT,
+        start_ms    INTEGER,
+        end_ms      INTEGER,
+        variant     TEXT,             -- 'raw' | 'polished'
+        text        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_transcript_segments_meeting
+        ON transcript_segments(meeting_id, segment_id);
+
+    -- Text lives once, in transcript_segments; the index reads it from
+    -- there (external content).
+    CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
+        text,
+        content = 'transcript_segments',
+        content_rowid = 'id',
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+"#;
+
+fn triggers_sql() -> String {
     let rows = segment_rows_select("new.meeting_id", "new.json", "new.cleaned_json");
     format!(
         r#"
-        CREATE TABLE IF NOT EXISTS transcript_segments (
-            id          INTEGER PRIMARY KEY,
-            meeting_id  TEXT NOT NULL,
-            seq         INTEGER,          -- position in the transcript
-            segment_id  TEXT NOT NULL,
-            speaker_key TEXT NOT NULL,
-            start_ms    INTEGER,
-            end_ms      INTEGER,
-            variant     TEXT NOT NULL,    -- 'raw' | 'polished'
-            text        TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_transcript_segments_meeting
-            ON transcript_segments(meeting_id, segment_id);
-
-        -- Text lives once, in transcript_segments; the index reads it from
-        -- there (external content).
-        CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
-            text,
-            content = 'transcript_segments',
-            content_rowid = 'id',
-            tokenize = 'unicode61 remove_diacritics 2'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS transcript_segments_fts_insert
+        CREATE TRIGGER transcript_segments_fts_insert
         AFTER INSERT ON transcript_segments BEGIN
             INSERT INTO segments_fts (rowid, text) VALUES (new.id, new.text);
         END;
-        CREATE TRIGGER IF NOT EXISTS transcript_segments_fts_delete
+        CREATE TRIGGER transcript_segments_fts_delete
         AFTER DELETE ON transcript_segments BEGIN
             INSERT INTO segments_fts (segments_fts, rowid, text)
             VALUES ('delete', old.id, old.text);
         END;
-        CREATE TRIGGER IF NOT EXISTS transcript_segments_fts_update
+        CREATE TRIGGER transcript_segments_fts_update
         AFTER UPDATE ON transcript_segments BEGIN
             INSERT INTO segments_fts (segments_fts, rowid, text)
             VALUES ('delete', old.id, old.text);
             INSERT INTO segments_fts (rowid, text) VALUES (new.id, new.text);
         END;
 
-        CREATE TRIGGER IF NOT EXISTS transcripts_segments_insert
+        CREATE TRIGGER transcripts_segments_insert
         AFTER INSERT ON transcripts BEGIN
             INSERT INTO transcript_segments
                 (meeting_id, seq, segment_id, speaker_key, start_ms, end_ms, variant, text)
@@ -111,7 +135,7 @@ pub(crate) fn schema_sql() -> String {
         -- has (a re-transcribe makes new ids). The app re-anchors them right
         -- after (citations.rs); an older build leaves them marked, which is
         -- the honest state.
-        CREATE TRIGGER IF NOT EXISTS transcripts_segments_update
+        CREATE TRIGGER transcripts_segments_update
         AFTER UPDATE OF json, cleaned_json ON transcripts BEGIN
             DELETE FROM transcript_segments WHERE meeting_id = old.meeting_id;
             INSERT INTO transcript_segments
@@ -119,16 +143,48 @@ pub(crate) fn schema_sql() -> String {
             {rows};
             UPDATE citation_locators SET status = 'changed'
              WHERE meeting_id = new.meeting_id AND status != 'changed'
-               AND seg_id NOT IN (SELECT segment_id FROM transcript_segments
-                                   WHERE meeting_id = new.meeting_id);
+               AND NOT EXISTS (SELECT 1 FROM transcript_segments ts
+                                WHERE ts.meeting_id = new.meeting_id
+                                  AND ts.segment_id = citation_locators.seg_id);
         END;
 
-        CREATE TRIGGER IF NOT EXISTS transcripts_segments_delete
+        CREATE TRIGGER transcripts_segments_delete
         AFTER DELETE ON transcripts BEGIN
             DELETE FROM transcript_segments WHERE meeting_id = old.meeting_id;
             DELETE FROM citation_locators WHERE meeting_id = old.meeting_id;
         END;
         "#
+    )
+}
+
+/// Create the segment index if missing, and (re)install its triggers. Runs
+/// on every open, after `citation_locators` exists: dropping and re-creating
+/// the triggers in one transaction means a fixed trigger reaches every
+/// existing file, not just new ones. Also turns on FTS5 `secure-delete`
+/// (SQLite >= 3.42, bundled in every build) so deleted transcript text
+/// doesn't linger in the index's pages.
+pub(crate) fn install(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(TABLES_SQL)?;
+    let tx = conn.unchecked_transaction()?;
+    for name in TRIGGERS {
+        conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {name};"))?;
+    }
+    conn.execute_batch(&triggers_sql())?;
+    conn.execute(
+        "INSERT INTO segments_fts (segments_fts, rank) VALUES ('secure-delete', 1)",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// True for SQLite's "database disk image is malformed" family
+/// (`SQLITE_CORRUPT`, incl. `SQLITE_CORRUPT_VTAB` from a damaged FTS index).
+pub(crate) fn is_corrupt(e: &crate::StorageError) -> bool {
+    matches!(
+        e,
+        crate::StorageError::Db(rusqlite::Error::SqliteFailure(f, _))
+            if f.code == rusqlite::ErrorCode::DatabaseCorrupt
     )
 }
 
@@ -158,6 +214,17 @@ pub(crate) struct IndexedSegment {
 }
 
 impl Storage {
+    /// Rebuild `segments_fts` from `transcript_segments` (FTS5 `rebuild`):
+    /// the repair for a damaged keyword index, and the last stage of the v3
+    /// step.
+    pub(crate) fn rebuild_segment_index(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO segments_fts (segments_fts) VALUES ('rebuild')",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Keyword search over individual transcript segments, bm25-ranked.
     /// Honors `filter` like [`Storage::search_split`]: folder via the owning
     /// note, dates on the meeting's start, `limit`/`offset`, and
@@ -455,30 +522,166 @@ mod tests {
     fn malformed_transcript_json_never_fails_the_write() {
         let (_dir, s) = test_storage();
         // What an older build or a hand-edited row might hold: the trigger
-        // must index nothing rather than abort the write.
-        for json in [
+        // must index what it can and never abort the write.
+        let shapes = [
             "not json",
             "{}",
             "{\"segments\": 7}",
+            "{\"segments\": \"abc\"}",
+            "{\"segments\": [\"x\"]}",
+            "{\"segments\": [\"x\", 3, null, [1], {\"id\": \"ok\", \"text\": \"fine\"}]}",
             "{\"segments\": [{\"text\": 1}]}",
-        ] {
+            "{\"segments\": {\"a\": {\"id\": \"o\"}}}",
+        ];
+        for json in shapes {
             s.conn
                 .execute(
                     "INSERT INTO transcripts (meeting_id, json) VALUES ('m-x', ?1)
                      ON CONFLICT(meeting_id) DO UPDATE SET json = excluded.json",
                     [json],
                 )
-                .unwrap();
+                .unwrap_or_else(|e| panic!("json {json}: {e}"));
         }
+        let good = r#"{"segments": [{"id": "ok", "text": "fine"}]}"#;
         s.conn
             .execute(
-                "UPDATE transcripts SET cleaned_json = 'nope' WHERE meeting_id = 'm-x'",
-                [],
+                "UPDATE transcripts SET json = ?1 WHERE meeting_id = 'm-x'",
+                [good],
             )
             .unwrap();
+        for cleaned in shapes.iter().chain(&["nope"]) {
+            s.conn
+                .execute(
+                    "UPDATE transcripts SET cleaned_json = ?1 WHERE meeting_id = 'm-x'",
+                    [cleaned],
+                )
+                .unwrap_or_else(|e| panic!("cleaned {cleaned}: {e}"));
+        }
+        // The object element still indexed, raw text (no polished match).
+        assert_eq!(
+            rows(&s, "m-x"),
+            vec![("ok".into(), "raw".into(), "fine".into())]
+        );
         s.conn
             .execute("DELETE FROM transcripts WHERE meeting_id = 'm-x'", [])
             .unwrap();
         fts_ok(&s);
+    }
+
+    #[test]
+    fn duplicate_polished_ids_never_duplicate_rows() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("n", None).unwrap();
+        let m = s.create_meeting("n", &note.id, &[]).unwrap();
+        s.save_transcript(&transcript(
+            &m.id,
+            vec![seg("a", 0, "one"), seg("b", 1000, "two")],
+        ))
+        .unwrap();
+        s.save_cleaned_transcript(&transcript(
+            &m.id,
+            vec![
+                seg("a", 0, "One."),
+                seg("a", 0, "One!"),
+                seg("b", 1000, "Two."),
+            ],
+        ))
+        .unwrap();
+        let r = rows(&s, &m.id);
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert!(r.iter().all(|x| x.1 == "polished"));
+    }
+
+    /// Triggers are dropped and re-created on every open, so a corrected
+    /// trigger reaches files that already have an old one.
+    #[test]
+    fn triggers_are_reinstalled_on_every_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let note_id;
+        let mid;
+        {
+            let s = Storage::open(dir.path()).unwrap();
+            let note = s.create_note("n", None).unwrap();
+            note_id = note.id.clone();
+            mid = s.create_meeting("n", &note.id, &[]).unwrap().id;
+            // Simulate a file carrying a stale (here: broken) trigger.
+            s.conn
+                .execute_batch(
+                    "DROP TRIGGER transcripts_segments_insert;
+                     CREATE TRIGGER transcripts_segments_insert AFTER INSERT ON transcripts
+                     BEGIN SELECT RAISE(ABORT, 'stale trigger'); END;",
+                )
+                .unwrap();
+            assert!(s
+                .save_transcript(&transcript(&mid, vec![seg("a", 0, "hello")]))
+                .is_err());
+        }
+        let s = Storage::open(dir.path()).unwrap();
+        s.save_transcript(&transcript(&mid, vec![seg("a", 0, "hello")]))
+            .unwrap();
+        assert_eq!(rows(&s, &mid).len(), 1);
+        assert!(!note_id.is_empty());
+    }
+
+    /// FTS5 secure-delete: a deleted meeting's words don't linger in the
+    /// index's pages (`secure_delete` alone doesn't reach them).
+    #[test]
+    fn deleted_text_leaves_the_index_pages() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("n", None).unwrap();
+        let m = s.create_meeting("n", &note.id, &[]).unwrap();
+        s.save_transcript(&transcript(&m.id, vec![seg("a", 0, "zanzibarquokka plan")]))
+            .unwrap();
+        let in_pages = |s: &Storage| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM segments_fts_data
+                      WHERE instr(block, CAST('zanzibarquokka' AS BLOB)) > 0",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert!(in_pages(&s) > 0, "term is in the index before");
+        s.purge_meeting(&m.id).unwrap();
+        assert_eq!(in_pages(&s), 0, "term gone from the index pages");
+        fts_ok(&s);
+    }
+
+    /// A damaged keyword index used to fail the transcript write itself
+    /// (for every build, through the triggers). The app rebuilds it from
+    /// `transcript_segments` and retries once.
+    #[test]
+    fn corrupt_index_is_rebuilt_and_the_save_retried() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("n", None).unwrap();
+        let m = s.create_meeting("n", &note.id, &[]).unwrap();
+        s.save_transcript(&transcript(&m.id, vec![seg("a", 0, "alpha beta")]))
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE segments_fts_data SET block = x'0102030405' WHERE id > 1",
+                [],
+            )
+            .unwrap();
+        let broken = s.conn.execute(
+            "INSERT INTO segments_fts (segments_fts) VALUES ('integrity-check')",
+            [],
+        );
+        assert!(broken.is_err(), "fixture must actually damage the index");
+
+        s.save_transcript(&transcript(&m.id, vec![seg("b", 0, "gamma delta")]))
+            .unwrap();
+        fts_ok(&s);
+        let hits = s
+            .search_segments(
+                "gamma",
+                &SearchFilter {
+                    limit: 5,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
     }
 }

@@ -52,6 +52,7 @@ pub(crate) fn to_v2(conn: &Connection, data_dir: &Path) -> Result<()> {
 /// recorded. Unreadable rows are logged and skipped — never fatal, since a
 /// failing step would stop the app from opening.
 pub(crate) fn to_v3(storage: &Storage) -> Result<()> {
+    let started = std::time::Instant::now();
     let conn = &storage.conn;
     let tx = conn.unchecked_transaction()?;
     conn.execute_batch(
@@ -67,16 +68,24 @@ pub(crate) fn to_v3(storage: &Storage) -> Result<()> {
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
     for id in &meeting_ids {
-        match storage.get_transcript(id) {
-            Ok(Some(t)) => storage.sync_transcript_chunks(&t)?,
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(meeting_id = %id, error = %e, "v3: skipping unreadable transcript")
-            }
+        let res = storage
+            .get_transcript(id)
+            .and_then(|t| t.map_or(Ok(()), |t| storage.sync_transcript_chunks(&t)));
+        if let Err(e) = res {
+            tracing::warn!(meeting_id = %id, error = %e, "v3: skipping transcript chunks");
         }
     }
     storage.sync_all_citations()?;
+    // A keyword index left damaged by anything (an older build's crash, a
+    // half-copied file) would now fail transcript writes: rebuild it from
+    // its content table.
+    storage.rebuild_segment_index()?;
     tx.commit()?;
+    tracing::info!(
+        meetings = meeting_ids.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "schema v3 step done"
+    );
     Ok(())
 }
 

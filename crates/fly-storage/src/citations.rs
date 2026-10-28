@@ -3,21 +3,37 @@
 //! AI note blocks and extracted items cite transcript segments by id. A new
 //! transcription run generates new ids (`align.rs` `new_id()`), so without
 //! help every citation silently dangles. A locator remembers, per (citing
-//! thing, segment), where the segment was (`start_ms`/`end_ms`) and what it
-//! said (`text_hash`), so that:
+//! thing, segment), where the segment was (`start_ms`/`end_ms`), who said it
+//! (`speaker_key`) and what it said (`text_hash`), so that:
 //!
 //! * a re-transcribe can **re-anchor** each citation to the new segment that
 //!   best matches it, and rewrite the id in the block / item so the
 //!   existing "zoom in" keeps working ([`Storage::save_transcript`]);
-//! * a reader can tell when a cited segment's text has changed since it was
-//!   cited (an edit, a different polish) and show "source changed — check".
+//! * a reader can tell when the cited segment no longer says what it said
+//!   (an edit, a re-transcribe that heard something else, a re-attributed
+//!   speaker) and show "source changed — check".
+//!
+//! **The cited hash is never overwritten.** It's taken once, from the RAW
+//! segment text (the source of truth; a re-polish can't move it) when the
+//! citation is first recorded. Re-anchoring moves the pointer to the best
+//! match but keeps the hash, and calls the result `reanchored` only when
+//! the new segment says exactly the same thing (normalized) with the same
+//! speaker key — otherwise `changed`, still pointing at the best match so
+//! zoom-in lands in the right place. "We will ship" → "we will NOT ship" is
+//! `changed`, not `reanchored`.
 //!
 //! Locators are written automatically by the storage write paths for note
-//! blocks (`update_note_blocks`) and items (`replace_meeting_items`); Ask
-//! inserts can use [`Storage::record_citations`]. The hash is taken from
-//! the text as indexed when the citation is first recorded (polished when
-//! present) and is never refreshed by later saves, which is what makes
-//! drift detectable.
+//! blocks (`update_note_blocks`) and items (`replace_meeting_items`), and
+//! after a recording self-heal; Ask inserts can use
+//! [`Storage::record_citations`]. A cited id no transcript of the owner's
+//! meetings has (a model citing ids a re-transcribe replaced while it ran)
+//! gets a `changed` placeholder, so nothing reads as fine by omission.
+//! Readers must still treat a cited id with no locator as changed.
+//!
+//! **No visibility filter.** [`Storage::citation_locators`] answers for any
+//! owner it's asked about; callers that serve an AI reader (Ask, MCP, a
+//! future `segments_by_ids`) must gate on the owner's keep-local status
+//! first, like every other by-id read.
 //!
 //! An older build that opens a v3 file never writes locators. The
 //! `transcripts` triggers (segments.rs) still mark citations whose segment
@@ -26,7 +42,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fly_core::{BlockOrigin, Note, Transcript};
+use fly_core::{BlockOrigin, Note, Transcript, TranscriptSegment};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -41,20 +57,22 @@ pub const OWNER_ASK_INSERT: &str = "ask_insert";
 /// Time padding around a lost segment's span when looking for its
 /// replacement in a new transcript.
 const REANCHOR_PAD_MS: u64 = 2_000;
-/// Minimum match score (0.5 × time IoU + 0.5 × token Jaccard).
+/// Match score = 0.45 × time IoU + 0.45 × token Jaccard + 0.10 × same
+/// speaker key; a lost segment re-points only at or above this.
 const REANCHOR_MIN_SCORE: f64 = 0.6;
 
 pub(crate) const SCHEMA_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS citation_locators (
-        owner_kind TEXT NOT NULL,   -- 'note_block' | 'item' | 'ask_insert'
-        owner_id   TEXT NOT NULL,   -- NoteBlock.id / MeetingItem.id / insert id
-        note_id    TEXT,            -- note holding the block (note_block, ask_insert)
-        meeting_id TEXT NOT NULL,
-        seg_id     TEXT NOT NULL,
-        start_ms   INTEGER NOT NULL,
-        end_ms     INTEGER NOT NULL,
-        text_hash  TEXT NOT NULL,   -- see text_hash()
-        status     TEXT NOT NULL DEFAULT 'ok',  -- 'ok' | 'reanchored' | 'changed'
+        owner_kind  TEXT NOT NULL,  -- 'note_block' | 'item' | 'ask_insert'
+        owner_id    TEXT NOT NULL,  -- NoteBlock.id / MeetingItem.id / insert id
+        note_id     TEXT,           -- note holding the block (note_block, ask_insert)
+        meeting_id  TEXT NOT NULL,
+        seg_id      TEXT NOT NULL,  -- current pointer (re-anchoring moves it)
+        start_ms    INTEGER NOT NULL,
+        end_ms      INTEGER NOT NULL,
+        text_hash   TEXT NOT NULL,  -- text_hash() of the RAW text when cited; '' = unresolved
+        speaker_key TEXT,           -- speaker key when cited
+        status      TEXT NOT NULL DEFAULT 'ok',  -- 'ok' | 'reanchored' | 'changed'
         PRIMARY KEY (owner_kind, owner_id, seg_id)
     );
     CREATE INDEX IF NOT EXISTS idx_citation_locators_meeting
@@ -67,12 +85,16 @@ pub(crate) const SCHEMA_SQL: &str = r#"
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CitationStatus {
-    /// The segment exists and says what it said when cited.
+    /// The segment exists and says what it said when cited, by the same
+    /// speaker.
     Ok,
-    /// A re-transcribe replaced the segment; the citation now points at the
-    /// best-matching new segment.
+    /// A re-transcribe replaced the segment with one that says exactly the
+    /// same thing (normalized), by the same speaker; the citation points at
+    /// it now.
     Reanchored,
-    /// The segment is gone, or its text changed since it was cited.
+    /// The segment is gone, or what it says (or who says it) differs from
+    /// what was cited. If a re-transcribe found a likely replacement, the
+    /// citation points at it — check before trusting.
     Changed,
 }
 
@@ -94,17 +116,23 @@ pub struct CitationLocator {
     pub seg_id: String,
     pub start_ms: u64,
     pub end_ms: u64,
+    /// Hash of the raw text when cited (`""` for an id that never resolved).
     pub text_hash: String,
-    /// Computed when read: stored state, plus a hash check against the
-    /// segment's current text.
+    /// Speaker key when cited.
+    pub speaker_key: Option<String>,
+    /// Computed when read: stored state, plus a check of the segment's
+    /// current text and speaker against what was cited.
     pub status: CitationStatus,
 }
 
-/// Hex SHA-256 (first 16 chars) of the text lowercased with whitespace
-/// collapsed, so re-wrapping or casing never reads as a change.
+/// Hex SHA-256 (first 16 chars) of the text's words: lowercased
+/// alphanumeric runs joined by one space. Casing, spacing and punctuation
+/// (which every decode and polish varies) never read as a change; any
+/// different, added or missing word does ("not", "fourteen", "4").
 pub fn text_hash(text: &str) -> String {
     let norm = text
-        .split_whitespace()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
@@ -143,11 +171,14 @@ struct Lost {
     seg_id: String,
     span: (u64, u64),
     words: HashSet<String>,
+    speaker_key: Option<String>,
 }
 
 /// Best new segment for each lost one: candidates overlap the lost span
-/// padded by [`REANCHOR_PAD_MS`]; score = 0.5 × time IoU + 0.5 × token
-/// Jaccard; accepted at [`REANCHOR_MIN_SCORE`] or above.
+/// padded by [`REANCHOR_PAD_MS`], scored as documented on
+/// [`REANCHOR_MIN_SCORE`]. Matching only decides where the pointer goes;
+/// whether the citation still holds is decided by the hash (see
+/// [`Storage::apply_reanchor_db`]).
 fn match_lost(lost: &[Lost], new: &Transcript) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for l in lost {
@@ -158,8 +189,10 @@ fn match_lost(lost: &[Lost], new: &Transcript) -> Vec<(String, String)> {
             .iter()
             .filter(|s| s.start_ms < hi && s.end_ms > lo)
             .map(|s| {
-                let score = 0.5 * time_iou(l.span, (s.start_ms, s.end_ms))
-                    + 0.5 * jaccard(&l.words, &tokens(&s.text));
+                let same_speaker = l.speaker_key.as_deref() == Some(s.speaker_key.as_str());
+                let score = 0.45 * time_iou(l.span, (s.start_ms, s.end_ms))
+                    + 0.45 * jaccard(&l.words, &tokens(&s.text))
+                    + if same_speaker { 0.10 } else { 0.0 };
                 (score, s)
             })
             .max_by(|a, b| a.0.total_cmp(&b.0));
@@ -185,19 +218,65 @@ fn map_ids(ids: &[String], map: &HashMap<String, String>) -> (Vec<String>, bool)
     (out, changed)
 }
 
+/// Raw transcripts read once per call; an unreadable one reads as absent
+/// (logged) so a damaged row never fails a note or item save.
+#[derive(Default)]
+struct RawCache(HashMap<String, Option<Transcript>>);
+
+impl RawCache {
+    fn get<'a>(&'a mut self, s: &Storage, meeting_id: &str) -> Option<&'a Transcript> {
+        self.0
+            .entry(meeting_id.to_string())
+            .or_insert_with(|| match s.get_transcript(meeting_id) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(meeting_id, error = %e, "citations: unreadable transcript");
+                    None
+                }
+            })
+            .as_ref()
+    }
+
+    fn segment<'a>(
+        &'a mut self,
+        s: &Storage,
+        meeting_id: &str,
+        seg_id: &str,
+    ) -> Option<&'a TranscriptSegment> {
+        self.get(s, meeting_id)?
+            .segments
+            .iter()
+            .find(|x| x.id == seg_id)
+    }
+}
+
+/// A row about to be re-pointed.
+struct LocRow {
+    kind: String,
+    owner: String,
+    hash: String,
+    speaker_key: Option<String>,
+}
+
+/// Note whose block provenance a re-anchor rewrote: its on-disk mirrors
+/// need a refresh (done after the database work, best-effort).
+pub(crate) struct ReanchoredNote(pub(crate) Note);
+
 impl Storage {
-    /// Locators for one citing thing, with live status.
+    /// Locators for one citing thing, with live status. No visibility
+    /// filter — see the module docs.
     pub fn citation_locators(
         &self,
         owner_kind: &str,
         owner_id: &str,
     ) -> Result<Vec<CitationLocator>> {
         let mut stmt = self.conn.prepare(
-            "SELECT meeting_id, seg_id, start_ms, end_ms, text_hash, status
+            "SELECT meeting_id, seg_id, start_ms, end_ms, text_hash, speaker_key, status
                FROM citation_locators WHERE owner_kind = ?1 AND owner_id = ?2
               ORDER BY start_ms, seg_id",
         )?;
-        let rows: Vec<(String, String, i64, i64, String, String)> = stmt
+        type Row = (String, String, i64, i64, String, Option<String>, String);
+        let rows: Vec<Row> = stmt
             .query_map((owner_kind, owner_id), |r| {
                 Ok((
                     r.get(0)?,
@@ -206,34 +285,31 @@ impl Storage {
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get(6)?,
                 ))
             })?
             .collect::<std::result::Result<_, _>>()?;
-        let mut raw_cache: HashMap<String, Option<Transcript>> = HashMap::new();
+        let mut raw = RawCache::default();
         let mut out = Vec::with_capacity(rows.len());
-        for (meeting_id, seg_id, start, end, hash, stored) in rows {
+        for (meeting_id, seg_id, start, end, hash, speaker_key, stored) in rows {
             let mut status = CitationStatus::parse(&stored);
             if status != CitationStatus::Changed {
-                status = match self.indexed_segment(&meeting_id, &seg_id)? {
-                    None => CitationStatus::Changed,
-                    Some(seg) if text_hash(&seg.text) == hash => status,
-                    Some(_) => {
-                        // Cited from the other variant (raw vs polished)?
-                        if !raw_cache.contains_key(&meeting_id) {
-                            raw_cache.insert(meeting_id.clone(), self.get_transcript(&meeting_id)?);
-                        }
-                        let raw_matches = raw_cache[&meeting_id].as_ref().is_some_and(|t| {
-                            t.segments
-                                .iter()
-                                .any(|s| s.id == seg_id && text_hash(&s.text) == hash)
-                        });
-                        if raw_matches {
-                            status
-                        } else {
-                            CitationStatus::Changed
-                        }
-                    }
+                let same_speaker = |seg: &TranscriptSegment| {
+                    speaker_key.as_deref().is_none_or(|k| k == seg.speaker_key)
                 };
+                let holds = match raw.segment(self, &meeting_id, &seg_id) {
+                    None => false,
+                    Some(seg) if !same_speaker(seg) => false,
+                    Some(seg) if text_hash(&seg.text) == hash => true,
+                    // Cited before v3 hashed raw text? Accept the indexed
+                    // (polished) variant too.
+                    Some(_) => self
+                        .indexed_segment(&meeting_id, &seg_id)?
+                        .is_some_and(|seg| text_hash(&seg.text) == hash),
+                };
+                if !holds {
+                    status = CitationStatus::Changed;
+                }
             }
             out.push(CitationLocator {
                 owner_kind: owner_kind.to_string(),
@@ -243,6 +319,7 @@ impl Storage {
                 start_ms: start.max(0) as u64,
                 end_ms: end.max(0) as u64,
                 text_hash: hash,
+                speaker_key,
                 status,
             });
         }
@@ -250,11 +327,13 @@ impl Storage {
     }
 
     /// Make one citing thing's locators match `seg_ids`: pairs it no longer
-    /// cites are dropped, new ones are recorded from the current index (each
-    /// id resolved in the first of `meeting_ids` whose transcript has it;
-    /// ids no transcript has are skipped), and pairs already recorded are
-    /// kept as they are, so their hash still describes the cited text.
-    /// Returns how many locators the owner has afterwards.
+    /// cites are dropped; new ones are recorded from the current raw
+    /// transcript (each id resolved in the first of `meeting_ids` whose
+    /// transcript has it). An id none of them has gets a `changed`
+    /// placeholder in the first meeting (upgraded to a real locator if it
+    /// resolves on a later sync); with no meeting at all it's skipped.
+    /// Pairs already recorded are kept as they are, so their hash still
+    /// describes the cited text. Returns how many locators the owner has.
     pub fn record_citations(
         &self,
         owner_kind: &str,
@@ -263,51 +342,91 @@ impl Storage {
         meeting_ids: &[String],
         seg_ids: &[String],
     ) -> Result<usize> {
-        let existing: HashSet<String> = self
+        self.record_citations_with(
+            &mut RawCache::default(),
+            owner_kind,
+            owner_id,
+            note_id,
+            meeting_ids,
+            seg_ids,
+        )
+    }
+
+    fn record_citations_with(
+        &self,
+        raw: &mut RawCache,
+        owner_kind: &str,
+        owner_id: &str,
+        note_id: Option<&str>,
+        meeting_ids: &[String],
+        seg_ids: &[String],
+    ) -> Result<usize> {
+        // seg_id → resolved (a real hash, not a placeholder)
+        let existing: HashMap<String, bool> = self
             .conn
             .prepare(
-                "SELECT seg_id FROM citation_locators WHERE owner_kind = ?1 AND owner_id = ?2",
+                "SELECT seg_id, text_hash != '' FROM citation_locators
+                  WHERE owner_kind = ?1 AND owner_id = ?2",
             )?
-            .query_map((owner_kind, owner_id), |r| r.get(0))?
+            .query_map((owner_kind, owner_id), |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<std::result::Result<_, _>>()?;
         let wanted: HashSet<&String> = seg_ids.iter().collect();
-        for gone in existing.iter().filter(|s| !wanted.contains(s)) {
+        for gone in existing.keys().filter(|s| !wanted.contains(s)) {
             self.conn.execute(
                 "DELETE FROM citation_locators
                   WHERE owner_kind = ?1 AND owner_id = ?2 AND seg_id = ?3",
                 (owner_kind, owner_id, gone),
             )?;
         }
-        let mut count = existing.iter().filter(|s| wanted.contains(s)).count();
         for seg_id in seg_ids {
-            if existing.contains(seg_id) {
+            let had = existing.get(seg_id).copied();
+            if had == Some(true) {
                 continue;
             }
-            for meeting_id in meeting_ids {
-                if let Some(seg) = self.indexed_segment(meeting_id, seg_id)? {
-                    let start = seg.start_ms.unwrap_or(0);
-                    let n = self.conn.execute(
-                        "INSERT OR IGNORE INTO citation_locators
+            let found = meeting_ids.iter().find_map(|mid| {
+                raw.segment(self, mid, seg_id)
+                    .map(|s| (mid.clone(), s.clone()))
+            });
+            match found {
+                Some((meeting_id, seg)) => {
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO citation_locators
                          (owner_kind, owner_id, note_id, meeting_id, seg_id,
-                          start_ms, end_ms, text_hash, status)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'ok')",
+                          start_ms, end_ms, text_hash, speaker_key, status)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'ok')",
                         rusqlite::params![
                             owner_kind,
                             owner_id,
                             note_id,
                             meeting_id,
                             seg_id,
-                            start as i64,
-                            seg.end_ms.unwrap_or(start) as i64,
-                            text_hash(&seg.text)
+                            seg.start_ms as i64,
+                            seg.end_ms.max(seg.start_ms) as i64,
+                            text_hash(&seg.text),
+                            seg.speaker_key
                         ],
                     )?;
-                    count += n;
-                    break;
                 }
+                None if had.is_none() => {
+                    if let Some(meeting_id) = meeting_ids.first() {
+                        self.conn.execute(
+                            "INSERT OR IGNORE INTO citation_locators
+                             (owner_kind, owner_id, note_id, meeting_id, seg_id,
+                              start_ms, end_ms, text_hash, speaker_key, status)
+                             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, '', NULL, 'changed')",
+                            (owner_kind, owner_id, note_id, meeting_id, seg_id),
+                        )?;
+                    }
+                }
+                None => {} // placeholder already there
             }
         }
-        Ok(count)
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM citation_locators WHERE owner_kind = ?1 AND owner_id = ?2",
+            (owner_kind, owner_id),
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
     }
 
     /// Re-sync the locators of a note's AI blocks (blocks whose provenance
@@ -319,6 +438,7 @@ impl Storage {
             .into_iter()
             .map(|m| m.id)
             .collect();
+        let mut raw = RawCache::default();
         let mut cited: HashSet<&str> = HashSet::new();
         for block in &note.blocks {
             if let BlockOrigin::Ai { source_segment_ids } = &block.origin {
@@ -326,7 +446,8 @@ impl Storage {
                     continue;
                 }
                 cited.insert(&block.id);
-                self.record_citations(
+                self.record_citations_with(
+                    &mut raw,
                     OWNER_NOTE_BLOCK,
                     &block.id,
                     Some(&note.id),
@@ -356,10 +477,18 @@ impl Storage {
     pub(crate) fn sync_item_citations(&self, meeting_id: &str) -> Result<()> {
         let items = self.get_meeting_items(meeting_id)?;
         let scope = vec![meeting_id.to_string()];
+        let mut raw = RawCache::default();
         let mut cited: HashSet<&str> = HashSet::new();
         for item in &items {
             cited.insert(&item.id);
-            self.record_citations(OWNER_ITEM, &item.id, None, &scope, &item.segment_ids)?;
+            self.record_citations_with(
+                &mut raw,
+                OWNER_ITEM,
+                &item.id,
+                None,
+                &scope,
+                &item.segment_ids,
+            )?;
         }
         let owners: Vec<String> = self
             .conn
@@ -378,18 +507,40 @@ impl Storage {
         Ok(())
     }
 
+    /// Re-sync the citations of the meetings a recording self-heal restored
+    /// (it writes notes and transcripts without going through the normal
+    /// write paths). Best-effort: logged, never fatal.
+    pub(crate) fn sync_citations_for_meetings(&self, meeting_ids: &[String]) {
+        for id in meeting_ids {
+            let res = (|| -> Result<()> {
+                let meeting = self.get_meeting(id)?;
+                if let Ok(note) = self.get_note(&meeting.note_id) {
+                    self.sync_note_citations(&note)?;
+                }
+                self.sync_item_citations(id)
+            })();
+            if let Err(e) = res {
+                tracing::warn!(meeting_id = %id, error = %e, "citations: re-sync after heal failed");
+            }
+        }
+    }
+
     /// Before `new` replaces a meeting's transcript: for every cited segment
     /// it no longer has, find the new segment that best matches the old one
-    /// (old text read from the transcript about to be replaced). Returns
-    /// old id → new id; cited segments without a good match aren't listed.
+    /// (old text and speaker read from the transcript about to be replaced).
+    /// Returns old id → new id; cited segments without a match aren't
+    /// listed (they stay `changed`).
     pub(crate) fn plan_reanchor(&self, new: &Transcript) -> Result<Vec<(String, String)>> {
-        let cited: Vec<(String, i64, i64)> = self
+        let cited: Vec<(String, i64, i64, Option<String>)> = self
             .conn
             .prepare(
-                "SELECT seg_id, MIN(start_ms), MAX(end_ms) FROM citation_locators
-                  WHERE meeting_id = ?1 GROUP BY seg_id",
+                "SELECT seg_id, MIN(start_ms), MAX(end_ms), MAX(speaker_key)
+                   FROM citation_locators
+                  WHERE meeting_id = ?1 AND text_hash != '' GROUP BY seg_id",
             )?
-            .query_map([&new.meeting_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map([&new.meeting_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
             .collect::<std::result::Result<_, _>>()?;
         if cited.is_empty() {
             return Ok(vec![]);
@@ -397,7 +548,7 @@ impl Storage {
         let new_ids: HashSet<&str> = new.segments.iter().map(|s| s.id.as_str()).collect();
         let dangling: Vec<_> = cited
             .into_iter()
-            .filter(|(id, _, _)| !new_ids.contains(id.as_str()))
+            .filter(|(id, _, _, _)| !new_ids.contains(id.as_str()))
             .collect();
         if dangling.is_empty() {
             return Ok(vec![]);
@@ -405,64 +556,86 @@ impl Storage {
         let old = self.get_transcript(&new.meeting_id).ok().flatten();
         let lost: Vec<Lost> = dangling
             .into_iter()
-            .map(|(seg_id, start, end)| {
+            .map(|(seg_id, start, end, speaker_key)| {
                 let old_seg = old
                     .as_ref()
                     .and_then(|t| t.segments.iter().find(|s| s.id == seg_id));
-                let (span, words) = match old_seg {
-                    Some(s) => ((s.start_ms, s.end_ms), tokens(&s.text)),
-                    // Unknown text: time alone caps the score at 0.5 (< the
-                    // threshold), so such a citation is marked changed.
-                    None => ((start.max(0) as u64, end.max(0) as u64), HashSet::new()),
-                };
-                Lost {
-                    seg_id,
-                    span,
-                    words,
+                match old_seg {
+                    Some(s) => Lost {
+                        span: (s.start_ms, s.end_ms),
+                        words: tokens(&s.text),
+                        speaker_key: Some(s.speaker_key.clone()),
+                        seg_id,
+                    },
+                    // Unknown text: time + speaker alone stay below the
+                    // threshold, so such a citation is left `changed`.
+                    None => Lost {
+                        span: (start.max(0) as u64, end.max(0) as u64),
+                        words: HashSet::new(),
+                        speaker_key,
+                        seg_id,
+                    },
                 }
             })
             .collect();
         Ok(match_lost(&lost, new))
     }
 
-    /// After the new transcript is saved: point re-anchored locators at
-    /// their new segments, and rewrite the ids in the meeting's items and in
-    /// its note's AI blocks so existing segment links keep working.
-    pub(crate) fn apply_reanchor(
+    /// After the new transcript is saved, database side only: point the
+    /// re-anchored locators at their new segments (status `reanchored` only
+    /// when the new raw text hashes to the cited hash and the speaker key is
+    /// the cited one; else `changed`; the cited hash is never touched), and
+    /// rewrite the ids in the meeting's items and in its note's AI blocks.
+    /// Only `segment_ids_json` and `source_segment_ids` change — block
+    /// markdown, origin kind, order and the note's `updated_at` don't.
+    /// Returns the note whose blocks changed, for a mirror refresh.
+    pub(crate) fn apply_reanchor_db(
         &self,
-        meeting_id: &str,
+        new: &Transcript,
         pairs: &[(String, String)],
-    ) -> Result<()> {
+    ) -> Result<Option<ReanchoredNote>> {
         if pairs.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
-        for (old, new) in pairs {
-            let Some(seg) = self.indexed_segment(meeting_id, new)? else {
+        let meeting_id = new.meeting_id.as_str();
+        for (old, new_id) in pairs {
+            let Some(seg) = new.segments.iter().find(|s| &s.id == new_id) else {
                 continue;
             };
-            let owners: Vec<(String, String)> = self
+            let new_hash = text_hash(&seg.text);
+            let rows: Vec<LocRow> = self
                 .conn
                 .prepare(
-                    "SELECT owner_kind, owner_id FROM citation_locators
+                    "SELECT owner_kind, owner_id, text_hash, speaker_key FROM citation_locators
                       WHERE meeting_id = ?1 AND seg_id = ?2",
                 )?
-                .query_map((meeting_id, old), |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map((meeting_id, old), |r| {
+                    Ok(LocRow {
+                        kind: r.get(0)?,
+                        owner: r.get(1)?,
+                        hash: r.get(2)?,
+                        speaker_key: r.get(3)?,
+                    })
+                })?
                 .collect::<std::result::Result<_, _>>()?;
-            for (kind, owner) in owners {
-                let start = seg.start_ms.unwrap_or(0);
+            for row in rows {
+                let same = row.hash == new_hash
+                    && row
+                        .speaker_key
+                        .as_deref()
+                        .is_none_or(|k| k == seg.speaker_key);
                 // Two old segments can map to one new one: keep one row.
                 let n = self.conn.execute(
                     "UPDATE OR IGNORE citation_locators
-                        SET seg_id = ?1, start_ms = ?2, end_ms = ?3, text_hash = ?4,
-                            status = 'reanchored'
+                        SET seg_id = ?1, start_ms = ?2, end_ms = ?3, status = ?4
                       WHERE owner_kind = ?5 AND owner_id = ?6 AND seg_id = ?7",
                     rusqlite::params![
-                        new,
-                        start as i64,
-                        seg.end_ms.unwrap_or(start) as i64,
-                        text_hash(&seg.text),
-                        kind,
-                        owner,
+                        new_id,
+                        seg.start_ms as i64,
+                        seg.end_ms.max(seg.start_ms) as i64,
+                        if same { "reanchored" } else { "changed" },
+                        row.kind,
+                        row.owner,
                         old
                     ],
                 )?;
@@ -470,7 +643,7 @@ impl Storage {
                     self.conn.execute(
                         "DELETE FROM citation_locators
                           WHERE owner_kind = ?1 AND owner_id = ?2 AND seg_id = ?3",
-                        (&kind, &owner, old),
+                        (&row.kind, &row.owner, old),
                     )?;
                 }
             }
@@ -494,14 +667,13 @@ impl Storage {
             }
         }
 
-        // The note's AI blocks: rewrite provenance without bumping the
-        // note's updated_at (the user's text didn't change), then refresh
-        // its mirrors so note.json carries the new ids too.
+        // The note's AI blocks: rewrite provenance only, without bumping
+        // updated_at (the user's text didn't change).
         let Ok(meeting) = self.get_meeting(meeting_id) else {
-            return Ok(());
+            return Ok(None);
         };
         let Ok(mut note) = self.get_note(&meeting.note_id) else {
-            return Ok(());
+            return Ok(None);
         };
         let mut any = false;
         for block in &mut note.blocks {
@@ -513,21 +685,22 @@ impl Storage {
                 }
             }
         }
-        if any {
-            self.conn.execute(
-                "UPDATE notes SET blocks_json = ?1 WHERE id = ?2",
-                (serde_json::to_string(&note.blocks)?, &note.id),
-            )?;
-            self.sync_note_derived(&note)?;
-            self.sync_note_citations(&note)?;
+        if !any {
+            return Ok(None);
         }
-        Ok(())
+        self.conn.execute(
+            "UPDATE notes SET blocks_json = ?1 WHERE id = ?2",
+            (serde_json::to_string(&note.blocks)?, &note.id),
+        )?;
+        self.sync_note_citations(&note)?;
+        Ok(Some(ReanchoredNote(note)))
     }
 
     /// Full re-sync for the v3 step: drop locators whose owner or meeting is
     /// gone (an older build may have deleted them), then record every AI
     /// block's and item's citations. Rows that already exist keep their
-    /// hash and status. Unreadable rows are skipped, never fatal.
+    /// hash and status. A note or meeting that fails is logged and skipped,
+    /// never fatal (a failing step would stop the app from opening).
     pub(crate) fn sync_all_citations(&self) -> Result<()> {
         self.conn.execute_batch(
             "DELETE FROM citation_locators
@@ -549,9 +722,11 @@ impl Storage {
             .query_map([], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
         for id in note_ids {
-            match self.get_note(&id) {
-                Ok(note) => self.sync_note_citations(&note)?,
-                Err(e) => tracing::warn!(note = %id, error = %e, "v3: skipping note citations"),
+            let res = self
+                .get_note(&id)
+                .and_then(|note| self.sync_note_citations(&note));
+            if let Err(e) = res {
+                tracing::warn!(note = %id, error = %e, "v3: skipping note citations");
             }
         }
         let meeting_ids: Vec<String> = self
@@ -560,7 +735,9 @@ impl Storage {
             .query_map([], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
         for id in meeting_ids {
-            self.sync_item_citations(&id)?;
+            if let Err(e) = self.sync_item_citations(&id) {
+                tracing::warn!(meeting_id = %id, error = %e, "v3: skipping item citations");
+            }
         }
         Ok(())
     }
@@ -634,8 +811,11 @@ mod tests {
     }
 
     #[test]
-    fn hash_ignores_case_and_whitespace() {
+    fn hash_ignores_case_whitespace_and_punctuation() {
         assert_eq!(text_hash("Ship  it\nFriday"), text_hash("ship it friday"));
+        assert_eq!(text_hash("Okay, sure."), text_hash("okay sure"));
+        assert_ne!(text_hash("$4.90"), text_hash("$49.0"));
+        assert_ne!(text_hash("we will ship"), text_hash("we will not ship"));
         assert_ne!(text_hash("ship it friday"), text_hash("ship it monday"));
         assert_eq!(text_hash("x").len(), 16);
     }
@@ -647,10 +827,22 @@ mod tests {
         s.update_note_blocks(&note_id, &[block.clone(), NoteBlock::user("mine")])
             .unwrap();
         let locs = s.citation_locators(OWNER_NOTE_BLOCK, &block.id).unwrap();
-        assert_eq!(locs.len(), 1, "unknown ids are skipped");
+        assert_eq!(locs.len(), 2);
         assert_eq!(locs[0].seg_id, "a1");
         assert_eq!((locs[0].start_ms, locs[0].end_ms), (0, 2_000));
         assert_eq!(locs[0].status, CitationStatus::Ok);
+        assert_eq!(locs[0].text_hash, text_hash(FIRST[0].2), "raw text hashed");
+        assert_eq!(locs[0].speaker_key.as_deref(), Some("spk_0"));
+        // An id no transcript has gets a `changed` placeholder, so it can't
+        // read as fine by omission.
+        assert_eq!(
+            (
+                locs[1].seg_id.as_str(),
+                locs[1].text_hash.as_str(),
+                locs[1].status
+            ),
+            ("nope", "", CitationStatus::Changed)
+        );
 
         let it = item(&mid, &["a3"]);
         s.replace_meeting_items(&mid, std::slice::from_ref(&it))
@@ -676,12 +868,10 @@ mod tests {
         s.update_note_blocks(&note_id, std::slice::from_ref(&block))
             .unwrap();
 
-        // Polish changes casing/spacing only → same normalized hash.
+        // A polish never moves the citation (the hash is of the raw text).
         let mut polished = s.get_transcript(&mid).unwrap().unwrap();
         polished.segments[1].text = "Legal still needs to sign off on the indemnity.".into();
         s.save_cleaned_transcript(&polished).unwrap();
-        // (punctuation counts as text, so this one IS a change in the
-        // polished variant; the raw text still matches the hash.)
         assert_eq!(
             s.citation_locators(OWNER_NOTE_BLOCK, &block.id).unwrap()[0].status,
             CitationStatus::Ok,
@@ -723,12 +913,16 @@ mod tests {
         ))
         .unwrap();
 
+        // "four ninety" → "4 ninety": the best match (pointer moves, so
+        // zoom-in lands there), but not the same words → changed, with the
+        // cited hash kept.
         let l1 = s.citation_locators(OWNER_NOTE_BLOCK, &b1.id).unwrap();
         assert_eq!(l1.len(), 1);
         assert_eq!(
             (l1[0].seg_id.as_str(), l1[0].status),
-            ("b1", CitationStatus::Reanchored)
+            ("b1", CitationStatus::Changed)
         );
+        assert_eq!(l1[0].text_hash, text_hash(FIRST[0].2), "cited hash kept");
         let l2 = s.citation_locators(OWNER_NOTE_BLOCK, &b2.id).unwrap();
         let by_seg: HashMap<_, _> = l2.iter().map(|l| (l.seg_id.as_str(), l.status)).collect();
         assert_eq!(by_seg.get("a2"), Some(&CitationStatus::Changed), "{l2:?}");
@@ -785,12 +979,202 @@ mod tests {
             "only segment_ids changed on the item"
         );
 
-        // A re-save of the same blocks keeps the re-anchored locators as
+        // A re-save of the same blocks keeps the re-pointed locators as
         // they are (no reset to `ok`).
         s.update_note_blocks(&note_id, &note.blocks).unwrap();
+        let statuses = |id: &str| -> Vec<CitationStatus> {
+            s.citation_locators(OWNER_NOTE_BLOCK, id)
+                .unwrap()
+                .iter()
+                .map(|l| l.status)
+                .collect()
+        };
+        assert_eq!(statuses(&b1.id), [CitationStatus::Changed]);
+        assert!(statuses(&b2.id).contains(&CitationStatus::Reanchored));
+    }
+
+    /// Re-anchoring must never hide a change of meaning: the matcher only
+    /// picks where the pointer goes; `reanchored` needs the same words (after
+    /// case/whitespace normalization) from the same speaker.
+    #[test]
+    fn adversarial_retranscribes_read_as_changed() {
+        let cases: [(&str, &str, &str, &str, u64, CitationStatus); 6] = [
+            // (cited text, new text, cited speaker, new speaker, shift ms, want)
+            (
+                "we will ship the renewal on friday",
+                "we will not ship the renewal on friday",
+                "spk_0",
+                "spk_0",
+                0,
+                CitationStatus::Changed,
+            ),
+            (
+                "the bid goes out at four ninety",
+                "the bid goes out at fourteen ninety",
+                "spk_0",
+                "spk_0",
+                0,
+                CitationStatus::Changed,
+            ),
+            (
+                "okay sure",
+                "okay sure",
+                "spk_0",
+                "spk_1",
+                600,
+                CitationStatus::Changed,
+            ),
+            (
+                "okay sure",
+                "Okay,  sure.",
+                "spk_0",
+                "spk_0",
+                300,
+                CitationStatus::Reanchored,
+            ),
+            (
+                "okay sure",
+                "okay so sure",
+                "spk_0",
+                "spk_0",
+                0,
+                CitationStatus::Changed,
+            ),
+            (
+                "okay sure",
+                "OKAY   sure",
+                "spk_0",
+                "spk_0",
+                300,
+                CitationStatus::Reanchored,
+            ),
+        ];
+        for (cited, heard, k0, k1, shift, want) in cases {
+            let (_d, s) = test_storage();
+            let note = s.create_note("n", None).unwrap();
+            let m = s.create_meeting("n", &note.id, &[]).unwrap();
+            let mut first = seg("old", 10_000, cited);
+            first.speaker_key = k0.into();
+            s.save_transcript(&transcript(&m.id, vec![first])).unwrap();
+            let b = NoteBlock::ai("- claim", vec!["old".into()]);
+            s.update_note_blocks(&note.id, std::slice::from_ref(&b))
+                .unwrap();
+
+            let mut again = seg("new", 10_000 + shift, heard);
+            again.speaker_key = k1.into();
+            s.save_transcript(&transcript(&m.id, vec![again])).unwrap();
+
+            let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+            assert_eq!(l.len(), 1, "{cited:?} → {heard:?}");
+            assert_eq!(
+                l[0].seg_id, "new",
+                "{cited:?} → {heard:?}: points at best match"
+            );
+            assert_eq!(l[0].status, want, "{cited:?} → {heard:?} ({k0}→{k1})");
+            assert_eq!(
+                l[0].text_hash,
+                text_hash(cited),
+                "cited hash never overwritten"
+            );
+        }
+    }
+
+    #[test]
+    fn repolish_never_marks_changed_but_reattribution_does() {
+        let (_d, s, note_id, mid) = setup();
+        let b = NoteBlock::ai("- Renewal", vec!["a3".into()]);
+        s.update_note_blocks(&note_id, std::slice::from_ref(&b))
+            .unwrap();
+        let status = || s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap()[0].status;
+
+        for wording in [
+            "And we ship the renewal on Friday.",
+            "We're shipping the renewal Friday.",
+        ] {
+            let mut polished = s.get_transcript(&mid).unwrap().unwrap();
+            polished.segments[2].text = wording.into();
+            s.save_cleaned_transcript(&polished).unwrap();
+            assert_eq!(status(), CitationStatus::Ok, "re-polish: {wording}");
+        }
+
+        // A re-diarize moving the line to another speaker changes meaning.
+        let mut raw = s.get_transcript(&mid).unwrap().unwrap();
+        raw.segments[2].speaker_key = "spk_1".into();
+        s.save_transcript(&raw).unwrap();
+        assert_eq!(status(), CitationStatus::Changed);
+    }
+
+    #[test]
+    fn citing_ids_replaced_meanwhile_is_recorded_as_changed() {
+        // Enhance read a1..a3, then a re-transcribe replaced them while the
+        // model ran; the blocks it saves cite ids that no longer exist.
+        let (_d, s, note_id, mid) = setup();
+        s.save_transcript(&transcript(&mid, vec![seg("z1", 0, "fresh run")]))
+            .unwrap();
+        let b = NoteBlock::ai("- stale", vec!["a1".into(), "z1".into()]);
+        s.update_note_blocks(&note_id, std::slice::from_ref(&b))
+            .unwrap();
+        let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+        let by_seg: HashMap<_, _> = l.iter().map(|l| (l.seg_id.as_str(), l.status)).collect();
+        assert_eq!(by_seg.get("a1"), Some(&CitationStatus::Changed));
+        assert_eq!(by_seg.get("z1"), Some(&CitationStatus::Ok));
+    }
+
+    #[test]
+    fn healed_rows_get_locators() {
+        // The self-heal writes blocks_json directly (no write path runs).
+        let (_d, s, note_id, mid) = setup();
+        let b = NoteBlock::ai("- healed", vec!["a2".into()]);
+        s.conn
+            .execute(
+                "UPDATE notes SET blocks_json = ?1 WHERE id = ?2",
+                (
+                    serde_json::to_string(std::slice::from_ref(&b)).unwrap(),
+                    &note_id,
+                ),
+            )
+            .unwrap();
+        assert!(s
+            .citation_locators(OWNER_NOTE_BLOCK, &b.id)
+            .unwrap()
+            .is_empty());
+        s.sync_citations_for_meetings(std::slice::from_ref(&mid));
         assert_eq!(
-            s.citation_locators(OWNER_NOTE_BLOCK, &b1.id).unwrap()[0].status,
-            CitationStatus::Reanchored
+            s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap()[0].status,
+            CitationStatus::Ok
+        );
+    }
+
+    /// The note mirror can't be written (locked, permissions): the new
+    /// transcript still saves and the re-anchor still lands; only the
+    /// mirror refresh is skipped (logged).
+    #[test]
+    fn reanchor_mirror_failure_never_fails_the_save() {
+        let (_d, s, note_id, mid) = setup();
+        let b = NoteBlock::ai("- Renewal", vec!["a3".into()]);
+        s.update_note_blocks(&note_id, std::slice::from_ref(&b))
+            .unwrap();
+        let mirror = s.note_mirror_abs(&note_id);
+        std::fs::remove_file(&mirror).unwrap();
+        std::fs::create_dir_all(mirror.join("blocker")).unwrap();
+        // The fault is real: a plain blocks save now fails on the mirror.
+        assert!(s
+            .update_note_blocks(&note_id, std::slice::from_ref(&b))
+            .is_err());
+
+        s.save_transcript(&transcript(
+            &mid,
+            vec![seg("c3", 4_000, "and we ship the renewal on friday")],
+        ))
+        .expect("save must succeed despite the mirror error");
+        assert_eq!(
+            s.get_transcript(&mid).unwrap().unwrap().segments[0].id,
+            "c3"
+        );
+        let l = s.citation_locators(OWNER_NOTE_BLOCK, &b.id).unwrap();
+        assert_eq!(
+            (l[0].seg_id.as_str(), l[0].status),
+            ("c3", CitationStatus::Reanchored)
         );
     }
 
@@ -822,6 +1206,19 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM citation_locators", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn deleting_the_note_drops_its_block_locators() {
+        let (_d, s, note_id, _mid) = setup();
+        let b = NoteBlock::ai("- Bid", vec!["a1".into()]);
+        s.update_note_blocks(&note_id, std::slice::from_ref(&b))
+            .unwrap();
+        s.delete_note(&note_id).unwrap();
+        assert!(s
+            .citation_locators(OWNER_NOTE_BLOCK, &b.id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

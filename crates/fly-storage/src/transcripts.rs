@@ -61,18 +61,82 @@ impl Storage {
     /// new transcript drops segments that notes or items cite (a new
     /// transcription run makes new ids), those citations are re-anchored to
     /// the best-matching new segments (citations.rs).
+    ///
+    /// Re-anchoring is best-effort: if it fails, the transcript still saves
+    /// and the affected citations read `changed`. Its database side commits
+    /// together with the upsert (one savepoint), so a crash can't leave a
+    /// new transcript with citations that were never re-pointed; the note
+    /// mirrors it touches are refreshed afterwards and their I/O errors are
+    /// only logged. A damaged segment index (`SQLITE_CORRUPT` from the
+    /// triggers) is rebuilt and the save retried once.
     pub fn save_transcript(&self, transcript: &Transcript) -> Result<()> {
         // Read the old transcript BEFORE it's replaced.
-        let reanchor = self.plan_reanchor(transcript)?;
+        let reanchor = self.plan_reanchor(transcript).unwrap_or_else(|e| {
+            tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "re-anchor planning failed; citations stay changed");
+            vec![]
+        });
         let json = serde_json::to_string(transcript)?;
-        self.conn.execute(
-            "INSERT INTO transcripts (meeting_id, json) VALUES (?1, ?2)
-             ON CONFLICT(meeting_id) DO UPDATE SET json = excluded.json",
-            (&transcript.meeting_id, &json),
-        )?;
+        let note = match self.upsert_transcript(transcript, &json, &reanchor) {
+            Err(e) if crate::segments::is_corrupt(&e) => {
+                tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "segment index damaged; rebuilding");
+                self.rebuild_segment_index()?;
+                self.upsert_transcript(transcript, &json, &reanchor)?
+            }
+            other => other?,
+        };
         self.sync_transcript_derived(transcript)?;
-        self.apply_reanchor(&transcript.meeting_id, &reanchor)?;
+        if let Some(crate::citations::ReanchoredNote(note)) = note {
+            if let Err(e) = self.sync_note_derived(&note) {
+                tracing::warn!(note = %note.id, error = %e, "re-anchored note: mirror refresh failed");
+            }
+        }
         Ok(())
+    }
+
+    /// The upsert plus the database side of re-anchoring, in one savepoint.
+    /// A re-anchor error rolls back only the re-anchor (nested savepoint).
+    fn upsert_transcript(
+        &self,
+        transcript: &Transcript,
+        json: &str,
+        reanchor: &[(String, String)],
+    ) -> Result<Option<crate::citations::ReanchoredNote>> {
+        self.conn.execute_batch("SAVEPOINT save_transcript")?;
+        let res = (|| -> Result<Option<crate::citations::ReanchoredNote>> {
+            self.conn.execute(
+                "INSERT INTO transcripts (meeting_id, json) VALUES (?1, ?2)
+                 ON CONFLICT(meeting_id) DO UPDATE SET json = excluded.json",
+                (&transcript.meeting_id, json),
+            )?;
+            if reanchor.is_empty() {
+                return Ok(None);
+            }
+            self.conn.execute_batch("SAVEPOINT reanchor")?;
+            match self.apply_reanchor_db(transcript, reanchor) {
+                Ok(note) => {
+                    self.conn.execute_batch("RELEASE reanchor")?;
+                    Ok(note)
+                }
+                Err(e) => {
+                    tracing::warn!(meeting_id = %transcript.meeting_id, error = %e, "re-anchor failed; citations stay changed");
+                    self.conn
+                        .execute_batch("ROLLBACK TO reanchor; RELEASE reanchor")?;
+                    Ok(None)
+                }
+            }
+        })();
+        match res {
+            Ok(note) => {
+                self.conn.execute_batch("RELEASE save_transcript")?;
+                Ok(note)
+            }
+            Err(e) => {
+                let _ = self
+                    .conn
+                    .execute_batch("ROLLBACK TO save_transcript; RELEASE save_transcript");
+                Err(e)
+            }
+        }
     }
 
     pub fn get_transcript(&self, meeting_id: &str) -> Result<Option<Transcript>> {

@@ -187,6 +187,15 @@ impl Storage {
                 }
             }
         }
+        // Healing writes notes and transcripts directly, past the write
+        // paths that record citation locators.
+        let healed: Vec<String> = report
+            .attached
+            .iter()
+            .chain(&report.resurrected)
+            .cloned()
+            .collect();
+        self.sync_citations_for_meetings(&healed);
         report.refreshed = self.refresh_portable_artifacts();
         // same startup pass: drop pipeline scratch nothing can resume from
         self.sweep_stale_scratch();

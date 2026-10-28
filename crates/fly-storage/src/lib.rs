@@ -407,8 +407,27 @@ impl Storage {
     /// Downgrades: an older build that opens a newer file stamps ITS version
     /// back (the unconditional stamp at the end of `migrate`, unchanged since
     /// v2), so the next newer build re-runs its steps over whatever the older
-    /// one wrote. Every step must therefore be a full, idempotent rebuild of
-    /// what it owns — never "skip if the version says it's done".
+    /// one wrote. The contract for v3 and every later version — a file must
+    /// stay safe while builds of different versions take turns writing it:
+    ///
+    /// * New columns are nullable or have a default (older builds insert
+    ///   rows without them).
+    /// * Triggers are total: they never raise and never fail a write for any
+    ///   stored value, and use only features of the oldest SQLite any
+    ///   supported build bundles (rusqlite 0.40 since v1.0.3: JSON, FTS5,
+    ///   FTS5 secure-delete).
+    /// * Trigger-maintained tables carry no NOT NULL / UNIQUE / FK
+    ///   constraints a trigger could violate.
+    /// * Triggers are dropped and re-created on every open
+    ///   (`create_derived_indexes`), so a corrected trigger reaches existing
+    ///   files.
+    /// * Steps from v3 on rebuild DERIVED data only (indexes, chunks,
+    ///   locators), fully and idempotently — never "skip if the version says
+    ///   it's done" — and a failing row is logged and skipped, never fatal.
+    /// * A build that opens a NEWER-stamped file re-installs its own
+    ///   triggers and re-runs its own idempotent steps (`from >
+    ///   SCHEMA_VERSION`), then stamps its version; the newer build heals
+    ///   again on its next open.
     pub const SCHEMA_VERSION: i64 = 3;
 
     fn migrate(&self) -> Result<()> {
@@ -430,10 +449,14 @@ impl Storage {
         // startup self-heal re-attaches folders in place from their manifests.
         if from < 2 && !fresh {
             migrations::to_v2(conn, data_dir)?;
+            // Done with the file-layout step: a v3 failure below must not
+            // re-run it.
+            conn.pragma_update(None, "user_version", 2)?;
         }
         // v3: per-segment index, label-free chunks with exact spans, citation
-        // locators. Also re-run after a downgrade (see SCHEMA_VERSION).
-        if from < 3 && !fresh {
+        // locators. Also re-run after a downgrade, and when a newer build's
+        // file is opened (see SCHEMA_VERSION).
+        if (from < 3 || from > Self::SCHEMA_VERSION) && !fresh {
             migrations::to_v3(self)?;
         }
         conn.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
@@ -592,10 +615,11 @@ impl Storage {
 
     /// Tables, indexes and triggers whose definitions reference columns that
     /// `repair_missing_columns` may only just have added (e.g.
-    /// `transcripts.cleaned_json`), so they're created after it.
+    /// `transcripts.cleaned_json`), so they're created after it. Triggers
+    /// are re-installed on every open (see `SCHEMA_VERSION`).
     fn create_derived_indexes(conn: &Connection) -> Result<()> {
-        conn.execute_batch(&segments::schema_sql())?;
         conn.execute_batch(citations::SCHEMA_SQL)?;
+        segments::install(conn)?;
         Ok(())
     }
 

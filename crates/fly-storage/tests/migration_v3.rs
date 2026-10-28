@@ -241,6 +241,14 @@ fn v2_fixture(dir: &Path) -> Fixture {
             "2026-09-05T10:00:00Z",
             0,
         ),
+        // Its note row is gone: privacy can't be checked → fail closed.
+        (
+            "m-noteless",
+            "Noteless",
+            "n-missing",
+            "2026-09-06T10:00:00Z",
+            0,
+        ),
     ];
     for (id, title, note, at, keep) in meetings {
         conn.execute(
@@ -302,6 +310,15 @@ fn v2_fixture(dir: &Path) -> Fixture {
         ),
         "Standup",
         Some(&[0.9, 0.1, 0.0]),
+    );
+    v2_save_transcript(
+        &conn,
+        &transcript(
+            "m-noteless",
+            vec![seg("n1", "spk_0", 0, "SECRETNOTELESS fuel ledger")],
+        ),
+        "Noteless",
+        Some(&[1.0, 0.0, 0.0]),
     );
     // orphan chunk of a meeting deleted long ago
     conn.execute(
@@ -459,7 +476,7 @@ fn v2_database_migrates_to_v3() {
     let s = Storage::open(tmp.path()).unwrap();
     eprintln!(
         "v3 step over {} segments: {:?}",
-        BULK_MEETINGS * BULK_SEGMENTS + 6,
+        BULK_MEETINGS * BULK_SEGMENTS + 7,
         started.elapsed()
     );
     assert_eq!(user_version(tmp.path()), 3);
@@ -471,7 +488,7 @@ fn v2_database_migrates_to_v3() {
     // Per-segment index: one row per segment, polished text by id.
     assert_eq!(
         count(tmp.path(), "SELECT COUNT(*) FROM transcript_segments"),
-        (BULK_MEETINGS * BULK_SEGMENTS + 6) as i64
+        (BULK_MEETINGS * BULK_SEGMENTS + 7) as i64
     );
     fts_integrity(tmp.path());
     let hits = s.search_segments("fuel", &filter(50, false)).unwrap();
@@ -607,17 +624,23 @@ fn rerun_is_a_no_op() {
 fn a_failed_step_leaves_the_file_unchanged_and_resumes() {
     let tmp = tempfile::tempdir().unwrap();
     v2_fixture(tmp.path());
-    // Make the step fail at its LAST stage (locators), after the segment
-    // index and the re-chunk have run inside the same transaction.
+    // Make the step fail late: at the locator reconciliation, after the
+    // segment index and the re-chunk have run inside the same transaction.
+    // (A per-note or per-meeting failure is only logged; this batch
+    // statement is not.) A stale locator row makes its UPDATE fire.
     db(tmp.path())
         .execute_batch(
             "CREATE TABLE citation_locators (
                 owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, note_id TEXT,
                 meeting_id TEXT NOT NULL, seg_id TEXT NOT NULL,
                 start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
-                text_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ok',
+                text_hash TEXT NOT NULL, speaker_key TEXT,
+                status TEXT NOT NULL DEFAULT 'ok',
                 PRIMARY KEY (owner_kind, owner_id, seg_id));
-             CREATE TRIGGER boom BEFORE INSERT ON citation_locators
+             INSERT INTO citation_locators
+                 (owner_kind, owner_id, meeting_id, seg_id, start_ms, end_ms, text_hash)
+                 VALUES ('item', 'item-case', 'm-case', 'gone-seg', 0, 0, 'h');
+             CREATE TRIGGER boom BEFORE UPDATE ON citation_locators
              BEGIN SELECT RAISE(ABORT, 'simulated crash'); END;",
         )
         .unwrap();
@@ -680,7 +703,7 @@ fn keep_local_is_filtered_inside_sql_on_every_read_path() {
                 )
                 .unwrap();
             let v = match owner.as_str() {
-                "m-case" | "m-one" => vec![1.0, 0.0, 0.0],
+                "m-case" | "m-one" | "m-noteless" => vec![1.0, 0.0, 0.0],
                 "m-budget" | "m-standup" => vec![0.8, 0.2, 0.0],
                 _ => vec![0.0, 1.0, 0.0],
             };
@@ -723,16 +746,30 @@ fn keep_local_is_filtered_inside_sql_on_every_read_path() {
         .vector_search(&[1.0, 0.0, 0.0], MODEL, &filter(0, false), 10_000)
         .unwrap();
     assert!(everything.iter().all(|h| !h.text.contains("SECRETORPHAN")));
+    // The note-less meeting is returned unfiltered, never when filtered.
+    assert!(everything
+        .iter()
+        .any(|h| h.meeting_id.as_deref() == Some("m-noteless")));
+    let shared_all = s
+        .vector_search(&[1.0, 0.0, 0.0], MODEL, &filter(0, true), 10_000)
+        .unwrap();
+    assert!(shared_all.iter().all(|h| !matches!(
+        h.meeting_id.as_deref(),
+        Some("m-case" | "m-one" | "m-noteless")
+    )));
 
     // search_segments
+    let hidden = |m: &str| matches!(m, "m-case" | "m-one" | "m-noteless");
     let seg_all = s.search_segments("fuel", &filter(50, false)).unwrap();
-    assert!(seg_all.iter().any(|h| h.meeting_id == "m-case"));
-    assert!(seg_all.iter().any(|h| h.meeting_id == "m-one"));
+    for m in ["m-case", "m-one", "m-noteless"] {
+        assert!(seg_all.iter().any(|h| h.meeting_id == m), "{m} unfiltered");
+    }
     let seg_shared = s.search_segments("fuel", &filter(50, true)).unwrap();
     assert!(!seg_shared.is_empty());
-    assert!(seg_shared
-        .iter()
-        .all(|h| h.meeting_id != "m-case" && h.meeting_id != "m-one"));
+    assert!(
+        seg_shared.iter().all(|h| !hidden(&h.meeting_id)),
+        "{seg_shared:?}"
+    );
     // paging can't reveal hidden rows: offset over the shareable list only
     let page = s.search_segments("secretcase", &filter(50, true)).unwrap();
     assert!(page.is_empty());
@@ -749,7 +786,15 @@ fn keep_local_is_filtered_inside_sql_on_every_read_path() {
         .map(|m| m.id)
         .collect();
     assert_eq!(listed.len(), BULK_MEETINGS + 2);
-    assert!(!listed.iter().any(|m| m == "m-case" || m == "m-one"));
+    assert!(!listed.iter().any(|m| hidden(m)));
+    let unfiltered = s
+        .list_meetings_filtered(&MeetingFilter {
+            limit: 100,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(unfiltered.len(), BULK_MEETINGS + 5);
+    assert_eq!(unfiltered[0].id, "m-noteless", "newest, shown unfiltered");
     // limit after the filter: newest two shareable meetings
     let top2: Vec<String> = s
         .list_meetings_filtered(&MeetingFilter {
@@ -782,6 +827,43 @@ fn keep_local_is_filtered_inside_sql_on_every_read_path() {
         })
         .unwrap();
     assert_eq!(in_folder.len(), 1);
+
+    // A chunk of an owner kind the filter doesn't know (e.g. a future
+    // attachment kind) fails closed, in search and in the cloud-embedding
+    // queue alike.
+    db(tmp.path())
+        .execute(
+            "INSERT INTO embedding_chunks
+             (owner_kind, owner_id, chunk_index, title, text, embedding, model)
+             VALUES ('attachment', 'att-1', 0, 'Scan', 'SECRETATTACHMENT', ?1, ?2)",
+            (
+                [1.0f32, 0.0, 0.0]
+                    .iter()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+                MODEL,
+            ),
+        )
+        .unwrap();
+    let with_kind = |exclude: bool| {
+        s.vector_search(&[1.0, 0.0, 0.0], MODEL, &filter(0, exclude), 10_000)
+            .unwrap()
+            .iter()
+            .any(|h| h.text.contains("SECRETATTACHMENT"))
+    };
+    assert!(with_kind(false), "fixture chunk is searchable unfiltered");
+    assert!(!with_kind(true), "unknown owner kind fails closed");
+    db(tmp.path())
+        .execute(
+            "UPDATE embedding_chunks SET embedding = NULL WHERE owner_id = 'att-1'",
+            [],
+        )
+        .unwrap();
+    assert!(s
+        .pending_embedding_chunks_shareable(MODEL, 10_000)
+        .unwrap()
+        .iter()
+        .all(|p| !p.text.contains("SECRETATTACHMENT")));
 
     // A meeting moved under the keep-local folder later disappears at once.
     s.move_note("n-budget", Some("f-cases")).unwrap();

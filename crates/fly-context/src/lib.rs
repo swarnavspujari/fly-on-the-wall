@@ -20,8 +20,9 @@
 //!
 //! Dormant in v2.5: nothing calls it yet. Keyword passages are still
 //! localized in memory (see [`passages`]); vector hits map onto windows by
-//! the chunk's segment ids (storage schema v3). `MIGRATION.md` records the
-//! v3 schema and what is left for fly-context to adopt.
+//! the chunk's segment ids (storage schema v3).
+//! `crates/fly-storage/SCHEMA_V3.md` records the v3 schema and what is
+//! left for fly-context to adopt.
 
 use std::collections::HashSet;
 
