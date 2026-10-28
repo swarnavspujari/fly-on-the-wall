@@ -223,6 +223,18 @@ test("Bash: writes, moves, deletes and redirects are denied", () => {
     "printf 'rm -rf evals\\n' | sh -s",
     "echo \"open('evals/x', 'w').write('x')\" | python -",
     "cat <<'EOF' | python3\nopen('evals/thresholds.toml', 'w').write('x')\nEOF",
+    // Launchers before the reader, shell options with values, unreadable feeds.
+    "echo \"rm evals/thresholds.toml\" | timeout 5 bash",
+    "echo \"rm evals/thresholds.toml\" | nice -n 5 sh",
+    "echo \"rm evals/thresholds.toml\" | bash -o pipefail",
+    "cat /dev/zero | bash",
+    "cat /no/such/file | sh",
+    // A heredoc whose own reader is a shell, piped onward to something else.
+    "bash <<'EOF' | cat\nrm evals/thresholds.toml\nEOF",
+    // GraphQL that can't be inspected, or any mutation.
+    "gh api graphql -F query=@q.graphql",
+    "gh api graphql --input body.json",
+    "gh api graphql -f query='mutation { addStar(input: {}) { clientMutationId } }'",
   ]);
   // Already inside a protected folder: relative writes are denied.
   assert.ok(bash("echo x > a.txt", at("evals")));

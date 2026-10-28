@@ -33,7 +33,7 @@
 // Node built-ins only; works with Git Bash and PowerShell on Windows and on
 // macOS / Linux.
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -89,16 +89,26 @@ function nativePath(p) {
   return p;
 }
 
+const MAX_READ = 1 << 20;
+
+/** A regular file of at most 1 MB, or null (never a FIFO, device or
+ * folder, so a crafted path can't hang or exhaust the hook). */
+function safeRead(file) {
+  try {
+    const st = statSync(file);
+    if (!st.isFile() || st.size > MAX_READ) return null;
+    return readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 const repoCache = new Map();
 /** `root` is a checkout of this repository. */
 function isThisRepo(root) {
   if (!repoCache.has(root)) {
     let ok = false;
-    try {
-      ok = /name\s*=\s*"fly-evals"/.test(readFileSync(path.join(root, SIGNATURE), "utf8"));
-    } catch {
-      ok = false;
-    }
+    ok = /name\s*=\s*"fly-evals"/.test(safeRead(path.join(root, SIGNATURE)) ?? "");
     repoCache.set(root, ok);
   }
   return repoCache.get(root);
@@ -239,7 +249,7 @@ function inQuotes(line, at) {
 function stripBodies(command) {
   const bodies = [];
   let text = command.replace(/@(['"])\r?\n([\s\S]*?)\r?\n\1@/g, (_, _q, body) => {
-    bodies.push({ owner: "here-string", body });
+    bodies.push({ owners: ["here-string"], body });
     return "'HERE-STRING'";
   });
   const lines = text.split(/\r?\n/);
@@ -263,17 +273,13 @@ function stripBodies(command) {
         body.push(lines[i]);
         i++;
       }
-      // The body's reader: the command holding `<<`, unless the line pipes
-      // into a shell, interpreter or runner (`cat <<EOF | bash`), which
-      // then runs it.
-      const verbsOnLine = segments(line).map((s) => {
-        const ws = words(s);
-        return verbOf(ws[skipPrefixes(ws)] || "");
-      });
-      const runner = verbsOnLine.find((v) => SHELLS.has(v) || isInterpreter(v) || ["xargs", "iex", "invoke-expression", "eval", "source", "."].includes(v));
+      // The body's readers: the command holding `<<`, plus every command
+      // the rest of the line pipes it into (`cat <<EOF | bash`). Each one
+      // is checked; any failing check denies.
       const owner = segments(line.slice(0, h.at)).pop() || "";
-      const ownerVerb = verbOf(words(owner)[skipPrefixes(words(owner))] || "");
-      bodies.push({ owner: runner && runner !== ownerVerb ? runner : ownerVerb, body: body.join("\n") });
+      const readers = [realVerb(words(owner))];
+      for (const s of segments(line.slice(h.at)).slice(1)) readers.push(realVerb(words(s)));
+      bodies.push({ owners: readers.filter(Boolean), body: body.join("\n") });
     }
   }
   return { text: out.join("\n"), bodies };
@@ -430,6 +436,17 @@ const FORMATTERS = {
   taplo: (a) => a.some((x) => /^(fmt|format)$/.test(x)) && !a.includes("--check"),
   shfmt: (a) => a.includes("-w"),
 };
+// Launchers that run their (later) arguments as a command, with options
+// or numbers in between: `timeout 5 bash`, `nice -n 5 sh`.
+const LAUNCHERS = new Set([
+  "timeout", "nice", "time", "stdbuf", "ionice", "chrt", "taskset", "setsid", "exec",
+  "builtin", "nohup", "env", "sudo", "doas", "command", "unbuffer", "script",
+]);
+// Inline-code flags: shells run their next argument as a command,
+// interpreters as code.
+const SHELL_INLINE = /^(-c|-lc|-ic|-xc|-ec|-command|-c[a-z]*|\/c|\/k)$/i;
+const INTERP_INLINE = /^(-e|-c|-E|--eval|-p|--print|-r)$/;
+
 // Package runners whose next word is the real command.
 const WRAPPERS = new Set(["npx", "bunx", "pnpx", "uvx", "sudo", "command", "env", "nohup", "doas"]);
 
@@ -459,15 +476,32 @@ function skipPrefixes(ws) {
   }
 }
 
+/** The real verb of a simple command: past prefixes, wrappers and
+ * launchers (and their options / numeric arguments). */
+function realVerb(ws) {
+  let k = skipPrefixes(ws);
+  while (k < ws.length && LAUNCHERS.has(verbOf(ws[k]))) {
+    k++;
+    while (k < ws.length && (/^[-+]/.test(ws[k]) || /^\d/.test(ws[k]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k]))) k++;
+  }
+  return k < ws.length ? verbOf(ws[k]) : "";
+}
+
+/** Index of the real verb (see [`realVerb`]). */
+function realVerbIndex(ws) {
+  let k = skipPrefixes(ws);
+  while (k < ws.length && LAUNCHERS.has(verbOf(ws[k]))) {
+    k++;
+    while (k < ws.length && (/^[-+]/.test(ws[k]) || /^\d/.test(ws[k]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k]))) k++;
+  }
+  return k;
+}
+
 /** Paths a patch (git diff / unified diff) touches, or null if unreadable. */
 function patchPaths(file, ctx) {
-  let text;
-  try {
-    const base = ctx.cwd ? path.resolve(nativePath(ctx.cwd)) : process.cwd();
-    text = readFileSync(path.resolve(base, nativePath(expand(file, ctx))), "utf8");
-  } catch {
-    return null;
-  }
+  const base = ctx.cwd ? path.resolve(nativePath(ctx.cwd)) : process.cwd();
+  const text = safeRead(path.resolve(base, nativePath(expand(file, ctx))));
+  if (text === null) return null;
   const out = [];
   for (const line of text.split(/\r?\n/)) {
     let m;
@@ -493,12 +527,15 @@ function trustRootViolation(cmd) {
   if (/\bgh\b(?:[^\n;|&]*\s)?pr\s+merge\b[^\n;|&]*--admin\b/i.test(cmd)) {
     return "an admin merge (gh pr merge --admin)";
   }
-  // GraphQL mutations on rulesets, branch protection or variables.
+  // GraphQL: any mutation, any query loaded from a file or stdin (it can't
+  // be inspected), and anything touching rulesets, protection or variables.
   if (
     /\bgraphql\b/i.test(cmd) &&
-    /(branchProtectionRule|repositoryRuleset|ruleset|bypass|actionsVariable|updateRepository)/i.test(cmd)
+    (/\bmutation\b/i.test(cmd) ||
+      /query=@|--input\b|-F\s*\S*=@|\.graphql\b/i.test(cmd) ||
+      /(branchProtectionRule|repositoryRuleset|ruleset|bypass|actionsVariable|updateRepository)/i.test(cmd))
   ) {
-    return "a GraphQL call on rulesets, branch protection or variables";
+    return "a GraphQL mutation, or a query that can't be inspected";
   }
   return null;
 }
@@ -532,12 +569,19 @@ export function commandViolation(command, ctx = {}, depth = 0) {
   const looseMention = /evals|\.claude/i.test(command);
 
   // Bodies run by a shell or an interpreter are commands too.
+  const RUNS_STDIN = ["xargs", "iex", "invoke-expression", "eval", "source", "."];
   for (const b of bodies) {
-    if (SHELLS.has(b.owner) || (b.owner === "here-string" && /\b(iex|invoke-expression)\b/i.test(text))) {
-      const why = commandViolation(b.body, vctx, depth + 1);
-      if (why) return why;
-    } else if (isInterpreter(b.owner) && WRITE_API.test(b.body) && (mentions(b.body) || here())) {
-      return `${b.owner} code that writes a protected path`;
+    for (const owner of b.owners) {
+      if (
+        SHELLS.has(owner) ||
+        RUNS_STDIN.includes(owner) ||
+        (owner === "here-string" && /\b(iex|invoke-expression)\b/i.test(text))
+      ) {
+        const why = commandViolation(b.body, vctx, depth + 1);
+        if (why) return why;
+      } else if (isInterpreter(owner) && WRITE_API.test(b.body) && (mentions(b.body) || here())) {
+        return `${owner} code that writes a protected path`;
+      }
     }
   }
   // A shell or interpreter reading stdin (`echo "rm evals/x" | bash`,
@@ -546,13 +590,26 @@ export function commandViolation(command, ctx = {}, depth = 0) {
   const stdinReaders = segs
     .map((s) => {
       const ws = words(s);
-      const k = skipPrefixes(ws);
+      const k = realVerbIndex(ws);
       const v = verbOf(ws[k] || "");
       const rest = ws.slice(k + 1);
-      const scriptArg = rest.find((x) => !/^-/.test(x));
-      const reads = (SHELLS.has(v) || isInterpreter(v)) && (!scriptArg || scriptArg === "-" || rest.includes("-") || rest.includes("-s"));
-      const hasC = rest.some((x) => /^(-c|-lc|-ic|-e|-command|\/c|\/k)$/i.test(x));
-      return reads && !hasC ? v : null;
+      const shell = SHELLS.has(v);
+      if (!shell && !isInterpreter(v)) return null;
+      if (rest.some((x) => (shell ? SHELL_INLINE : INTERP_INLINE).test(x))) return null;
+      // The script argument, skipping options that take a value (-o x, +o x, -O x).
+      let script = null;
+      for (let j = 0; j < rest.length; j++) {
+        if (/^[-+][oO]$/.test(rest[j])) {
+          j++;
+          continue;
+        }
+        if (!/^[-+]/.test(rest[j])) {
+          script = rest[j];
+          break;
+        }
+      }
+      const reads = !script || script === "-" || rest.includes("-") || rest.includes("-s");
+      return reads ? v : null;
     })
     .filter(Boolean);
   if (stdinReaders.length) {
@@ -562,19 +619,21 @@ export function commandViolation(command, ctx = {}, depth = 0) {
     if (stdinReaders.some((v) => SHELLS.has(v))) {
       for (const s of segs) {
         const ws = words(s);
-        const k = skipPrefixes(ws);
+        const k = realVerbIndex(ws);
         const v = verbOf(ws[k] || "");
-        // What a feeder prints: its quoted arguments, or a file it cats.
-        const fed =
-          v === "cat" || v === "type" || v === "get-content" || v === "gc"
-            ? ws.slice(k + 1).filter((x) => !/^-/.test(x)).map((f) => {
-                try {
-                  return readFileSync(path.resolve(vctx.cwd, nativePath(expand(f, vctx))), "utf8");
-                } catch {
-                  return "";
-                }
-              })
-            : ws.slice(k + 1);
+        // What a feeder prints: its arguments, or a file it cats. A file we
+        // can't check (missing, not regular, over 1 MB) fed to a shell is
+        // denied.
+        let fed = ws.slice(k + 1);
+        if (["cat", "type", "get-content", "gc", "tac", "head", "tail"].includes(v)) {
+          fed = [];
+          // (Redirect tokens aren't files; a heredoc body was checked above.)
+          for (const f of ws.slice(k + 1).filter((x) => !/^-/.test(x) && !/^[0-9&]*[<>]/.test(x))) {
+            const t = safeRead(path.resolve(vctx.cwd, nativePath(expand(f, vctx))));
+            if (t === null) return "a file fed to a shell that couldn't be checked";
+            fed.push(t);
+          }
+        }
         for (const piece of fed) {
           const why = commandViolation(piece.replace(/\\n/g, "\n"), vctx, depth + 1);
           if (why) return why;
