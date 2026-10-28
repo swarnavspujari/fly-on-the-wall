@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { Note, Transcript } from "../types";
+import type { Meeting, Note, Transcript } from "../types";
 import EnhancedDoc, { REMOVE_UNDO_MS } from "./EnhancedDoc";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -242,6 +242,60 @@ describe("Remove with undo", () => {
     await flush();
     expect(edit).not.toHaveBeenCalled();
   });
+
+  it("a second Remove deletes the first line now, and keeps it hidden until that's done", async () => {
+    let finish!: (n: Note) => void;
+    const edit = vi
+      .spyOn(api, "editNoteBlock")
+      .mockImplementation((_n, id) =>
+        id === "b3" ? new Promise<Note>((r) => (finish = r)) : Promise.resolve(note),
+      );
+    const { onNoteChanged, rerender } = render();
+    onNoteChanged.mockImplementation((n: Note) => rerender({ note: n }));
+    act(() => button(unsourced()[0], "Remove")!.click()); // b3
+    act(() => button(unsourced()[0], "Remove")!.click()); // b4
+    await flush();
+    expect(edit).toHaveBeenCalledTimes(1);
+    expect(edit).toHaveBeenCalledWith("n1", "b3", "");
+    // b3 stays hidden while its delete runs; b4 holds the one Undo
+    expect($$('[data-testid="removed-line"]').map((r) => r.textContent)).toEqual([
+      "Removing…",
+      "RemovedUndo",
+    ]);
+    expect(host!.textContent).not.toContain("Launch likely moves to May.");
+    expect(button(host!, "Keep")).toBeUndefined();
+
+    const removed: Note = { ...note, blocks: note.blocks.filter((b) => b.id !== "b3") };
+    await act(async () => finish(removed));
+    expect(onNoteChanged).toHaveBeenCalledWith(removed);
+    expect($$('[data-testid="removed-line"]').map((r) => r.textContent)).toEqual(["RemovedUndo"]);
+  });
+
+  it("if that delete fails, the first line comes back with the error", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "editNoteBlock").mockRejectedValue("database is locked");
+    render();
+    act(() => button(unsourced()[0], "Remove")!.click()); // b3
+    act(() => button(unsourced()[0], "Remove")!.click()); // b4
+    await flush();
+    const line = unsourced()[0];
+    expect(line.textContent).toContain("Launch likely moves to May.");
+    expect(line.querySelector('[role="alert"]')!.textContent).toContain(
+      "Couldn't remove this line",
+    );
+    expect($('[data-testid="removed-line"]')!.textContent).toBe("RemovedUndo"); // b4
+  });
+
+  it("a delete that finishes after a note switch doesn't reopen that note", async () => {
+    let finish!: (n: Note) => void;
+    vi.spyOn(api, "editNoteBlock").mockReturnValue(new Promise<Note>((r) => (finish = r)));
+    const { onNoteChanged, rerender } = render();
+    act(() => button(unsourced()[0], "Remove")!.click());
+    act(() => vi.advanceTimersByTime(REMOVE_UNDO_MS));
+    rerender({ note: { ...note, id: "n2", blocks: [] } });
+    await act(async () => finish(note));
+    expect(onNoteChanged).not.toHaveBeenCalled();
+  });
 });
 
 describe("sources", () => {
@@ -257,7 +311,7 @@ describe("sources", () => {
     expect(preview.textContent).toContain("14:02");
     expect(preview.textContent).toContain("um I can put together two pricing options");
     act(() => chip.click());
-    expect(onZoom).toHaveBeenCalledWith(["t1"]);
+    expect(onZoom).toHaveBeenCalledWith(["t1"], "m1");
   });
 
   it("Esc in the preview closes it and hands focus back to the chip", () => {
@@ -367,5 +421,115 @@ describe("editing", () => {
     });
     expect(e.defaultPrevented).toBe(true);
     expect(host!.querySelector("textarea")).toBeNull();
+  });
+});
+
+describe("a note recorded into again", () => {
+  const meet = (id: string, startedAt: string): Meeting => ({
+    id,
+    title: "Launch sync",
+    note_id: "n1",
+    attendees: [],
+    attendees_confirmed: false,
+    started_at: startedAt,
+    ended_at: null,
+    recording: null,
+  });
+  const m1 = meet("m1", "2026-10-20T10:00:00Z");
+  const m2 = meet("m2", "2026-10-27T10:00:00Z");
+  // create_meeting points the note at its newest recording; the blocks
+  // still cite m1, the one Enhance read.
+  const reRecorded: Note = { ...note, meeting_id: "m2" };
+  const m2Transcript: Transcript = {
+    ...transcript,
+    meeting_id: "m2",
+    segments: [{ ...transcript.segments[0], id: "u1", text: "a new recording" }],
+  };
+  const transcriptsById = (map: Record<string, Transcript | null>) =>
+    vi.spyOn(api, "getTranscript").mockImplementation((id) => Promise.resolve(map[id] ?? null));
+
+  it("lines sourced from the earlier recording stay sourced, and zoom into it", async () => {
+    transcriptsById({ m1: transcript, m2: m2Transcript });
+    const { onZoom } = render({ note: reRecorded, meetings: [m2, m1], transcript: m2Transcript });
+    await flush();
+    expect($('[data-trust="sourced"]')!.textContent).toContain("Dana will send");
+    expect($('[data-trust="missing"]')).toBeNull();
+    expect(legend().textContent).not.toContain("not found");
+    act(() => $('[data-trust="sourced"] .fly-cite')!.click());
+    expect(onZoom).toHaveBeenCalledWith(["t1"], "m1");
+  });
+
+  it("while the new recording isn't transcribed, nothing is missing and quotes still show", async () => {
+    transcriptsById({ m1: transcript, m2: null });
+    render({
+      note: {
+        ...reRecorded,
+        blocks: [
+          ...reRecorded.blocks,
+          { id: "b9", origin: { kind: "ai", source_segment_ids: ["x9"] }, markdown: "Elsewhere." },
+        ],
+      },
+      meetings: [m2, m1],
+      transcript: null,
+    });
+    await flush();
+    expect($('[data-trust="missing"]')).toBeNull();
+    const chip = $('[data-trust="sourced"] .fly-cite')!;
+    act(() => {
+      chip.parentElement!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    });
+    const preview = $('[data-testid="source-preview"]')!.textContent!;
+    expect(preview).toContain("um I can put together two pricing options");
+    expect(preview).not.toContain("Loading");
+  });
+
+  it("claims nothing until every recording's transcript has loaded", async () => {
+    let resolveM1!: (t: Transcript | null) => void;
+    vi.spyOn(api, "getTranscript").mockImplementation((id) =>
+      id === "m1" ? new Promise((r) => (resolveM1 = r)) : Promise.resolve(m2Transcript),
+    );
+    render({ note: reRecorded, meetings: [m2, m1], transcript: m2Transcript });
+    await flush();
+    expect($('[data-trust="missing"]')).toBeNull();
+    expect(button(host!, "Keep")).toBeUndefined();
+    await act(async () => resolveM1(transcript));
+    expect($('[data-trust="sourced"]')).not.toBeNull();
+    expect(unsourced()).toHaveLength(2);
+  });
+
+  it("while the editor still lists the previous note's recordings, it asks for this note's", async () => {
+    const get = transcriptsById({ m1: transcript, m2: m2Transcript });
+    let listed!: (ms: Meeting[]) => void;
+    const list = vi
+      .spyOn(api, "getMeetingsForNote")
+      .mockReturnValue(new Promise((r) => (listed = r)));
+    const previous = { ...m1, id: "mx", note_id: "n9" };
+    const { onZoom } = render({ note: reRecorded, meetings: [previous], transcript: m2Transcript });
+    await flush();
+    expect(list).toHaveBeenCalledWith("n1");
+    expect(get).not.toHaveBeenCalledWith("mx");
+    // claims nothing until it knows the note's recordings
+    expect($('[data-trust="missing"]')).toBeNull();
+    expect(button(host!, "Keep")).toBeUndefined();
+    await act(async () => listed([m2, m1]));
+    await flush();
+    expect($('[data-trust="missing"]')).toBeNull();
+    expect(unsourced()).toHaveLength(2);
+    act(() => $('[data-trust="sourced"] .fly-cite')!.click());
+    expect(onZoom).toHaveBeenCalledWith(["t1"], "m1");
+  });
+});
+
+describe("enhanced before the transcript was ready", () => {
+  it("says so once in the legend, with no Keep / Remove on every line", () => {
+    const early: Note = { ...note, blocks: note.blocks.filter((b) => b.id !== "b2") };
+    render({ note: early });
+    expect(legend().textContent).toContain("2 AI lines · no sources yet");
+    expect(legend().textContent).toContain(
+      "Enhanced before the transcript was ready. Enhance again to link sources.",
+    );
+    expect(button(host!, "Keep")).toBeUndefined();
+    expect(button(host!, "Remove")).toBeUndefined();
+    expect($$('[data-trust="notes"]')).toHaveLength(2);
   });
 });

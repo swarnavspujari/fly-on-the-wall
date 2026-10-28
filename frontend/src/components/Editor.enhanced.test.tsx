@@ -6,7 +6,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { Note, Transcript } from "../types";
+import type { Meeting, Note, Transcript } from "../types";
 import Editor from "./Editor";
 import { REMOVE_UNDO_MS } from "./EnhancedDoc";
 
@@ -29,12 +29,15 @@ const start: Note = {
   attachments: [],
   created_at: "2026-10-27T10:00:00Z",
   updated_at: "2026-10-27T10:00:00Z",
-  blocks: [{ id: "only", origin: { kind: "ai", source_segment_ids: [] }, markdown: "Lone line." }],
+  // cites a line the transcript no longer has, so it's one to check
+  blocks: [
+    { id: "only", origin: { kind: "ai", source_segment_ids: ["gone"] }, markdown: "Lone line." },
+  ],
 };
 
 const noop = () => {};
 
-function Harness() {
+function Harness(p: Partial<Parameters<typeof Editor>[0]> = {}) {
   const [note, setNote] = useState(start);
   return (
     <Editor
@@ -77,6 +80,7 @@ function Harness() {
       onOpenSettings={noop}
       onRelabel={noop}
       onEditSegment={noop}
+      {...p}
     />
   );
 }
@@ -111,6 +115,76 @@ describe("Editor › Enhanced", () => {
     expect(host.querySelector('[data-testid="trust-legend"]')).toBeNull();
     const notes = host.querySelector(".fotw-notes")!;
     expect((notes.closest('div[style*="display"]') as HTMLElement).style.display).toBe("block");
+  });
+});
+
+describe("Editor › Enhanced › a note recorded into again", () => {
+  const meet = (id: string, startedAt: string): Meeting => ({
+    id,
+    title: "Launch sync",
+    note_id: "nr",
+    attendees: [],
+    attendees_confirmed: false,
+    started_at: startedAt,
+    ended_at: null,
+    recording: null,
+  });
+  const m1 = meet("m1", "2026-10-20T10:00:00Z");
+  const m2 = meet("m2", "2026-10-27T10:00:00Z");
+  const t2: Transcript = {
+    ...transcript,
+    meeting_id: "m2",
+    segments: [{ ...transcript.segments[0], id: "u1", text: "a new recording" }],
+  };
+  // The note points at its newest recording; its line cites the first one.
+  const reRecorded: Note = {
+    ...start,
+    id: "nr",
+    meeting_id: "m2",
+    blocks: [{ id: "c1", origin: { kind: "ai", source_segment_ids: ["t1"] }, markdown: "Cited." }],
+  };
+
+  function TwoRecordings({ onPick }: { onPick: (m: Meeting) => void }) {
+    const [meeting, setMeeting] = useState(m2);
+    const [shown, setShown] = useState<Transcript | null>(t2);
+    return (
+      <Harness
+        note={reRecorded}
+        meeting={meeting}
+        meetings={[m2, m1]}
+        transcript={shown}
+        onSelectMeeting={(m) => {
+          onPick(m);
+          setMeeting(m);
+          void api.getTranscript(m.id).then(setShown);
+        }}
+      />
+    );
+  }
+
+  it("a source chip opens the earlier recording and scrolls to the line", async () => {
+    vi.spyOn(api, "getTranscript").mockImplementation((id) =>
+      Promise.resolve(id === "m1" ? transcript : t2),
+    );
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll; // jsdom has none
+    const onPick = vi.fn();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    try {
+      act(() => root!.render(<TwoRecordings onPick={onPick} />));
+      for (let i = 0; i < 4; i++) await act(async () => {});
+      expect(host.querySelector('[data-trust="sourced"]')).not.toBeNull();
+      expect(host.querySelector('[data-trust="missing"]')).toBeNull();
+      act(() => host!.querySelector<HTMLElement>('[data-trust="sourced"] .fly-cite')!.click());
+      for (let i = 0; i < 4; i++) await act(async () => {});
+      expect(onPick).toHaveBeenCalledWith(m1);
+      expect(scroll).toHaveBeenCalled();
+      expect((scroll.mock.contexts.at(-1) as HTMLElement).textContent).toContain("hi");
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
   });
 });
 

@@ -2,13 +2,15 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Note, Transcript } from "../types";
+import type { Meeting, Note, Transcript } from "../types";
 import { api } from "../api";
 import {
   REVIEW_COPY,
   blockTrust,
+  enhancedBeforeTranscript,
   needsReview,
   sourceQuotes,
+  sourceTarget,
   trustLine,
   trustSubline,
   trustSummary,
@@ -22,12 +24,15 @@ import { SAFE_IMG, SafeLink } from "./markdownSafe";
 interface Props {
   note: Note;
   onNoteChanged: (note: Note) => void;
-  /** Zoom-in: select an AI block's source transcript segments (jumps to Transcript). */
-  onZoom: (segmentIds: string[]) => void;
+  /** Zoom-in: select an AI block's source transcript segments (jumps to
+   *  Transcript), in `meetingId`'s recording when it's known. */
+  onZoom: (segmentIds: string[], meetingId?: string) => void;
   /** The raw transcript the editor has loaded (the selected recording). Used
-   *  when it is the one Enhance cited (`note.meeting_id`); otherwise that
-   *  one is fetched. */
+   *  for its meeting; the note's other meetings' transcripts are fetched. */
   transcript?: Transcript | null;
+  /** The note's meetings (a note recorded into again has several). Sources
+   *  are checked against all of them. Without it, only `note.meeting_id`. */
+  meetings?: Meeting[];
   /** Enhance is running: its result replaces every block, so edits made now
    *  would be silently undone. */
   enhancing?: boolean;
@@ -112,29 +117,74 @@ function Markdown({ children }: { children: string }) {
   );
 }
 
-/** The raw transcript Enhance cited: the loaded one when it is the note's
- *  meeting, else fetched. "checking" until known, so nothing is downgraded
- *  (or called notes-only) on a guess. */
-function useCitedTranscript(meetingId: string | null, loaded: Transcript | null): CitedTranscript {
-  const matches = !!meetingId && !!loaded && loaded.meeting_id === meetingId;
-  const [fetched, setFetched] = useState<{ meetingId: string; t: Transcript | null } | null>(null);
+/** The raw transcripts Enhance could have cited, one per meeting of the
+ *  note: the loaded one for its meeting, the others fetched. "checking"
+ *  until every one is known, so nothing is downgraded (or called
+ *  notes-only) on a guess. */
+function useCitedTranscripts(
+  note: Note,
+  meetings: Meeting[] | undefined,
+  loaded: Transcript | null,
+): CitedTranscript {
+  // The editor's list is this note's once it holds the note's own (newest)
+  // meeting. While a note opens it can still be the previous note's (or
+  // empty), so then the note's meetings are fetched here instead.
+  const given = meetings?.filter((m) => m.note_id === note.id).map((m) => m.id);
+  const trusted = !given || !note.meeting_id || given.includes(note.meeting_id);
+  const [ownList, setOwnList] = useState<{ noteId: string; ids: string[] } | null>(null);
   useEffect(() => {
-    if (!meetingId || matches) return undefined;
+    if (trusted) return undefined;
     let live = true;
+    const noteId = note.id;
     api
-      .getTranscript(meetingId)
-      .then((t) => live && setFetched({ meetingId, t }))
+      .getMeetingsForNote(noteId)
+      .then((ms) => live && setOwnList({ noteId, ids: ms.map((m) => m.id) }))
       .catch(() => {}); // stays "checking": claim nothing
     return () => {
       live = false;
     };
-  }, [meetingId, matches]);
-  if (!meetingId) return { state: "none" };
-  if (matches) return { state: "ready", transcript: loaded! };
-  if (fetched?.meetingId === meetingId) {
-    return fetched.t ? { state: "ready", transcript: fetched.t } : { state: "none" };
+  }, [trusted, note.id]);
+  const list = trusted ? (given ?? []) : ownList?.noteId === note.id ? ownList.ids : null;
+  const key = [...new Set([...(list ?? []), ...(note.meeting_id ? [note.meeting_id] : [])])].join(
+    "|",
+  );
+  const [fetched, setFetched] = useState<Record<string, Transcript | null>>({});
+  useEffect(() => {
+    const want = key ? key.split("|") : [];
+    const toFetch = want.filter((id) => loaded?.meeting_id !== id);
+    if (toFetch.length === 0) return undefined;
+    let live = true;
+    for (const id of toFetch) {
+      api
+        .getTranscript(id)
+        .then((t) => {
+          if (!live) return;
+          // keep only this note's meetings (transcripts can be large)
+          setFetched((f) => {
+            const next: Record<string, Transcript | null> = {};
+            for (const k of want) if (k in f) next[k] = f[k];
+            next[id] = t;
+            return next;
+          });
+        })
+        .catch(() => {}); // stays unknown: claim nothing
+    }
+    return () => {
+      live = false;
+    };
+  }, [key, loaded]);
+  if (!list) return { state: "checking" };
+  const ids = key ? key.split("|") : [];
+  if (ids.length === 0) return { state: "none" };
+  const transcripts: Transcript[] = [];
+  let complete = true;
+  for (const id of ids) {
+    const t = loaded?.meeting_id === id ? loaded : fetched[id];
+    if (t === undefined) return { state: "checking" };
+    if (t) transcripts.push(t);
+    else complete = false; // not transcribed yet
   }
-  return { state: "checking" };
+  return transcripts.length === 0 ? { state: "none" } : { state: "ready", transcripts, complete };
 }
 
 /** One legend for the whole document instead of a label on every block. */
@@ -148,8 +198,12 @@ function TrustLegend({
   legendRef: RefObject<HTMLDivElement | null>;
 }) {
   const summary = trustSummary(note.blocks, cited);
-  const items: [keyof typeof SWATCH, string][] =
-    cited.state === "none"
+  const items: [keyof typeof SWATCH, string][] = summary.early
+    ? [
+        ["user", "You"],
+        ["notes", "AI, no sources yet"],
+      ]
+    : cited.state === "none"
       ? [
           ["user", "You"],
           ["notes", "AI, from your notes"],
@@ -201,17 +255,23 @@ function TrustLegend({
 }
 
 /** The citation chip: hover or focus previews the cited lines (the raw
- *  transcript text Enhance read); a click opens them in the transcript. */
+ *  transcript text Enhance read); a click opens them in the transcript of
+ *  the recording that holds them. */
 function SourceChip({
   ids,
-  transcript,
+  cited,
   onZoom,
 }: {
   ids: string[];
-  /** The transcript Enhance cited, when loaded (null: can't quote yet). */
-  transcript: Transcript | null;
-  onZoom: (segmentIds: string[]) => void;
+  cited: CitedTranscript;
+  onZoom: (segmentIds: string[], meetingId?: string) => void;
 }) {
+  const transcripts = cited.state === "ready" ? cited.transcripts : [];
+  const zoom = () => {
+    const target = sourceTarget(ids, transcripts);
+    if (target) onZoom(target.ids, target.meetingId);
+    else onZoom(ids);
+  };
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLSpanElement>(null);
   const hideTimer = useRef<number | null>(null);
@@ -242,7 +302,7 @@ function SourceChip({
     if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
     hideTimer.current = window.setTimeout(() => setOpen(false), 150);
   };
-  const { found, missing } = open ? sourceQuotes(ids, transcript) : { found: [], missing: 0 };
+  const { found, missing } = open ? sourceQuotes(ids, transcripts) : { found: [], missing: 0 };
   const shown = found.slice(0, 3);
   const more = found.length - shown.length;
 
@@ -261,7 +321,7 @@ function SourceChip({
     >
       <CitationChip
         count={ids.length}
-        onClick={() => onZoom(ids)}
+        onClick={zoom}
         title=""
         aria-label={`${ids.length} source${ids.length === 1 ? "" : "s"}. Open in transcript`}
         aria-describedby={open ? previewId : undefined}
@@ -281,9 +341,11 @@ function SourceChip({
           }}
         >
           <EscapeLayerScope depth={depth}>
-            {transcript === null ? (
+            {cited.state !== "ready" ? (
               <span className="text-[12px]" style={{ color: "var(--text-3)" }}>
-                Loading the transcript…
+                {cited.state === "checking"
+                  ? "Loading the transcript…"
+                  : "There's no transcript here to quote these lines from."}
               </span>
             ) : (
               <>
@@ -317,9 +379,11 @@ function SourceChip({
                 )}
                 {missing > 0 && (
                   <span className="text-[12px]" style={{ color: "var(--text-3)" }}>
-                    {found.length === 0
-                      ? "These lines aren't in the current transcript. It may have been re-transcribed."
-                      : `${missing} cited ${missing === 1 ? "line isn't" : "lines aren't"} in the current transcript.`}
+                    {!cited.complete
+                      ? `${missing} cited ${missing === 1 ? "line isn't" : "lines aren't"} in a transcript here yet.`
+                      : found.length === 0
+                        ? "These lines aren't in the current transcript. It may have been re-transcribed."
+                        : `${missing} cited ${missing === 1 ? "line isn't" : "lines aren't"} in the current transcript.`}
                   </span>
                 )}
               </>
@@ -328,7 +392,7 @@ function SourceChip({
               type="button"
               onClick={() => {
                 setOpen(false);
-                onZoom(ids);
+                zoom();
               }}
               className="cursor-pointer self-start border-0 bg-transparent p-0 text-[12.5px] font-semibold"
               style={{ color: "var(--primary-text)" }}
@@ -354,10 +418,11 @@ export default function EnhancedDoc({
   onNoteChanged,
   onZoom,
   transcript = null,
+  meetings,
   enhancing = false,
 }: Props) {
-  const cited = useCitedTranscript(note.meeting_id, transcript);
-  const citedTranscript = cited.state === "ready" ? cited.transcript : null;
+  const cited = useCitedTranscripts(note, meetings, transcript);
+  const early = enhancedBeforeTranscript(note.blocks, cited);
   const [editing, setEditing] = useState<{ id: string; markdown: string } | null>(null);
   const [saving, setSaving] = useState(false);
   // The block a Keep / Remove is running on, and the last failure.
@@ -365,13 +430,15 @@ export default function EnhancedDoc({
   const [failed, setFailed] = useState<{ id: string; message: string } | null>(null);
   // Remove is deferred: the line hides behind "Removed · Undo" and is only
   // deleted when the timer runs out. A note switch or leaving the view
-  // cancels it; nothing is deleted without the full wait.
-  const [removing, setRemoving] = useState<{
-    noteId: string;
-    id: string;
-    phase: "undo" | "saving";
-  } | null>(null);
+  // cancels it; nothing is deleted without the full wait. One Undo at a
+  // time: a second Remove deletes the first line now.
+  const [removing, setRemoving] = useState<{ noteId: string; id: string } | null>(null);
   const removeTimer = useRef<number | null>(null);
+  // Lines whose delete is running: they stay hidden ("Removing…") until it
+  // settles, even once a newer Remove holds the Undo.
+  const [deleting, setDeleting] = useState<{ noteId: string; id: string }[]>([]);
+  // Deletes run one at a time, so their replies land in order.
+  const deleteQueue = useRef<Promise<unknown>>(Promise.resolve());
   const noteRef = useRef(note);
   useEffect(() => {
     noteRef.current = note;
@@ -443,36 +510,42 @@ export default function EnhancedDoc({
 
   const commitRemove = (noteId: string, blockId: string) => {
     removeTimer.current = null;
+    setRemoving((r) => (r?.id === blockId ? null : r));
     const current = noteRef.current;
     if (current.id !== noteId || !current.blocks.some((b) => b.id === blockId)) {
-      setRemoving(null); // the note moved on (switched, or re-enhanced)
-      return;
+      return; // the note moved on (switched, or re-enhanced)
     }
     // Undo is about to go: if it had focus, move on to the next line now.
     const undoHadFocus =
       document.activeElement instanceof HTMLElement &&
       document.activeElement.dataset.undoFor === blockId;
     if (undoHadFocus) setFocusPlan(nextAfter(blockId));
-    setRemoving({ noteId, id: blockId, phase: "saving" });
-    api
-      .editNoteBlock(noteId, blockId, "")
-      .then((updated) => onNoteChanged(updated))
+    const entry = { noteId, id: blockId };
+    setDeleting((d) => [...d, entry]);
+    const run = deleteQueue.current.then(() => api.editNoteBlock(noteId, blockId, ""));
+    deleteQueue.current = run.catch(() => {});
+    // A reply for a note that's no longer open must not reopen it.
+    run
+      .then((updated) => {
+        if (noteRef.current.id === noteId) onNoteChanged(updated);
+      })
       .catch((e) => {
         console.error(e);
+        if (noteRef.current.id !== noteId) return;
         setFailed({ id: blockId, message: `Couldn't remove this line. Try again. (${String(e)})` });
       })
-      .finally(() => setRemoving((r) => (r?.id === blockId ? null : r)));
+      .finally(() => setDeleting((d) => d.filter((x) => x !== entry)));
   };
 
   const startRemove = (blockId: string) => {
     setFailed(null);
-    // A second Remove finishes the first one now.
-    if (activeRemove?.phase === "undo" && removeTimer.current !== null) {
+    // One Undo at a time: a second Remove deletes the first line now.
+    if (activeRemove && removeTimer.current !== null) {
       window.clearTimeout(removeTimer.current);
       commitRemove(activeRemove.noteId, activeRemove.id);
     }
     const noteId = note.id;
-    setRemoving({ noteId, id: blockId, phase: "undo" });
+    setRemoving({ noteId, id: blockId });
     removeTimer.current = window.setTimeout(() => commitRemove(noteId, blockId), REMOVE_UNDO_MS);
     setFocusPlan({ kind: "undo", id: blockId });
   };
@@ -506,12 +579,13 @@ export default function EnhancedDoc({
       <TrustLegend note={note} cited={cited} legendRef={legendRef} />
 
       {note.blocks.map((b) => {
-        const trust = blockTrust(b.origin, cited);
+        const trust = blockTrust(b.origin, cited, early);
         const sources = b.origin.kind === "ai" ? b.origin.source_segment_ids : [];
         const busy = pending === b.id || enhancing;
         const review = needsReview(trust) ? REVIEW_COPY[trust as "unsourced" | "missing"] : null;
 
-        if (activeRemove?.id === b.id) {
+        const undoable = activeRemove?.id === b.id;
+        if (undoable || deleting.some((d) => d.noteId === note.id && d.id === b.id)) {
           return (
             <div
               key={b.id}
@@ -520,10 +594,8 @@ export default function EnhancedDoc({
               className="print:hidden mb-3.5 flex items-center gap-2 rounded-lg border border-dashed border-line px-4 py-2 text-[13px]"
               style={{ color: "var(--text-2)" }}
             >
-              <span className="mr-auto">
-                {activeRemove.phase === "undo" ? "Removed" : "Removing…"}
-              </span>
-              {activeRemove.phase === "undo" && (
+              <span className="mr-auto">{undoable ? "Removed" : "Removing…"}</span>
+              {undoable && (
                 <Button variant="ghost" size="xs" onClick={undoRemove} data-undo-for={b.id}>
                   Undo
                 </Button>
@@ -537,7 +609,7 @@ export default function EnhancedDoc({
           body = (
             <div className="flex items-start gap-2.5">
               <div className="min-w-0 flex-1">{body}</div>
-              <SourceChip ids={sources} transcript={citedTranscript} onZoom={onZoom} />
+              <SourceChip ids={sources} cited={cited} onZoom={onZoom} />
             </div>
           );
         }

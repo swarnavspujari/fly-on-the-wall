@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  EARLY_COPY,
   blockTrust,
+  enhancedBeforeTranscript,
   sourceQuotes,
+  sourceTarget,
   templateSections,
   trustLine,
   trustSubline,
@@ -37,7 +40,7 @@ const raw: Transcript = {
     { id: "t2", speaker_key: "mic", start_ms: 9000, end_ms: 9500, text: "ok", words: [] },
   ],
 };
-const ready: CitedTranscript = { state: "ready", transcript: raw };
+const ready: CitedTranscript = { state: "ready", transcripts: [raw], complete: true };
 const none: CitedTranscript = { state: "none" };
 const checking: CitedTranscript = { state: "checking" };
 
@@ -70,6 +73,7 @@ describe("block trust", () => {
       unsourced: 1,
       missing: 1,
       notes: 0,
+      early: false,
     });
   });
 });
@@ -137,7 +141,7 @@ describe("templateSections", () => {
 
 describe("sourceQuotes", () => {
   it("quotes the raw text Enhance read and counts missing ids", () => {
-    const { found, missing } = sourceQuotes(["t1", "t2", "gone"], raw);
+    const { found, missing } = sourceQuotes(["t1", "t2", "gone"], [raw]);
     expect(found.map((q) => [q.id, q.speaker, q.text, q.speakerIndex])).toEqual([
       ["t1", "Dana", "um, the price", 1],
       ["t2", "You", "ok", 0],
@@ -146,6 +150,64 @@ describe("sourceQuotes", () => {
   });
 
   it("reports everything missing when there is no transcript", () => {
-    expect(sourceQuotes(["t1"], null)).toEqual({ found: [], missing: 1 });
+    expect(sourceQuotes(["t1"], [])).toEqual({ found: [], missing: 1 });
+  });
+});
+
+describe("a note recorded into more than once", () => {
+  // m1 is the recording Enhance read; m2 was recorded into the note later.
+  const m2: Transcript = {
+    ...raw,
+    meeting_id: "m2",
+    segments: [{ id: "u1", speaker_key: "s1", start_ms: 0, end_ms: 900, text: "new", words: [] }],
+  };
+  const both: CitedTranscript = { state: "ready", transcripts: [m2, raw], complete: true };
+
+  it("a source in any of its recordings counts", () => {
+    expect(blockTrust(ai("b", ["t1"]).origin, both)).toBe("sourced");
+    expect(blockTrust(ai("c", ["u1"]).origin, both)).toBe("sourced");
+    expect(blockTrust(ai("d", ["gone"]).origin, both)).toBe("missing");
+  });
+
+  it("a recording with no transcript yet never makes a line 'not found'", () => {
+    const partial: CitedTranscript = { state: "ready", transcripts: [raw], complete: false };
+    expect(blockTrust(ai("b", ["t1"]).origin, partial)).toBe("sourced");
+    expect(blockTrust(ai("d", ["gone"]).origin, partial)).toBe("sourced");
+    expect(trustSummary([ai("d", ["gone"])], partial).missing).toBe(0);
+  });
+
+  it("quotes and zooms into the recording that holds the lines", () => {
+    expect(sourceQuotes(["t1", "u1"], [m2, raw]).found.map((q) => q.text)).toEqual([
+      "um, the price",
+      "new",
+    ]);
+    expect(sourceTarget(["gone", "t1", "t2"], [m2, raw])).toEqual({
+      meetingId: "m1",
+      ids: ["t1", "t2", "gone"],
+    });
+    expect(sourceTarget(["gone"], [m2, raw])).toBeNull();
+  });
+});
+
+describe("enhanced before the transcript was ready", () => {
+  const blocks = [user("a"), ai("b", []), ai("c", [])];
+
+  it("is when a transcript exists but no AI line has a source", () => {
+    expect(enhancedBeforeTranscript(blocks, ready)).toBe(true);
+    expect(enhancedBeforeTranscript([...blocks, ai("d", ["t1"])], ready)).toBe(false);
+    expect(enhancedBeforeTranscript(blocks, none)).toBe(false);
+    expect(enhancedBeforeTranscript(blocks, checking)).toBe(false);
+    expect(enhancedBeforeTranscript([user("a")], ready)).toBe(false);
+  });
+
+  it("says so once in the legend instead of flagging every line", () => {
+    const s = trustSummary(blocks, ready);
+    expect(s).toMatchObject({ ai: 2, unsourced: 0, notes: 2, early: true });
+    expect(blockTrust(ai("b", []).origin, ready, true)).toBe("notes");
+    expect(trustLine(s, ready)).toBe("2 AI lines · no sources yet");
+    expect(trustSubline(s, ready)).toBe(EARLY_COPY);
+    expect(EARLY_COPY).toBe(
+      "Enhanced before the transcript was ready. Enhance again to link sources.",
+    );
   });
 });

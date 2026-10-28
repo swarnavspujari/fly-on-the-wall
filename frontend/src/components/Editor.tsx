@@ -102,6 +102,7 @@ interface Props {
 
 type View = "notes" | "transcript" | "enhanced";
 
+const NO_HIGHLIGHT: string[] = [];
 const VIDEO_RE = /\.(mp4|webm|mov|mkv|m4v)$/i;
 const isVideo = (a: Attachment) =>
   (a.mime?.startsWith("video/") ?? false) || VIDEO_RE.test(a.file_name);
@@ -981,6 +982,9 @@ export default function Editor({
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
   const [askOpen, setAskOpen] = useState(false);
   const [zoomIds, setZoomIds] = useState<string[]>([]);
+  // The recording a zoom points into: highlights wait for its transcript, so
+  // the transcript view scrolls to them once it's shown.
+  const [zoomMeetingId, setZoomMeetingId] = useState<string | null>(null);
   // Poster rel paths keyed by attachment id — doubles as a session cache when
   // switching between notes. Requested ids are tracked so each video is asked
   // for at most once per session.
@@ -1168,10 +1172,16 @@ export default function Editor({
     scheduleSave(title, next);
   };
 
-  const zoom = (segmentIds: string[]) => {
+  const zoom = (segmentIds: string[], meetingId?: string) => {
     setZoomIds(segmentIds);
+    setZoomMeetingId(meetingId ?? null);
+    // A source in an earlier recording of this note opens that recording.
+    const target = meetingId ? meetings.find((m) => m.id === meetingId) : undefined;
+    if (target && target.id !== meeting?.id) onSelectMeeting(target);
     if (hasMeeting) setView("transcript");
   };
+  const highlightIds =
+    zoomMeetingId && transcript?.meeting_id !== zoomMeetingId ? NO_HIGHLIGHT : zoomIds;
 
   // "Someone else…" in the transcript speaker dropdown: add the person to the
   // attendee list AND assign them to the speaker in one step. The attendee
@@ -1479,7 +1489,7 @@ export default function Editor({
                   pipelineError={pipelineError}
                   engine={engine}
                   engineInstalling={engineInstalling}
-                  highlightIds={zoomIds}
+                  highlightIds={highlightIds}
                   onTranscribe={onTranscribe}
                   onInstallEngine={onInstallEngine}
                   onOpenSettings={onOpenSettings}
@@ -1499,6 +1509,7 @@ export default function Editor({
                   onNoteChanged={onNoteChanged}
                   onZoom={zoom}
                   transcript={transcript}
+                  meetings={meetings}
                   enhancing={enhancing}
                 />
               </>
