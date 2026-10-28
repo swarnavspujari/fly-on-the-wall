@@ -27,6 +27,34 @@
                                      configured model not downloaded
      fotwMockGpuBench = "gpu" | "cpu" | "failed" → a stored GPU speed-test
                                      verdict (Settings "Use the graphics card")
+     fotwMockUpdate = "available" | "fail" → the startup update check (5 s
+                                     after load) finds v2.4.0; Update now hangs
+                                     in "Downloading", or fails
+     fotwMockImportFail = "1"      → the first Transcribe of a staged import
+                                     can't convert screen-walkthrough.mp4:
+                                     that row shows its cause, the others
+                                     convert; "Retry failed file" succeeds
+     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "none"
+                                   → with fotwMockRecording, the capture's
+                                     warnings are the exact backend sentence
+                                     for that case (recording bar chips;
+                                     "worst": two warnings + a 1 h timer)
+     fotwMockNoAttendees = "1"     → Record starts with no attendees, as with
+                                     no calendar event (speaker card, typed)
+     fotwMockConsentReset = "1"    → no cloud consent recorded (as after the
+                                     v2.4 reset): the launch check asks for
+                                     Anthropic, the saved provider
+     fotwMockConsentSkips = "1"    → the backend skipped m1's cleanup and
+                                     action items for missing consent (the
+                                     notice with "Review and allow")
+     fotwMockAskError = keep_local | consent | no_key | auth | ollama_missing |
+                        ollama_down | model_missing | offline | timeout |
+                        rate_limit | server | other → ask_meeting fails with
+                                     the backend's own text for that case
+     fotwMockImportPipelineFail = "1" → a staged import's run fails for good
+                                     at "Detecting speakers" (after ASR);
+                                     pipeline_failure keeps the cause, so the
+                                     queue shows it with Retry on reopen
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -56,6 +84,11 @@ const noteMeta = [
     meeting_id: "m1",
     updated_at: ago(1),
     happened_at: ago(30),
+    // list status (computed by the backend query): Enhanced
+    has_transcript: true,
+    has_enhanced_doc: true,
+    has_recording: true,
+    job_status: "done",
   },
   {
     id: "n2",
@@ -64,6 +97,11 @@ const noteMeta = [
     meeting_id: "m2",
     updated_at: ago(120),
     happened_at: ago(180),
+    // Ready to enhance
+    has_transcript: true,
+    has_enhanced_doc: false,
+    has_recording: true,
+    job_status: "done",
   },
   {
     id: "n3",
@@ -72,6 +110,11 @@ const noteMeta = [
     meeting_id: null,
     updated_at: ago(1500),
     happened_at: ago(1500),
+    // Notes only
+    has_transcript: false,
+    has_enhanced_doc: false,
+    has_recording: false,
+    job_status: null,
   },
   {
     id: "n4",
@@ -80,6 +123,11 @@ const noteMeta = [
     meeting_id: "m4",
     updated_at: ago(2900),
     happened_at: ago(2900),
+    // Queued (waiting, or requeued after a crash)
+    has_transcript: false,
+    has_enhanced_doc: false,
+    has_recording: true,
+    job_status: "queued",
   },
   {
     id: "n5",
@@ -88,6 +136,11 @@ const noteMeta = [
     meeting_id: "m5",
     updated_at: ago(5800),
     happened_at: ago(5800),
+    // Failed
+    has_transcript: false,
+    has_enhanced_doc: false,
+    has_recording: true,
+    job_status: "failed" as string | null,
   },
   {
     id: "n6",
@@ -96,6 +149,11 @@ const noteMeta = [
     meeting_id: null,
     updated_at: ago(8600),
     happened_at: ago(8600),
+    // Notes only
+    has_transcript: false,
+    has_enhanced_doc: false,
+    has_recording: false,
+    job_status: null,
   },
 ];
 
@@ -131,7 +189,31 @@ const blocks = [
     origin: { kind: "user" },
     markdown: "Gut check: annual looks likely if legal signs off this week.",
   },
+  // An AI line with no source: the Enhanced view flags it with Keep / Remove.
+  {
+    id: "b5",
+    origin: { kind: "ai", source_segment_ids: [] as string[] },
+    markdown: "Acme expects to sign the annual contract by the end of the month.",
+  },
 ];
+
+// edit_note_block / keep_note_block change the blocks above for the session,
+// like the backend: an edit (or Keep) makes an AI block yours, and an edit to
+// empty text removes it. Other notes' blocks (b0 on the notes-only fixtures)
+// aren't stored, so those calls just return the note, as before.
+function editMockBlock(blockId: string, markdown: string | null): boolean {
+  const i = blocks.findIndex((b) => b.id === blockId);
+  if (i === -1) return false;
+  if (markdown === null || blocks[i].markdown !== markdown) {
+    blocks[i] = {
+      ...blocks[i],
+      origin: { kind: "user" },
+      markdown: markdown ?? blocks[i].markdown,
+    };
+  }
+  if (markdown !== null && markdown.trim() === "") blocks.splice(i, 1);
+  return true;
+}
 
 function note(id: string) {
   const m = noteMeta.find((n) => n.id === id) || noteMeta[0];
@@ -241,6 +323,16 @@ let mockImport: {
   started: boolean;
 } | null = null;
 let mockImportDone = false;
+/** True while the mock import's pipeline is queued or running. */
+let mockImportRunning = false;
+/** A run that gave up keeps its cause, like the backend's parked job row
+ *  (read back by pipeline_failure); Retry (transcribe_meeting) clears it. */
+const mockPipelineFailures: Record<string, string> = {
+  // the seeded "Failed" note (n5): its parked job's cause
+  m5: "whisper-cli exited with status 3221225477",
+};
+const MOCK_PIPELINE_FAILURE =
+  "speaker detection failed: failed to launch sherpa-onnx (The filename or extension is too long. (os error 206))";
 
 const mockEmit = (event: string, payload: unknown) =>
   (window as unknown as { fotwMockEmit?: (e: string, p: unknown) => void }).fotwMockEmit?.(
@@ -256,10 +348,10 @@ function importStage() {
     files: [
       {
         id: "if-1",
-        file_name: "Fuel Bid Meeting 2026-07-09.mp3",
+        file_name: "Planning Sync 2026-01-15.mp3",
         size: 18_400_000,
         kind: "audio",
-        rel_path: "recordings/imp/Fuel Bid Meeting 2026-07-09.mp3",
+        rel_path: "recordings/imp/Planning Sync 2026-01-15.mp3",
         error: null,
       },
       {
@@ -285,11 +377,16 @@ function importStage() {
   if (!noteMeta.some((n) => n.id === IMPORT_NOTE_ID)) {
     noteMeta.unshift({
       id: IMPORT_NOTE_ID,
-      title: "Fuel Bid Meeting 2026-07-09",
+      title: "Planning Sync 2026-01-15",
       folder_id: null,
       meeting_id: IMPORT_MEETING_ID,
       updated_at: nowIso(),
       happened_at: nowIso(),
+      // staged import: no audio attached until Transcribe
+      has_transcript: false,
+      has_enhanced_doc: false,
+      has_recording: false,
+      job_status: null,
     });
   }
   return mockImport;
@@ -298,6 +395,8 @@ function importStage() {
 function importTranscribe(order: string[]) {
   if (!mockImport) throw new Error("no staged import for this meeting");
   if (mockImport.started) return mockImport;
+  const convertFailure = mockImportConvertFailure(order);
+  if (convertFailure) return convertFailure;
   const files = order
     .map((id) => mockImport?.files.find((f) => f.id === id))
     .filter((f): f is MockImportFile => f != null && f.error == null);
@@ -309,6 +408,7 @@ function importTranscribe(order: string[]) {
     boundaries.push(cum);
   }
   mockImport = { ...mockImport, files, boundaries_ms: boundaries, started: true };
+  mockImportRunning = true;
 
   // simulated backend events: per-file conversion, then the real pipeline shape
   const pipe = (
@@ -350,14 +450,74 @@ function importTranscribe(order: string[]) {
     at((t += 450), () => pipe("transcribing", detail));
   }
   at((t += 500), () => pipe("diarizing"));
+  // fotwMockImportPipelineFail: gives up here, as a sherpa launch failure
+  // ends (the backend tries it three times first; the mock skips to the
+  // end); the queue stays started
+  if (mockFlag("fotwMockImportPipelineFail") === "1") {
+    at((t += 1200), () => {
+      mockImportRunning = false;
+      mockPipelineFailures[IMPORT_MEETING_ID] = MOCK_PIPELINE_FAILURE;
+      pipe("error", null, true, MOCK_PIPELINE_FAILURE);
+    });
+    return mockImport;
+  }
   at((t += 1200), () => pipe("aligning"));
   at((t += 600), () => pipe("saving"));
   at((t += 500), () => pipe("polishing"));
   at((t += 1200), () => {
     mockImportDone = true;
+    mockImportRunning = false;
     pipe("done", null, true);
   });
   return mockImport;
+}
+
+/* ---- after Transcribe: Retry and Cancel (mirror cancel_transcription) ----
+   Retry re-enqueues the joined recording: the failure clears and the run
+   picks up after ASR (checkpointed), then finishes. Cancel with nothing
+   queued or running drops the queue to idle and emits the terminal
+   "cancelled" itself; a running mock run ignores it (no unwinding here). */
+function mockImportRetry() {
+  delete mockPipelineFailures[IMPORT_MEETING_ID];
+  mockImportRunning = true;
+  const pipe = (stage: string, done = false) =>
+    mockEmit("pipeline:progress", {
+      meeting_id: IMPORT_MEETING_ID,
+      stage,
+      detail: null,
+      done,
+      error: null,
+    });
+  let t = 0;
+  const at = (ms: number, fn: () => void) => window.setTimeout(fn, ms);
+  at((t += 100), () => pipe("waiting"));
+  for (const stage of ["starting", "diarizing", "aligning", "saving"]) {
+    at((t += 500), () => pipe(stage));
+  }
+  at((t += 500), () => {
+    mockImportDone = true;
+    mockImportRunning = false;
+    pipe("done", true);
+  });
+}
+
+function mockCancelTranscription(meetingId: string) {
+  if (meetingId === IMPORT_MEETING_ID && mockImportRunning) return null;
+  if (meetingId === IMPORT_MEETING_ID && mockImport) mockImport = { ...mockImport, started: false };
+  // like the backend: a parked failure goes with the run it belongs to
+  delete mockPipelineFailures[meetingId];
+  window.setTimeout(
+    () =>
+      mockEmit("pipeline:progress", {
+        meeting_id: meetingId,
+        stage: "cancelled",
+        detail: null,
+        done: true,
+        error: null,
+      }),
+    0,
+  );
+  return null;
 }
 
 const seg = (id: string, key: string, start: number, text: string) => ({
@@ -424,6 +584,20 @@ let templates = [
   { id: "tpl-standup", name: "Standup", system_prompt: "", structure_hint: "", built_in: true },
   { id: "tpl-interview", name: "Interview", system_prompt: "", structure_hint: "", built_in: true },
 ];
+// Section hints shaped like the built-ins' (crates/fly-storage/src/templates.rs),
+// so the Notes view's ghost headings have something to show.
+const MOCK_TEMPLATE_HINTS: Record<string, string> = {
+  "tpl-general": "## Summary\n## Key points\n## Decisions\n## Action items (owner — due)",
+  "tpl-1on1": "## Topics discussed\n## Feedback\n## Commitments\n## Follow-ups for next time",
+  "tpl-sales": "## Company & contact\n## Pain points\n## Budget & timeline\n## Next steps",
+  "tpl-standup": "## Per person\n### <name>\n- Did\n- Next\n- Blockers\n## Cross-team blockers",
+  "tpl-interview":
+    "## Candidate background\n## Strong signals\n## Concerns\n## Recommended follow-ups",
+};
+templates = templates.map((t) => ({
+  ...t,
+  structure_hint: t.structure_hint || MOCK_TEMPLATE_HINTS[t.id] || "",
+}));
 
 // fotwMockGpuBench = "gpu" | "cpu" | "failed" seeds a stored speed-test verdict.
 function mockGpuBench() {
@@ -557,6 +731,11 @@ const calendarStatus = {
   ms_connected: false,
   ms_configured: true,
 };
+// Home QA (v2.4 PR 1.4). fotwMockCalendar = "none" → no calendar connected
+// (Up next's connect prompt; Connect flips it on); "expired" → Google needs
+// a reconnect (no events from it, like the backend); "empty" → connected,
+// but no video meetings left today. fotwMockNoNotes = "1" → no notes (Home's
+// empty state).
 
 let mockCalendars = [
   { provider: "google", id: "primary", name: "you@example.com", primary: true, enabled: true },
@@ -586,6 +765,12 @@ function setAsrSettings(u: {
 }
 
 function upcoming() {
+  const homeCal = mockFlag("fotwMockCalendar");
+  if (!calendarStatus.google_connected && !calendarStatus.ms_connected) {
+    return { needs_reconnect: [], events: [] };
+  }
+  if (homeCal === "expired") return { needs_reconnect: ["google"], events: [] };
+  if (homeCal === "empty") return { needs_reconnect: [], events: [] };
   return {
     // Flip to ["google"] to preview the sidebar's Reconnect row.
     needs_reconnect: [],
@@ -618,6 +803,8 @@ function upcoming() {
 }
 
 function recordingStatus() {
+  const qa = mockRecordingQa();
+  if (qa) return qa;
   if (typeof localStorage !== "undefined" && localStorage.getItem("fotwMockRecording") === "1") {
     return {
       active: true,
@@ -679,8 +866,18 @@ const mockFlag = (k: string) =>
   typeof localStorage !== "undefined" ? localStorage.getItem(k) : null;
 // get/set_app_setting store (consent.* / capture.* / ui.* keys). The mock
 // user already accepted Anthropic (the configured provider), so picking
-// OpenAI or NVIDIA NIM shows the cloud-consent confirm.
-const mockUiSettings: Record<string, string> = { "consent.cloud_llm.anthropic": "true" };
+// OpenAI or NVIDIA NIM shows the cloud-consent confirm. fotwMockConsentReset
+// starts with none, as the v2.4 consent reset leaves it.
+const initialUiSettings = (): Record<string, string> =>
+  mockFlag("fotwMockConsentReset") === "1" ? {} : { "consent.cloud_llm.anthropic": "true" };
+const mockUiSettings: Record<string, string> = initialUiSettings();
+
+/** Tests: put the get/set_app_setting store back to its starting state, so a
+ *  consent one test gives can't leak into the next. */
+export function resetMockAppSettings() {
+  for (const k of Object.keys(mockUiSettings)) delete mockUiSettings[k];
+  Object.assign(mockUiSettings, initialUiSettings());
+}
 const mockLocalFolders = new Set<string>();
 const mockPrivacy: Record<
   string,
@@ -726,14 +923,113 @@ function ollamaState() {
   return mockOllama;
 }
 
+/* ---- Ask ---- */
+// The backend's own failure text (llm_commands.rs, ollama.rs, fly-llm), so
+// the Ask sheet's human-readable errors can be checked here. Without a
+// forced error the mock mirrors build_provider: a cloud provider is refused
+// for a kept-local note, before consent, or without a key.
+const MOCK_ASK_ERRORS: Record<string, string> = {
+  keep_local:
+    'this note is set to "Keep local", so it isn\'t sent to anthropic. Switch the AI provider to Ollama (runs on this device) in Settings, or turn off Keep local for this note',
+  consent:
+    "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama).",
+  no_key: "no API key stored for openai — add one in Settings",
+  auth: "authentication failed — check the API key",
+  ollama_missing:
+    "Ollama isn't installed — use the Install button in Settings → AI provider, or install it yourself from ollama.com",
+  ollama_down:
+    "Ollama isn't reachable at http://localhost:11434. Start the Ollama app (or install it from ollama.com), or switch provider in Settings.",
+  model_missing:
+    'provider returned an error: 404 Not Found: {"error":"model \\"llama3.1\\" not found, try pulling it first"}',
+  offline: "Can't reach anthropic — check your internet connection.",
+  timeout: "anthropic timed out. The model may still be loading — try again in a moment.",
+  rate_limit:
+    'provider returned an error: 429 Too Many Requests: {"type":"error","error":{"type":"rate_limit_error"}}',
+  server: 'provider returned an error: 500 Internal Server Error: {"type":"error"}',
+  other: "invalid request: the request couldn't be sent",
+};
+const MOCK_VENDORS: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  nim: "NVIDIA",
+};
+const MOCK_ASK_ANSWER =
+  "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
+function mockAsk(args: Record<string, unknown>): Promise<string> {
+  const forced = mockFlag("fotwMockAskError");
+  const provider = llmSettings.provider;
+  const info = llmSettings.providers.find((p) => p.id === provider);
+  const meetingId = noteMeta.find((n) => n.id === args.noteId)?.meeting_id ?? null;
+  const privacy = meetingId ? meetingPrivacy(meetingId) : null;
+  const keptLocal = !!privacy && (privacy.keep_local || privacy.keep_local_from_folder);
+  let error = forced ? (MOCK_ASK_ERRORS[forced] ?? MOCK_ASK_ERRORS.other) : null;
+  if (!error && info && !info.is_local) {
+    if (keptLocal) error = MOCK_ASK_ERRORS.keep_local.replace("anthropic", provider);
+    else if (mockConsentRefusal()) error = mockConsentRefusal();
+    else if (!info.has_key) error = MOCK_ASK_ERRORS.no_key.replace("openai", provider);
+  }
+  return new Promise((resolve, reject) =>
+    setTimeout(() => (error ? reject(error) : resolve(MOCK_ASK_ANSWER)), 700),
+  );
+}
+
+/** build_provider's missing-consent refusal for the saved provider, or null
+ *  (local, or allowed). Enhance, Test and backfill check it, like Ask. */
+function mockConsentRefusal(): string | null {
+  const provider = llmSettings.provider;
+  const info = llmSettings.providers.find((p) => p.id === provider);
+  if (!info || info.is_local || mockUiSettings[`consent.cloud_llm.${provider}`] === "true") {
+    return null;
+  }
+  return MOCK_ASK_ERRORS.consent.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
+}
+
+/* ---- consent skips ---- */
+// Meetings whose cleanup / action items the backend skipped for missing
+// consent. fotwMockConsentSkips = "1" starts with m1 skipped, so the notice
+// shows; retry_consent_skipped replays the "polishing" → done events.
+let mockConsentSkips: string[] = mockFlag("fotwMockConsentSkips") === "1" ? ["m1"] : [];
+function mockRetryConsentSkipped(): number {
+  const ids = mockConsentSkips;
+  mockConsentSkips = [];
+  ids.forEach((id, i) => {
+    setTimeout(() => {
+      const base = { meeting_id: id, detail: null, error: null };
+      mockEmit("pipeline:progress", { ...base, stage: "polishing", done: false });
+      setTimeout(() => {
+        mockEmit("pipeline:progress", { ...base, stage: null, done: true });
+        mockEmit("llm:consent-skips", mockConsentSkips);
+      }, 900);
+    }, i * 1200);
+  });
+  return ids.length;
+}
+
 /* ---- command router ---- */
 function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
+  // Stateful delete for the session, so Home's Undo-then-expire is visible
+  // (the note stays gone until reload).
+  if (cmd === "delete_note") {
+    const i = noteMeta.findIndex((n) => n.id === args.id);
+    if (i >= 0) noteMeta.splice(i, 1);
+    return null;
+  }
+  // Block edits on the stored meeting blocks change them for the session (a
+  // fresh copy back, like an IPC payload); anything else falls through to the
+  // plain note reply in the switch below.
+  if (cmd === "edit_note_block" || cmd === "keep_note_block") {
+    const markdown = cmd === "keep_note_block" ? null : String(args.markdown ?? "");
+    if (editMockBlock(String(args.blockId), markdown)) {
+      return JSON.parse(JSON.stringify(note(String(args.noteId ?? "n1"))));
+    }
+    if (cmd === "keep_note_block") return note(String(args.noteId ?? "n1"));
+  }
   switch (cmd) {
     case "ping":
       return "pong";
     case "app_info":
       return {
-        version: "2.3.0",
+        version: "2.4.0",
         data_dir: "C:\\Users\\you\\AppData\\Roaming\\FlyOnTheWall",
         // fotwMockTapDenied demos the macOS-only SystemAudioNotice, which is
         // gated on app_info.os — so the flag flips the reported OS too.
@@ -755,10 +1051,20 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "move_folder":
     case "delete_folder":
     case "move_note":
-    case "delete_note":
+      return null;
     case "cancel_transcription":
+      return mockCancelTranscription(String(args.meetingId));
+    case "pipeline_failure":
+      return mockPipelineFailures[String(args.meetingId)] ?? null;
+    case "transcribe_meeting":
+      // re-enqueued: like the backend's job row, the parked failure is gone
+      delete mockPipelineFailures[String(args.meetingId)];
+      if (args.meetingId === IMPORT_MEETING_ID && mockImport?.started && !mockImportRunning) {
+        mockImportRetry();
+      }
       return null;
     case "list_recent_notes":
+      if (mockFlag("fotwMockNoNotes") === "1") return [];
       return [...noteMeta].sort(byHappenedDesc);
     case "list_notes_in_folder":
       return (
@@ -773,8 +1079,12 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "update_note_title":
     case "update_note_scratchpad":
     case "edit_note_block":
-    case "enhance_note":
       return note(String(args.id ?? args.noteId ?? "n1"));
+    case "enhance_note": {
+      const refused = mockConsentRefusal();
+      if (refused) throw refused;
+      return note(String(args.id ?? args.noteId ?? "n1"));
+    }
     case "get_meeting_for_note":
       return meeting(String(args.noteId));
     case "get_meetings_for_note": {
@@ -880,6 +1190,13 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
           .map((a) => ({ name: a.name?.trim() || a.email, email: a.email }));
         mockAttendeesConfirmed = false;
       }
+      // fotwMockNoAttendees: no calendar event, so the backend starts the
+      // meeting with no attendees (unconfirmed)
+      if (mockFlag("fotwMockNoAttendees") === "1") {
+        mockAttendees = [];
+        mockAttendeesConfirmed = false;
+      }
+      mockRecPaused = false;
       if (typeof localStorage !== "undefined") localStorage.setItem("fotwMockRecording", "1");
       return recordingStatus();
     }
@@ -972,9 +1289,16 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "mcp_config":
       return mcpSnippet;
     case "ask_meeting":
-      return "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
-    case "test_llm_connection":
+      return mockAsk(args);
+    case "test_llm_connection": {
+      const refused = mockConsentRefusal();
+      if (refused) throw refused;
       return `Connected to ${llmSettings.provider}. It answered in 0.8 s.`;
+    }
+    case "consent_skipped_meetings":
+      return [...mockConsentSkips];
+    case "retry_consent_skipped":
+      return mockRetryConsentSkipped();
     case "ollama_status": {
       const o = ollamaState();
       return {
@@ -1044,8 +1368,10 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mockBackfillPending;
     case "backfill_meeting_items": {
       const processed = mockBackfillPending;
+      const refused = mockConsentRefusal();
+      if (refused) return { processed, extracted: 0, failed: processed, first_error: refused };
       mockBackfillPending = 0;
-      return { processed, extracted: processed * 4, failed: 0 };
+      return { processed, extracted: processed * 4, failed: 0, first_error: null };
     }
     case "get_meeting_privacy":
       return meetingPrivacy(String(args.meetingId));
@@ -1109,12 +1435,126 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         volume: "C:",
       };
     }
+    // Updater plugin (notice stack QA). fotwMockUpdate = "available" → the
+    // startup check (5 s after launch) finds v2.4.0 and Update now hangs in
+    // "Downloading"; "fail" → the download fails ("Update didn't install").
+    // Unset → no update (the plugin's null).
+    case "plugin:updater|check": {
+      const u = mockFlag("fotwMockUpdate");
+      return u === "available" || u === "fail"
+        ? { rid: 1, currentVersion: "2.3.0", version: "2.4.0", date: null, body: "", rawJson: {} }
+        : null;
+    }
+    case "plugin:updater|download":
+      return mockFlag("fotwMockUpdate") === "fail"
+        ? Promise.reject(new Error("download failed: connection reset by peer"))
+        : new Promise(() => {});
+    case "pause_recording":
+      mockRecPaused = true;
+      return recordingStatus();
+    case "resume_recording":
+      mockRecPaused = false;
+      return recordingStatus();
+    case "stop_recording":
+      // the capture ends; the meeting comes back like the backend's
+      mockRecPaused = false;
+      if (typeof localStorage !== "undefined") localStorage.removeItem("fotwMockRecording");
+      return meeting("n1");
     default:
       return null;
   }
 }
 
+/* ---- import: one file fails to convert (fotwMockImportFail) ----
+   Mirrors import_transcribe's per-file attribution: every file in the order
+   is converted, the bad one emits import:progress "failed" with its cause,
+   and the call resolves with the queue back at idle (started: false) so the
+   row shows its cause and the queue offers Retry. Fails once per page load. */
+let mockImportFailedOnce = false;
+const MOCK_CONVERT_CAUSE = "This file looks damaged or incomplete, so its audio can't be read.";
+function mockImportConvertFailure(order: string[]) {
+  if (!mockImport || mockImportFailedOnce || mockFlag("fotwMockImportFail") !== "1") return null;
+  if (!order.includes("if-2")) return null;
+  mockImportFailedOnce = true;
+  const current = mockImport;
+  const files = order
+    .map((id) => current.files.find((f) => f.id === id))
+    .filter((f): f is MockImportFile => f != null && f.error == null)
+    .map((f) => ({ ...f, convert_error: f.id === "if-2" ? MOCK_CONVERT_CAUSE : null }));
+  return new Promise((resolve) => {
+    let t = 200;
+    for (const f of files) {
+      const id = f.id;
+      window.setTimeout(
+        () =>
+          mockEmit("import:progress", {
+            meeting_id: IMPORT_MEETING_ID,
+            file_id: id,
+            stage: "converting",
+          }),
+        t,
+      );
+      t += 900;
+      window.setTimeout(
+        () =>
+          mockEmit("import:progress", {
+            meeting_id: IMPORT_MEETING_ID,
+            file_id: id,
+            stage: id === "if-2" ? "failed" : "converted",
+            error: id === "if-2" ? MOCK_CONVERT_CAUSE : null,
+          }),
+        t,
+      );
+    }
+    window.setTimeout(() => {
+      mockImport = { ...current, files, boundaries_ms: [], started: false };
+      resolve(mockImport);
+    }, t + 400);
+  });
+}
+
+/* ---- recording bar QA ----
+   fotwMockRecWarning swaps the active capture's warnings for the backend's
+   exact sentences (fly-audio cpal_backend.rs / tap_messages.rs), so each
+   warning chip can be checked; pause_recording / resume_recording round-trip
+   through mockRecPaused. Returns null to keep the original fixture. */
+let mockRecPaused = false;
+const MOCK_REC_WARNINGS: Record<string, string[]> = {
+  none: [],
+  muted: [
+    "System output is muted — the other participants' audio will record as silence. Unmute your speakers.",
+  ],
+  volume: [
+    "System volume is at 0% — the other participants' audio will record as silence. Raise your system volume.",
+  ],
+  loopback: [
+    "System audio capture couldn't start (no default output device) — only your microphone is being recorded, so the other participants won't be in this recording.",
+  ],
+  worst: [
+    "System audio capture couldn't start (no default output device) — only your microphone is being recorded, so the other participants won't be in this recording.",
+    "System volume is at 0% — the other participants' audio will record as silence. Raise your system volume.",
+  ],
+  macos: [
+    "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall. If it already shows as allowed, the grant belongs to a previously installed build: remove Fly on the Wall from that list with the − button and re-add it (or run `tccutil reset ScreenCapture com.flyonthewall.app` in Terminal), then relaunch.",
+  ],
+};
+function mockRecordingQa() {
+  if (mockFlag("fotwMockRecording") !== "1") return null;
+  const which = mockFlag("fotwMockRecWarning");
+  if (which == null && !mockRecPaused) return null;
+  return {
+    active: true,
+    state: mockRecPaused ? "paused" : "recording",
+    elapsed_ms: which === "worst" ? 3_723_000 : 154_000,
+    meeting_id: "m1",
+    note_id: "n1",
+    warnings: which != null ? (MOCK_REC_WARNINGS[which] ?? []) : (MOCK_REC_WARNINGS.muted ?? []),
+  };
+}
+
 function installDevMock() {
+  // fotwMockCalendar = "none": start with no calendar connected (see above).
+  if (mockFlag("fotwMockCalendar") === "none") calendarStatus.google_connected = false;
   const callbacks: Record<number, (payload: unknown) => void> = {};
   const listeners: Record<string, number[]> = {};
   let cbId = 1;

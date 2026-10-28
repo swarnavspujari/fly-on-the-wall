@@ -23,13 +23,36 @@ pub struct NoteSummary {
     /// the note's `created_at` for meeting-less notes. List views sort by and
     /// display this date.
     pub happened_at: chrono::DateTime<Utc>,
+    // Read-only status for the list's chips, computed by the query (nothing
+    // is stored; IPC only).
+    /// The note's meeting has a transcript.
+    #[serde(default)]
+    pub has_transcript: bool,
+    /// An enhanced doc exists (`blocks_json` isn't empty). Not "has AI
+    /// blocks": AI blocks the user edits become user blocks and still count.
+    #[serde(default)]
+    pub has_enhanced_doc: bool,
+    /// The meeting's audio is on disk to transcribe (recorded, and not
+    /// removed by retention).
+    #[serde(default)]
+    pub has_recording: bool,
+    /// The meeting's transcription job: queued | running | done | failed.
+    /// None when it never went through the queue.
+    #[serde(default)]
+    pub job_status: Option<String>,
 }
 
 /// Shared SELECT for summary rows: joins the note's meeting so `happened_at`
-/// (COALESCE(meeting started_at, note created_at)) comes back as column 5.
+/// (COALESCE(meeting started_at, note created_at)) comes back as column 5,
+/// then the chip status as columns 6-9 (primary-key joins, no scans).
 const SUMMARY_SELECT: &str = "SELECT n.id, n.title, n.folder_id, n.meeting_id, n.updated_at,
-            COALESCE(m.started_at, n.created_at) AS happened_at
-     FROM notes n LEFT JOIN meetings m ON m.id = n.meeting_id";
+            COALESCE(m.started_at, n.created_at) AS happened_at,
+            EXISTS(SELECT 1 FROM transcripts t WHERE t.meeting_id = n.meeting_id),
+            n.blocks_json <> '[]',
+            m.recording_json IS NOT NULL AND m.audio_deleted_at IS NULL,
+            j.status
+     FROM notes n LEFT JOIN meetings m ON m.id = n.meeting_id
+     LEFT JOIN transcription_jobs j ON j.meeting_id = n.meeting_id";
 
 impl Storage {
     pub fn create_note(&self, title: &str, folder_id: Option<&str>) -> Result<Note> {
@@ -206,6 +229,20 @@ impl Storage {
         if markdown.trim().is_empty() {
             blocks.retain(|b| b.id != block_id);
         }
+        self.update_note_blocks(id, &blocks)
+    }
+
+    /// Keep one block as the user's own text, unchanged ("Keep" on an AI
+    /// line with no source). An edit only reclaims when the text changes, so
+    /// this is the explicit form of the same rule.
+    pub fn keep_note_block(&self, id: &str, block_id: &str) -> Result<Note> {
+        let note = self.get_note(id)?;
+        let mut blocks = note.blocks;
+        blocks
+            .iter_mut()
+            .find(|b| b.id == block_id)
+            .ok_or_else(|| StorageError::NotFound(format!("block {block_id}")))?
+            .reclaim();
         self.update_note_blocks(id, &blocks)
     }
 
@@ -426,6 +463,10 @@ fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteSummary> {
         meeting_id: r.get(3)?,
         updated_at: parse_ts(r.get::<_, String>(4)?),
         happened_at: parse_ts(r.get::<_, String>(5)?),
+        has_transcript: r.get(6)?,
+        has_enhanced_doc: r.get(7)?,
+        has_recording: r.get(8)?,
+        job_status: r.get(9)?,
     })
 }
 
@@ -474,6 +515,30 @@ mod tests {
         s.delete_note(&note.id).unwrap();
         assert!(s.get_note(&note.id).is_err());
         assert!(!mirror.exists());
+    }
+
+    #[test]
+    fn keep_and_remove_an_unsourced_ai_block() {
+        use fly_core::{BlockOrigin, NoteBlock};
+        let (_dir, s) = test_storage();
+        let note = s.create_note("Launch", None).unwrap();
+        let kept = NoteBlock::ai("Launch likely moves to May.", vec![]);
+        let dropped = NoteBlock::ai("Budget is final.", vec![]);
+        s.update_note_blocks(&note.id, &[kept.clone(), dropped.clone()])
+            .unwrap();
+
+        // Keep: same text, now the user's
+        let after = s.keep_note_block(&note.id, &kept.id).unwrap();
+        let b = after.blocks.iter().find(|b| b.id == kept.id).unwrap();
+        assert_eq!(b.origin, BlockOrigin::User);
+        assert_eq!(b.markdown, "Launch likely moves to May.");
+
+        // Remove = an edit to empty text, which drops the block
+        let after = s.edit_note_block(&note.id, &dropped.id, "").unwrap();
+        assert_eq!(after.blocks.len(), 1);
+        assert_eq!(after.blocks[0].id, kept.id);
+
+        assert!(s.keep_note_block(&note.id, "nope").is_err());
     }
 
     #[test]
@@ -544,5 +609,136 @@ mod tests {
             unfiled.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
             vec![plain.id.as_str(), old.id.as_str()]
         );
+    }
+
+    /// The list's status columns, one storage state per test.
+    mod summary_status {
+        use crate::{test_storage, NoteSummary, Storage};
+        use fly_core::{NoteBlock, RecordingRef, Transcript};
+
+        fn only(s: &Storage) -> NoteSummary {
+            let mut rows = s.list_recent_notes(10).unwrap();
+            assert_eq!(rows.len(), 1);
+            let row = rows.remove(0);
+            // the folder query reads the same columns
+            let unfiled = s.list_notes_in_folder(None).unwrap();
+            assert_eq!(unfiled[0].has_transcript, row.has_transcript);
+            assert_eq!(unfiled[0].job_status, row.job_status);
+            row
+        }
+
+        /// A note with a meeting that recorded into `recordings/<folder>`.
+        fn recorded(s: &Storage, data_dir: &std::path::Path, folder: &str) -> String {
+            let note = s.create_note(folder, None).unwrap();
+            let m = s.create_meeting(folder, &note.id, &[]).unwrap();
+            std::fs::create_dir_all(data_dir.join("recordings").join(folder)).unwrap();
+            s.end_meeting(
+                &m.id,
+                &RecordingRef {
+                    mic_path: Some(format!("recordings/{folder}/recording.mic.wav")),
+                    system_path: None,
+                    mixed_path: None,
+                    playback_path: None,
+                    duration_ms: 1_000,
+                },
+            )
+            .unwrap();
+            m.id
+        }
+
+        fn transcribe(s: &Storage, meeting_id: &str) {
+            s.save_transcript(&Transcript {
+                meeting_id: meeting_id.to_string(),
+                language: None,
+                engine: "whisper.cpp".into(),
+                segments: vec![],
+                speakers: vec![],
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn notes_only() {
+            let (_d, s) = test_storage();
+            s.create_note("typed", None).unwrap();
+            let r = only(&s);
+            assert!(r.meeting_id.is_none());
+            assert!(!r.has_transcript && !r.has_enhanced_doc && !r.has_recording);
+            assert_eq!(r.job_status, None);
+        }
+
+        #[test]
+        fn recorded_not_transcribed() {
+            let (d, s) = test_storage();
+            recorded(&s, d.path(), "rec");
+            let r = only(&s);
+            assert!(r.has_recording);
+            assert!(!r.has_transcript);
+            assert_eq!(r.job_status, None);
+        }
+
+        #[test]
+        fn meeting_without_audio_has_no_recording() {
+            let (_d, s) = test_storage();
+            let note = s.create_note("live", None).unwrap();
+            s.create_meeting("live", &note.id, &[]).unwrap();
+            assert!(!only(&s).has_recording);
+        }
+
+        #[test]
+        fn job_queued_running_done_failed() {
+            let (d, s) = test_storage();
+            let m = recorded(&s, d.path(), "job");
+            s.enqueue_transcription(&m).unwrap();
+            assert_eq!(only(&s).job_status.as_deref(), Some("queued"));
+            s.mark_transcription_running(&m).unwrap();
+            assert_eq!(only(&s).job_status.as_deref(), Some("running"));
+            s.mark_transcription_failed(&m, 3, "boom").unwrap();
+            assert_eq!(only(&s).job_status.as_deref(), Some("failed"));
+            s.enqueue_transcription(&m).unwrap();
+            s.mark_transcription_done(&m).unwrap();
+            assert_eq!(only(&s).job_status.as_deref(), Some("done"));
+        }
+
+        #[test]
+        fn transcribed() {
+            let (d, s) = test_storage();
+            let m = recorded(&s, d.path(), "tx");
+            transcribe(&s, &m);
+            let r = only(&s);
+            assert!(r.has_transcript);
+            assert!(!r.has_enhanced_doc);
+        }
+
+        #[test]
+        fn enhanced_doc_counts_any_block_and_clears_when_emptied() {
+            let (d, s) = test_storage();
+            let m = recorded(&s, d.path(), "enh");
+            transcribe(&s, &m);
+            let note_id = s.list_recent_notes(1).unwrap()[0].id.clone();
+            s.update_note_blocks(&note_id, &[NoteBlock::ai("Decided X", vec![])])
+                .unwrap();
+            assert!(only(&s).has_enhanced_doc);
+            // an AI block the user kept is a user block now: still a doc
+            s.update_note_blocks(&note_id, &[NoteBlock::user("Decided X")])
+                .unwrap();
+            assert!(only(&s).has_enhanced_doc);
+            // every block deleted: back to "ready to enhance"
+            s.update_note_blocks(&note_id, &[]).unwrap();
+            let r = only(&s);
+            assert!(!r.has_enhanced_doc);
+            assert!(r.has_transcript);
+        }
+
+        #[test]
+        fn audio_deleted_by_retention_is_not_a_recording() {
+            let (d, s) = test_storage();
+            let m = recorded(&s, d.path(), "old");
+            transcribe(&s, &m);
+            s.delete_meeting_audio(&m).unwrap();
+            let r = only(&s);
+            assert!(!r.has_recording, "nothing left to re-transcribe");
+            assert!(r.has_transcript, "the transcript stays");
+        }
     }
 }

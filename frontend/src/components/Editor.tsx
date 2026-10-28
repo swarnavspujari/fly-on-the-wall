@@ -26,7 +26,6 @@ import {
   List,
   Lock,
   LockOpen,
-  MessageSquare,
   Mic,
   Monitor,
   Paperclip,
@@ -40,6 +39,7 @@ import {
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import { PRIVACY_CHANGED_EVENT, isKeptLocal, keepLocalTitle } from "../privacy";
+import { templateSections } from "../enhancedTrust";
 import { fmtElapsed } from "./RecordingBar";
 import { Button, Modal, SectionLabel } from "./ui";
 import AttendeeEditor from "./AttendeeEditor";
@@ -49,7 +49,7 @@ import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
 import EnhancedDoc from "./EnhancedDoc";
-import AskPanel from "./AskPanel";
+import { AskComposer, AskSheet, useAskChat, useWideWindow } from "./AskPanel";
 
 interface Props {
   note: Note;
@@ -101,6 +101,7 @@ interface Props {
 
 type View = "notes" | "transcript" | "enhanced";
 
+const NO_HIGHLIGHT: string[] = [];
 const VIDEO_RE = /\.(mp4|webm|mov|mkv|m4v)$/i;
 const isVideo = (a: Attachment) =>
   (a.mime?.startsWith("video/") ?? false) || VIDEO_RE.test(a.file_name);
@@ -306,10 +307,14 @@ function VideoStrip({
   videos,
   thumbFor,
   onOpen,
+  compact = false,
 }: {
   videos: Attachment[];
   thumbFor: (att: Attachment) => string | null;
   onOpen: (att: Attachment) => void;
+  /** A single clip shows as a small tile instead of full width (Notes and
+   *  Enhanced views, where the note itself comes first). */
+  compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   if (videos.length === 0) return null;
@@ -320,7 +325,7 @@ function VideoStrip({
         <VideoTile
           key={videos[0].id}
           att={videos[0]}
-          big
+          big={!compact}
           thumbSrc={thumbFor(videos[0])}
           onOpen={onOpen}
         />
@@ -868,6 +873,7 @@ function ViewSwitcher({
   transcriptBusy,
   onEnhance,
   enhancing,
+  children,
 }: {
   view: View;
   setView: (v: View) => void;
@@ -876,9 +882,13 @@ function ViewSwitcher({
   transcriptBusy: boolean;
   onEnhance: () => void;
   enhancing: boolean;
+  /** The Ask composer (and its answer sheet, anchored above this dock). */
+  children?: ReactNode;
 }) {
   return (
-    <div className="print:hidden absolute bottom-5 left-1/2 z-[8] flex -translate-x-1/2 items-center gap-2.5">
+    // The dock's empty space lets clicks through to the note under it; only
+    // its controls (and the answer sheet anchored to it) take them.
+    <div className="print:hidden pointer-events-none absolute bottom-5 left-1/2 z-[8] flex w-[min(760px,calc(100%-24px))] -translate-x-1/2 flex-wrap items-center justify-center gap-2.5 [&>*]:pointer-events-auto">
       <div
         className="flex items-center gap-[3px] rounded-full border border-line bg-surface p-1"
         style={{ boxShadow: "var(--shadow-lg)" }}
@@ -926,6 +936,7 @@ function ViewSwitcher({
           {enhancing ? "Enhancing…" : enhanced ? "Re-enhance" : "Enhance"}
         </button>
       )}
+      {children}
     </div>
   );
 }
@@ -975,7 +986,28 @@ export default function Editor({
   const [enhancing, setEnhancing] = useState(false);
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
   const [askOpen, setAskOpen] = useState(false);
+  // Ask chat for this note (ephemeral; resets on note switch) and whether
+  // its sheet is pinned beside the note (wide windows only; remembered).
+  const ask = useAskChat(note.id);
+  const askInputRef = useRef<HTMLTextAreaElement>(null);
+  const wideWindow = useWideWindow();
+  const [askPinPref, setAskPinPref] = useState(false);
+  useEffect(() => {
+    api
+      .getAppSetting("ui.ask.pinned")
+      .then((v) => setAskPinPref(v === "true"))
+      .catch(() => {});
+  }, []);
+  const askPinned = askPinPref && wideWindow;
+  const toggleAskPin = () => {
+    const next = !askPinPref;
+    setAskPinPref(next);
+    void api.setAppSetting("ui.ask.pinned", String(next)).catch(() => {});
+  };
   const [zoomIds, setZoomIds] = useState<string[]>([]);
+  // The recording a zoom points into: highlights wait for its transcript, so
+  // the transcript view scrolls to them once it's shown.
+  const [zoomMeetingId, setZoomMeetingId] = useState<string | null>(null);
   // Poster rel paths keyed by attachment id — doubles as a session cache when
   // switching between notes. Requested ids are tracked so each video is asked
   // for at most once per session.
@@ -1163,10 +1195,16 @@ export default function Editor({
     scheduleSave(title, next);
   };
 
-  const zoom = (segmentIds: string[]) => {
+  const zoom = (segmentIds: string[], meetingId?: string) => {
     setZoomIds(segmentIds);
+    setZoomMeetingId(meetingId ?? null);
+    // A source in an earlier recording of this note opens that recording.
+    const target = meetingId ? meetings.find((m) => m.id === meetingId) : undefined;
+    if (target && target.id !== meeting?.id) onSelectMeeting(target);
     if (hasMeeting) setView("transcript");
   };
+  const highlightIds =
+    zoomMeetingId && transcript?.meeting_id !== zoomMeetingId ? NO_HIGHLIGHT : zoomIds;
 
   // "Someone else…" in the transcript speaker dropdown: add the person to the
   // attendee list AND assign them to the speaker in one step. The attendee
@@ -1232,6 +1270,13 @@ export default function Editor({
   const showTranscript = !pendingImport && view === "transcript" && hasMeeting;
   const showEnhanced = !pendingImport && view === "enhanced" && enhanced;
   const showNotes = !pendingImport && !showTranscript && !showEnhanced;
+  // Screen clips show in every view: full width in Transcript, small tiles
+  // above the notes in Notes and Enhanced.
+  const clipStrip = (compact: boolean) =>
+    videos.length > 0 ? (
+      <VideoStrip videos={videos} thumbFor={videoThumbSrc} onOpen={openVideo} compact={compact} />
+    ) : null;
+  const template = templates.find((t) => t.id === templateId) ?? templates[0];
 
   return (
     <div className="flex h-full min-w-0 flex-1">
@@ -1256,15 +1301,6 @@ export default function Editor({
               onStopScreen={onStopScreen}
             />
           )}
-          <Button
-            variant={askOpen ? "soft" : "outline"}
-            size="sm"
-            onClick={() => setAskOpen((o) => !o)}
-            title="Ask questions about this meeting"
-            startIcon={<MessageSquare size={13} strokeWidth={1.75} />}
-          >
-            Ask
-          </Button>
           <span className="h-5 w-px" style={{ background: "var(--line)" }} />
           <Button
             variant="ghost"
@@ -1373,8 +1409,9 @@ export default function Editor({
           </div>
         </div>
 
-        {/* single content region — one view at a time */}
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* single content region — one view at a time (extra bottom room for
+            the dock, which wraps to two rows on narrow windows) */}
+        <div className="min-h-0 flex-1 overflow-y-auto pb-6">
           <div
             className={`mx-auto max-w-[var(--content-max)] px-6 ${showNotes ? "" : "pb-28 pt-5"}`}
           >
@@ -1456,9 +1493,7 @@ export default function Editor({
                     onFallback={playAudio}
                   />
                 )}
-                {videos.length > 0 && (
-                  <VideoStrip videos={videos} thumbFor={videoThumbSrc} onOpen={openVideo} />
-                )}
+                {clipStrip(false)}
                 <TranscriptPanel
                   meeting={meeting}
                   transcript={transcript}
@@ -1469,7 +1504,7 @@ export default function Editor({
                   pipelineError={pipelineError}
                   engine={engine}
                   engineInstalling={engineInstalling}
-                  highlightIds={zoomIds}
+                  highlightIds={highlightIds}
                   onTranscribe={onTranscribe}
                   onInstallEngine={onInstallEngine}
                   onOpenSettings={onOpenSettings}
@@ -1482,7 +1517,17 @@ export default function Editor({
 
             {/* Enhanced view */}
             {showEnhanced && (
-              <EnhancedDoc note={note} onNoteChanged={onNoteChanged} onZoom={zoom} />
+              <>
+                {clipStrip(true)}
+                <EnhancedDoc
+                  note={note}
+                  onNoteChanged={onNoteChanged}
+                  onZoom={zoom}
+                  transcript={transcript}
+                  meetings={meetings}
+                  enhancing={enhancing}
+                />
+              </>
             )}
           </div>
 
@@ -1493,7 +1538,13 @@ export default function Editor({
               markdown={scratchpad}
               revision={notesRev}
               onChange={onNotesChange}
-              placeholder="Write your notes… they'll merge with the transcript when you enhance."
+              placeholder={
+                hasMeeting
+                  ? "Write what matters to you. Enhance keeps your words and fills in the rest from the transcript."
+                  : "Write your notes. Enhance keeps your words and sorts them into sections."
+              }
+              sections={template ? templateSections(template.structure_hint) : []}
+              header={showNotes ? clipStrip(true) : null}
             />
           </div>
         </div>
@@ -1508,12 +1559,46 @@ export default function Editor({
             transcriptBusy={!!pipeStage || isRecordingThisNote}
             onEnhance={() => void enhance()}
             enhancing={enhancing}
-          />
+          >
+            <AskComposer
+              chat={ask}
+              inputRef={askInputRef}
+              open={askOpen}
+              onOpen={() => setAskOpen(true)}
+              placeholder={hasMeeting ? "Ask about this meeting" : "Ask about this note"}
+            />
+            {askOpen && !askPinned && (
+              <AskSheet
+                chat={ask}
+                inputRef={askInputRef}
+                hasMeeting={hasMeeting}
+                keptLocal={isKeptLocal(privacy)}
+                pinned={false}
+                canPin={wideWindow}
+                onTogglePin={toggleAskPin}
+                onClose={() => setAskOpen(false)}
+                onInsert={insertFromAsk}
+              />
+            )}
+          </ViewSwitcher>
         )}
       </div>
 
-      {askOpen && (
-        <AskPanel noteId={note.id} onInsert={insertFromAsk} onClose={() => setAskOpen(false)} />
+      {/* Pinned Ask sheet: a column beside the note on wide windows */}
+      {askOpen && askPinned && !pendingImport && (
+        <div className="print:hidden relative flex-none" style={{ width: "var(--ask-pinned-w)" }}>
+          <AskSheet
+            chat={ask}
+            inputRef={askInputRef}
+            hasMeeting={hasMeeting}
+            keptLocal={isKeptLocal(privacy)}
+            pinned
+            canPin={wideWindow}
+            onTogglePin={toggleAskPin}
+            onClose={() => setAskOpen(false)}
+            onInsert={insertFromAsk}
+          />
+        </div>
       )}
 
       {lightboxAtt && (

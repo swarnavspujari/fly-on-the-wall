@@ -257,6 +257,12 @@ pub fn move_note(
 /// meetings are purged on the spot.
 #[tauri::command]
 pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    // The note being recorded keeps its meeting and recordings folder: the
+    // purge below would delete the files the capture is writing.
+    {
+        let rec = state.recording.lock().unwrap();
+        delete_allowed_while_recording(&id, rec.as_ref().map(|r| r.note_id.as_str()))?;
+    }
     let meetings = state
         .storage
         .lock()
@@ -288,17 +294,29 @@ pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String
     Ok(())
 }
 
+/// A note can't be deleted while it's the one recording.
+fn delete_allowed_while_recording(note_id: &str, recording_note_id: Option<&str>) -> CmdResult<()> {
+    if recording_note_id == Some(note_id) {
+        return Err("Stop the recording before deleting this note.".into());
+    }
+    Ok(())
+}
+
 /// Stop a queued or running transcription (the import queue's Cancel).
 /// Completed batches stay checkpointed, so a later Transcribe resumes
 /// instead of redoing them; the staged import queue drops back to idle.
+/// Always ends in a terminal "cancelled" event, even with nothing running.
 #[tauri::command]
 pub fn cancel_transcription(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     meeting_id: String,
 ) -> CmdResult<()> {
-    crate::import_commands::reset_staged_started(&state, &meeting_id);
-    crate::scheduler::cancel(&state, &crate::scheduler::stage_emitter(&app), &meeting_id)
+    crate::import_commands::cancel_staged_transcription(
+        &state,
+        &crate::scheduler::stage_emitter(&app),
+        &meeting_id,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -684,5 +702,22 @@ mod security_tests {
             }
             assert!(!ok(bad), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod delete_guard_tests {
+    use super::delete_allowed_while_recording as allowed;
+
+    #[test]
+    fn the_recording_note_cannot_be_deleted() {
+        let err = allowed("n1", Some("n1")).unwrap_err();
+        assert_eq!(err, "Stop the recording before deleting this note.");
+    }
+
+    #[test]
+    fn other_notes_and_idle_times_are_fine() {
+        assert!(allowed("n2", Some("n1")).is_ok());
+        assert!(allowed("n1", None).is_ok());
     }
 }

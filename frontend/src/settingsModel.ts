@@ -19,7 +19,8 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   {
     id: "recording",
     title: "Recording",
-    keywords: "microphone mic input audio device transcribe when i stop automatically auto",
+    keywords:
+      "microphone mic input audio device transcribe when i stop automatically auto remind me tell people participants recording notice consent",
   },
   {
     id: "transcripts",

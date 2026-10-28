@@ -44,6 +44,16 @@ export interface NoteSummary {
   /** When the note's meeting happened (started_at), else the note's
    * created_at — list order and the date shown in rows. */
   happened_at: string;
+  /* List status (read-only, computed by the query). Optional: summaries
+   * cached in localStorage before these existed lack them. */
+  /** The note's meeting has a transcript. */
+  has_transcript?: boolean;
+  /** An enhanced doc exists (any blocks, including AI blocks the user kept). */
+  has_enhanced_doc?: boolean;
+  /** The meeting's audio is on disk (not removed by retention). */
+  has_recording?: boolean;
+  /** Transcription job: "queued" | "running" | "done" | "failed"; null = none. */
+  job_status?: string | null;
 }
 
 export interface SearchHit {
@@ -376,6 +386,9 @@ export interface ImportFile {
   /** Source copy inside the data dir (null for unsupported files). */
   rel_path: string | null;
   error: string | null;
+  /** Why this file's audio couldn't be converted on the last Transcribe
+   *  (the file stays staged, so Retry can try it again). */
+  convert_error?: string | null;
 }
 
 /** A note created from imported media that hasn't been transcribed yet. */
@@ -395,7 +408,9 @@ export interface ImportStaged {
 export interface ImportProgress {
   meeting_id: string;
   file_id: string;
-  stage: "converting" | "converted";
+  stage: "converting" | "converted" | "failed";
+  /** With "failed": this file's cause (the rest of the batch carries on). */
+  error?: string | null;
 }
 
 export interface AudioDevice {

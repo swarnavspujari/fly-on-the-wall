@@ -169,14 +169,7 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 Tick::Completed(meeting_id) => {
                     // fresh transcript → new chunks for the semantic index
                     state.embed_notify.notify_one();
-                    polish_after_transcribe(&state, &on_stage, &meeting_id).await;
-                    // Structured item extraction rides the same best-effort
-                    // train: enrichment only, never blocks or fails the job.
-                    let _ = tokio::time::timeout(
-                        POLISH_TIMEOUT,
-                        crate::extraction::extract_after_transcribe(&state, &meeting_id),
-                    )
-                    .await;
+                    ai_pass(&app, &state, &on_stage, &meeting_id).await;
                     emit_final(&on_stage, &meeting_id, None)
                 }
                 Tick::Retrying {
@@ -207,12 +200,110 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     });
 }
 
+/// The best-effort AI pass after a transcription: cleanup, then structured
+/// item extraction. Enrichment only, it never blocks or fails the job. A
+/// meeting either step skipped for missing cloud consent is remembered
+/// (`AppState::consent_skipped`); the current list goes out as
+/// `llm:consent-skips` so the app's notice can offer to run them.
+async fn ai_pass<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    on_stage: StageSink<'_>,
+    meeting_id: &str,
+) {
+    // This run decides it afresh; a refusal below puts it back.
+    state.consent_skipped.lock().unwrap().remove(meeting_id);
+    polish_after_transcribe(state, on_stage, meeting_id).await;
+    let _ = tokio::time::timeout(
+        POLISH_TIMEOUT,
+        crate::extraction::extract_after_transcribe(state, meeting_id),
+    )
+    .await;
+    let skipped: Vec<String> = state
+        .consent_skipped
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    let _ = app.emit("llm:consent-skips", skipped);
+}
+
+/// Run the AI pass again for every meeting it skipped for missing consent
+/// (the user has just allowed the provider). In the background, one meeting
+/// at a time, with the same "polishing" marker and final event as after a
+/// transcription, so an open note shows the cleaned transcript when it lands.
+/// Returns how many meetings it took on.
+pub fn retry_consent_skipped<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> usize {
+    let ids = take_consent_rerun(&app.state::<AppState>());
+    let count = ids.len();
+    if count == 0 {
+        return 0;
+    }
+    tauri::async_runtime::spawn(async move {
+        let on_stage = stage_emitter(&app);
+        let state = app.state::<AppState>();
+        for meeting_id in ids {
+            // Checked again: one may have started or failed since.
+            if !consent_rerun_allowed(&state, &meeting_id) {
+                continue;
+            }
+            ai_pass(&app, &state, &on_stage, &meeting_id).await;
+            emit_final(&on_stage, &meeting_id, None);
+        }
+    });
+    count
+}
+
+/// Empty the consent-skipped list and return the meetings the re-run should
+/// take. The rest are dropped, not kept for later. A meeting being
+/// transcribed again gets its own AI pass from that run. A meeting whose last
+/// transcription failed keeps its failure notice: the re-run would end in a
+/// "done" event, which clears that notice and the note's inline error.
+fn take_consent_rerun(state: &AppState) -> Vec<String> {
+    let taken = std::mem::take(&mut *state.consent_skipped.lock().unwrap());
+    taken
+        .into_iter()
+        .filter(|id| consent_rerun_allowed(state, id))
+        .collect()
+}
+
+/// See [`take_consent_rerun`]: not while it's being transcribed, and not
+/// over a held transcription failure.
+fn consent_rerun_allowed(state: &AppState, meeting_id: &str) -> bool {
+    !state
+        .pipeline_stage
+        .lock()
+        .unwrap()
+        .contains_key(meeting_id)
+        && last_failure(state, meeting_id).is_none()
+}
+
+/// Why this meeting's transcription last gave up: the error of a job parked
+/// as failed. The terminal error event is fire-and-forget, so a note opened
+/// later (another note was open, or the app restarted) reads it from here.
+/// None while a job is queued or running, after success, or with no job.
+pub fn last_failure(state: &AppState, meeting_id: &str) -> Option<String> {
+    let job = state
+        .storage
+        .lock()
+        .unwrap()
+        .transcription_job(meeting_id)
+        .ok()
+        .flatten()?;
+    (job.status == fly_storage::JOB_FAILED).then(|| {
+        job.last_error
+            .unwrap_or_else(|| "Transcription failed.".into())
+    })
+}
+
 /// Stop transcription work for a meeting. A pipeline that is actually
 /// running gets a cooperative cancel request and unwinds at its next batch
 /// boundary (cheap — completed batches are checkpointed); the worker then
 /// finishes up via [`Tick::Cancelled`]. A merely queued/waiting job is
 /// removed on the spot and the terminal "cancelled" event emitted here.
-pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Result<(), String> {
+/// Returns whether anything was in flight (so "cancelled" is out or coming).
+pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Result<bool, String> {
     let running = {
         let stages = state.pipeline_stage.lock().unwrap();
         matches!(stages.get(meeting_id).map(String::as_str), Some(s) if s != WAITING_STAGE)
@@ -223,7 +314,7 @@ pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Re
             .lock()
             .unwrap()
             .insert(meeting_id.to_string());
-        return Ok(());
+        return Ok(true);
     }
     let had_job = {
         let storage = state.storage.lock().unwrap();
@@ -249,7 +340,7 @@ pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Re
         state.pipeline_stage.lock().unwrap().remove(meeting_id);
         emit_cancelled(on_stage, meeting_id);
     }
-    Ok(())
+    Ok(had_job)
 }
 
 /// After a cancelled run winds down: if the owning note is gone (the cancel
@@ -275,7 +366,7 @@ pub fn finish_cancelled(state: &AppState, on_stage: StageSink<'_>, meeting_id: &
 
 /// Terminal event for a cancelled run: done, but neither success nor error —
 /// the frontend drops back to the pre-transcribe state.
-fn emit_cancelled(on_stage: StageSink<'_>, meeting_id: &str) {
+pub(crate) fn emit_cancelled(on_stage: StageSink<'_>, meeting_id: &str) {
     on_stage(PipelineProgress {
         meeting_id: meeting_id.to_string(),
         stage: "cancelled".into(),
@@ -310,6 +401,7 @@ async fn polish_after_transcribe(state: &AppState, on_stage: StageSink<'_>, meet
             "transcript cleanup done"
         ),
         Ok(Err(e)) => {
+            crate::llm_commands::record_consent_skip(state, meeting_id, &e);
             tracing::info!(meeting_id, error = %e, "transcript cleanup skipped (raw transcript stands)")
         }
         Err(_) => {
@@ -422,6 +514,47 @@ fn set_job_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Review and allow" re-runs only meetings it can finish cleanly. One
+    /// whose last transcription failed keeps its failure notice (a re-run's
+    /// "done" event would clear it), and one being transcribed now gets the
+    /// pass from that run. Both leave the list rather than wait in it.
+    #[test]
+    fn consent_rerun_skips_held_failures_and_running_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        {
+            let storage = state.storage.lock().unwrap();
+            storage.enqueue_transcription("m-failed").unwrap();
+            storage
+                .mark_transcription_failed("m-failed", 1, "whisper-cli crashed")
+                .unwrap();
+            // a finished job is fine: done, not failed
+            storage.enqueue_transcription("m-done").unwrap();
+            storage.mark_transcription_done("m-done").unwrap();
+        }
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .insert("m-running".into(), "transcribing".into());
+        state
+            .consent_skipped
+            .lock()
+            .unwrap()
+            .extend(["m-ok", "m-done", "m-failed", "m-running"].map(String::from));
+
+        assert!(last_failure(&state, "m-failed").is_some());
+        assert_eq!(take_consent_rerun(&state), vec!["m-done", "m-ok"]);
+        assert!(state.consent_skipped.lock().unwrap().is_empty());
+        assert!(!consent_rerun_allowed(&state, "m-failed"));
+        assert!(!consent_rerun_allowed(&state, "m-running"));
+        assert!(consent_rerun_allowed(&state, "m-ok"));
+    }
 
     #[test]
     fn rejected_cloud_errors_are_permanent() {

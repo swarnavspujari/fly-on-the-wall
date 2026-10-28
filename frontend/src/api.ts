@@ -2,6 +2,13 @@
 // invoke() directly — everything crosses this one seam.
 
 import { invoke } from "@tauri-apps/api/core";
+
+/** Window event after the saved AI provider or a cloud consent changes, so
+ *  views that name the provider (the skipped-cleanup notice) re-read it. */
+export const LLM_SETTINGS_CHANGED_EVENT = "fotw:llm-settings-changed";
+const llmSettingsChanged = (): void => {
+  window.dispatchEvent(new Event(LLM_SETTINGS_CHANGED_EVENT));
+};
 import type {
   CalendarAttendee,
   MeetingSeed,
@@ -131,6 +138,9 @@ export const api = {
   editTranscriptSegment: (meetingId: string, segmentId: string, text: string) =>
     invoke<Transcript>("edit_transcript_segment", { meetingId, segmentId, text }),
   pipelineStage: (meetingId: string) => invoke<string | null>("pipeline_stage", { meetingId }),
+  // Why the meeting's transcription last gave up (null = it didn't): the
+  // terminal error event is gone once you reopen the note or restart.
+  pipelineFailure: (meetingId: string) => invoke<string | null>("pipeline_failure", { meetingId }),
 
   // attendees & attendee-informed diarization
   // Replaces the list and marks it user-confirmed. Never re-transcribes.
@@ -161,13 +171,21 @@ export const api = {
   saveTemplate: (template: Template) => invoke<void>("save_template", { template }),
   deleteTemplate: (id: string) => invoke<void>("delete_template", { id }),
   getLlmSettings: () => invoke<LlmSettings>("get_llm_settings"),
-  setLlmSettings: (update: LlmSettingsUpdate) => invoke<void>("set_llm_settings", { update }),
+  setLlmSettings: (update: LlmSettingsUpdate) =>
+    invoke<void>("set_llm_settings", { update }).then(llmSettingsChanged),
   testLlmConnection: () => invoke<string>("test_llm_connection"),
+  // Meetings whose cleanup / action items were skipped for missing cloud
+  // consent this session (updates arrive as "llm:consent-skips"), and the
+  // re-run once the provider is allowed (background; returns how many).
+  consentSkippedMeetings: () => invoke<string[]>("consent_skipped_meetings"),
+  retryConsentSkipped: () => invoke<number>("retry_consent_skipped"),
   // structured item extraction (decisions / action items / figures …)
   extractMeetingItems: (meetingId: string) =>
     invoke<number>("extract_meeting_items", { meetingId }),
   backfillMeetingItems: () =>
-    invoke<{ processed: number; extracted: number; failed: number }>("backfill_meeting_items"),
+    invoke<{ processed: number; extracted: number; failed: number; first_error: string | null }>(
+      "backfill_meeting_items",
+    ),
   pendingBackfillCount: () => invoke<number>("pending_backfill_count"),
 
   // managed Ollama (local AI provider)
@@ -237,4 +255,9 @@ export const api = {
   deleteAllData: (includeModels: boolean, confirmation: string) =>
     invoke<WipeReport>("delete_all_data", { includeModels, confirmation }),
   diskEncryptionStatus: () => invoke<DiskEncryption>("disk_encryption_status"),
+
+  /** "Keep" an enhanced block as your own text, unchanged (an AI line with no
+   *  source becomes yours). To remove one, edit it to empty text. */
+  keepNoteBlock: (noteId: string, blockId: string) =>
+    invoke<Note>("keep_note_block", { noteId, blockId }),
 };

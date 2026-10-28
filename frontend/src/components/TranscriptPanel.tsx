@@ -3,6 +3,7 @@ import type { Meeting, ModelProgress, Transcript } from "../types";
 import { ChevronDown, FileDown, Plus, RefreshCw } from "lucide-react";
 import { api } from "../api";
 import { fmtElapsed } from "./RecordingBar";
+import { useConfirm } from "./confirm";
 import { Avatar, Button, ProgressBar, SectionLabel, speakerColor } from "./ui";
 import { briefError, selectPipelineNotice } from "../pipelineNotice";
 import { WHISPER_ENGINE_ID } from "../types";
@@ -373,6 +374,7 @@ export default function TranscriptPanel({
   onAssignNewAttendee,
   onEditSegment,
 }: Props) {
+  const confirm = useConfirm();
   const segRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // Cleaned-by-default when the polish pass has run; "Raw" shows the exact
   // ASR output. Edits apply to both variants (same segment ids).
@@ -499,7 +501,7 @@ export default function TranscriptPanel({
               className="mt-2 rounded-lg border border-line px-3 py-2 text-[13px]"
               style={{ background: "var(--error-soft)", color: "var(--error-text)" }}
             >
-              {pipelineError}
+              {briefError(pipelineError)}
             </div>
           )
         )}
@@ -609,15 +611,17 @@ export default function TranscriptPanel({
             size="sm"
             title="Re-process this recording with the current model settings"
             startIcon={<RefreshCw size={13} strokeWidth={1.75} />}
-            onClick={() => {
-              if (
-                confirm(
-                  "Re-run transcription for this meeting?\n\nThis reprocesses the recording with your current model settings and replaces the transcript — manual line edits and speaker renames for this meeting will be lost.",
-                )
-              ) {
-                onTranscribe();
-              }
-            }}
+            onClick={() =>
+              void confirm({
+                title: "Re-run transcription for this meeting?",
+                message:
+                  "This reprocesses the recording with your current model settings and replaces the transcript. Manual line edits and speaker renames for this meeting will be lost.",
+                confirmLabel: "Re-run transcription",
+                tone: "danger",
+              }).then((ok) => {
+                if (ok) onTranscribe();
+              })
+            }
           >
             Re-run transcription
           </Button>

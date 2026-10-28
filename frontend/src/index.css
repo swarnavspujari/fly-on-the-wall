@@ -799,3 +799,30 @@
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ---------- Ask (v2.4): answer sheet over the note, anchored to the dock ---------- */
+:root {
+  --ask-pinned-w: 380px; /* the sheet pinned beside the note (windows ≥ 1440px) */
+}
+/* Rendered inside the dock (view switcher + composer), so it sits just above
+   it at the dock's width whether the dock is one row or two. */
+.fly-ask-sheet.fly-sheet--bottom {
+  top: auto;
+  bottom: calc(100% + 10px);
+  max-height: min(560px, calc(100vh - 240px));
+  border-bottom: 1px solid var(--line);
+  border-radius: 18px;
+}
+.fly-ask-sheet.fly-sheet--bottom .fly-sheet-head,
+.fly-ask-sheet--pinned .fly-sheet-head {
+  padding: 10px 14px 10px 16px;
+}
+/* Pinned: a full-height column beside the note, not a floating card. */
+.fly-ask-sheet--pinned.fly-sheet--right {
+  width: 100%;
+  border-top: 0;
+  border-bottom: 0;
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
+}
