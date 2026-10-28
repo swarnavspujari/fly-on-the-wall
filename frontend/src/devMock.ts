@@ -56,6 +56,11 @@ const noteMeta = [
     meeting_id: "m1",
     updated_at: ago(1),
     happened_at: ago(30),
+    // list status (computed by the backend query): Enhanced
+    has_transcript: true,
+    has_enhanced_doc: true,
+    has_recording: true,
+    job_status: "done",
   },
   {
     id: "n2",
@@ -64,6 +69,11 @@ const noteMeta = [
     meeting_id: "m2",
     updated_at: ago(120),
     happened_at: ago(180),
+    // Ready to enhance
+    has_transcript: true,
+    has_enhanced_doc: false,
+    has_recording: true,
+    job_status: "done",
   },
   {
     id: "n3",
@@ -72,6 +82,11 @@ const noteMeta = [
     meeting_id: null,
     updated_at: ago(1500),
     happened_at: ago(1500),
+    // Notes only
+    has_transcript: false,
+    has_enhanced_doc: false,
+    has_recording: false,
+    job_status: null,
   },
   {
     id: "n4",
@@ -80,6 +95,11 @@ const noteMeta = [
     meeting_id: "m4",
     updated_at: ago(2900),
     happened_at: ago(2900),
+    // Queued (waiting, or requeued after a crash)
+    has_transcript: false,
+    has_enhanced_doc: false,
+    has_recording: true,
+    job_status: "queued",
   },
   {
     id: "n5",
@@ -88,6 +108,11 @@ const noteMeta = [
     meeting_id: "m5",
     updated_at: ago(5800),
     happened_at: ago(5800),
+    // Failed
+    has_transcript: false,
+    has_enhanced_doc: false,
+    has_recording: true,
+    job_status: "failed" as string | null,
   },
   {
     id: "n6",
@@ -96,6 +121,11 @@ const noteMeta = [
     meeting_id: null,
     updated_at: ago(8600),
     happened_at: ago(8600),
+    // Notes only
+    has_transcript: false,
+    has_enhanced_doc: false,
+    has_recording: false,
+    job_status: null,
   },
 ];
 
@@ -290,6 +320,11 @@ function importStage() {
       meeting_id: IMPORT_MEETING_ID,
       updated_at: nowIso(),
       happened_at: nowIso(),
+      // staged import: no audio attached until Transcribe
+      has_transcript: false,
+      has_enhanced_doc: false,
+      has_recording: false,
+      job_status: null,
     });
   }
   return mockImport;
