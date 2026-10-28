@@ -508,8 +508,22 @@ mod tests {
     #[test]
     fn the_committed_fixtures_load_and_validate() {
         let c = Corpus::load(&crate::evals_dir().join("fixtures")).unwrap();
-        assert!(c.meetings.len() >= 10 && c.meetings.len() <= 12);
+        assert!(c.meetings.len() >= 10);
         assert_eq!(c.keep_local_meetings().count(), 1);
+        // Long meetings: many ~160-word passages, so recall@8 measures
+        // passage ranking, not just finding the right meeting.
+        let long = c
+            .meetings
+            .iter()
+            .filter(|m| {
+                m.segments
+                    .iter()
+                    .map(|s| s.3.split_whitespace().count())
+                    .sum::<usize>()
+                    >= 2000
+            })
+            .count();
+        assert!(long >= 3, "{long} meetings of 2,000+ words");
         assert!(c.meetings.iter().any(|m| m.red_team));
         let s = c.segment("m02-04").unwrap();
         assert!(s.end_ms > s.start_ms && s.speaker == "Ines Carvalho");

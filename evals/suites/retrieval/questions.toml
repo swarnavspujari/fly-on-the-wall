@@ -474,3 +474,159 @@ visibility = "shareable"
 id = "u11"
 question = "Who replaced Ines as marketing lead?"
 why = "Nobody replaces Ines; it's never discussed."
+
+# --- long meetings (review item 8): answers deep inside ~100-segment meetings ---
+
+# --- long meetings: Q4 roadmap planning (m13) ------------------------------
+
+[[answerable]]
+id = "q13a"
+question = "Which calendar company did we end up picking for the partner integration?"
+must_cite = ["m13-066"]
+evidence = ["Larkspan", "not Orchardly"]
+answer = "Larkspan, not Orchardly; the earlier lean toward Orchardly was reversed."
+category = ["names", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q13b"
+question = "What cold start time are we aiming for on the technician app?"
+must_cite = ["m13-093"]
+evidence = ["under four seconds", "stretch goal"]
+answer = "Under four seconds on the reference Android phone; under three seconds is now only a stretch goal."
+category = ["numbers", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q13c"
+question = "When are we shutting off the old job export endpoint?"
+must_cite = ["m13-084"]
+evidence = ["thirty-first of March"]
+answer = "On the thirty-first of March, moved out from December."
+category = ["dates", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q13d"
+question = "Who's writing up the API versioning proposal, and when is it due?"
+must_cite = ["m13-077"]
+evidence = ["API versioning proposal", "ninth of October"]
+answer = "Jun is writing it himself, due Friday the ninth of October."
+category = ["names", "action_items", "near_duplicate"]
+
+[[unanswerable]]
+id = "u13"
+question = "How much is the Larkspan partnership going to cost us?"
+why = "Larkspan is picked as the calendar partner, but no fees, revenue share or other commercial terms are discussed anywhere."
+
+# --- long meetings: support operations review (m14) ------------------------
+
+[[answerable]]
+id = "q14a"
+question = "How many support tickets did we really get in September?"
+must_cite = ["m14-073"]
+evidence = ["a thousand and eighty"]
+answer = "A thousand and eighty, after Lotte took out merged duplicates and spam."
+category = ["numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q14b"
+question = "When is the switch to the new helpdesk happening?"
+must_cite = ["m14-050"]
+evidence = ["Tidepost goes live", "sixteenth of November"]
+answer = "Tidepost goes live on Monday the sixteenth of November, two weeks later than planned, with Burrowdesk read-only for a week after."
+category = ["dates", "names", "near_duplicate"]
+
+[[answerable]]
+id = "q14c"
+question = "How quickly do urgent tickets get escalated to engineering now?"
+must_cite = ["m14-084"]
+evidence = ["after two hours", "three days"]
+answer = "After two hours without a fix, shorter than the four hours first floated; everything else stays at three days."
+category = ["decisions", "numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q14d"
+question = "Who's cleaning up the support macros, and by when?"
+must_cite = ["m14-058"]
+evidence = ["ninety days", "twenty-third of October"]
+answer = "Callum, by Friday the twenty-third of October: he archives every macro unused for ninety days and rewrites the top twenty."
+category = ["names", "action_items", "near_duplicate"]
+
+[[unanswerable]]
+id = "u14"
+question = "What was our customer satisfaction score in September?"
+why = "The September support review covers volume, response times, categories, macros, escalation, staffing and the helpdesk move, but no satisfaction or CSAT score is given anywhere."
+
+# --- long meetings: answers deep inside, superseded values earlier --------
+
+[[answerable]]
+id = "q15a"
+question = "How long do we have to tell Calder Water after a security incident?"
+must_cite = ["m15-079"]
+evidence = ["forty eight hours", "old template"]
+answer = "Forty eight hours from when we confirm an incident; the seventy two hours mentioned first was our old template."
+category = ["numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q15b"
+question = "Which firm ran our most recent penetration test?"
+must_cite = ["m15-073"]
+evidence = ["Larkspire Assurance", "two years ago"]
+answer = "Larkspire Assurance did this year's test, finished in May; Ormsby Kade did the test two years ago."
+category = ["names", "near_duplicate"]
+
+[[answerable]]
+id = "q15c"
+question = "Is Calder getting its own dedicated instance for data residency?"
+must_cite = ["m15-087"]
+evidence = ["drop the dedicated instance", "residency addendum"]
+answer = "No. They stay on the shared environment, with a residency addendum stating that production data and backups stay in the US."
+category = ["decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q15d"
+question = "Who is sending Calder the corrected security questionnaire, and by when?"
+must_cite = ["m15-096"]
+evidence = ["revised questionnaire", "fourteenth of October"]
+answer = "Elena will send the revised questionnaire to Beatrix by Wednesday the fourteenth of October."
+category = ["names", "action_items", "dates"]
+
+[[unanswerable]]
+id = "u15"
+question = "How much would a dedicated single-tenant instance for Calder Water cost?"
+why = "Elena floats a dedicated instance and it is then dropped in favour of a residency addendum; no cost is ever mentioned."
+
+[[answerable]]
+id = "q16a"
+question = "Will the technician app open on the map or on a list of jobs?"
+must_cite = ["m16-057"]
+evidence = ["opens on the list", "one tap away"]
+answer = "It opens on the list, with the next job pinned at the top, and the map is one tap away on its own tab."
+category = ["decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q16b"
+question = "In the bigger usability round, how many technicians found their next job on the map layout?"
+must_cite = ["m16-047"]
+evidence = ["eight of fourteen", "thirteen of fourteen"]
+answer = "Eight of fourteen on the map, against thirteen of fourteen with the list."
+category = ["numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q16c"
+question = "Which icon set did we pick for the technician app?"
+must_cite = ["m16-068"]
+evidence = ["Marlpit icons", "instead of Pennyroyal"]
+answer = "Marlpit icons, instead of Pennyroyal."
+category = ["names", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q16d"
+question = "What are the rollout dates for the new home screen, and who is running it?"
+must_cite = ["m16-083"]
+evidence = ["ten percent of technicians", "twenty first of October", "eleventh of November"]
+answer = "Marcus runs it: internal crews on Wednesday the fourteenth, ten percent of technicians on the twenty first of October, and everyone on the eleventh of November."
+category = ["dates", "action_items", "near_duplicate"]
+
+[[unanswerable]]
+id = "u16"
+question = "How much does the licence for the new icon set cost?"
+why = "Marlpit is chosen and its licence is described as one-off and perpetual, with finance happy with the terms, but no price is ever given."
