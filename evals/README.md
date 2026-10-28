@@ -328,7 +328,9 @@ The ASR corpus manifest format is `docs/data/asr/corpus.example.json`; see
 gated metric worse than its baseline by more than the suite's
 `baseline_tolerance` is a regression (it fails `--gate quality` and
 `--strict`). Improvements never fail; to raise the floor, the user commits a
-new baseline (a locked change).
+new baseline (a locked change). A required suite must have one: a missing or
+unparseable baseline is a scorer error that blocks every mode, so quality
+gating can't silently compare against nothing.
 
 Retrieval's tolerance is 0.02, absolute. With 47 questions, one lost
 single-cite question (1/47 ≈ 0.021) was just over it; with today's 63 it's

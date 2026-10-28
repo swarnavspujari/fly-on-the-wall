@@ -7,7 +7,7 @@
 #
 # status
 #   required     a miss fails `cargo run -p fly-evals` (exit 1) and the
-#                evals-run CI job.
+#                CI checks, per their gating (README, "Gating").
 #   pending      runs and reports, never fails. Flipping it to required is
 #                a locked change.
 #   report_only  numbers only, never gates (judges, local benchmarks).

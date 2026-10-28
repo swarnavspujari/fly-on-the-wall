@@ -132,7 +132,23 @@ test("patches: git apply / git am / patch of protected paths", () => {
   const fine = path.join(tmpdir(), "fine.patch");
   writeFileSync(fine, "diff --git a/crates/x.rs b/crates/x.rs\n--- a/crates/x.rs\n+++ b/crates/x.rs\n");
   denies([`git apply ${evil}`, `git am ${evil}`, `git apply < ${evil}`, `patch -p1 < ${evil}`, "git apply /tmp/missing-evals.patch", "cat /tmp/p | git apply # evals"]);
-  allows([`git apply ${fine}`, `patch -p1 < ${fine}`]);
+  allows([`git apply ${fine}`, `patch -p1 < ${fine}`, `git apply -p1 ${fine}`]);
+  // Prefix tricks: a relative patch aimed at evals/ by --directory, a
+  // deep patch whose -p2 strip lands in evals/, and applying from inside.
+  const rel = path.join(tmpdir(), "rel.patch");
+  writeFileSync(rel, "diff --git a/thresholds.toml b/thresholds.toml\n--- a/thresholds.toml\n+++ b/thresholds.toml\n@@ -1 +1 @@\n-schema = 1\n+schema = 2\n");
+  const deep = path.join(tmpdir(), "deep.patch");
+  writeFileSync(deep, "diff --git a/b/evals/thresholds.toml b/b/evals/thresholds.toml\n--- a/b/evals/thresholds.toml\n+++ b/b/evals/thresholds.toml\n@@ -1 +1 @@\n-schema = 1\n+schema = 2\n");
+  denies([
+    `git apply --directory=evals ${rel}`,
+    `git apply --directory evals ${rel}`,
+    `git apply -p2 ${deep}`,
+    `patch -p2 < ${deep}`,
+    `patch -d evals -p1 < ${rel}`,
+    `cd evals && git apply ${rel}`,
+    `cd evals && patch -p1 < ${rel}`,
+  ]);
+  allows([`git apply ${rel}`]);
 });
 
 if (process.platform === "win32" || process.platform === "darwin") {

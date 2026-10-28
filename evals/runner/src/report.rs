@@ -165,15 +165,27 @@ pub struct Judged {
     pub result: SuiteResult,
 }
 
-pub fn load_baseline(path: &Path) -> Option<BTreeMap<String, f64>> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    let m = v.get("metrics")?.as_object()?;
-    Some(
+/// A committed baseline's metrics: `Ok(None)` when there is no file,
+/// `Err` when it exists but can't be read or parsed (never silently
+/// ignored: a required suite without a usable baseline makes quality
+/// gating vacuous, so the caller turns both into a blocking error).
+pub fn load_baseline(path: &Path) -> std::result::Result<Option<BTreeMap<String, f64>>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("can't read {}: {e}", path.display())),
+    };
+    let v: Value =
+        serde_json::from_str(&text).map_err(|e| format!("can't parse {}: {e}", path.display()))?;
+    let m = v
+        .get("metrics")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{} has no metrics object", path.display()))?;
+    Ok(Some(
         m.iter()
             .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
             .collect(),
-    )
+    ))
 }
 
 pub fn judge(
@@ -432,6 +444,25 @@ mod tests {
         assert_eq!(j.rows[1].verdict, Verdict::Regressed);
         // Improvements never fail.
         assert!(!judge(result(0.99, 0.0), &c, Some(&base)).blocks);
+    }
+
+    #[test]
+    fn baselines_are_never_silently_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("none.json");
+        assert_eq!(load_baseline(&missing), Ok(None));
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "{ not json").unwrap();
+        assert!(load_baseline(&bad).is_err());
+        let empty = dir.path().join("empty.json");
+        std::fs::write(&empty, r#"{"suite": "retrieval"}"#).unwrap();
+        assert!(load_baseline(&empty).is_err(), "no metrics object");
+        let ok = dir.path().join("ok.json");
+        std::fs::write(&ok, r#"{"metrics": {"recall_at_8": 0.5}}"#).unwrap();
+        assert_eq!(load_baseline(&ok).unwrap().unwrap()["recall_at_8"], 0.5);
+        // The committed retrieval baseline is usable.
+        let committed = crate::evals_dir().join("baselines").join("retrieval.json");
+        assert!(load_baseline(&committed).unwrap().is_some());
     }
 
     #[test]

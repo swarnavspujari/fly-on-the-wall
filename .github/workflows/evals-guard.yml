@@ -147,15 +147,29 @@ jobs:
                   for v in x:
                       yield from strings(v)
 
+          # Contexts an expression could read a PR-controlled or computed
+          # value from (a branch named evals-lock via github.head_ref).
+          CONTEXTS = re.compile(r"\b(github|env|vars|job|jobs|steps|runner|secrets|strategy|needs|inputs)\b")
+
           def suspicious(text, matrix):
               t = text.lower()
               literals = "".join(re.findall(r"'([^']*)'", t))
               bare = re.sub(r"\$\{\{.*?\}\}", "", t)
               if any(n in s for n in NAMES for s in (t, literals, bare, bare + literals)):
                   return True
-              # An expression name next to anything spelling "eval".
               # ("$" + "{{": a literal one here would be an Actions expression.)
-              return ("$" + "{{") in t and "eval" in (t + literals + matrix)
+              if ("$" + "{{") not in t:
+                  return False
+              exprs = re.findall(r"\$\{\{(.*?)\}\}", t)
+              # Any context other than matrix: the value isn't ours to know.
+              if any(CONTEXTS.search(e) for e in exprs):
+                  return True
+              # Literal pieces that spell part of an eval check name.
+              pieces = bare + literals
+              if any(w in pieces for w in ("lock", "security", "quality")):
+                  return True
+              # An expression name next to anything spelling "eval".
+              return "eval" in (t + literals + matrix)
 
           for path in sorted(glob.glob("*.json")):
               name_of_file = path[: -len(".json")]

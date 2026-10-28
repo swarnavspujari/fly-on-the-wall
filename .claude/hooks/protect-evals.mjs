@@ -563,11 +563,42 @@ function patchPaths(file, ctx) {
   const out = [];
   for (const line of text.split(/\r?\n/)) {
     let m;
-    if ((m = /^diff --git a\/(\S+) b\/(\S+)/.exec(line))) out.push(m[1], m[2]);
-    else if ((m = /^(?:\+\+\+|---) (\S+)/.exec(line))) out.push(m[1].replace(/^[ab]\//, ""));
+    if ((m = /^diff --git (\S+) (\S+)/.exec(line))) out.push(m[1], m[2]);
+    else if ((m = /^(?:\+\+\+|---) (\S+)/.exec(line))) out.push(m[1]);
     else if ((m = /^(?:rename|copy) (?:from|to) (\S+)/.exec(line))) out.push(m[1]);
   }
   return out;
+}
+
+/** A patch touches a protected path under ANY prefix strip (`-p0`..`-pN`,
+ * so `a/b/evals/x` counts) and any `--directory` / `-d` prefix: fail
+ * closed rather than model each tool's rules. */
+function patchHitsProtected(paths, prefixes = []) {
+  for (const raw of paths) {
+    const parts = raw.replace(/\\/g, "/").split("/").filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      const tail = parts.slice(i).join("/");
+      for (const d of ["", ...prefixes]) {
+        if (isProtectedRel(d ? `${d.replace(/\/+$/, "")}/${tail}` : tail)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** `--directory=x` / `--directory x` / `-d x` values, and whether a
+ * `-p<N>` / `-p N` strip option is present. */
+function patchOptions(args, dirFlags) {
+  const dirs = [];
+  let strip = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = /^(--directory|--dir)=(.+)$/.exec(a);
+    if (eq) dirs.push(eq[2]);
+    else if (dirFlags.includes(a) && args[i + 1]) dirs.push(args[++i]);
+    else if (/^-p\d*$/.test(a) || /^--strip(=\d+)?$/.test(a)) strip = true;
+  }
+  return { dirs, strip };
 }
 
 /** Commands on the eval trust roots, whatever their arguments. */
@@ -840,9 +871,14 @@ export function commandViolation(command, ctx = {}, depth = 0) {
     if (verb === "patch") {
       const k = args.findIndex((x) => /^(-i|--input)$/.test(x));
       const sources = [...(k >= 0 ? [args[k + 1]] : []), ...ins];
+      const { dirs, strip } = patchOptions(args, ["-d", "--directory"]);
+      // Applied inside a protected folder, into one, or with path
+      // rewriting in a command that names one: denied whatever the file.
+      if (here() || dirs.some((d) => protectedTarget(d, vctx) !== null)) return "patch applied inside a protected path";
+      if ((strip || dirs.length) && looseMention) return "patch with -p/-d in a command naming a protected path";
       for (const s of sources) {
         const ps = patchPaths(s, vctx);
-        if (ps === null ? looseMention : ps.some(isProtectedRel)) return "patch touching a protected path";
+        if (ps === null ? looseMention : patchHitsProtected(ps, dirs)) return "patch touching a protected path";
       }
       if (!sources.length && (touches() || anyMention)) return "patch touching a protected path";
       continue;
@@ -870,10 +906,15 @@ export function commandViolation(command, ctx = {}, depth = 0) {
       };
       const gitHere = protectedTarget(".", gctx) !== null;
       if (sub === "apply" || sub === "am") {
-        const files = [...rest.filter((x) => !/^-/.test(x)), ...ins];
+        const { dirs, strip } = patchOptions(rest, ["--directory"]);
+        // From inside a protected folder, or with path rewriting in a
+        // command that names one: denied even when a patch file is named.
+        if (gitHere || dirs.some((d) => isProtectedRel(d))) return `git ${sub} inside a protected path`;
+        if ((strip || dirs.length) && looseMention) return `git ${sub} with -p/--directory in a command naming a protected path`;
+        const files = [...rest.filter((x) => !/^-/.test(x) && !dirs.includes(x)), ...ins];
         for (const f of files) {
           const ps = patchPaths(f, gctx);
-          if (ps === null ? looseMention : ps.some(isProtectedRel)) return `git ${sub} of a patch touching a protected path`;
+          if (ps === null ? looseMention : patchHitsProtected(ps, dirs)) return `git ${sub} of a patch touching a protected path`;
         }
         if (!files.length && (anyMention || gitHere)) return `git ${sub} touching a protected path`;
         continue;

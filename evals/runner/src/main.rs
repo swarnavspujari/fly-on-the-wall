@@ -114,7 +114,26 @@ fn main() -> ExitCode {
                 local_bench::run(&dir, &thresholds.local_bench),
             ),
         };
-        let baseline = load_baseline(&dir.join("baselines").join(format!("{name}.json")));
+        let mut result = result;
+        // A required suite needs a usable committed baseline, or quality
+        // gating would compare against nothing.
+        let baseline = match load_baseline(&dir.join("baselines").join(format!("{name}.json"))) {
+            Ok(Some(b)) => Some(b),
+            Ok(None) => {
+                if cfg.status == Status::Required {
+                    result.errors.push(format!(
+                        "required suite has no committed baseline (evals/baselines/{name}.json)"
+                    ));
+                }
+                None
+            }
+            Err(e) => {
+                if cfg.status == Status::Required {
+                    result.errors.push(format!("baseline unusable: {e}"));
+                }
+                None
+            }
+        };
         let j = judge_with(result, cfg, baseline.as_ref(), gating);
         print!("{}", j.table());
         judged.push(j);
