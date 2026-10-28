@@ -11,8 +11,10 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api";
+import { CALENDAR_NAMES, videoEvents, type PrivacySummary } from "../homeModel";
 import { PRIVACY_CHANGED_EVENT } from "../privacy";
-import type { CalendarEvent, Folder } from "../types";
+import type { CalendarEvent, CalendarStatus, Folder } from "../types";
+import PrivacyPill from "./PrivacyPill";
 import { Badge, Button, SectionLabel } from "./ui";
 import logoLight from "../assets/brand/fly-on-the-wall-logo.svg";
 import logoDark from "../assets/brand/fly-on-the-wall-logo-dark.svg";
@@ -25,6 +27,14 @@ interface Props {
   /** Providers whose calendar token expired — shows a persistent Reconnect row. */
   calendarNeedsReconnect?: ("google" | "msgraph")[];
   onReconnectCalendar?: (provider: "google" | "msgraph") => void;
+  /** Calendar connection status; null until loaded. With nothing connected,
+   *  Up next shows a prompt to connect one. */
+  calendar?: CalendarStatus | null;
+  /** Providers whose sign-in window is open (connect or reconnect): their
+   *  buttons say so but stay clickable. */
+  calendarBusy?: ReadonlySet<string>;
+  /** Where meeting content goes (footer pill); null until settings load. */
+  privacy?: PrivacySummary | null;
   selection: Selection;
   onSelect: (sel: Selection) => void;
   onCreateFolder: (name: string, parentId: string | null) => void;
@@ -134,6 +144,8 @@ function buildTree(folders: Folder[]): TreeNode[] {
 type FolderMeta = { color?: string; emoji?: string };
 const META_KEY = "fotw-folder-meta";
 
+const NO_BUSY: ReadonlySet<string> = new Set();
+
 const ROW =
   "group flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13.5px] font-medium text-text";
 const INPUT =
@@ -144,6 +156,9 @@ export default function Sidebar({
   upcoming,
   calendarNeedsReconnect = [],
   onReconnectCalendar,
+  calendar = null,
+  calendarBusy = NO_BUSY,
+  privacy = null,
   selection,
   onSelect,
   onCreateFolder,
@@ -160,10 +175,13 @@ export default function Sidebar({
   const [now, setNow] = useState(0);
   // Up next lists video meetings only; link-less events still arrive so a
   // plain Record press can match them (see App.startRecording).
-  const visibleUpcoming = useMemo(
-    () => upcoming.filter((ev) => ev.join_url != null && ev.join_url !== ""),
-    [upcoming],
-  );
+  const visibleUpcoming = useMemo(() => videoEvents(upcoming), [upcoming]);
+  const calendarConnected = calendar ? calendar.google_connected || calendar.ms_connected : null;
+  const connectable = calendar
+    ? (["google", "msgraph"] as const).filter((p) =>
+        p === "google" ? calendar.google_configured : calendar.ms_configured,
+      )
+    : [];
   useEffect(() => {
     setNow(Date.now());
     const t = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -438,16 +456,45 @@ export default function Sidebar({
               title={`Reconnect ${provider === "google" ? "Google Calendar" : "Outlook"}`}
               onClick={() => onReconnectCalendar?.(provider)}
             >
-              Reconnect
+              {calendarBusy.has(provider) ? "Waiting…" : "Reconnect"}
             </Button>
           </div>
         ))}
         {visibleUpcoming.length === 0
-          ? calendarNeedsReconnect.length === 0 && (
-              <div className="px-2.5 py-1.5 text-[12.5px] text-text-3">
-                Nothing scheduled for today.
+          ? calendarNeedsReconnect.length === 0 &&
+            (calendarConnected === false ? (
+              // Nothing connected: say what Up next is for and how to get it.
+              <div className="mx-2.5 mt-0.5 flex flex-col gap-2 rounded-lg border border-dashed border-line-strong p-2.5">
+                <span className="text-[12.5px] text-text-2">See your meetings here.</span>
+                <span className="flex flex-wrap gap-1.5">
+                  {connectable.length > 0 ? (
+                    connectable.map((p) => (
+                      <Button
+                        key={p}
+                        variant="outline"
+                        size="xs"
+                        title={`Connect ${CALENDAR_NAMES[p]}`}
+                        onClick={() => onReconnectCalendar?.(p)}
+                      >
+                        {calendarBusy.has(p)
+                          ? "Waiting…"
+                          : `Connect ${p === "google" ? "Google" : "Outlook"}`}
+                      </Button>
+                    ))
+                  ) : (
+                    <Button variant="outline" size="xs" onClick={onOpenSettings}>
+                      Set up in Settings
+                    </Button>
+                  )}
+                </span>
               </div>
-            )
+            ) : (
+              calendarConnected === true && (
+                <div className="px-2.5 py-1.5 text-[12.5px] text-text-3">
+                  No video meetings for the rest of today. Only events with a join link show here.
+                </div>
+              )
+            ))
           : visibleUpcoming.map((ev) => {
               const live =
                 now > 0 && new Date(ev.start).getTime() <= now && now <= new Date(ev.end).getTime();
@@ -527,6 +574,11 @@ export default function Sidebar({
           {tree.map((n) => renderNode(n, 0))}
         </div>
       </nav>
+      {privacy && (
+        <div className="border-t border-line px-3 py-2.5">
+          <PrivacyPill summary={privacy} onOpen={onOpenSettings} />
+        </div>
+      )}
       <button
         onClick={onImportMedia}
         title="Upload audio or video files — everything you pick becomes one new note"

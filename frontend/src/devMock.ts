@@ -595,6 +595,11 @@ const calendarStatus = {
   ms_connected: false,
   ms_configured: true,
 };
+// Home QA (v2.4 PR 1.4). fotwMockCalendar = "none" → no calendar connected
+// (Up next's connect prompt; Connect flips it on); "expired" → Google needs
+// a reconnect (no events from it, like the backend); "empty" → connected,
+// but no video meetings left today. fotwMockNoNotes = "1" → no notes (Home's
+// empty state).
 
 let mockCalendars = [
   { provider: "google", id: "primary", name: "you@example.com", primary: true, enabled: true },
@@ -624,6 +629,12 @@ function setAsrSettings(u: {
 }
 
 function upcoming() {
+  const homeCal = mockFlag("fotwMockCalendar");
+  if (!calendarStatus.google_connected && !calendarStatus.ms_connected) {
+    return { needs_reconnect: [], events: [] };
+  }
+  if (homeCal === "expired") return { needs_reconnect: ["google"], events: [] };
+  if (homeCal === "empty") return { needs_reconnect: [], events: [] };
   return {
     // Flip to ["google"] to preview the sidebar's Reconnect row.
     needs_reconnect: [],
@@ -766,6 +777,13 @@ function ollamaState() {
 
 /* ---- command router ---- */
 function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
+  // Stateful delete for the session, so Home's Undo-then-expire is visible
+  // (the note stays gone until reload).
+  if (cmd === "delete_note") {
+    const i = noteMeta.findIndex((n) => n.id === args.id);
+    if (i >= 0) noteMeta.splice(i, 1);
+    return null;
+  }
   switch (cmd) {
     case "ping":
       return "pong";
@@ -793,10 +811,10 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "move_folder":
     case "delete_folder":
     case "move_note":
-    case "delete_note":
     case "cancel_transcription":
       return null;
     case "list_recent_notes":
+      if (mockFlag("fotwMockNoNotes") === "1") return [];
       return [...noteMeta].sort(byHappenedDesc);
     case "list_notes_in_folder":
       return (
@@ -1167,6 +1185,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
 }
 
 function installDevMock() {
+  // fotwMockCalendar = "none": start with no calendar connected (see above).
+  if (mockFlag("fotwMockCalendar") === "none") calendarStatus.google_connected = false;
   const callbacks: Record<number, (payload: unknown) => void> = {};
   const listeners: Record<string, number[]> = {};
   let cbId = 1;

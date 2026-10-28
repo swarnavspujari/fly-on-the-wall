@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { PanelLeft } from "lucide-react";
 import { api } from "./api";
@@ -7,6 +7,8 @@ import { WHISPER_ENGINE_ID } from "./types";
 import type {
   AppInfo,
   CalendarEvent,
+  CalendarStatus,
+  LlmSettings,
   Folder,
   ImportStaged,
   Meeting,
@@ -23,8 +25,8 @@ import type {
 } from "./types";
 import { readNotesCache, writeNotesCache } from "./notesCache";
 import { useTheme } from "./theme";
-import logoLight from "./assets/brand/fly-on-the-wall-logo.svg";
-import logoDark from "./assets/brand/fly-on-the-wall-logo-dark.svg";
+import { privacySummary, runStateOf, type LiveNoteState } from "./homeModel";
+import { useNoteDeletion } from "./noteDeletion";
 import Sidebar, { type Selection } from "./components/Sidebar";
 import NoteList from "./components/NoteList";
 import Editor from "./components/Editor";
@@ -40,6 +42,8 @@ import {
   type PipelineFailure,
 } from "./pipelineFailures";
 import RestartRequired from "./components/RestartRequired";
+import Home from "./components/Home";
+import UndoToast from "./components/UndoToast";
 import { useUpdater } from "./updater";
 
 /** Window width (px) under which the sidebars collapse into a menu button. */
@@ -111,6 +115,27 @@ export default function App() {
   const [calendarNeedsReconnect, setCalendarNeedsReconnect] = useState<("google" | "msgraph")[]>(
     [],
   );
+  // Which calendars are connected (Up next's "connect a calendar" prompt);
+  // null until the first fetch.
+  const [calendarStatus, setCalendarStatus] = useState<CalendarStatus | null>(null);
+  // Providers whose sign-in window is open (connect or reconnect). Nothing
+  // is disabled by it: an abandoned sign-in can take minutes to time out.
+  const [calendarBusy, setCalendarBusy] = useState<ReadonlySet<string>>(() => new Set());
+  const refreshCalendarStatus = useCallback(() => {
+    api.getCalendarSettings().then(setCalendarStatus).catch(console.error);
+  }, []);
+  // Saved AI provider + transcription target, for the sidebar privacy pill.
+  const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null);
+  const [asrPrivacy, setAsrPrivacy] = useState<{ tier: string; use_groq: boolean } | null>(null);
+  const refreshLlmSettings = useCallback(() => {
+    api.getLlmSettings().then(setLlmSettings).catch(console.error);
+  }, []);
+  // Meetings with a transcription running or queued (any note), from
+  // pipeline events, for the list's chips.
+  const [liveRuns, setLiveRuns] = useState<ReadonlyMap<string, "running" | "queued">>(
+    () => new Map(),
+  );
+  const liveRunsRef = useRef(new Map<string, "running" | "queued">());
   const refreshUpcoming = useCallback(() => {
     api
       .upcomingMeetings()
@@ -126,16 +151,28 @@ export default function App() {
   const [settingsFocus, setSettingsFocus] = useState<"engine" | "groq" | null>(null);
   const [showFirstRun, setShowFirstRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Re-run the interactive OAuth flow for a provider whose token expired,
-  // then refresh "Up next" so the Reconnect row clears on success.
-  const reconnectCalendar = useCallback(
+  // Run the interactive OAuth flow: a first connect from Up next, or a
+  // provider whose token expired. Then refresh "Up next" and the connection
+  // status so the prompt / Reconnect row clears on success.
+  const connectCalendar = useCallback(
     (provider: "google" | "msgraph") => {
+      setCalendarBusy((s) => new Set(s).add(provider));
       void api
         .connectCalendar(provider)
-        .then(refreshUpcoming)
-        .catch((e) => setError(String(e)));
+        .then(() => {
+          refreshUpcoming();
+          refreshCalendarStatus();
+        })
+        .catch((e) => setError(String(e)))
+        .finally(() =>
+          setCalendarBusy((s) => {
+            const next = new Set(s);
+            next.delete(provider);
+            return next;
+          }),
+        );
     },
-    [refreshUpcoming],
+    [refreshUpcoming, refreshCalendarStatus],
   );
   // Notepad mode: below this width both sidebars fold into a menu button and
   // only the note itself stays visible, so the app works docked in a corner.
@@ -183,6 +220,7 @@ export default function App() {
       .then((s) => {
         setAutoTranscribe(s.auto_transcribe);
         setEngine({ installed: s.engine_installed, managed: s.engine_managed });
+        setAsrPrivacy({ tier: s.tier, use_groq: s.use_groq });
       })
       .catch(console.error);
   }, []);
@@ -204,6 +242,12 @@ export default function App() {
     }
   }, [selection]);
 
+  // For event listeners registered once: always the current selection's fetch.
+  const refreshNotesRef = useRef(refreshNotes);
+  useEffect(() => {
+    refreshNotesRef.current = refreshNotes;
+  }, [refreshNotes]);
+
   // Notes first: this effect stays ahead of the others so the notes query
   // is the first invoke the backend sees on launch.
   useEffect(() => {
@@ -217,12 +261,14 @@ export default function App() {
       .catch((e) => setError(String(e)));
     refreshFolders().catch((e) => setError(String(e)));
     refreshAsrState();
+    refreshLlmSettings();
+    refreshCalendarStatus();
     api.listTemplates().then(setTemplates).catch(console.error);
     api
       .getAppSetting("consent.recording_notice_accepted")
       .then((v) => setShowFirstRun(v !== "true"))
       .catch(console.error);
-  }, [refreshFolders, refreshAsrState]);
+  }, [refreshFolders, refreshAsrState, refreshLlmSettings, refreshCalendarStatus]);
 
   // macOS consent probe: a short throwaway system-audio tap at launch, so a
   // TCC denial (incl. the stale-grant case where the Settings toggle already
@@ -315,9 +361,22 @@ export default function App() {
           .catch(() => add(undefined));
       }
     };
+    // Track which meetings are queued or mid-transcription (list status
+    // chips). Only a change of state re-renders, not every progress tick.
+    const markRun = (meetingId: string, run: "running" | "queued" | null) => {
+      const runs = liveRunsRef.current;
+      if ((runs.get(meetingId) ?? null) === run) return;
+      if (run) runs.set(meetingId, run);
+      else runs.delete(meetingId);
+      setLiveRuns(new Map(runs));
+    };
     const unPipeline = listen<PipelineProgress>("pipeline:progress", (e) => {
       const p = e.payload;
       trackFailures(p);
+      markRun(p.meeting_id, runStateOf(p));
+      // A finished run changes the stored chip state (job, transcript):
+      // re-read the list so it never shows a stale "Transcribing".
+      if (p.done || p.stage === "cancelled") void refreshNotesRef.current().catch(console.error);
       if (p.meeting_id !== openMeetingIdRef.current) return;
       // Cancelled is terminal but neither success nor failure: clear the
       // progress UI and drop a staged import queue back to idle (the backend
@@ -439,38 +498,70 @@ export default function App() {
   // only the newest one may write state (otherwise note B can end up showing
   // note A's meeting/transcript).
   const openSeq = useRef(0);
-  const openNoteById = useCallback(async (id: string) => {
-    const seq = ++openSeq.current;
-    const fresh = () => openSeq.current === seq;
-    const note = await api.getNote(id);
-    if (!fresh()) return;
-    setOpenNote(note);
-    const meetings = await api.getMeetingsForNote(id).catch(() => [] as Meeting[]);
-    if (!fresh()) return;
-    setNoteMeetings(meetings);
-    const meeting = meetings[0] ?? null; // newest is the primary
-    setOpenMeeting(meeting);
-    setPipelineError(null);
-    setPipeDetail(null);
-    if (meeting) {
-      const [raw, cleaned, stage, staged] = await Promise.all([
-        api.getTranscript(meeting.id),
-        api.getCleanedTranscript(meeting.id).catch(() => null),
-        api.pipelineStage(meeting.id),
-        api.importState(meeting.id).catch(() => null),
-      ]);
-      if (!fresh()) return;
-      setTranscript(raw);
-      setCleanedTranscript(cleaned);
-      setPipeStage(stage);
-      setImportStaged(staged);
-    } else {
-      setTranscript(null);
-      setCleanedTranscript(null);
-      setPipeStage(null);
-      setImportStaged(null);
-    }
+
+  const closeEditor = useCallback(() => {
+    openSeq.current++; // invalidate any in-flight openNoteById
+    setOpenNote(null);
+    setOpenMeeting(null);
+    setNoteMeetings([]);
+    setTranscript(null);
+    setCleanedTranscript(null);
+    setImportStaged(null);
   }, []);
+
+  // Undo toast = deferred delete (spec §3.2.5, noteDeletion.ts): the note
+  // disappears now and stays hidden until the delete and the list refresh
+  // land; the delete command runs only when the toast expires or closes.
+  // Undo restores it; closing the app while it waits deletes nothing.
+  const deletion = useNoteDeletion({
+    remove: api.deleteNote,
+    refresh: refreshNotes,
+    onDeleted: (id) => {
+      dispatchFailures({ type: "noteDeleted", noteId: id });
+      if (openNoteIdRef.current === id) closeEditor();
+    },
+    onError: setError,
+  });
+  const { isHidden: isDeleted } = deletion;
+
+  const openNoteById = useCallback(
+    async (id: string) => {
+      // A deleted note (waiting on Undo, or gone) never comes back into the
+      // editor, even from a stale caller.
+      if (isDeleted(id)) return;
+      const seq = ++openSeq.current;
+      const fresh = () => openSeq.current === seq && !isDeleted(id);
+      const note = await api.getNote(id);
+      if (!fresh()) return;
+      setOpenNote(note);
+      const meetings = await api.getMeetingsForNote(id).catch(() => [] as Meeting[]);
+      if (!fresh()) return;
+      setNoteMeetings(meetings);
+      const meeting = meetings[0] ?? null; // newest is the primary
+      setOpenMeeting(meeting);
+      setPipelineError(null);
+      setPipeDetail(null);
+      if (meeting) {
+        const [raw, cleaned, stage, staged] = await Promise.all([
+          api.getTranscript(meeting.id),
+          api.getCleanedTranscript(meeting.id).catch(() => null),
+          api.pipelineStage(meeting.id),
+          api.importState(meeting.id).catch(() => null),
+        ]);
+        if (!fresh()) return;
+        setTranscript(raw);
+        setCleanedTranscript(cleaned);
+        setPipeStage(stage);
+        setImportStaged(staged);
+      } else {
+        setTranscript(null);
+        setCleanedTranscript(null);
+        setPipeStage(null);
+        setImportStaged(null);
+      }
+    },
+    [isDeleted],
+  );
 
   const newNote = async () => {
     const folderId = selection.view === "folder" ? selection.id : null;
@@ -487,19 +578,28 @@ export default function App() {
     setImportStaged(null);
   };
 
-  const deleteNote = async (id: string) => {
-    await api.deleteNote(id);
-    dispatchFailures({ type: "noteDeleted", noteId: id });
-    if (openNote?.id === id) {
-      openSeq.current++;
-      setOpenNote(null);
-      setOpenMeeting(null);
-      setNoteMeetings([]);
-      setTranscript(null);
-      setCleanedTranscript(null);
-      setImportStaged(null);
+  const deleteNote = (id: string) => {
+    // The list hides its trash on the recording note; the backend refuses
+    // too (the purge would delete the files the capture is writing).
+    if (recStatus.active && recStatus.note_id === id) {
+      setError("Stop the recording before deleting this note.");
+      return;
     }
-    await refreshNotes();
+    const title =
+      notes.find((n) => n.id === id)?.title ??
+      (openNote?.id === id ? openNote.title : null) ??
+      "Untitled";
+    const wasOpen = openNote?.id === id;
+    if (wasOpen) closeEditor();
+    deletion.request({ id, title, wasOpen });
+  };
+
+  // Undo restores every waiting note; it reopens the one that was open only
+  // if the user hasn't opened another note since.
+  const undoDelete = () => {
+    const items = deletion.undo();
+    const reopen = items.find((i) => i.wasOpen);
+    if (reopen && !openNoteIdRef.current) void openNoteById(reopen.id);
   };
 
   const moveOpenNote = async (folderId: string | null) => {
@@ -517,6 +617,9 @@ export default function App() {
   };
 
   const onNoteChanged = (note: Note) => {
+    // A save that lands after the note was deleted (the editor's debounced
+    // save outlives it) must not put it back on screen.
+    if (isDeleted(note.id)) return;
     setOpenNote(note);
     void refreshNotes();
   };
@@ -744,13 +847,58 @@ export default function App() {
         (openNote?.id === recStatus.note_id ? openNote.title : null))
       : null;
 
+  // A deleted note (waiting on Undo, or gone) is out of every list, search
+  // result and notice at once, and never flashes back while it commits.
+  const deletedIds = deletion.hiddenIds;
+  const listedNotes = deletedIds.size ? notes.filter((n) => !deletedIds.has(n.id)) : notes;
+  const listedHits = deletedIds.size
+    ? searchHits.filter((h) => !deletedIds.has(h.note_id))
+    : searchHits;
+  const shownFailures = deletedIds.size
+    ? pipelineFailures.filter((f) => !f.noteId || !deletedIds.has(f.noteId))
+    : pipelineFailures;
+
+  // Status chips: recording, transcribing (any meeting) and failed runs.
+  const openMeetingId = openMeeting?.id ?? null;
+  const liveNotes = useMemo<LiveNoteState>(() => {
+    const running = new Set<string>();
+    const queued = new Set<string>();
+    for (const [id, run] of liveRuns) (run === "queued" ? queued : running).add(id);
+    // The open meeting's stage also comes from pipelineStage() on open; the
+    // scheduler's "waiting" means queued, not transcribing.
+    if (openMeetingId && pipeStage) {
+      (pipeStage === "waiting" ? queued : running).add(openMeetingId);
+    }
+    const failed = new Set(pipelineFailures.map((f) => f.meetingId));
+    if (openMeetingId && pipelineError) failed.add(openMeetingId);
+    return {
+      recordingNoteId: recStatus.active ? recStatus.note_id : null,
+      runningMeetingIds: running,
+      queuedMeetingIds: queued,
+      failedMeetingIds: failed,
+    };
+  }, [
+    liveRuns,
+    openMeetingId,
+    pipeStage,
+    pipelineFailures,
+    pipelineError,
+    recStatus.active,
+    recStatus.note_id,
+  ]);
+
+  const privacy = useMemo(() => privacySummary(asrPrivacy, llmSettings), [asrPrivacy, llmSettings]);
+
   // Shared by the docked layout and the narrow-mode drawer.
   const sidebarEl = (
     <Sidebar
       folders={folders}
       upcoming={upcoming}
       calendarNeedsReconnect={calendarNeedsReconnect}
-      onReconnectCalendar={reconnectCalendar}
+      onReconnectCalendar={connectCalendar}
+      calendar={calendarStatus}
+      calendarBusy={calendarBusy}
+      privacy={privacy}
       selection={selection}
       onSelect={setSelection}
       onCreateFolder={(name, parentId) =>
@@ -781,9 +929,10 @@ export default function App() {
   );
   const noteListEl = (
     <NoteList
-      notes={notes}
+      notes={listedNotes}
       searchQuery={searchQuery}
-      searchHits={searchHits}
+      searchHits={listedHits}
+      live={liveNotes}
       selectedNoteId={openNote?.id ?? null}
       onSearchChange={setSearchQuery}
       onOpenNote={(id) => {
@@ -794,7 +943,7 @@ export default function App() {
         setDrawerOpen(false);
         void newNote();
       }}
-      onDeleteNote={(id) => void deleteNote(id)}
+      onDeleteNote={deleteNote}
     />
   );
 
@@ -873,27 +1022,22 @@ export default function App() {
             onEditSegment={(id, text) => void editSegment(id, text)}
           />
         ) : (
-          <div className="flex flex-1 flex-col items-center justify-center gap-5 bg-surface text-text-3">
-            <div className="text-center">
-              <img
-                src={resolved === "dark" ? logoDark : logoLight}
-                alt="Fly on the Wall"
-                className="mx-auto block h-auto w-[260px] select-none"
-                draggable={false}
-              />
-              <div className="mt-3 text-sm text-text-2">
-                Select a note, create one, or start recording.
-              </div>
-            </div>
-            {!recStatus.active && (
-              <button
-                onClick={() => void startRecording()}
-                className="inline-flex cursor-pointer items-center gap-2.5 rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-on-primary transition-[filter] hover:brightness-105"
-              >
-                <span className="h-3 w-3 rounded-full bg-on-primary" /> Start a meeting
-              </button>
-            )}
-          </div>
+          <Home
+            recording={recStatus.active}
+            upcoming={upcoming}
+            calendar={calendarStatus}
+            needsReconnect={calendarNeedsReconnect}
+            calendarBusy={calendarBusy}
+            hasNotes={
+              selection.view === "all" && !searchQuery.trim() ? listedNotes.length > 0 : null
+            }
+            onRecord={() => void startRecording()}
+            onStartFromEvent={(ev) => void startFromEvent(ev)}
+            onConnectCalendar={connectCalendar}
+            onOpenSettings={() => setShowSettings(true)}
+            onImport={() => void importMedia()}
+            onNewNote={() => void newNote()}
+          />
         )}
       </div>
       {narrow && drawerOpen && (
@@ -925,7 +1069,7 @@ export default function App() {
         onDismissSystemAudio={() => setTapDenied(false)}
         appError={error}
         onDismissAppError={() => setError(null)}
-        pipelineFailures={pipelineFailures}
+        pipelineFailures={shownFailures}
         engine={engine}
         onOpenFailedNote={(f) => {
           if (!f.noteId) return;
@@ -944,6 +1088,13 @@ export default function App() {
         }}
         updater={updater}
       />
+      {deletion.pending.length > 0 && (
+        <UndoToast
+          titles={deletion.pending.map((i) => i.title)}
+          onUndo={undoDelete}
+          onDismiss={deletion.flush}
+        />
+      )}
       {/* after "Delete all my data": blocks the app until it restarts */}
       <RestartRequired />
       {showFirstRun && (
@@ -967,6 +1118,8 @@ export default function App() {
             refreshAsrState();
             api.listTemplates().then(setTemplates).catch(console.error);
             refreshUpcoming();
+            refreshCalendarStatus();
+            refreshLlmSettings();
           }}
         />
       )}
