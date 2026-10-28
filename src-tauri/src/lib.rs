@@ -111,7 +111,8 @@ pub fn run() {
             {
                 let storage = app_state.storage.lock().unwrap();
                 llm_commands::migrate_anthropic_model(&storage);
-                llm_commands::grandfather_cloud_consent(&storage);
+                // Consents recorded while the prompt couldn't show are void.
+                llm_commands::reset_unseen_cloud_consent(&storage);
                 privacy::record_pending_wipe(&storage);
             }
             privacy::spawn_disk_encryption_check(app_state.data_dir.clone());

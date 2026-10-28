@@ -9,6 +9,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { api } from "../api";
 import { RESTART_REQUIRED_EVENT } from "../privacy";
 import type { Updater } from "../updater";
+import { ConfirmProvider } from "./confirm";
+import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
 import RestartRequired from "./RestartRequired";
 import SettingsModal from "./SettingsModal";
 
@@ -41,14 +43,16 @@ async function open(props: Partial<Parameters<typeof SettingsModal>[0]> = {}) {
   root = createRoot(host);
   act(() =>
     root!.render(
-      <SettingsModal
-        modelProgress={null}
-        updater={updater}
-        recordingActive={false}
-        appVersion="2.3.0"
-        onClose={onClose}
-        {...props}
-      />,
+      <ConfirmProvider>
+        <SettingsModal
+          modelProgress={null}
+          updater={updater}
+          recordingActive={false}
+          appVersion="2.3.0"
+          onClose={onClose}
+          {...props}
+        />
+      </ConfirmProvider>,
     ),
   );
   await flush();
@@ -86,6 +90,11 @@ async function type(input: HTMLInputElement, value: string) {
     setter.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
+  await flush();
+}
+
+async function answer(yes: boolean) {
+  await act(async () => confirmChoice(yes).click());
   await flush();
 }
 
@@ -240,7 +249,6 @@ describe("Settings overlay", () => {
   });
 
   it("picking a cloud provider asks for consent first", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     const setLlm = vi.spyOn(api, "setLlmSettings");
     const setSetting = vi.spyOn(api, "setAppSetting");
     await open();
@@ -248,24 +256,53 @@ describe("Settings overlay", () => {
     expect(runsOn.value).toBe("anthropic");
 
     await choose(runsOn, "openai");
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(confirm.mock.calls[0][0]).toContain("transcript cleanup");
+    // the in-app question waits for you: nothing is saved yet
+    expect(confirmTitle()).toBe("Use OpenAI for Ask and Enhance?");
+    expect(confirmDialog()!.textContent).toContain("transcript cleanup");
+    expect(setSetting).not.toHaveBeenCalled();
+    expect(setLlm).not.toHaveBeenCalled();
+    await answer(false);
+    expect(confirmDialog()).toBeNull();
+    expect(setSetting).not.toHaveBeenCalled();
+    expect(await api.getAppSetting("consent.cloud_llm.openai")).toBeNull();
     expect(setLlm).not.toHaveBeenCalled();
     expect(runsOn.value).toBe("anthropic");
     expect(host!.textContent).toContain("Kept your current provider");
 
-    confirm.mockReturnValue(true);
     await choose(runsOn, "openai");
+    await answer(true);
     expect(setSetting).toHaveBeenCalledWith("consent.cloud_llm.openai", "true");
     expect(setLlm).toHaveBeenCalledWith(expect.objectContaining({ provider: "openai" }));
     expect(host!.textContent).toContain("Text leaves this computer");
     expect(host!.textContent).toContain("OpenAI API key");
 
     // local needs no consent; restore the mock to Anthropic afterwards
-    confirm.mockClear();
     await choose(runsOn, "ollama");
-    expect(confirm).not.toHaveBeenCalled();
+    expect(confirmDialog()).toBeNull();
     expect(host!.textContent).toContain("Nothing leaves this computer");
+    await choose(runsOn, "anthropic");
+  });
+
+  it("deleting a local model asks first, and Cancel keeps it", async () => {
+    const del = vi.spyOn(api, "ollamaDelete");
+    await open();
+    const runsOn = $<HTMLSelectElement>('select[aria-label="Runs on"]')!;
+    await choose(runsOn, "ollama");
+    await click($('[aria-labelledby="settings-h-ai"] .fly-sgroup-more'));
+    const deleteButton = () => byText("button", "Delete");
+    await click(deleteButton());
+    expect(confirmTitle()).toBe("Delete qwen3.5:4b?");
+    expect(confirmDialog()!.dataset.tone).toBe("danger");
+    expect(del).not.toHaveBeenCalled();
+    await answer(false);
+    expect(del).not.toHaveBeenCalled();
+    expect(host!.textContent).toContain("qwen3.5:4b");
+
+    await click(deleteButton());
+    await answer(true);
+    expect(del).toHaveBeenCalledWith("qwen3.5:4b");
+    expect(host!.textContent).toContain("qwen3.5:4b deleted.");
+    expect(deleteButton()).toBeNull(); // the only other model is the one in use
     await choose(runsOn, "anthropic");
   });
 

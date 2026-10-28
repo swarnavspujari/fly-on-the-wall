@@ -42,7 +42,9 @@ The second pass followed staff-engineer and SOC 2 (Security, Confidentiality and
 
 **Data handling**
 - Deletes are atomic transactions. SQLite `secure_delete=ON`, plus a WAL checkpoint after each delete.
-- **Cloud processing needs recorded consent per provider.** A one-time disclosure names the processor and what is sent, and it's enforced in the backend so no UI path can skip it. Users already on a cloud provider are migrated once, so nothing breaks.
+- **Cloud processing needs recorded consent per provider.** A one-time disclosure names the processor and what is sent, and it's enforced in the backend so no UI path can skip it.
+  - *Correction (v2.4):* until v2.4 the disclosure used `window.confirm`, which tauri-plugin-dialog makes async and which had no dialog permission. So it never showed, and the Promise it returned counted as "yes". Every consent recorded before v2.4, including the one-time migration for users already on a cloud provider, was recorded without the disclosure being seen.
+  - v2.4 asks with an in-app dialog, clears all earlier consents once (`reset_unseen_cloud_consent`), and asks again at launch when the saved provider is a cloud one. A lint rule bans `confirm`/`alert`.
 - **MCP settings copy corrected.** Results are sent to the MCP client's model provider; they don't "stay on this machine".
 
 **Supply chain and release (CC8)**

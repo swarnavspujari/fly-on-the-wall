@@ -41,6 +41,9 @@
                                      "worst": two warnings + a 1 h timer)
      fotwMockNoAttendees = "1"     → Record starts with no attendees, as with
                                      no calendar event (speaker card, typed)
+     fotwMockConsentReset = "1"    → no cloud consent recorded (as after the
+                                     v2.4 reset): the launch check asks for
+                                     Anthropic, the saved provider
      fotwMockAskError = keep_local | consent | no_key | auth | ollama_missing |
                         ollama_down | model_missing | offline | timeout |
                         rate_limit | server | other → ask_meeting fails with
@@ -785,8 +788,10 @@ const mockFlag = (k: string) =>
   typeof localStorage !== "undefined" ? localStorage.getItem(k) : null;
 // get/set_app_setting store (consent.* / capture.* / ui.* keys). The mock
 // user already accepted Anthropic (the configured provider), so picking
-// OpenAI or NVIDIA NIM shows the cloud-consent confirm.
-const mockUiSettings: Record<string, string> = { "consent.cloud_llm.anthropic": "true" };
+// OpenAI or NVIDIA NIM shows the cloud-consent confirm. fotwMockConsentReset
+// starts with none, as the v2.4 consent reset leaves it.
+const mockUiSettings: Record<string, string> =
+  mockFlag("fotwMockConsentReset") === "1" ? {} : { "consent.cloud_llm.anthropic": "true" };
 const mockLocalFolders = new Set<string>();
 const mockPrivacy: Record<
   string,
@@ -841,7 +846,7 @@ const MOCK_ASK_ERRORS: Record<string, string> = {
   keep_local:
     'this note is set to "Keep local", so it isn\'t sent to anthropic. Switch the AI provider to Ollama (runs on this device) in Settings, or turn off Keep local for this note',
   consent:
-    "confirm that meeting content may be sent to openai: open Settings → AI provider and select it again",
+    "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama)",
   no_key: "no API key stored for openai — add one in Settings",
   auth: "authentication failed — check the API key",
   ollama_missing:
@@ -857,6 +862,11 @@ const MOCK_ASK_ERRORS: Record<string, string> = {
   server: 'provider returned an error: 500 Internal Server Error: {"type":"error"}',
   other: "invalid request: the request couldn't be sent",
 };
+const MOCK_VENDORS: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  nim: "NVIDIA",
+};
 const MOCK_ASK_ANSWER =
   "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
 function mockAsk(args: Record<string, unknown>): Promise<string> {
@@ -870,7 +880,7 @@ function mockAsk(args: Record<string, unknown>): Promise<string> {
   if (!error && info && !info.is_local) {
     if (keptLocal) error = MOCK_ASK_ERRORS.keep_local.replace("anthropic", provider);
     else if (mockUiSettings[`consent.cloud_llm.${provider}`] !== "true")
-      error = MOCK_ASK_ERRORS.consent.replace("openai", provider);
+      error = MOCK_ASK_ERRORS.consent.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
     else if (!info.has_key) error = MOCK_ASK_ERRORS.no_key.replace("openai", provider);
   }
   return new Promise((resolve, reject) =>
