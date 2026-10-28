@@ -70,7 +70,10 @@ fn main() -> ExitCode {
                     thresholds.retrieval.embedder.as_deref().unwrap_or_default(),
                 ),
             ),
-            "ask_contract" => (&thresholds.ask_contract, ask_contract::run(&dir)),
+            "ask_contract" => (
+                &thresholds.ask_contract,
+                ask_contract::run(&dir, &thresholds.ask_contract.gates),
+            ),
             _ => (
                 &thresholds.local_bench,
                 local_bench::run(&dir, &thresholds.local_bench),

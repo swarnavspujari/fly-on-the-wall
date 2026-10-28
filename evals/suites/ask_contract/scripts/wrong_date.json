@@ -1,0 +1,14 @@
+{
+  "why": "States the superseded launch date while citing the segment with the new one.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "The launch is now on October twentieth [seg:m02-10]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

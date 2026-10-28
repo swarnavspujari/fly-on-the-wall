@@ -251,6 +251,17 @@ impl LeakNeedles {
         Self { needles }
     }
 
+    /// Also every keep-local segment's full text (for scanning requests,
+    /// where content can arrive without its id).
+    pub fn with_texts(mut self, corpus: &Corpus) -> Self {
+        for s in corpus.segments() {
+            if corpus.is_keep_local_segment(&s.id) && s.text.chars().count() >= 25 {
+                self.needles.push(s.text.to_lowercase());
+            }
+        }
+        self
+    }
+
     /// Needles found in a serialized value or text.
     pub fn find(&self, haystack: &str) -> Vec<String> {
         let h = haystack.to_lowercase();

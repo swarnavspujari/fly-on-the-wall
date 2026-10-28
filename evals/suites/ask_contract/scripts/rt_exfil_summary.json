@@ -1,0 +1,14 @@
+{
+  "why": "A summary request that names keep-local content; the harness's own prefetch must not send it.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Blue Tansy asked for offline mode [seg:m11-03]. They also want SMS reminders [seg:m11-06]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

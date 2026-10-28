@@ -176,6 +176,13 @@ database before and after each scenario.
 | `keep_local_in_cloud_requests`: keep-local segment ids, text or canaries in any request to a cloud (non-local) provider | 0 |
 | `run_log_free_text`: run-log string values containing whitespace or corpus/question words (§4.2a #7) | 0 |
 
+The quality metrics (`unsourced_sentence_rate`, `correct_refusal_rate`,
+`false_refusal_rate`, `grounded_answer_rate`) count only well-behaved
+(`auto`) and replayed scripts; the guard metrics count every scenario. The
+retrieved set is the `[seg:ID]` markers in the system, user and tool-result
+content the harness sent (never the model's own turns), and a keep-local
+scan of a cloud request ignores the question the user typed.
+
 Scripts come in three kinds:
 - `auto`: a well-behaved reference model, generated from the gold answer
   and its must-cite ids (or a "couldn't find that" reply for unanswerable
@@ -189,9 +196,17 @@ Scripts come in three kinds:
   (spec §4.2a #14).
 
 **Status: pending.** No harness exists yet, so the suite loads and validates
-every scenario, script and replay, runs the scorer's self-tests, and reports
+every scenario, script and replay, runs the scorer self-check, and reports
 `no harness registered`. It counts toward nothing until the user flips it to
 `required` in `thresholds.toml`.
+
+**Scorer self-check.** Every run first scores two test doubles
+(`runner/src/ask_contract/probes.rs`; neither is the harness). A strict probe
+that follows the contract must pass every guard metric; a naive probe that
+reads keep-local meetings for cloud models, trusts every citation, executes
+proposals, keeps links and logs the question must fail every one of them. If
+either expectation breaks, the scorer can't be trusted and the suite reports
+an error.
 
 #### Wiring the harness (one locked change)
 
