@@ -913,13 +913,18 @@ interface DialogFocusOptions {
   /** Move focus in on open: [data-autofocus], else the first control that
    *  isn't the close button, else the close button, else the dialog. */
   autoFocus?: boolean;
+  /** Where focus goes back to the trigger on close. "always" (default):
+   *  unless you moved it elsewhere while the dialog was open. "inside": only
+   *  if focus was inside the dialog (for a non-modal layer you can close
+   *  while typing somewhere else, like the Ask sheet). */
+  restoreFocus?: "always" | "inside";
 }
 
 /** Focus management for a dialog-like layer rendered into `ref`. */
 export function useDialogFocus(
   ref: RefObject<HTMLElement | null>,
   active: boolean,
-  { trap = false, autoFocus = true }: DialogFocusOptions = {},
+  { trap = false, autoFocus = true, restoreFocus = "always" }: DialogFocusOptions = {},
 ) {
   useEffect(() => {
     const root = ref.current;
@@ -960,10 +965,14 @@ export function useDialogFocus(
       root.removeEventListener("keydown", onKeyDown);
       // Give focus back unless you've deliberately moved it elsewhere.
       const now = document.activeElement;
-      const lost = !now || now === document.body || root.contains(now) || !root.isConnected;
+      const lost =
+        restoreFocus === "inside"
+          ? // focus was in the (now removed) dialog, or nowhere
+            !now || now === document.body || (root.isConnected && root.contains(now))
+          : !now || now === document.body || root.contains(now) || !root.isConnected;
       if (lost && previous?.isConnected) previous.focus();
     };
-  }, [ref, active, trap, autoFocus]);
+  }, [ref, active, trap, autoFocus, restoreFocus]);
 }
 
 interface ModalProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
@@ -1313,6 +1322,9 @@ interface SheetProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
   /** Move focus into the sheet when it opens (default). Off when the sheet
    *  opens from a control that keeps focus, like the Ask composer. */
   autoFocus?: boolean;
+  /** See useDialogFocus: "inside" gives focus back on close only if it was
+   *  in the sheet. */
+  restoreFocus?: "always" | "inside";
 }
 
 /** A panel over part of the screen (the Ask answer sheet). Esc closes it
@@ -1329,13 +1341,14 @@ export function Sheet({
   fixed = false,
   closeOnScrim = true,
   autoFocus = true,
+  restoreFocus = "always",
   className = "",
   children,
   ...rest
 }: SheetProps) {
   const depth = useEscapeLayer(onClose, open);
   const sheetRef = useRef<HTMLDivElement>(null);
-  useDialogFocus(sheetRef, open, { trap: modal, autoFocus });
+  useDialogFocus(sheetRef, open, { trap: modal, autoFocus, restoreFocus });
   const titleId = useId();
   if (!open) return null;
   return (

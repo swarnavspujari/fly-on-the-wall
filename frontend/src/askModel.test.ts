@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   CLAUDE_MODELS,
   QUICK_PROMPTS,
+  RUNS_ON_HELPER,
   cloudConsentMessage,
   describeAskError,
+  isLoopbackUrl,
   providerName,
+  runsOnPlace,
+  runsOnSwitched,
 } from "./askModel";
 
 describe("describeAskError", () => {
@@ -85,6 +89,71 @@ describe("describeAskError", () => {
   it("keeps the raw text for the details and never shows an empty one", () => {
     expect(describeAskError("", "ollama").raw).toBe("Unknown error");
     expect(describeAskError(new Error("boom"), "ollama").raw).toBe("Error: boom");
+  });
+
+  it("offers a consent button for 'isn't confirmed', and only there", () => {
+    const consent = describeAskError(
+      "confirm that meeting content may be sent to openai: open Settings → AI provider and select it again",
+      "openai",
+    );
+    expect(consent.action).toBe("consent");
+    expect(consent.fix).toBe("Ask needs your OK before it sends this note to OpenAI.");
+    expect(describeAskError("anthropic timed out.", "anthropic").action).toBeUndefined();
+  });
+
+  it("only calls a missing model 'not downloaded' for the local AI", () => {
+    const cloud404 =
+      'provider returned an error: 404 Not Found: {"error":{"message":"The model `gpt-9` does not exist","code":"model_not_found"}}';
+    expect(describeAskError(cloud404, "openai").title).not.toContain("downloaded");
+  });
+
+  it("puts 5xx before connection wording, and doesn't guess auth from a bare 401", () => {
+    expect(
+      describeAskError(
+        "provider returned an error: 502 Bad Gateway: upstream connection reset",
+        "openai",
+      ).title,
+    ).toBe("OpenAI had a problem answering");
+    expect(
+      describeAskError("provider returned an error: tokens used 401 of 4096", "openai").title,
+    ).not.toContain("API key");
+  });
+});
+
+describe("Runs on helpers", () => {
+  it.each([
+    ["http://localhost:11434", true],
+    ["http://127.0.0.1:1234", true],
+    ["http://[::1]:8080", true],
+    ["http://192.168.1.2:11434", false],
+    ["https://api.openai.com", false],
+    ["garbage", false],
+  ])("isLoopbackUrl(%s) → %s", (url, loop) => {
+    expect(isLoopbackUrl(url)).toBe(loop);
+  });
+
+  it("says where a provider runs, in the privacy pill's words", () => {
+    expect(runsOnPlace({ id: "ollama", is_local: true, base_url: null })).toEqual({
+      kind: "local",
+      label: "This computer",
+    });
+    expect(
+      runsOnPlace({ id: "ollama", is_local: true, base_url: "http://localhost:11434" }).kind,
+    ).toBe("local");
+    expect(
+      runsOnPlace({ id: "ollama", is_local: true, base_url: "http://192.168.1.20:11434" }),
+    ).toEqual({ kind: "remote", label: "Off this computer · 192.168.1.20:11434" });
+    expect(runsOnPlace({ id: "anthropic", is_local: false, base_url: null })).toEqual({
+      kind: "cloud",
+      label: "Anthropic",
+    });
+  });
+
+  it("discloses that the provider isn't just Ask's", () => {
+    expect(RUNS_ON_HELPER).toBe("Also used for Enhance, transcript cleanup and action items.");
+    expect(runsOnSwitched("OpenAI")).toBe(
+      "Ask, Enhance, transcript cleanup and action items now run on OpenAI.",
+    );
   });
 });
 

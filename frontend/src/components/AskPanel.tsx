@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -18,9 +18,12 @@ import { api } from "../api";
 import {
   CLAUDE_MODELS,
   QUICK_PROMPTS,
+  RUNS_ON_HELPER,
   cloudConsentMessage,
   describeAskError,
   providerName,
+  runsOnPlace,
+  runsOnSwitched,
 } from "../askModel";
 import { providerLabel } from "../settingsModel";
 import { Button, Notice, Select, Sheet } from "./ui";
@@ -45,6 +48,9 @@ const PROMPT_ICONS: Record<(typeof QUICK_PROMPTS)[number], ReactNode> = {
 /** The sheet can pin beside the note from this width up. */
 export const PIN_MIN_WIDTH = 1440;
 
+/** The composer grows with what you type, up to this height, then scrolls. */
+const COMPOSER_MAX_PX = 132;
+
 /** True while the window is at least PIN_MIN_WIDTH wide. */
 export function useWideWindow(): boolean {
   const query = `(min-width: ${PIN_MIN_WIDTH}px)`;
@@ -67,18 +73,29 @@ export interface AskChat {
   input: string;
   setInput: (value: string) => void;
   busy: boolean;
-  /** The last failure and the question it was for (to retry). */
-  error: { raw: string; question: string } | null;
+  /** The last failure, the question it was for (to retry) and the provider
+   *  it went to (read when it was asked). */
+  error: { raw: string; question: string; provider: string } | null;
   /** Answers (by history index) already inserted into the note. */
   inserted: ReadonlySet<number>;
   send: (text: string) => void;
   retry: () => void;
   dismissError: () => void;
   markInserted: (index: number) => void;
+  /** The SAVED LLM settings. Re-read when the sheet opens, before each
+   *  question and before Runs on writes, so a change made in Settings is
+   *  never undone from a stale copy. */
+  llm: LlmSettings | null;
+  setLlm: (next: LlmSettings) => void;
+  refreshLlm: () => Promise<LlmSettings | null>;
+  /** The answer sheet's id (the composer's aria-controls). */
+  sheetId: string;
+  /** Polite live-region text: an answer arrived, or Ask couldn't answer. */
+  announcement: string;
 }
 
 /** The composer's input, shared so the sheet can hand focus back to it. */
-export type AskInputRef = RefObject<HTMLInputElement | null>;
+export type AskInputRef = RefObject<HTMLTextAreaElement | null>;
 
 /** One ephemeral chat per open note: switching notes starts a fresh one and
  *  drops any reply still on its way for the old note. */
@@ -88,26 +105,50 @@ export function useAskChat(noteId: string): AskChat {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AskChat["error"]>(null);
   const [inserted, setInserted] = useState<ReadonlySet<number>>(new Set());
+  const [llm, setLlm] = useState<LlmSettings | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const sheetId = useId();
   const seq = useRef(0);
+  // A question is on its way: guards double sends inside one render (two
+  // Enters, Enter + a quick prompt) that the `busy` state can't see yet.
+  const inFlight = useRef(false);
 
   useEffect(() => {
     seq.current += 1;
+    inFlight.current = false;
     setHistory([]);
     setInput("");
     setBusy(false);
     setError(null);
     setInserted(new Set());
+    setAnnouncement("");
   }, [noteId]);
+
+  const refreshLlm = useCallback(async () => {
+    try {
+      const s = await api.getLlmSettings();
+      setLlm(s);
+      return s;
+    } catch {
+      return null;
+    }
+  }, []);
 
   const send = (text: string) => {
     const content = text.trim();
-    if (!content || busy) return;
+    if (!content || inFlight.current) return;
+    inFlight.current = true;
     const before = history;
     const next: AskMessage[] = [...before, { role: "user", content }];
     const mine = ++seq.current;
+    const providerAtSend = llm?.provider ?? "ollama";
+    // Re-read the saved provider alongside the question: Runs on stays
+    // current, and an error names the provider the question went to.
+    const settings = refreshLlm();
     setHistory(next);
     setBusy(true);
     setError(null);
+    setAnnouncement("");
     // Clear the composer only if it holds this question (not something
     // typed meanwhile, or when a quick prompt was clicked).
     setInput((cur) => (cur.trim() === content ? "" : cur));
@@ -117,18 +158,24 @@ export function useAskChat(noteId: string): AskChat {
         (reply) => {
           if (mine !== seq.current) return;
           setHistory([...next, { role: "assistant", content: reply }]);
+          const n = next.filter((m) => m.role === "user").length;
+          setAnnouncement(`Answer ${n} is ready.`);
         },
-        (e) => {
+        async (e) => {
+          const s = await settings;
           if (mine !== seq.current) return;
           // Roll back the question (the backend needs the chat to end on a
           // user turn) and hand it back to the composer.
           setHistory(before);
           setInput((cur) => (cur.trim() ? cur : content));
-          setError({ raw: String(e), question: content });
+          setError({ raw: String(e), question: content, provider: s?.provider ?? providerAtSend });
+          setAnnouncement("Ask couldn't answer. The reason is in the answer sheet.");
         },
       )
       .finally(() => {
-        if (mine === seq.current) setBusy(false);
+        if (mine !== seq.current) return;
+        inFlight.current = false;
+        setBusy(false);
       });
   };
 
@@ -145,10 +192,17 @@ export function useAskChat(noteId: string): AskChat {
     },
     dismissError: () => setError(null),
     markInserted: (i) => setInserted((s) => new Set(s).add(i)),
+    llm,
+    setLlm,
+    refreshLlm,
+    sheetId,
+    announcement,
   };
 }
 
-/** The docked composer: focusing it opens the answer sheet. */
+/** The docked composer. A click, typing or Enter opens the answer sheet
+ *  (focus alone doesn't, so tabbing past it or getting focus back when the
+ *  sheet closes never reopens it). Enter sends; Shift+Enter adds a line. */
 export function AskComposer({
   chat,
   inputRef,
@@ -164,10 +218,25 @@ export function AskComposer({
 }) {
   const [focused, setFocused] = useState(false);
   const canSend = chat.input.trim() !== "" && !chat.busy;
+  const submit = () => {
+    onOpen();
+    chat.send(chat.input);
+  };
+
+  // Grow with the text (one line when empty), up to COMPOSER_MAX_PX.
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
+    // scroll only once it's at full height (no stray scrollbar on one line)
+    el.style.overflowY = el.scrollHeight > COMPOSER_MAX_PX ? "auto" : "hidden";
+  }, [chat.input, inputRef]);
+
   return (
     <form
       aria-label="Ask"
-      className="flex min-w-[240px] flex-1 items-center gap-2 rounded-full border py-1 pl-3.5 pr-1"
+      className="flex min-w-[240px] flex-1 items-end gap-2 rounded-[22px] border py-1 pl-3.5 pr-1"
       style={{
         background: "var(--surface)",
         borderColor: focused || open ? "var(--primary-border)" : "var(--line)",
@@ -175,43 +244,45 @@ export function AskComposer({
       }}
       onSubmit={(e) => {
         e.preventDefault();
-        onOpen();
-        chat.send(chat.input);
+        submit();
       }}
     >
       <Sparkles
         size={16}
         strokeWidth={1.75}
         aria-hidden="true"
-        style={{ color: "var(--primary-text)", flex: "none" }}
+        style={{ color: "var(--primary-text)", flex: "none", marginBottom: 9 }}
       />
-      <input
+      <textarea
         ref={inputRef}
+        rows={1}
         value={chat.input}
         onChange={(e) => {
           chat.setInput(e.target.value);
           onOpen();
         }}
-        // Tabbing in, a click or typing opens the sheet. Focus with no
-        // relatedTarget is the sheet handing focus back as it closes (Esc,
-        // ×, note switch), which must not reopen it; a click from the page
-        // body also has none, so onClick covers that case.
-        onFocus={(e) => {
-          setFocused(true);
-          if (e.relatedTarget) onOpen();
-        }}
         onClick={onOpen}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+        onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         placeholder={placeholder}
         aria-label={placeholder}
-        className="min-w-0 flex-1 border-0 bg-transparent py-1.5 text-[14px] text-text outline-none placeholder:text-text-3"
+        // The sheet this composer fills. (aria-expanded isn't valid on a
+        // text box; the sheet announces itself as a labelled dialog.)
+        aria-controls={open ? chat.sheetId : undefined}
+        className="block min-w-0 flex-1 resize-none overflow-hidden border-0 bg-transparent py-1.5 text-[14px] leading-[1.45] text-text outline-none placeholder:text-text-3"
         // the pill around it shows the focus ring
-        style={{ boxShadow: "none" }}
+        style={{ boxShadow: "none", maxHeight: COMPOSER_MAX_PX }}
       />
       <button
         type="submit"
         aria-label="Send"
-        title="Send"
+        title="Send (Enter). Shift+Enter adds a line."
         disabled={!canSend}
         className="grid h-8 w-8 flex-none place-items-center rounded-full border-0"
         style={{
@@ -222,6 +293,9 @@ export function AskComposer({
       >
         <ArrowUp size={16} strokeWidth={2} />
       </button>
+      <span className="sr-only" aria-live="polite" data-testid="ask-live">
+        {chat.announcement}
+      </span>
     </form>
   );
 }
@@ -242,82 +316,117 @@ async function confirmCloudProvider(llm: LlmSettings, id: string): Promise<boole
   return ok;
 }
 
+const modelLabel = (model: string) => CLAUDE_MODELS.find((m) => m.value === model)?.label ?? model;
+
 /** "Runs on": every provider (not a local/cloud binary), plus the Claude
- *  model when Anthropic is picked. It changes the saved provider, which
- *  Enhance, transcript cleanup and action items use too. */
+ *  model when Anthropic is picked. It changes the SAVED provider, which
+ *  Enhance, transcript cleanup and action items use too, so it says so, and
+ *  it re-reads the saved settings before every write. */
 function RunsOn({
-  llm,
-  onChange,
+  chat,
   disabled,
   keptLocal,
 }: {
-  llm: LlmSettings;
-  onChange: (next: LlmSettings) => void;
+  chat: AskChat;
   disabled: boolean;
   keptLocal: boolean;
 }) {
+  const llm = chat.llm!;
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ text: string; tone: "info" | "error" } | null>(null);
   const selectId = useId();
+  const helperId = useId();
+  const warningId = useId();
   const current = llm.providers.find((p) => p.id === llm.provider) ?? null;
-  const cloud = !!current && !current.is_local;
+  const place = current
+    ? runsOnPlace(current)
+    : { kind: "cloud" as const, label: providerName(llm.provider) };
   const claudeModel = current?.model || current?.default_model || CLAUDE_MODELS[0].value;
   const claudeOptions = CLAUDE_MODELS.some((m) => m.value === claudeModel)
     ? CLAUDE_MODELS
     : [...CLAUDE_MODELS, { value: claudeModel, label: claudeModel }];
 
-  const pickProvider = async (id: string) => {
-    setMessage(null);
-    if (!(await confirmCloudProvider(llm, id))) {
-      setMessage("Kept your current provider. Nothing was sent anywhere.");
-      return;
-    }
-    const info = llm.providers.find((p) => p.id === id);
+  const write = async (
+    fresh: LlmSettings,
+    provider: string,
+    model: string | null,
+    done: (next: LlmSettings) => string,
+  ) => {
+    const info = fresh.providers.find((p) => p.id === provider);
     setSaving(true);
     try {
       await api.setLlmSettings({
-        provider: id,
-        model: info?.model ?? null,
-        base_url: info?.base_url ?? null,
-        api_key: null,
-      });
-      onChange({ ...llm, provider: id });
-    } catch (e) {
-      setMessage(`Couldn't switch: ${String(e)}`);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const pickClaudeModel = async (model: string) => {
-    setMessage(null);
-    if (!(await confirmCloudProvider(llm, "anthropic"))) return;
-    const info = llm.providers.find((p) => p.id === "anthropic");
-    setSaving(true);
-    try {
-      await api.setLlmSettings({
-        provider: "anthropic",
+        provider,
         model,
         base_url: info?.base_url ?? null,
         api_key: null,
       });
-      onChange({
-        ...llm,
-        providers: llm.providers.map((p) => (p.id === "anthropic" ? { ...p, model } : p)),
-      });
+      const next: LlmSettings = {
+        ...fresh,
+        provider,
+        providers: fresh.providers.map((p) => (p.id === provider ? { ...p, model } : p)),
+      };
+      chat.setLlm(next);
+      setMessage({ text: done(next), tone: "info" });
     } catch (e) {
-      setMessage(`Couldn't switch: ${String(e)}`);
+      setMessage({ text: `Couldn't switch, so nothing changed. (${String(e)})`, tone: "error" });
+      void chat.refreshLlm();
     } finally {
       setSaving(false);
     }
   };
 
+  const pickProvider = async (id: string) => {
+    setMessage(null);
+    const fresh = (await chat.refreshLlm()) ?? llm;
+    if (fresh.provider === id) return;
+    if (!(await confirmCloudProvider(fresh, id))) {
+      setMessage({ text: "Kept your current provider. Nothing was sent anywhere.", tone: "info" });
+      return;
+    }
+    const info = fresh.providers.find((p) => p.id === id);
+    await write(fresh, id, info?.model ?? null, () => runsOnSwitched(providerLabel(id)));
+  };
+
+  const pickClaudeModel = async (model: string) => {
+    setMessage(null);
+    const fresh = (await chat.refreshLlm()) ?? llm;
+    // Picking a model never switches the provider behind your back: if
+    // Settings moved off Anthropic meanwhile, the select now shows that, and
+    // switching back is a question.
+    const switching = fresh.provider !== "anthropic";
+    if (
+      switching &&
+      !window.confirm(
+        `Ask now runs on ${providerLabel(fresh.provider)} (changed in Settings).\n\n` +
+          `Switch Ask, Enhance, transcript cleanup and action items to ` +
+          `${providerLabel("anthropic")} with ${modelLabel(model)}?`,
+      )
+    ) {
+      setMessage({ text: `Kept ${providerLabel(fresh.provider)}.`, tone: "info" });
+      return;
+    }
+    if (!(await confirmCloudProvider(fresh, "anthropic"))) {
+      setMessage({ text: "Kept your current setting. Nothing was sent anywhere.", tone: "info" });
+      return;
+    }
+    await write(fresh, "anthropic", model, () =>
+      switching
+        ? runsOnSwitched(`${providerLabel("anthropic")} · ${modelLabel(model)}`)
+        : `Ask, Enhance, transcript cleanup and action items now use ${modelLabel(model)}.`,
+    );
+  };
+
   const warning =
-    cloud && keptLocal
-      ? `This note is kept local, so Ask won't send it to ${providerName(llm.provider)}.`
-      : cloud && current && !current.has_key
+    keptLocal && place.kind !== "local"
+      ? place.kind === "remote"
+        ? "This note is kept local, so Ask won't send it to another computer."
+        : `This note is kept local, so Ask won't send it to ${providerName(llm.provider)}.`
+      : place.kind === "cloud" && current && !current.has_key
         ? `No API key for ${providerName(llm.provider)} yet. Add one in Settings › Ask and Enhance.`
         : null;
+  const describedBy = warning ? `${helperId} ${warningId}` : helperId;
+  const refreshOnFocus = () => void chat.refreshLlm();
 
   return (
     <div className="flex min-w-0 flex-col gap-1">
@@ -325,7 +434,7 @@ function RunsOn({
         <span
           aria-hidden="true"
           className="h-2 w-2 flex-none rounded-full"
-          style={{ background: cloud ? "var(--warning)" : "var(--success)" }}
+          style={{ background: place.kind === "local" ? "var(--success)" : "var(--warning)" }}
         />
         <label htmlFor={selectId} className="text-[12px] font-semibold text-text-2">
           Runs on
@@ -334,7 +443,8 @@ function RunsOn({
           id={selectId}
           value={llm.provider}
           disabled={disabled || saving}
-          title="Also used for Enhance, transcript cleanup and action items"
+          aria-describedby={describedBy}
+          onFocus={refreshOnFocus}
           onChange={(e) => void pickProvider(e.target.value)}
           options={llm.providers.map((p) => ({ value: p.id, label: providerLabel(p.id) }))}
           className="!py-1 !pl-2.5 !text-[12.5px]"
@@ -345,6 +455,8 @@ function RunsOn({
             aria-label="Claude model"
             value={claudeModel}
             disabled={disabled || saving}
+            aria-describedby={describedBy}
+            onFocus={refreshOnFocus}
             onChange={(e) => void pickClaudeModel(e.target.value)}
             options={claudeOptions}
             className="!py-1 !pl-2.5 !text-[12.5px]"
@@ -355,14 +467,26 @@ function RunsOn({
             {current.model || current.default_model}
           </span>
         ) : null}
+        {place.kind === "remote" && (
+          <span className="text-[12px]" style={{ color: "var(--warning-text)" }}>
+            {place.label}
+          </span>
+        )}
       </div>
+      <span id={helperId} className="text-[11.5px]" style={{ color: "var(--text-3)" }}>
+        {RUNS_ON_HELPER}
+      </span>
       {message && (
-        <span className="text-[12px]" style={{ color: "var(--text-3)" }} role="status">
-          {message}
+        <span
+          className="text-[12px]"
+          style={{ color: message.tone === "error" ? "var(--error-text)" : "var(--text-2)" }}
+          role="status"
+        >
+          {message.text}
         </span>
       )}
       {warning && (
-        <span className="text-[12px]" style={{ color: "var(--warning-text)" }}>
+        <span id={warningId} className="text-[12px]" style={{ color: "var(--warning-text)" }}>
           {warning}
         </span>
       )}
@@ -418,19 +542,13 @@ export function AskSheet({
   /** Insert an answer into the note (today: appended to your notes). */
   onInsert: (content: string) => void;
 }) {
-  const [llm, setLlm] = useState<LlmSettings | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const { refreshLlm } = chat;
 
+  // The saved provider may have changed in Settings since last time.
   useEffect(() => {
-    let live = true;
-    api
-      .getLlmSettings()
-      .then((s) => live && setLlm(s))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, []);
+    void refreshLlm();
+  }, [refreshLlm]);
 
   // Keep the newest message in view (scroll the sheet body only).
   const { history, busy, error } = chat;
@@ -447,7 +565,15 @@ export function AskSheet({
     action();
   };
   const lastAnswer = history.map((m) => m.role).lastIndexOf("assistant");
-  const errorView = error ? describeAskError(error.raw, llm?.provider ?? "ollama") : null;
+  const errorView = error ? describeAskError(error.raw, error.provider) : null;
+
+  // "Isn't confirmed yet": ask for consent here, then ask the question again.
+  const allowAndRetry = async () => {
+    if (!error) return;
+    const fresh = (await chat.refreshLlm()) ?? chat.llm;
+    if (fresh && (await confirmCloudProvider(fresh, error.provider))) chat.retry();
+    inputRef.current?.focus();
+  };
 
   return (
     <Sheet
@@ -455,6 +581,8 @@ export function AskSheet({
       onClose={onClose}
       side={pinned ? "right" : "bottom"}
       autoFocus={false}
+      restoreFocus="inside"
+      id={chat.sheetId}
       aria-label={what}
       data-testid="ask-sheet"
       className={
@@ -479,7 +607,7 @@ export function AskSheet({
       footer={
         <div className="flex w-full flex-wrap items-center gap-2">
           <div className="mr-auto min-w-0">
-            {llm && <RunsOn llm={llm} onChange={setLlm} disabled={busy} keptLocal={keptLocal} />}
+            {chat.llm && <RunsOn chat={chat} disabled={busy} keptLocal={keptLocal} />}
           </div>
           {canPin && (
             <Button
@@ -597,9 +725,15 @@ export function AskSheet({
           data-testid="ask-error"
           actions={
             <>
-              <Button variant="outline" size="xs" onClick={thenFocusComposer(chat.retry)}>
-                Try again
-              </Button>
+              {errorView.action === "consent" ? (
+                <Button variant="outline" size="xs" onClick={() => void allowAndRetry()}>
+                  Review and allow {providerName(error!.provider)}
+                </Button>
+              ) : (
+                <Button variant="outline" size="xs" onClick={thenFocusComposer(chat.retry)}>
+                  Try again
+                </Button>
+              )}
               <Button variant="ghost" size="xs" onClick={thenFocusComposer(chat.dismissError)}>
                 Dismiss
               </Button>

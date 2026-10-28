@@ -886,7 +886,9 @@ function ViewSwitcher({
   children?: ReactNode;
 }) {
   return (
-    <div className="print:hidden absolute bottom-5 left-1/2 z-[8] flex w-[min(760px,calc(100%-24px))] -translate-x-1/2 flex-wrap items-center justify-center gap-2.5">
+    // The dock's empty space lets clicks through to the note under it; only
+    // its controls (and the answer sheet anchored to it) take them.
+    <div className="print:hidden pointer-events-none absolute bottom-5 left-1/2 z-[8] flex w-[min(760px,calc(100%-24px))] -translate-x-1/2 flex-wrap items-center justify-center gap-2.5 [&>*]:pointer-events-auto">
       <div
         className="flex items-center gap-[3px] rounded-full border border-line bg-surface p-1"
         style={{ boxShadow: "var(--shadow-lg)" }}
@@ -987,7 +989,7 @@ export default function Editor({
   // Ask chat for this note (ephemeral; resets on note switch) and whether
   // its sheet is pinned beside the note (wide windows only; remembered).
   const ask = useAskChat(note.id);
-  const askInputRef = useRef<HTMLInputElement>(null);
+  const askInputRef = useRef<HTMLTextAreaElement>(null);
   const wideWindow = useWideWindow();
   const [askPinPref, setAskPinPref] = useState(false);
   useEffect(() => {
