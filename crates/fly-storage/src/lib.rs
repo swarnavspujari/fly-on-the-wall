@@ -21,6 +21,7 @@
 
 mod atomic;
 mod attachments;
+pub mod citations;
 pub mod embeddings;
 mod folders;
 pub mod hybrid;
@@ -35,13 +36,16 @@ mod recovery;
 pub mod safe_path;
 pub mod scratch;
 mod search;
+pub mod segments;
 mod settings;
 mod templates;
 mod transcripts;
 
+pub use citations::{CitationLocator, CitationStatus};
 pub use embeddings::{PendingChunk, VectorHit};
 pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
+pub use meetings::MeetingFilter;
 pub use meetings::{contained_recordings_dir, recording_dir_rel};
 pub use notes::NoteSummary;
 pub use privacy::{
@@ -51,6 +55,7 @@ pub use recovery::{
     HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR, RECORDING_MANIFEST,
 };
 pub use search::{SearchFilter, SearchHit, SearchHitKind};
+pub use segments::SegmentHit;
 pub use transcripts::SpeakerSnapshot;
 
 use std::path::{Path, PathBuf};
@@ -115,6 +120,11 @@ const REQUIRED_TABLES: &[&str] = &[
     "notes_fts",
     "transcripts_fts",
     "embedding_chunks",
+    // v3: per-segment index + citation locators (see segments.rs,
+    // citations.rs)
+    "transcript_segments",
+    "segments_fts",
+    "citation_locators",
 ];
 
 /// Columns added after a table's first release, per table. Repaired by
@@ -173,6 +183,17 @@ const EXPECTED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
         "transcripts",
         &[("cleaned_json", "TEXT"), ("speaker_undo_json", "TEXT")],
     ),
+    // v3: a chunk's exact transcript span and which text variant it
+    // embeds (see embeddings.rs). Defaults keep rows written by an older
+    // build valid: '[]' reads as "span unknown".
+    (
+        "embedding_chunks",
+        &[
+            ("segment_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("end_ms", "INTEGER"),
+            ("variant", "TEXT NOT NULL DEFAULT 'raw'"),
+        ],
+    ),
 ];
 
 pub struct Storage {
@@ -199,11 +220,11 @@ impl Storage {
         // Deleted meeting text is overwritten in the database file instead of
         // lingering in free pages until reused (confidential-data disposal).
         conn.pragma_update(None, "secure_delete", "ON")?;
-        Self::migrate(&conn, data_dir)?;
         let storage = Self {
             conn,
             data_dir: data_dir.to_path_buf(),
         };
+        storage.migrate()?;
         storage.seed_builtin_templates()?;
         Ok(storage)
     }
@@ -381,14 +402,22 @@ impl Storage {
     /// Current schema/layout version stamped into SQLite `user_version`.
     /// Bump it and add a `if from < N` step below for every upgrade that
     /// must run exactly once against existing data.
-    const SCHEMA_VERSION: i64 = 2;
+    ///
+    /// Downgrades: an older build that opens a newer file stamps ITS version
+    /// back (the unconditional stamp at the end of `migrate`, unchanged since
+    /// v2), so the next newer build re-runs its steps over whatever the older
+    /// one wrote. Every step must therefore be a full, idempotent rebuild of
+    /// what it owns — never "skip if the version says it's done".
+    pub const SCHEMA_VERSION: i64 = 3;
 
-    fn migrate(conn: &Connection, data_dir: &Path) -> Result<()> {
+    fn migrate(&self) -> Result<()> {
+        let (conn, data_dir) = (&self.conn, self.data_dir.as_path());
         let from: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Checked BEFORE the baseline tables are created below.
         let fresh = from == 0 && Self::has_no_tables(conn)?;
         Self::create_baseline(conn)?;
         Self::repair_missing_columns(conn)?;
+        Self::create_derived_indexes(conn)?;
         // v2: human-readable disk layout (meeting folders + note mirrors
         // named by date + title; transcripts inside their meeting folder).
         //
@@ -400,6 +429,11 @@ impl Storage {
         // startup self-heal re-attaches folders in place from their manifests.
         if from < 2 && !fresh {
             migrations::to_v2(conn, data_dir)?;
+        }
+        // v3: per-segment index, label-free chunks with exact spans, citation
+        // locators. Also re-run after a downgrade (see SCHEMA_VERSION).
+        if from < 3 && !fresh {
+            migrations::to_v3(self)?;
         }
         conn.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         Ok(())
@@ -541,12 +575,26 @@ impl Storage {
                 start_ms    INTEGER,
                 embedding   BLOB,
                 model       TEXT,
+                -- v3: transcript chunks' exact span + embedded text variant
+                -- ('raw' | 'polished'); notes keep the defaults
+                segment_ids_json TEXT NOT NULL DEFAULT '[]',
+                end_ms      INTEGER,
+                variant     TEXT NOT NULL DEFAULT 'raw',
                 UNIQUE(owner_kind, owner_id, chunk_index)
             );
             CREATE INDEX IF NOT EXISTS idx_embedding_chunks_owner
                 ON embedding_chunks(owner_kind, owner_id);
             "#,
         )?;
+        Ok(())
+    }
+
+    /// Tables, indexes and triggers whose definitions reference columns that
+    /// `repair_missing_columns` may only just have added (e.g.
+    /// `transcripts.cleaned_json`), so they're created after it.
+    fn create_derived_indexes(conn: &Connection) -> Result<()> {
+        conn.execute_batch(&segments::schema_sql())?;
+        conn.execute_batch(citations::SCHEMA_SQL)?;
         Ok(())
     }
 

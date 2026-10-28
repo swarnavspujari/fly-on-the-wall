@@ -57,7 +57,13 @@ impl SpeakerSnapshot {
 
 impl Storage {
     /// Upsert a meeting's transcript; keeps FTS and on-disk mirrors in sync.
+    /// The per-segment index follows through triggers (segments.rs). When the
+    /// new transcript drops segments that notes or items cite (a new
+    /// transcription run makes new ids), those citations are re-anchored to
+    /// the best-matching new segments (citations.rs).
     pub fn save_transcript(&self, transcript: &Transcript) -> Result<()> {
+        // Read the old transcript BEFORE it's replaced.
+        let reanchor = self.plan_reanchor(transcript)?;
         let json = serde_json::to_string(transcript)?;
         self.conn.execute(
             "INSERT INTO transcripts (meeting_id, json) VALUES (?1, ?2)
@@ -65,6 +71,7 @@ impl Storage {
             (&transcript.meeting_id, &json),
         )?;
         self.sync_transcript_derived(transcript)?;
+        self.apply_reanchor(&transcript.meeting_id, &reanchor)?;
         Ok(())
     }
 
@@ -105,6 +112,10 @@ impl Storage {
                 cleaned.meeting_id
             )));
         }
+        // Chunks embed the polished text where it exists.
+        if let Some(raw) = self.get_transcript(&cleaned.meeting_id)? {
+            self.sync_transcript_chunks(&raw)?;
+        }
         let paths = self.transcript_mirror_paths(&cleaned.meeting_id, ".cleaned");
         write_atomic(&paths.md, cleaned.to_markdown())?;
         write_atomic(&paths.json, serde_json::to_string_pretty(cleaned)?)?;
@@ -121,6 +132,9 @@ impl Storage {
             "UPDATE transcripts SET cleaned_json = NULL WHERE meeting_id = ?1",
             [meeting_id],
         )?;
+        if let Some(raw) = self.get_transcript(meeting_id)? {
+            self.sync_transcript_chunks(&raw)?;
+        }
         let paths = self.transcript_mirror_paths(meeting_id, ".cleaned");
         let _ = std::fs::remove_file(paths.md);
         let _ = std::fs::remove_file(paths.json);

@@ -189,6 +189,7 @@ impl Storage {
         self.touch_note(id, "blocks_json", &serde_json::to_string(blocks)?)?;
         let note = self.get_note(id)?;
         self.sync_note_derived(&note)?;
+        self.sync_note_citations(&note)?;
         Ok(note)
     }
 
@@ -235,6 +236,8 @@ impl Storage {
         self.conn
             .execute("DELETE FROM notes_fts WHERE note_id = ?1", [id])?;
         self.delete_chunks("note", id)?;
+        self.conn
+            .execute("DELETE FROM citation_locators WHERE note_id = ?1", [id])?;
         tx.commit()?;
         self.checkpoint_after_delete();
         for path in [mirror, self.data_dir.join("attachments").join(id)] {

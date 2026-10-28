@@ -1,102 +1,93 @@
-# Proposed retrieval schema migration (v2.5 PR 3.2b, not landed)
+# Storage schema v3: retrieval index + citation locators (v2.5 PR 3.2b)
 
-This is the design for spec §4.2 "Retrieval fixes" and §4.2a #6 (citation locators). It **waits for the storage-safety session's `fly-storage` changes** and lands in `fly-storage` as the next `user_version` step after theirs. `fly-context` 3.2a works on today's schema and swaps its in-memory workarounds for these tables once they exist. Each workaround is marked below.
+This implements spec §4.2 "Retrieval fixes" and §4.2a #6 (citation locators) in `fly-storage` as `user_version` **3**. It's a data-format change: it ships with v2.5 and must not merge before v2.4 is tagged.
 
-## Why
-Today's schema forces `fly-context` into several workarounds:
-- **`transcripts_fts` has one row per meeting.** A keyword hit says *which meeting*, not *where*. `search_passages` localizes it by re-chunking the transcript in memory and scoring windows lexically.
-- **`embedding_chunks` stores only `start_ms`.** No segment ids, no `end_ms`. A vector hit is mapped back to its window by re-running the chunker and matching `start_ms`. That works only because `fly-context`'s windowing is pinned to `chunk_transcript` by a test.
-- **Chunk text embeds speaker labels** (`Dana: …`). A speaker rename changes every chunk of the meeting and re-embeds the whole meeting.
-- **The polished transcript is never indexed.** Proper nouns that polish fixed are invisible to keyword search.
-- **`vector_search` ignores `SearchFilter.exclude_keep_local`** and truncates before any caller can filter. `fly-context` requests every hit, then filters against `keep_local_note_ids()` (fail-closed), then caps. Today the only caller is the UI's semantic search (`commands.rs:648`), so nothing leaks. But it's a trap for the next AI caller, and the fix below is required before wiring.
-- **`list_meetings` has no keep-local or `until` filter.** `fly-context` filters in memory.
-- **Citations are bare segment ids.** Re-transcribing builds new ids (`align.rs` `new_id()`), so every citation in Enhanced blocks and items silently dangles.
+Code: `crates/fly-storage/src/{segments,citations,embeddings,migrations}.rs`. Tests: `crates/fly-storage/tests/migration_v3.rs`, plus unit tests in those modules.
 
-## Schema (one `user_version` step)
+## What changed and why
 
-```sql
--- 1. Chunks carry their exact span. Text becomes label-free.
-ALTER TABLE embedding_chunks ADD COLUMN segment_ids_json TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE embedding_chunks ADD COLUMN end_ms INTEGER;
-ALTER TABLE embedding_chunks ADD COLUMN variant TEXT NOT NULL DEFAULT 'raw'; -- 'raw' | 'polished'
--- (via EXPECTED_COLUMNS, so repair_missing_columns also heals odd DBs)
+| Before (v2) | After (v3) |
+| --- | --- |
+| `transcripts_fts` has one row per meeting, so a keyword hit names a meeting, not a place in it. | **`transcript_segments`** holds one row per segment (id, speaker key, `start_ms`/`end_ms`, text, `variant`). **`segments_fts`** is an external-content FTS5 index over its text, so the text is stored once. `Storage::search_segments` returns segment hits ranked by bm25, with keep-local filtered in SQL. `transcripts_fts` is unchanged, so `search_notes`, the MCP and Home search behave exactly as before. |
+| Chunk text embeds speaker labels (`Dana: …`), so a rename re-embeds the whole meeting. | Chunks are **label-free**: one line per turn. A rename re-embeds nothing. |
+| Chunks store only `start_ms`, and readers re-run the chunker to find the span. | `embedding_chunks` gains `segment_ids_json`, `end_ms` and `variant`. `VectorHit` carries `segment_ids`, `end_ms` and the full `text`. |
+| The polished transcript is never indexed. | Each segment indexes and embeds its **polished** text when the polished transcript has a segment with the same id, otherwise its raw text. Matching by id means a stale polish left over from an earlier run (old ids) is never used. |
+| `vector_search` ignores `exclude_keep_local` and truncates before callers filter. | The keep-local filter (`KEEP_LOCAL_CTE` + `SHAREABLE_CHUNK`) and an orphan guard run **inside SQL, before the limit** (§4.2a #13). Chunks whose meeting or note row is gone are never returned. Under `exclude_keep_local`, a transcript chunk whose meeting has no note row is dropped too, because its privacy can't be checked. |
+| `list_meetings` has no keep-local or `until` filter. | `list_meetings_filtered(&MeetingFilter { since, until, folder_id, exclude_keep_local, limit })`, all applied in SQL. |
+| Citations are bare segment ids, and re-transcribing silently breaks every one. | **`citation_locators`** (see below). |
 
--- 2. Per-segment keyword index (labels NOT indexed; speakers are filters).
-CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
-    meeting_id  UNINDEXED,
-    segment_id  UNINDEXED,
-    speaker_key UNINDEXED,
-    start_ms    UNINDEXED,
-    end_ms      UNINDEXED,
-    variant     UNINDEXED,   -- which text is indexed: 'polished' when present, else 'raw'
-    text,
-    tokenize = 'unicode61 remove_diacritics 2'
-);
+### Triggers keep the segment index in step, not Rust write paths
 
--- 3. Citation locators (§4.2a #6), one row per (citing thing, segment).
-CREATE TABLE IF NOT EXISTS citation_locators (
-    owner_kind TEXT NOT NULL,      -- 'note_block' | 'item' | 'ask_insert'
-    owner_id   TEXT NOT NULL,      -- NoteBlock.id / MeetingItem.id / insert id
-    meeting_id TEXT NOT NULL,
-    seg_id     TEXT NOT NULL,
-    start_ms   INTEGER NOT NULL,
-    end_ms     INTEGER NOT NULL,
-    text_hash  TEXT NOT NULL,      -- hex sha256 of whitespace-collapsed, lowercased text, first 16 chars
-    status     TEXT NOT NULL DEFAULT 'ok',   -- 'ok' | 'reanchored' | 'changed'
-    PRIMARY KEY (owner_kind, owner_id, seg_id)
-);
-CREATE INDEX IF NOT EXISTS idx_citation_locators_meeting ON citation_locators(meeting_id);
-```
+`transcript_segments`, `segments_fts` and the locator clean-up are maintained by SQLite triggers on `transcripts`. The triggers are stored in the database file, so **any** build that writes transcripts keeps the index consistent, including an older build that knows nothing about v3. They use only core SQLite (built-in JSON functions and FTS5, both present in every released build's bundled SQLite). They are written so they can't fail on a stored row: `json_valid` guards and no constraints a malformed segment could break. A trigger error would fail the older build's write.
 
-`transcripts_fts` (meeting-level) stays as it is. `search_notes`, the MCP and the Home search keep working byte-for-byte, and it can be retired in a later release.
+**`LIMIT -1` in the polished-text subquery is load-bearing.** Without it, SQLite re-parses the polished JSON once per segment: 42 s for a 3,000-segment transcript. With it, the subquery is built once and joined through an automatic index, in about 30 ms. Test: `long_polished_transcript_indexes_quickly`.
 
-## Write paths (fly-storage)
-- **`sync_transcript_chunks`:**
-  - chunks with the same turn/160-word windowing, but chunk `text` = segment texts joined per turn, *without* labels;
-  - stores `segment_ids_json` and `end_ms`;
-  - embeds the **polished** text when a cleaned transcript exists (`variant='polished'`), else raw. Ids and timestamps are identical between the two, so spans don't change.
-  - Content-keyed vector reuse keys on `(title, text)` as now. Because labels are gone, **a rename costs zero re-embeds**.
-  - Readers render labels at read time from `segment_ids` and the current speakers.
-- **`sync_transcript_derived` and `save_cleaned_transcript`:** rewrite the meeting's `segments_fts` rows (polished text when present), so FTS and chunks always agree on the variant.
-- **Embedding prompt:** `title: {meeting title} | text: {label-free text}`. The title stays in the embedding context because it's what makes "the airline meeting" match.
-- **Citation locators:**
-  - written whenever an AI block, item or Ask insert is saved with segment ids, from the transcript variant the model was shown;
-  - `edit_segment_text` recomputes the hash for that segment and marks its locators `changed` when the hash moves.
-- **Re-anchoring on re-transcribe** (inside `save_transcript`, while the *old* transcript is still readable), for each locator whose `seg_id` is gone from the new transcript:
-  1. take candidates overlapping `[start_ms − 2 s, end_ms + 2 s]`;
-  2. score each as `0.5 × time-overlap ratio + 0.5 × token-Jaccard(old text, new text)`;
-  3. if the best score is ≥ 0.6, repoint the locator (`status='reanchored'`) and rewrite the matching id in `BlockOrigin::Ai.source_segment_ids` and `meeting_items.segment_ids_json`, so existing "zoom in" keeps working;
-  4. otherwise mark it `changed`, and the UI shows "source changed — check".
+### Citation locators
 
-  Re-diarize keeps ids (`pipeline.rs:720`), so it never triggers this. **Required before re-transcribe-with-Parakeet is offered** (spec 4.2a #6).
+Table: `citation_locators(owner_kind, owner_id, note_id, meeting_id, seg_id, start_ms, end_ms, text_hash, status)`, with primary key `(owner_kind, owner_id, seg_id)`.
 
-## Read paths added to fly-storage
-- **Required before anything wires `fly-context` to a cloud model or the MCP** (spec §4.2a #13): `vector_search` honors `filter.exclude_keep_local` inside SQL (`KEEP_LOCAL_CTE` + `SHAREABLE_CHUNK`, both already in `privacy.rs`).
-  - It must also take an **orphan guard**: a transcript chunk whose meeting row is gone, or a note chunk whose note is gone, has no checkable privacy and is excluded under `exclude_keep_local`.
-  - Its `limit` must apply *after* that filter.
-  - Until then, `fly-context` asks `vector_search` for every hit, drops keep-local and orphan chunks, and only then caps the candidate pool at 200. That's correct, but it scans and sorts every chunk per query. Tests `keep_local_chunks_cannot_starve_the_vector_pool` and `out_of_scope_chunks_cannot_starve_a_scoped_search` pin the behavior.
-  - Alongside this, `VectorHit` gains `segment_ids`, `end_ms` and the full chunk `text`.
-- `search_segments(query, &SearchFilter) -> Vec<SegmentHit { meeting_id, segment_id, start_ms, end_ms, snippet }>`, bm25-ranked, keep-local in SQL.
-- `list_meetings(&MeetingFilter { since, until, folder_id, exclude_keep_local, limit })`.
-- Optionally `segments_by_ids(meeting_id, &[seg_id])` for the citation validator. It avoids parsing the whole transcript JSON per check.
+**Written automatically:**
+- `update_note_blocks` records locators for AI blocks.
+- `replace_meeting_items` records locators for items.
+- Ask inserts can call `record_citations` (`owner_kind = 'ask_insert'`, reserved).
+- A pair that's already recorded keeps its hash, so later drift is visible.
 
-## What fly-context then changes (no API change)
-- `search_passages` keyword list: `search_segments` hits grouped into windows by `segment_ids` (no in-memory re-scoring); `meeting_items` added as a third ranked list (spec §4.2).
-- Semantic list: windows straight from `VectorHit.segment_ids`. The pinned-windowing test becomes unnecessary.
-- Remove the post-filters for `vector_search` and `list_meetings`. Keep the by-id guards; they're cheap and fail closed.
+**Text hash:** the first 16 hex characters of SHA-256 over the text, lowercased, with whitespace collapsed.
 
-## Backfill and cost
-- **Migration step** (idempotent, resumable per meeting, like `to_v2`):
-  1. populate `segments_fts` for every transcript;
-  2. re-chunk every transcript (new label-free text, which resets vectors to pending);
-  3. write locators for existing AI blocks and items from the current transcripts. Their ids are valid now, so all rows start as `ok`.
-- **Re-embed:** every transcript chunk changes text once, so the whole corpus re-embeds once. On this machine that's roughly 27 meetings × ~20 chunks, about 600 chunks. It must run in the existing worker at the lowest priority (spec 4.2a #3: captions > Ask > backfill), throttled. FTS-only search keeps working throughout, as it does today when Ollama is down.
-- **Disk:** `segments_fts` roughly duplicates transcript text once more (~1–2 MB per 100 meeting-hours), and locators are tiny.
+**Status:**
+- **Computed when read** (`citation_locators()`): `changed` if the segment is gone, or if its text matches the stored hash in neither the indexed (polished) variant nor the raw one.
+- **Changes that are stored:**
+  - the update trigger marks a citation `changed` when its segment id disappears;
+  - re-anchoring sets `reanchored`.
 
-## Tests the migration PR needs
-- An old-DB fixture migrates and the rerun is a no-op; a crash between steps resumes cleanly.
-- A rename re-embeds 0 chunks; an edit to one segment re-embeds 1 chunk.
-- `segments_fts` uses the polished text when it exists and the raw text otherwise, and both agree with the chunk `variant`.
-- Re-transcribe fixture: identical speech with new ids gets every locator `reanchored`; changed speech gets `changed`. Block and item ids are rewritten.
-- The keep-local exclusion test covers `vector_search`, `search_segments` and `list_meetings` with `exclude_keep_local`.
-- The retrieval gold set (spec §4.2 eval 1, recall@8 ≥ 0.85) runs in CI against the migrated schema.
+**Re-anchoring** happens in `save_transcript`, while the old transcript is still readable. For each cited segment the new transcript no longer has:
+1. Take candidates overlapping the old span padded by 2 s.
+2. Score each as 0.5 × time IoU + 0.5 × token Jaccard (old text vs new).
+3. If the best score is ≥ 0.6, repoint the locator (`reanchored`). Then rewrite the id in `meeting_items.segment_ids_json` and in the note's `BlockOrigin::Ai.source_segment_ids`, so the existing "zoom in" keeps working. This doesn't bump the note's `updated_at`, and its `note.json` mirror is refreshed.
+4. Otherwise the locator stays `changed`.
+
+Re-diarize keeps ids, so it never triggers this.
+
+## The v3 step (`migrations::to_v3`)
+
+The step runs in **one transaction**. A crash or error rolls it back completely: the version isn't stamped and the next open runs it again.
+
+1. Rebuild `transcript_segments` through the triggers (`UPDATE transcripts SET json = json`), after dropping rows whose transcript is gone.
+2. Re-chunk every transcript: label-free, with spans, polished where it exists. Chunk text changes once, so **the whole corpus re-embeds once**. The existing embedding worker picks up the pending rows, and keyword search works throughout. Note chunks don't change and keep their vectors. Orphan transcript chunks are dropped.
+3. Record locators for every AI block and item from the current transcripts, so they start `ok`. Then drop locators whose owner or meeting is gone, and mark citations of vanished segments `changed`.
+
+Unreadable rows are logged and skipped, never fatal: a failing step would stop the app opening. In tests, a debug build takes about 1 s for 9,000 segments. A fresh database gets the schema and is stamped 3 without running the step.
+
+## When an older app opens a v3 database
+
+Every released build (v1.0.3 through v2.3.0, and v2.4 as it stands) has `SCHEMA_VERSION = 2`, stamps `user_version` unconditionally at the end of `migrate`, and bundles the same SQLite (rusqlite 0.40). Replayed in `an_older_build_writing_to_a_v3_file_stays_safe_and_heals`:
+
+- **It opens normally and stamps the file back to 2.** It creates or alters nothing that conflicts: the new columns have defaults and the new tables are ignored by its code.
+- **Its transcript writes keep the segment index correct** (triggers). Its meeting deletes remove that meeting's segments, their keyword-index entries and its locators, so deleted text doesn't linger in the new index. Its re-transcribes mark affected citations `changed`; it can't re-anchor, which is the honest state.
+- **Its "Delete all my data" erases the new tables too.** It deletes every table listed in `sqlite_master`.
+- **Cost, not data loss:**
+  - its startup chunk backfill rewrites transcript chunks in its labelled format, so the corpus re-embeds under the old build and again after returning to v3;
+  - its new AI blocks and items get no locators until v3 reopens.
+- **Next v3 open:** the version reads 2, so the v3 step runs again and heals everything. It re-chunks, reconciles deletes and records the missing locators. A second open after that is a no-op.
+- **MCP binaries:**
+  - an old MCP server refuses a v3 file ("newer than this build supports — update Fly on the Wall") until the old app has stamped it back to 2;
+  - a v3 MCP server refuses a v2-stamped file ("open the app once to upgrade it") until the v3 app has reopened it.
+  - Neither ever writes the schema.
+
+**Rule for future steps** (in the `SCHEMA_VERSION` doc comment): every step must be a full, idempotent rebuild of what it owns, because a downgrade round-trip re-runs it.
+
+## Not done here (follow-ups)
+
+- **fly-context keyword path:** still localizes meeting-level FTS hits in memory. Switching it to `search_segments` and adding `meeting_items` as a third ranked list (§4.2) is a fly-context change with no schema impact. The vector path already uses the segment ids and the in-SQL filter.
+- **Embedding worker priority:** the one-time re-embed runs at the worker's normal pace. Spec §4.2a #3 wants it lowest priority and throttled (captions > Ask > backfill). The worker isn't in this PR.
+- **`segments_by_ids`** for the citation validator: `indexed_segment` exists `pub(crate)`. Expose it when a caller needs it.
+- **Retrieval gold set** (§4.2 eval 1, recall@8 ≥ 0.85) in CI against the v3 schema.
+- **Retiring `transcripts_fts`:** a later release.
+
+## Deviations from the proposal in 3.2a
+
+- The segment index is a plain table plus external-content FTS5, maintained by triggers, instead of a standalone FTS table written by Rust. This gives safety under older builds, indexed per-meeting deletes and no duplicated text.
+- The polished-vs-raw choice is made per segment id, not per meeting.
+- `citation_locators` gains `note_id`, for note-scoped clean-up.
+- Text drift is detected when locators are read, not written by `edit_segment_text`. Edits then need no extra write path, and older builds' edits are caught too.
+- Re-anchoring rewrites block ids without touching the note's `updated_at`.

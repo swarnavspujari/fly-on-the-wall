@@ -12,6 +12,22 @@ use rusqlite::OptionalExtension;
 use crate::folders::parse_ts;
 use crate::{naming, Result, Storage, StorageError};
 
+/// Filters for [`Storage::list_meetings_filtered`]; `None` fields don't
+/// constrain.
+#[derive(Debug, Default, Clone)]
+pub struct MeetingFilter {
+    /// Started at/after.
+    pub since: Option<DateTime<Utc>>,
+    /// Started at/before.
+    pub until: Option<DateTime<Utc>>,
+    /// The meeting's note is filed directly in this folder.
+    pub folder_id: Option<String>,
+    /// Drop keep-local meetings (own flag, a sibling meeting's flag, or a
+    /// local-only folder chain) BEFORE the limit.
+    pub exclude_keep_local: bool,
+    pub limit: usize,
+}
+
 /// The data-dir-relative folder holding a meeting's recording files (the
 /// parent shared by the paths in `recording_json`).
 pub fn recording_dir_rel(rec: &RecordingRef) -> Option<String> {
@@ -252,6 +268,39 @@ impl Storage {
                 row_to_meeting,
             )
             .optional()?)
+    }
+
+    /// Meetings newest first, filtered inside the query (see
+    /// [`MeetingFilter`]). Under `exclude_keep_local` a meeting whose note
+    /// row is missing is dropped: its privacy can't be checked.
+    pub fn list_meetings_filtered(&self, filter: &MeetingFilter) -> Result<Vec<Meeting>> {
+        let (cte, not_local) = if filter.exclude_keep_local {
+            (
+                crate::privacy::KEEP_LOCAL_CTE,
+                " AND n.id IS NOT NULL AND m.note_id NOT IN (SELECT id FROM local_notes)",
+            )
+        } else {
+            ("", "")
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "{cte}SELECT m.id, m.title, m.note_id, m.attendees_json, m.started_at, m.ended_at,
+                    m.recording_json, m.attendees_confirmed
+               FROM meetings m LEFT JOIN notes n ON n.id = m.note_id
+              WHERE (?1 IS NULL OR m.started_at >= ?1)
+                AND (?2 IS NULL OR m.started_at <= ?2)
+                AND (?3 IS NULL OR n.folder_id = ?3){not_local}
+              ORDER BY m.started_at DESC LIMIT ?4"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                filter.since.map(|t| t.to_rfc3339()),
+                filter.until.map(|t| t.to_rfc3339()),
+                filter.folder_id.as_deref(),
+                filter.limit.max(1) as i64
+            ],
+            row_to_meeting,
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     /// All meetings attached to a note, oldest first.

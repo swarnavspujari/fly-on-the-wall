@@ -152,7 +152,7 @@ impl Storage {
 /// Turn free-form user input into a safe FTS5 MATCH expression: each token
 /// double-quoted (no operator injection / syntax errors), joined with
 /// implicit AND, last token gets prefix matching for search-as-you-type.
-fn sanitize_fts_query(input: &str) -> String {
+pub(crate) fn sanitize_fts_query(input: &str) -> String {
     let tokens: Vec<String> = input
         .split_whitespace()
         .map(|t| t.replace('"', ""))

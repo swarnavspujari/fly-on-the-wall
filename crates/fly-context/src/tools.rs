@@ -735,19 +735,25 @@ impl Context<'_> {
         // Semantic list.
         let mut semantic: Vec<PassageKey> = Vec::new();
         if let Some(qv) = query_vector {
-            // vector_search has no keep-local filter and truncates after
-            // sorting, so ask for every hit, filter, THEN cap: truncating
-            // first would let keep-local (or out-of-scope) chunks crowd
-            // shareable ones out of the candidate pool.
+            // vector_search filters keep-local (and orphans) inside SQL,
+            // before its limit, so hidden chunks can't crowd the pool. A
+            // meeting scope isn't expressible there, so a scoped search asks
+            // for every hit and caps after its own filter: truncating first
+            // would let out-of-scope chunks crowd in-scope ones out.
+            let pool = if scope.is_some() {
+                ALL_ROWS
+            } else {
+                VECTOR_CANDIDATES
+            };
             let hits = self
                 .storage()
-                .vector_search(qv.vector, qv.model, &filter, ALL_ROWS)?;
+                .vector_search(qv.vector, qv.model, &filter, pool)?;
             for h in hits {
                 if semantic.len() >= VECTOR_CANDIDATES {
                     break;
                 }
-                // vector_search has no keep-local filter: apply the set. An
-                // orphan chunk (no owning note) can't be checked → dropped.
+                // Defense in depth over the in-SQL filter: the by-id sets
+                // fail closed, and an orphan chunk can't be checked.
                 if self.shareable_only() && (h.note_id.is_empty() || hidden.note(&h.note_id)) {
                     continue;
                 }
@@ -766,13 +772,22 @@ impl Context<'_> {
                         if hidden.meeting(&l.meeting.id, &l.meeting.note_id) {
                             continue;
                         }
+                        // The window holding the chunk's first segment
+                        // (chunks may embed polished text, so their
+                        // boundaries can differ from raw-text windows).
+                        // Chunks an older build wrote carry no ids: fall
+                        // back to the window that starts at/before start_ms.
+                        let by_id = h.segment_ids.first().and_then(|first| {
+                            let pos = l.transcript.segments.iter().position(|s| &s.id == first)?;
+                            l.windows.iter().position(|w| w.segments.contains(&pos))
+                        });
                         let start = h.start_ms.unwrap_or(0);
-                        // Exact window start; else the window containing it.
-                        let idx = l
-                            .windows
-                            .iter()
-                            .position(|w| w.start_ms == start)
-                            .or_else(|| l.windows.iter().rposition(|w| w.start_ms <= start));
+                        let idx = by_id.or_else(|| {
+                            l.windows
+                                .iter()
+                                .position(|w| w.start_ms == start)
+                                .or_else(|| l.windows.iter().rposition(|w| w.start_ms <= start))
+                        });
                         if let Some(i) = idx {
                             semantic.push(PassageKey::Transcript(mid, i));
                         }
@@ -921,11 +936,23 @@ impl Context<'_> {
         let attendee = non_empty(&args.attendee).map(str::to_lowercase);
         let folder = non_empty(&args.folder_id);
         let mut meetings = Vec::new();
-        for m in self.storage().list_meetings(since, ALL_ROWS)? {
+        // Dates, folder and keep-local filter inside SQL; title/attendee
+        // matching happens here, so every remaining row is read.
+        let rows = self
+            .storage()
+            .list_meetings_filtered(&fly_storage::MeetingFilter {
+                since,
+                until,
+                folder_id: folder.map(str::to_string),
+                exclude_keep_local: self.shareable_only(),
+                limit: ALL_ROWS,
+            })?;
+        for m in rows {
             if meetings.len() >= limit {
                 break;
             }
-            if hidden.meeting(&m.id, &m.note_id) || until.is_some_and(|u| m.started_at > u) {
+            // Defense in depth over the in-SQL filter (fails closed).
+            if hidden.meeting(&m.id, &m.note_id) {
                 continue;
             }
             if let Some(words) = &title_words {
@@ -943,13 +970,6 @@ impl Context<'_> {
                 });
                 if !hit {
                     continue;
-                }
-            }
-            if let Some(f) = folder {
-                match self.storage().get_note(&m.note_id) {
-                    Ok(n) if n.folder_id.as_deref() == Some(f) => {}
-                    Ok(_) | Err(fly_storage::StorageError::NotFound(_)) => continue,
-                    Err(e) => return Err(e.into()),
                 }
             }
             meetings.push(MeetingSummary {
