@@ -84,26 +84,44 @@ jobs:
           impostors=$(git grep -nE 'evals-(lock|security|quality)\b|evals-\$\{\{' "$HEAD_SHA" -- \
             '.github/workflows/*.yml' '.github/workflows/*.yaml' \
             ':!.github/workflows/evals.yml' ':!.github/workflows/evals-guard.yml' || true)
-          # The workflow files are copied out of the PR's git objects into
-          # a temp folder and parsed there by an isolated interpreter (-I: no
-          # cwd or script dir on sys.path), so nothing from the PR can be
-          # imported or run.
+          # The workflow files are copied out of the PR's git objects into a
+          # temp folder and parsed there by isolated interpreters (python3 -I:
+          # no cwd or script dir on sys.path), so nothing from the PR is imported
+          # or run.
           wfdir="$RUNNER_TEMP/pr-workflows"
           rm -rf "$wfdir"
-          mkdir -p "$wfdir/.github/workflows"
+          mkdir -p "$wfdir"
           git ls-tree --name-only "$HEAD_SHA" -- .github/workflows/ | while IFS= read -r f; do
             case "$f" in
-              *.yml | *.yaml) git show "$HEAD_SHA:$f" >"$wfdir/.github/workflows/$(basename "$f")" ;;
+              .github/workflows/evals.yml | .github/workflows/evals-guard.yml) ;;
+              *.yml | *.yaml) git show "$HEAD_SHA:$f" >"$wfdir/$(basename "$f")" ;;
             esac
           done
+          # YAML → JSON with whatever parser the runner has (none of them
+          # loads code from the folder); the detector then needs only the
+          # standard library.
+          parser=""
+          if (cd "$wfdir" && python3 -I -c 'import yaml') 2>/dev/null; then
+            parser=pyyaml
+          elif command -v yq >/dev/null 2>&1; then
+            parser=yq
+          elif command -v ruby >/dev/null 2>&1; then
+            parser=ruby
+          fi
+          for f in "$wfdir"/*.yml "$wfdir"/*.yaml; do
+            [ -f "$f" ] || continue
+            case "$parser" in
+              pyyaml) (cd "$wfdir" && python3 -I -c 'import json, sys, yaml; json.dump(yaml.safe_load(open(sys.argv[1], encoding="utf-8")), open(sys.argv[2], "w"), default=str)' "$f" "$f.json") || echo '"unparseable"' >"$f.json" ;;
+              yq) yq -o=json '.' "$f" >"$f.json" 2>/dev/null || echo '"unparseable"' >"$f.json" ;;
+              ruby) (cd "$wfdir" && ruby -ryaml -rjson -e 'puts JSON.dump(YAML.safe_load(File.read(ARGV[0]), aliases: true, permitted_classes: [Date, Time, Symbol]))' "$f" >"$f.json") || echo '"unparseable"' >"$f.json" ;;
+            esac
+          done
+          if [ -z "$parser" ]; then
+            echo "::warning title=Eval lock::No YAML parser on the runner: job names were checked by literal text only."
+          fi
           parsed=$(cd "$wfdir" && python3 -I - <<'PY'
-          import glob, os, re, sys
-          try:
-              import yaml
-          except ImportError:
-              print("PyYAML is missing on the runner, so job names couldn't be parsed")
-              sys.exit(0)
-          LOCKED = {".github/workflows/evals.yml", ".github/workflows/evals-guard.yml"}
+          import glob, json, re
+
           NAMES = ("evals-lock", "evals-security", "evals-quality")
 
           def strings(x):
@@ -111,7 +129,7 @@ jobs:
                   yield x
               elif isinstance(x, dict):
                   for k, v in x.items():
-                      yield from strings(k)
+                      yield from strings(str(k))
                       yield from strings(v)
               elif isinstance(x, list):
                   for v in x:
@@ -127,14 +145,15 @@ jobs:
               # ("$" + "{{": a literal one here would be an Actions expression.)
               return ("$" + "{{") in t and "eval" in (t + literals + matrix)
 
-          for path in sorted(glob.glob(".github/workflows/*.y*ml")):
-              rel = path.replace(os.sep, "/")
-              if rel in LOCKED:
-                  continue
+          for path in sorted(glob.glob("*.json")):
+              name_of_file = path[: -len(".json")]
               try:
-                  wf = yaml.safe_load(open(path, encoding="utf-8")) or {}
+                  wf = json.load(open(path, encoding="utf-8"))
               except Exception as e:
-                  print(f"{rel}: not parseable ({e})")
+                  print(f"{name_of_file}: not parseable ({e})")
+                  continue
+              if wf == "unparseable":
+                  print(f"{name_of_file}: not parseable")
                   continue
               jobs = wf.get("jobs") if isinstance(wf, dict) else None
               for jid, job in (jobs or {}).items() if isinstance(jobs, dict) else []:
@@ -142,7 +161,7 @@ jobs:
                   name = str(job.get("name", jid))
                   matrix = "".join(strings((job.get("strategy") or {}).get("matrix"))).lower()
                   if suspicious(str(jid), matrix) or suspicious(name, matrix):
-                      print(f"{rel}: job {jid} (name: {name})")
+                      print(f"{name_of_file}: job {jid} (name: {name})")
           PY
           )
           impostors=$(printf '%s\n%s' "$impostors" "$parsed" | sed '/^$/d')
