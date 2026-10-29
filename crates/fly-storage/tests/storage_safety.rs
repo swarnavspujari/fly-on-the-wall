@@ -87,6 +87,8 @@ fn fresh_database_never_creates_unlinked() {
         attendees: None,
         attendees_confirmed: None,
         folder_path: None,
+        keep_local: None,
+        folder_keep_local: None,
     };
     std::fs::write(
         meeting_dir.join(RECORDING_MANIFEST),

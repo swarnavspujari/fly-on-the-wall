@@ -149,9 +149,30 @@ pub struct ConsentPrompt {
 /// adds why the app is asking unprompted (the saved provider is a cloud one
 /// without consent) and declines with "Not now" instead of "Cancel".
 pub fn cloud_consent_prompt(provider: &str, at_launch: bool) -> ConsentPrompt {
+    cloud_consent_prompt_for(provider, at_launch, None)
+}
+
+/// Who receives the content, as the disclosure names it: the vendor, or the
+/// custom server's host when the provider's base URL points elsewhere.
+pub fn consent_recipient(provider: &str, custom_host: Option<&str>) -> String {
     let vendor = provider_vendor(provider);
+    match custom_host {
+        Some(host) => format!("the server at {host} (your custom {vendor} endpoint)"),
+        None => vendor.to_string(),
+    }
+}
+
+/// [`cloud_consent_prompt`], naming `custom_host` as the recipient when the
+/// provider is set to a server other than its default.
+pub fn cloud_consent_prompt_for(
+    provider: &str,
+    at_launch: bool,
+    custom_host: Option<&str>,
+) -> ConsentPrompt {
+    let vendor = provider_vendor(provider);
+    let who = consent_recipient(provider, custom_host);
     let disclosure = format!(
-        "Your notes and full meeting transcripts will be sent to {vendor} for processing \
+        "Your notes and full meeting transcripts will be sent to {who} for processing \
          whenever you run Enhance or Ask, and automatically for transcript cleanup and \
          action items after each transcription. Their data-retention terms apply (see their \
          privacy / data-usage policy).\n\n\
@@ -212,7 +233,16 @@ pub fn cloud_consent_question(
     }
     let saved = storage.get_setting("llm.provider").ok().flatten();
     let at_launch = at_launch && saved.as_deref() == Some(provider);
-    Ok(Some(cloud_consent_prompt(provider, at_launch)))
+    let base_url = storage
+        .get_setting(&format!("llm.{provider}.base_url"))
+        .ok()
+        .flatten();
+    let host = custom_endpoint_host(provider, base_url.as_deref());
+    Ok(Some(cloud_consent_prompt_for(
+        provider,
+        at_launch,
+        host.as_deref(),
+    )))
 }
 
 /// Two declines for one provider this close together…
@@ -439,11 +469,33 @@ pub fn is_consent_refusal(error: &str) -> bool {
     error.contains(CONSENT_REFUSAL_MARK)
 }
 
+/// How every missing-key error from [`build_provider`] starts. Ask's error
+/// view keys on "no api key" (askModel.ts describeAskError), and background
+/// cleanup on the whole mark ([`record_consent_skip`]).
+const MISSING_KEY_MARK: &str = "No API key for";
+
+/// The error when a cloud provider is picked but has no saved key: what's
+/// missing and where to add it, in words a person reads in Enhance or a
+/// notice.
+pub fn missing_key_error(provider: &str) -> String {
+    format!(
+        "{MISSING_KEY_MARK} {} yet. Add one in Settings › Ask and Enhance.",
+        provider_vendor(provider)
+    )
+}
+
+/// True when `error` is [`missing_key_error`]'s.
+pub fn is_missing_key(error: &str) -> bool {
+    error.contains(MISSING_KEY_MARK)
+}
+
 /// Background cleanup / extraction for `meeting_id` failed with `error`:
-/// remember the meeting when the reason was missing consent, so the app can
-/// offer to run it once the user allows the provider. Returns whether it was.
+/// remember the meeting when the reason was missing consent or a missing
+/// API key, so the app can offer to run it once the user allows the
+/// provider or adds the key (the notice reads which from the settings).
+/// Returns whether it was.
 pub fn record_consent_skip(state: &AppState, meeting_id: &str, error: &str) -> bool {
-    let skipped = is_consent_refusal(error);
+    let skipped = is_consent_refusal(error) || is_missing_key(error);
     if skipped {
         state
             .consent_skipped
@@ -618,7 +670,7 @@ pub fn build_provider(
             .secrets
             .get(name)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no API key stored for {provider} — add one in Settings"))
+            .ok_or_else(|| missing_key_error(&provider))
     };
 
     Ok(match provider.as_str() {
@@ -1166,12 +1218,111 @@ pub fn validate_base_url(provider: &str, url: &str) -> Result<(), String> {
     }
 }
 
+/// Where `provider`'s stored API key is sent: the origin (scheme, host,
+/// port) of `base_url`, or of the provider's default endpoint when it's
+/// empty. `None` for providers whose key can't be pointed elsewhere
+/// (Anthropic's host is fixed; Ollama holds no key).
+fn key_endpoint(provider: &str, base_url: Option<&str>) -> Option<String> {
+    use fly_llm::openai_compat::OpenAiCompatProvider;
+    let default = match provider {
+        "openai" => OpenAiCompatProvider::openai(String::new(), String::new()).base_url,
+        "nim" => OpenAiCompatProvider::nim(String::new(), String::new()).base_url,
+        _ => return None,
+    };
+    let url = base_url
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .unwrap_or(&default);
+    // An unparseable value can't be compared, so it counts as its own place.
+    Some(
+        tauri::Url::parse(url)
+            .map(|u| u.origin().ascii_serialization())
+            .unwrap_or_else(|_| format!("invalid:{url}")),
+    )
+}
+
+/// The host of `base_url` when it sends `provider`'s key somewhere other
+/// than the provider's default endpoint (for the consent dialog), else
+/// `None`.
+fn custom_endpoint_host(provider: &str, base_url: Option<&str>) -> Option<String> {
+    let custom = key_endpoint(provider, base_url)?;
+    if Some(&custom) == key_endpoint(provider, None).as_ref() {
+        return None;
+    }
+    let url = base_url?.trim();
+    Some(
+        tauri::Url::parse(url)
+            .ok()
+            .and_then(|u| {
+                u.host_str().map(|h| match u.port() {
+                    Some(p) => format!("{h}:{p}"),
+                    None => h.to_string(),
+                })
+            })
+            .unwrap_or_else(|| url.to_string()),
+    )
+}
+
+/// Refusal when an endpoint change arrives without the key.
+pub fn endpoint_needs_key(provider: &str) -> String {
+    format!(
+        "To use a different server for {}, enter the API key again. Nothing was changed.",
+        provider_vendor(provider)
+    )
+}
+
 #[tauri::command]
 pub fn set_llm_settings(state: State<'_, AppState>, update: LlmSettingsUpdate) -> CmdResult<()> {
+    apply_llm_settings(&state, update)
+}
+
+/// [`set_llm_settings`] without the Tauri wrapper.
+///
+/// The stored key goes wherever the saved base URL points, so it is tied to
+/// that endpoint: a change that sends it to a different server (another
+/// scheme, host or port) must bring the key with it. Without one the whole
+/// update is refused, so no script in the webview can point a saved key at
+/// a server of its choosing. On an endpoint change the old key is removed
+/// before the new URL is saved, so a failed key write leaves no key behind
+/// rather than the old key with the new URL.
+pub fn apply_llm_settings(state: &AppState, update: LlmSettingsUpdate) -> CmdResult<()> {
     if !PROVIDERS.iter().any(|(id, _, _)| *id == update.provider) {
         return Err(format!("unknown provider '{}'", update.provider));
     }
     validate_base_url(&update.provider, update.base_url.as_deref().unwrap_or(""))?;
+    let secret_name = secret_key_for(&update.provider);
+    let endpoint_changed = {
+        let saved = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_setting(&format!("llm.{}.base_url", update.provider))
+            .map_err(|e| e.to_string())?;
+        key_endpoint(&update.provider, saved.as_deref())
+            != key_endpoint(&update.provider, update.base_url.as_deref())
+    };
+    if let (true, Some(secret_name)) = (endpoint_changed, secret_name) {
+        // A key that can't be read counts as stored: refuse rather than guess.
+        let stored = state.secrets.get(secret_name).map_or(true, |k| k.is_some());
+        // `api_key: None` keeps the stored key; a new key or "" (clear) is fine.
+        if stored && update.api_key.is_none() {
+            return Err(endpoint_needs_key(&update.provider));
+        }
+        if stored {
+            state
+                .secrets
+                .delete(secret_name)
+                .map_err(|e| e.to_string())?;
+        }
+        // Consent was given for the old server: ask again (naming the new
+        // one) before anything is sent there.
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .delete_setting(&cloud_consent_key(&update.provider))
+            .map_err(|e| e.to_string())?;
+    }
     {
         let storage = state.storage.lock().unwrap();
         storage
@@ -1190,7 +1341,7 @@ pub fn set_llm_settings(state: State<'_, AppState>, update: LlmSettingsUpdate) -
             )
             .map_err(|e| e.to_string())?;
     }
-    if let (Some(key), Some(secret_name)) = (update.api_key, secret_key_for(&update.provider)) {
+    if let (Some(key), Some(secret_name)) = (update.api_key, secret_name) {
         if key.is_empty() {
             state
                 .secrets
@@ -1259,14 +1410,52 @@ mod security_tests {
     /// was the reason (the app then offers to run it once allowed).
     #[test]
     fn only_the_consent_refusal_counts_as_a_consent_skip() {
-        use super::is_consent_refusal;
+        use super::{is_consent_refusal, missing_key_error};
         let consent = check_cloud_policy("anthropic", false, false, false, false).unwrap_err();
         assert!(is_consent_refusal(&consent), "{consent}");
         let keep_local = check_cloud_policy("anthropic", false, false, true, true).unwrap_err();
         assert!(!is_consent_refusal(&keep_local), "{keep_local}");
-        assert!(!is_consent_refusal(
-            "no API key stored for anthropic — add one in Settings"
+        assert!(!is_consent_refusal(&missing_key_error("anthropic")));
+    }
+
+    /// The missing-key error reads as a sentence and says where to fix it.
+    /// A background pass that hits it is remembered like a consent skip (the
+    /// notice then offers "Add a key"); keep-local and other failures aren't.
+    #[test]
+    fn a_missing_key_reads_plainly_and_is_remembered() {
+        use super::{is_missing_key, missing_key_error, record_consent_skip};
+        assert_eq!(
+            missing_key_error("openai"),
+            "No API key for OpenAI yet. Add one in Settings › Ask and Enhance."
+        );
+        assert!(is_missing_key(&missing_key_error("nim")));
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        assert!(record_consent_skip(
+            &state,
+            "m-key",
+            &missing_key_error("openai")
         ));
+        let keep_local = check_cloud_policy("openai", false, false, true, true).unwrap_err();
+        assert!(!record_consent_skip(&state, "m-local", &keep_local));
+        assert!(!record_consent_skip(
+            &state,
+            "m-net",
+            "can't reach api.openai.com"
+        ));
+        assert_eq!(
+            state
+                .consent_skipped
+                .lock()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec!["m-key"]
+        );
     }
 
     #[test]
@@ -1538,8 +1727,15 @@ mod security_tests {
         }
         let joined = joined
             .replace("\\n", "\n")
+            .replace("${host}", "other.example")
+            .replace("${who}", "OpenAI")
             .replace("${vendor}", "OpenAI")
             .replace("${disclosure}", "");
+        // the custom-server wording names the same recipient
+        assert!(
+            joined.contains(&super::consent_recipient("openai", Some("other.example"))),
+            "devMock custom-server wording differs:\n{joined}"
+        );
         let rust = cloud_consent_prompt("openai", false);
         assert!(
             joined.contains(&rust.message),
@@ -1646,5 +1842,184 @@ mod security_tests {
     fn ollama_holds_no_key_so_http_is_fine() {
         assert!(validate_base_url("ollama", "http://192.168.1.20:11434").is_ok());
         assert!(validate_base_url("ollama", "javascript:alert(1)").is_err());
+    }
+
+    /// The webview's `set_llm_settings` payload can't point a saved key at
+    /// another server: an endpoint change without the key is refused and
+    /// changes nothing; with the key (or clearing it) it goes through. Same
+    /// server, a new path, or another field (Runs on, model) needs no key.
+    #[test]
+    fn a_saved_key_cant_be_pointed_at_another_server() {
+        use super::{apply_llm_settings, endpoint_needs_key, LlmSettingsUpdate};
+        use fly_secrets::SecretStore;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = std::sync::Arc::new(fly_secrets::MemorySecretStore::default());
+        let state =
+            crate::state::AppState::init_with(dir.path().to_path_buf(), secrets.clone()).unwrap();
+        // exactly what the frontend sends (api.ts setLlmSettings)
+        let send = |json: &str| {
+            let update: LlmSettingsUpdate = serde_json::from_str(json).unwrap();
+            apply_llm_settings(&state, update)
+        };
+        let saved_url = || {
+            state
+                .storage
+                .lock()
+                .unwrap()
+                .get_setting("llm.openai.base_url")
+                .unwrap()
+        };
+        let key = || secrets.get(fly_secrets::keys::OPENAI_API_KEY).unwrap();
+
+        send(r#"{"provider":"openai","model":null,"base_url":null,"api_key":"sk-one"}"#).unwrap();
+        assert_eq!(key().as_deref(), Some("sk-one"));
+
+        // the official host, spelled out: same server, no key needed
+        send(r#"{"provider":"openai","model":"gpt-4o","base_url":"https://api.openai.com/v1","api_key":null}"#)
+            .unwrap();
+        for other in [
+            "https://other.example/v1",
+            "https://api.openai.com.other.example/v1",
+            "https://api.openai.com:8443/v1",
+            "http://localhost:8080/v1",
+        ] {
+            let json = format!(
+                r#"{{"provider":"openai","model":null,"base_url":"{other}","api_key":null}}"#
+            );
+            assert_eq!(send(&json), Err(endpoint_needs_key("openai")), "{other}");
+            assert_eq!(saved_url().as_deref(), Some("https://api.openai.com/v1"));
+            assert_eq!(key().as_deref(), Some("sk-one"), "{other}");
+        }
+        // back to the default (empty) is the same server
+        send(r#"{"provider":"openai","model":null,"base_url":"","api_key":null}"#).unwrap();
+
+        // with the key re-entered, the move goes through
+        send(r#"{"provider":"openai","model":null,"base_url":"https://proxy.example/v1","api_key":"sk-two"}"#)
+            .unwrap();
+        assert_eq!(saved_url().as_deref(), Some("https://proxy.example/v1"));
+        assert_eq!(key().as_deref(), Some("sk-two"));
+        // same server, another path: fine
+        send(r#"{"provider":"openai","model":null,"base_url":"https://proxy.example/openai/v1","api_key":null}"#)
+            .unwrap();
+        assert_eq!(key().as_deref(), Some("sk-two"));
+
+        // clearing the key along with the move: nothing is left to send
+        send(r#"{"provider":"openai","model":null,"base_url":"https://third.example/v1","api_key":""}"#)
+            .unwrap();
+        assert_eq!(key(), None);
+        // and with no key stored, the endpoint is free to change
+        send(r#"{"provider":"openai","model":null,"base_url":"https://fourth.example/v1","api_key":null}"#)
+            .unwrap();
+
+        // Anthropic's host is fixed, so its stored URL never carries the key
+        secrets
+            .set(fly_secrets::keys::ANTHROPIC_API_KEY, "sk-ant")
+            .unwrap();
+        send(r#"{"provider":"anthropic","model":null,"base_url":"https://other.example","api_key":null}"#)
+            .unwrap();
+        assert_eq!(
+            secrets
+                .get(fly_secrets::keys::ANTHROPIC_API_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("sk-ant")
+        );
+    }
+
+    /// Consent belongs to the server it was given for. Moving OpenAI or NIM
+    /// to another server (with its key) clears the provider's consent, the
+    /// dialog then names the new server, and nothing is built until it's
+    /// allowed again. Another path on the same server keeps consent.
+    #[test]
+    fn a_new_server_needs_consent_again_and_the_dialog_names_it() {
+        use super::{
+            apply_llm_settings, build_provider, cloud_consent_key, cloud_consent_question,
+            consent_recipient, endpoint_needs_key, is_consent_refusal, record_cloud_consent,
+            ConsentAnswer, DataScope, LlmSettingsUpdate,
+        };
+        for (provider, default_url) in [
+            ("openai", "https://api.openai.com/v1"),
+            ("nim", "https://integrate.api.nvidia.com/v1"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let secrets = std::sync::Arc::new(fly_secrets::MemorySecretStore::default());
+            let state =
+                crate::state::AppState::init_with(dir.path().to_path_buf(), secrets).unwrap();
+            let send = |base_url: &str, api_key: Option<&str>| {
+                let update: LlmSettingsUpdate = serde_json::from_value(serde_json::json!({
+                    "provider": provider,
+                    "model": null,
+                    "base_url": base_url,
+                    "api_key": api_key,
+                }))
+                .unwrap();
+                apply_llm_settings(&state, update)
+            };
+            let consented = || {
+                state
+                    .storage
+                    .lock()
+                    .unwrap()
+                    .get_setting(&cloud_consent_key(provider))
+                    .unwrap()
+            };
+            let allow = || {
+                record_cloud_consent(
+                    &state.storage.lock().unwrap(),
+                    provider,
+                    ConsentAnswer::Allow,
+                )
+                .unwrap()
+            };
+            let question =
+                || cloud_consent_question(&state.storage.lock().unwrap(), provider, false).unwrap();
+
+            send("", Some("sk-one")).unwrap();
+            allow();
+            assert!(build_provider(&state, DataScope::NoMeetingData).is_ok());
+
+            // the default spelled out is the same server: consent stays
+            send(default_url, None).unwrap();
+            assert_eq!(consented().as_deref(), Some("true"), "{provider}");
+
+            // another server without the key: refused, nothing changes
+            assert_eq!(
+                send("https://proxy.example:8443/v1", None),
+                Err(endpoint_needs_key(provider))
+            );
+            assert_eq!(consented().as_deref(), Some("true"), "{provider}");
+
+            // with the key: saved, consent cleared, dialog names the server
+            send("https://proxy.example:8443/v1", Some("sk-two")).unwrap();
+            assert_eq!(consented(), None, "{provider}");
+            let prompt = question().expect("asks again");
+            assert!(
+                prompt
+                    .message
+                    .contains(&consent_recipient(provider, Some("proxy.example:8443"))),
+                "{}",
+                prompt.message
+            );
+            let err = build_provider(&state, DataScope::NoMeetingData)
+                .err()
+                .expect("refused until allowed again");
+            assert!(is_consent_refusal(&err), "{err}");
+            allow();
+            assert!(build_provider(&state, DataScope::NoMeetingData).is_ok());
+
+            // same server, another path: consent stays
+            send("https://proxy.example:8443/other/v1", None).unwrap();
+            assert_eq!(consented().as_deref(), Some("true"), "{provider}");
+
+            // back to the default server: asked again, naming the vendor
+            send("", Some("sk-three")).unwrap();
+            assert_eq!(consented(), None, "{provider}");
+            let prompt = question().expect("asks again");
+            assert!(!prompt.message.contains("server at"), "{}", prompt.message);
+            assert!(prompt.message.contains(&format!(
+                "sent to {} for",
+                consent_recipient(provider, None)
+            )));
+        }
     }
 }

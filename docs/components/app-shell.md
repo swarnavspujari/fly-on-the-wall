@@ -8,7 +8,7 @@ The process entry point and the only place platform implementations are chosen. 
 
 ## Files it owns
 - `src-tauri/src/main.rs` — 6-line shim; `windows_subsystem = "windows"` in release.
-- `src-tauri/src/lib.rs` — `run()`: pre-builder startup, plugin order, `setup` (picks the synchronous or background open), command registration (106 commands, `lib.rs:93-200`), Exit hook.
+- `src-tauri/src/lib.rs` — `run()`: pre-builder startup, plugin order, `setup` (picks the synchronous or background open), command registration (108 commands, `lib.rs:93-202`), Exit hook.
 - `src-tauri/src/startup.rs` — the library open on either path: the upgrade check, the background open with progress, the startup gate (`LibraryGate`, `library_status`, `library:upgrade`), the error dialog, and `finish` (everything after the open, in order).
 - `src-tauri/src/state.rs` — `AppState`, data-dir resolution, Looma→FlyOnTheWall folder move, legacy keychain copy.
 - `src-tauri/src/logging.rs` — tracing subscriber, rolling file logs, panic hook, the log-hygiene rule and its lexical test.
@@ -37,7 +37,7 @@ The process entry point and the only place platform implementations are chosen. 
 | `recording` | `Mutex<Option<ActiveRecording>>` | Set/taken by recording.rs; read by commands.rs (`delete_note` guard), live.rs, scheduler.rs (`recording_active`, used by privacy.rs) |
 | `secrets` | `Arc<dyn SecretStore>` (keychain) | asr_commands, calendar_commands (+ `secrets_arc` for providers), llm_commands, pipeline, privacy (delete-all), state.rs (migration) |
 | `pipeline_stage` | `Mutex<HashMap<meeting_id, stage>>` | Written by pipeline.rs and scheduler.rs; read by asr_commands (`pipeline_stage` cmd), commands.rs (`delete_note`), privacy.rs (busy check, cleared on delete-all) |
-| `cancel_requests` | `Mutex<HashSet<meeting_id>>` | Inserted by scheduler.rs (`cancel`), polled/cleared by pipeline.rs |
+| `cancel_requests` | `Mutex<HashSet<meeting_id>>` | Inserted by scheduler.rs (`cancel`), polled by pipeline.rs between batches; cleared by scheduler.rs only (when a run ends, cancelled or not, and when `enqueue` creates a new job), so a retry never drops a pending cancel |
 | `screen` | `Mutex<Option<ActiveScreenRecording>>` | Set/taken by screen_commands.rs; read by scheduler.rs:469 |
 | `jobs_notify` | `tokio::sync::Notify` | Notified by recording.rs, screen_commands.rs, scheduler.rs; awaited by the scheduler worker |
 | `ollama` | `Mutex<Option<Child>>` | ollama.rs only (spawn, status, `shutdown` on Exit) |

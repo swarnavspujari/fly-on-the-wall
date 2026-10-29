@@ -227,13 +227,25 @@ pub fn finish(app: &AppHandle, app_state: AppState) {
         tauri::async_runtime::spawn(async move {
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 let state = handle.state::<AppState>();
-                let storage = state.storage.lock().unwrap();
-                match storage.self_heal_recordings() {
-                    Ok(r) if !r.is_empty() => tracing::info!(
-                        attached = r.attached.len(),
-                        resurrected = r.resurrected.len(),
-                        "recording self-heal repaired meetings"
-                    ),
+                let healed = state.storage.lock().unwrap().self_heal_recordings();
+                match healed {
+                    Ok(r) if !r.is_empty() => {
+                        tracing::info!(
+                            attached = r.attached.len(),
+                            resurrected = r.resurrected.len(),
+                            kept_local_unconfirmed = r.kept_local_unconfirmed.len(),
+                            "recording self-heal repaired meetings"
+                        );
+                        // Kept local only because the manifest didn't say:
+                        // ask the user to review them.
+                        if !r.kept_local_unconfirmed.is_empty() {
+                            let entries = privacy::note_recovered_kept_local(
+                                &state,
+                                &r.kept_local_unconfirmed,
+                            );
+                            let _ = handle.emit(privacy::RECOVERED_KEPT_LOCAL_EVENT, entries);
+                        }
+                    }
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, "recording self-heal failed")

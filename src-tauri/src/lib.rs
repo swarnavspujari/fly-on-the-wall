@@ -197,6 +197,8 @@ pub fn run() {
             privacy::dismiss_wipe_report,
             privacy::delete_all_data,
             privacy::disk_encryption_status,
+            privacy::recovered_kept_local,
+            privacy::dismiss_recovered_kept_local,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fly on the Wall")

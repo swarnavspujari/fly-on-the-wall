@@ -1409,7 +1409,7 @@ mod tests {
         let b = NoteBlock::ai("- Renewal", vec!["a3".into()]);
         s.update_note_blocks(&note_id, std::slice::from_ref(&b))
             .unwrap();
-        let mirror = s.note_mirror_abs(&note_id);
+        let mirror = s.note_mirror_abs(&note_id).unwrap();
         std::fs::remove_file(&mirror).unwrap();
         std::fs::create_dir_all(mirror.join("blocker")).unwrap();
         // The fault is real: a plain blocks save now fails on the mirror.

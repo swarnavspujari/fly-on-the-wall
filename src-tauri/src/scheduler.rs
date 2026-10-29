@@ -31,6 +31,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(10);
 const IDLE_POLL: Duration = Duration::from_secs(5);
 
 /// What one scheduling step did.
+#[derive(Debug)]
 pub enum Tick {
     /// Nothing queued.
     Idle,
@@ -61,6 +62,10 @@ pub fn enqueue(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> R
         .enqueue_transcription(meeting_id)
         .map_err(|e| e.to_string())?;
     if queued {
+        // A new job: a cancel left over from an earlier run of this meeting
+        // must not stop it. (Only here: a retry of the same job keeps a
+        // pending cancel, see `tick`.)
+        state.cancel_requests.lock().unwrap().remove(meeting_id);
         mark_waiting(state, on_stage, meeting_id, None);
     }
     state.jobs_notify.notify_one();
@@ -86,6 +91,13 @@ fn permanent_failure(error: &str) -> bool {
 /// surfaced, the job row is simply removed.
 fn cancelled_failure(error: &str) -> bool {
     error.contains(fly_asr::CANCELLED_MARKER)
+}
+
+/// True while a cancel for `meeting_id` is waiting to be honoured. A run
+/// that fails for another reason after the user cancelled (a network error
+/// mid-ASR, say) ends as cancelled, not as a retry.
+fn cancel_pending(state: &AppState, meeting_id: &str) -> bool {
+    state.cancel_requests.lock().unwrap().contains(meeting_id)
 }
 
 /// Run at most one queued job to completion. Never starts a pipeline while
@@ -116,10 +128,12 @@ pub async fn tick(
 
     match pipeline::run_with(state, on_stage, on_model, &meeting_id).await {
         Ok(_) => {
+            // a cancel that landed after the last batch poll is moot now
+            state.cancel_requests.lock().unwrap().remove(&meeting_id);
             set_job_state(state, |s| s.mark_transcription_done(&meeting_id));
             Tick::Completed(meeting_id)
         }
-        Err(error) if cancelled_failure(&error) => {
+        Err(error) if cancelled_failure(&error) || cancel_pending(state, &meeting_id) => {
             tracing::info!(meeting_id, "transcription cancelled");
             state.pipeline_stage.lock().unwrap().remove(&meeting_id);
             state.cancel_requests.lock().unwrap().remove(&meeting_id);
@@ -601,6 +615,86 @@ mod tests {
         assert!(!permanent_failure(&e));
         assert!(!cancelled_failure("network reset by peer"));
         assert!(!cancelled_failure(pipeline::ERR_NO_RECORDING_FILES));
+    }
+
+    fn test_state(dir: &std::path::Path) -> AppState {
+        AppState::init_with(
+            dir.to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap()
+    }
+
+    /// The user cancels while a run is going, and the run then fails for
+    /// another reason before it notices (here: the meeting has no recording,
+    /// a retryable error). The cancel wins: the job is removed, not queued
+    /// for another attempt that would carry on as if nothing was asked.
+    #[test]
+    fn a_cancel_survives_a_run_that_fails_before_noticing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let meeting_id = {
+            let storage = state.storage.lock().unwrap();
+            let note = storage.create_note("Standup", None).unwrap();
+            storage.create_meeting("Standup", &note.id, &[]).unwrap().id
+        };
+        let quiet = |_: pipeline::PipelineProgress| {};
+        let model = |_: models::ModelProgress| {};
+        enqueue(&state, &quiet, &meeting_id).unwrap();
+        // the cancel lands while the worker is already on it
+        state
+            .cancel_requests
+            .lock()
+            .unwrap()
+            .insert(meeting_id.clone());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tick = rt.block_on(tick(&state, &quiet, &model));
+        assert!(
+            matches!(&tick, Tick::Cancelled(id) if *id == meeting_id),
+            "a pending cancel must not turn into a retry"
+        );
+        let job = state
+            .storage
+            .lock()
+            .unwrap()
+            .transcription_job(&meeting_id)
+            .unwrap();
+        assert!(job.is_none(), "{job:?}");
+        assert!(!state.cancel_requests.lock().unwrap().contains(&meeting_id));
+    }
+
+    /// Without a cancel the same failure is retried, as before.
+    #[test]
+    fn the_same_failure_without_a_cancel_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let meeting_id = {
+            let storage = state.storage.lock().unwrap();
+            let note = storage.create_note("Standup", None).unwrap();
+            storage.create_meeting("Standup", &note.id, &[]).unwrap().id
+        };
+        let quiet = |_: pipeline::PipelineProgress| {};
+        let model = |_: models::ModelProgress| {};
+        enqueue(&state, &quiet, &meeting_id).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tick = rt.block_on(tick(&state, &quiet, &model));
+        assert!(matches!(tick, Tick::Retrying { .. }), "{tick:?}");
+    }
+
+    /// Queuing a meeting afresh drops a cancel left from an earlier run; an
+    /// enqueue that finds the job still pending keeps it.
+    #[test]
+    fn only_a_new_job_drops_a_stale_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let quiet = |_: pipeline::PipelineProgress| {};
+        state.cancel_requests.lock().unwrap().insert("m1".into());
+        enqueue(&state, &quiet, "m1").unwrap();
+        assert!(!state.cancel_requests.lock().unwrap().contains("m1"));
+        state.cancel_requests.lock().unwrap().insert("m1".into());
+        enqueue(&state, &quiet, "m1").unwrap(); // already queued
+        assert!(state.cancel_requests.lock().unwrap().contains("m1"));
     }
 
     /// A quota 429 is transient by definition (the window reopens) — it must

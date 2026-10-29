@@ -29,6 +29,7 @@ import type {
   Folder,
   LlmSettings,
   LlmSettingsUpdate,
+  RecoveredMeeting,
   Meeting,
   MeetingPrivacy,
   Note,
@@ -182,6 +183,12 @@ export const api = {
   // re-run once the provider is allowed (background; returns how many).
   consentSkippedMeetings: () => invoke<string[]>("consent_skipped_meetings"),
   retryConsentSkipped: () => invoke<number>("retry_consent_skipped"),
+  // Meetings self-heal restored this launch with Keep local set because their
+  // privacy setting couldn't be confirmed (updates: "privacy:recovered-kept-local").
+  recoveredKeptLocal: () => invoke<RecoveredMeeting[]>("recovered_kept_local"),
+  /** One meeting off the list (null: all); returns what's left. */
+  dismissRecoveredKeptLocal: (meetingId: string | null) =>
+    invoke<RecoveredMeeting[]>("dismiss_recovered_kept_local", { meetingId }),
   // Ask in a native dialog (the backend owns its words) whether `provider`
   // may receive meeting content, and record a yes. True when it may: local,
   // allowed before, or allowed now. The only way consent gets recorded;

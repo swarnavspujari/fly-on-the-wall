@@ -16,7 +16,7 @@ App owns the import flow around it: `importMedia` (`App.tsx:645-654`), `importTr
 ### Public API
 | Export | Where | Notes |
 |---|---|---|
-| `ImportQueue` (default) | `ImportQueue.tsx:50` | Props: `staged: ImportStaged`, `pipeStage`, `pipeDetail`, `pipelineError`, `onTranscribe(order)`, `onRetry`, `onCancel`. Mounted by the Editor when the note has a staged import (`Editor.tsx:1428-1438`). |
+| `ImportQueue` (default) | `ImportQueue.tsx:50` | Props: `staged: ImportStaged`, `pipeStage`, `pipeDetail`, `pipelineError`, `onTranscribe(order)`, `onRetry`, `onCancel`, `onFilesChange(before, after)` (a file removed or a drag finished). Mounted by the Editor when the note has a staged import (`Editor.tsx:1428-1438`). |
 | `mapProgress(files, boundariesMs, pct)` | `importProgress.ts:18-50` | Per-file `waiting` / `transcribing` / `done` and the active file's own % (capped at 99). Falls back to everything `transcribing` with no % when boundaries are missing or don't match. |
 | `parseTranscribingDetail(detail)` | `importProgress.ts:64-74` | Reads `%`, engine (`cloud` / `GPU` / `CPU`) and quota wait minutes from the pipeline detail. |
 | `rollingStatus(files, boundariesMs, detail)` | `importProgress.ts:80-94` | Header line, e.g. "2 of 3 · Cloud · 20%" or "2 of 3 · Waiting for cloud quota (~3m)". |
@@ -91,6 +91,7 @@ None.
 - Per-file % is proportional to each file's share of the joined timeline (1 s gap between files, `import_commands.rs:28`), never a timer (`importProgress.ts:14-17`).
 - A finished `import_transcribe` updates only the queue of the import note that's still open (`App.tsx:664-671`, PR #95).
 - The queue's local file list re-syncs whenever the backend hands back a new `staged` object (`ImportQueue.tsx:68-74`).
+- The note is titled after the first file (`importTitle`, the backend's `file_stem`). Until the user renames it, the Editor's title follows the queue's first file when a file is removed or the order changes (`followedImportTitle` in `importProgress.ts`).
 
 ## Tests
 | Kind | File | Tests | Covers |

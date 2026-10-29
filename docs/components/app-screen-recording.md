@@ -61,7 +61,7 @@ None.
 ## Invariants
 - At most one screen capture at a time (`screen_commands.rs:61-63`; `state.rs:32-33`).
 - A window title is re-resolved against the windows open **now**; a vanished or ambiguous window fails at start with a readable message (`screen_commands.rs:64-82`).
-- The note must exist before any capture starts (`screen_commands.rs:83-89`); because the id is checked against the database, `note_id` can't steer the output path elsewhere (inferred — see the app-notes-library note on ids from copied-in manifests).
+- The note must exist before any capture starts, and the output goes into `note_attachments_dir(note_id)`, which is `None` (capture refused) unless the id is one plain path component inside `attachments/`.
 - Recorder start and stop run on blocking threads, never the async runtime (`screen_commands.rs:117-120`, `:251-254`).
 - Thumbnails only for paths inside `attachments/` or `recordings/` (`attachment_abs_path`, `crates/fly-storage/src/attachments.rs:70-79`); THREAT_MODEL T3.
 - Stopping a capture nudges the transcription queue (`screen_commands.rs:262-263`); the queue waits while a capture is active (`scheduler.rs:469`).
