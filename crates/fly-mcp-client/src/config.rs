@@ -109,20 +109,49 @@ fn bad(msg: impl Into<String>) -> ConfigError {
     ConfigError(msg.into())
 }
 
-/// Variables that change how a program loads code. A local connector can't
-/// set them.
+/// Variables that change how a program loads code, where its runtime fetches
+/// packages from, or which TLS certificates it trusts. A local connector
+/// can't set them.
 const RESERVED_ENV: &[&str] = &[
     "PATH",
     "PATHEXT",
-    "NODE_OPTIONS",
-    "NODE_PATH",
-    "PYTHONPATH",
-    "PYTHONSTARTUP",
-    "PYTHONHOME",
-    "RUBYOPT",
-    "PERL5OPT",
     "COMSPEC",
     "SYSTEMROOT",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "RUBYOPT",
+    "RUBYLIB",
+    "PERL5OPT",
+    "PERL5LIB",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "CLASSPATH",
+    "DOTNET_STARTUP_HOOKS",
+    "DOTNET_ADDITIONAL_DEPS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_NO_VERIFY",
+];
+
+/// Prefixes of the same kinds of variables (preloading, package registries,
+/// runtime hooks).
+const RESERVED_ENV_PREFIXES: &[&str] = &[
+    "LD_",
+    "DYLD_",
+    "PYTHON",
+    "NPM_CONFIG_",
+    "YARN_",
+    "PNPM_",
+    "BUN_",
+    "PIP_",
+    "UV_",
+    "CORECLR_",
+    "COR_PROFILER",
 ];
 
 /// Headers FOTW sets itself or that change how the request is framed.
@@ -253,8 +282,7 @@ impl ServerConfig {
                     }
                     let upper = e.name.to_ascii_uppercase();
                     if RESERVED_ENV.contains(&upper.as_str())
-                        || upper.starts_with("LD_")
-                        || upper.starts_with("DYLD_")
+                        || RESERVED_ENV_PREFIXES.iter().any(|p| upper.starts_with(p))
                     {
                         return Err(bad(format!("{} can't be set for a connector.", e.name)));
                     }
@@ -335,16 +363,19 @@ impl ServerConfig {
     }
 
     /// True when `other` points somewhere else: another address, another
-    /// program line, another transport or another kind of sign-in. Stored
+    /// program line or settings (a setting can change what a runner like
+    /// `npx` fetches), another transport or another kind of sign-in. Stored
     /// secrets, tokens and tool permissions must not carry over to it.
     pub fn moves_from(&self, other: &ServerConfig) -> bool {
         let identity = |c: &ServerConfig| {
             (
                 match &c.transport {
                     TransportConfig::Http { url, .. } => format!("http {url}"),
-                    TransportConfig::Stdio { .. } => {
-                        format!("stdio {}", c.will_run().unwrap_or_default())
-                    }
+                    TransportConfig::Stdio { env, .. } => format!(
+                        "stdio {}\n{}",
+                        c.will_run().unwrap_or_default(),
+                        serde_json::to_string(env).unwrap_or_default()
+                    ),
                 },
                 std::mem::discriminant(&c.auth),
             )
@@ -544,6 +575,15 @@ mod tests {
             "LD_PRELOAD",
             "DYLD_INSERT_LIBRARIES",
             "node_options",
+            "NPM_CONFIG_REGISTRY",
+            "npm_config_registry",
+            "PIP_INDEX_URL",
+            "UV_INDEX_URL",
+            "PYTHONPATH",
+            "JAVA_TOOL_OPTIONS",
+            "DOTNET_STARTUP_HOOKS",
+            "NODE_EXTRA_CA_CERTS",
+            "SSL_CERT_FILE",
             "1X",
             "A-B",
         ] {
@@ -618,7 +658,13 @@ mod tests {
                 value: Some("eu".into()),
             }],
         };
-        assert!(!with_setting.moves_from(&l));
+        assert!(
+            with_setting.moves_from(&l),
+            "a setting can change what the runner fetches"
+        );
+        let mut renamed = l.clone();
+        renamed.name = "Local 2".into();
+        assert!(!renamed.moves_from(&l));
     }
 
     #[test]

@@ -839,31 +839,15 @@ async fn probing_never_starts_a_local_program() {
 }
 
 #[tokio::test]
-async fn editing_a_connector_re_approves_it_and_drops_old_secrets() {
+async fn editing_a_connector_re_approves_it_and_keeps_what_still_applies() {
     let s = setup().await;
-    let old_key = format!("connector.{}.env.ACME_TOKEN", s.id);
+    s.set("search_contacts", Permission::AlwaysAllow);
+    let key = format!("connector.{}.env.ACME_TOKEN", s.id);
     let mut edited = config();
-    edited.transport = TransportConfig::Stdio {
-        command: "acme-crm-mcp".into(),
-        args: vec![],
-        env: vec![EnvConfig {
-            name: "ACME_KEY".into(),
-            value: None,
-        }],
-    };
-    // A new secret name needs a value.
-    let err = s
-        .hub
-        .update_approved(&s.id, edited.clone(), &NewSecrets::default())
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("ACME_KEY"), "{err}");
-    let secrets = NewSecrets {
-        values: [("ACME_KEY".to_string(), "k3y".to_string())].into(),
-        ..Default::default()
-    };
+    edited.name = "Acme CRM (work)".into();
+    assert!(!s.hub.edit_moves(&s.id, &edited).unwrap());
     s.hub
-        .update_approved(&s.id, edited, &secrets)
+        .update_approved(&s.id, edited, &NewSecrets::default())
         .await
         .unwrap();
     let reg = s.hub.registry();
@@ -871,20 +855,10 @@ async fn editing_a_connector_re_approves_it_and_drops_old_secrets() {
     assert!(entry.is_approved(), "approval moved to the new config");
     assert_eq!(
         entry.tool("search_contacts").unwrap().permission,
-        Permission::NeedsApproval,
-        "permissions are kept"
+        Permission::AlwaysAllow,
+        "a rename keeps permissions"
     );
-    assert!(
-        s.secrets.get(&old_key).unwrap().is_none(),
-        "dropped secret deleted"
-    );
-    assert_eq!(
-        s.secrets
-            .get(&format!("connector.{}.env.ACME_KEY", s.id))
-            .unwrap()
-            .as_deref(),
-        Some("k3y")
-    );
+    assert_eq!(s.secrets.get(&key).unwrap().as_deref(), Some("t0ken"));
 }
 
 #[tokio::test]

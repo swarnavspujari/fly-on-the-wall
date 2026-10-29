@@ -208,6 +208,19 @@ fn add_prompt(c: &ServerConfig, turning_on: bool) -> ConsentPrompt {
             q(&c.name, 60),
             clean_capped(&run, 600)
         );
+        if let TransportConfig::Stdio { env, .. } = &c.transport {
+            let shown: Vec<String> = env
+                .iter()
+                .filter_map(|e| {
+                    e.value
+                        .as_deref()
+                        .map(|v| format!("{}={}", e.name, clean_capped(v, 120)))
+                })
+                .collect();
+            if !shown.is_empty() {
+                body.push_str(&format!("\n\nWith these settings: {}.", shown.join(", ")));
+            }
+        }
         let secrets = c.secret_names();
         if !secrets.is_empty() {
             body.push_str(&format!(
@@ -1452,6 +1465,16 @@ mod tests {
             },
             auth: AuthConfig::None,
         };
+        let mut with_region = local.clone();
+        if let TransportConfig::Stdio { env, .. } = &mut with_region.transport {
+            env.push(EnvConfig {
+                name: "REGION".into(),
+                value: Some("eu".into()),
+            });
+        }
+        assert!(add_prompt(&with_region, false)
+            .message
+            .contains("With these settings: REGION=eu."));
         let add = add_prompt(&local, false);
         assert_eq!(add.title, "Run a program on this computer?");
         assert!(add.message.contains("will run: npx -y @example/docs"));
