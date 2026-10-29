@@ -401,13 +401,15 @@ impl Storage {
             .ok()
             .and_then(|m| m.recording)
             .and_then(|r| crate::meetings::recording_dir_rel(&r))
-            .map(|rel| self.data_dir.join(rel))
+            .and_then(|rel| crate::contained_recordings_dir(&self.data_dir, &rel))
             .filter(|d| d.is_dir());
         let (dir, stem) = match meeting_dir {
             Some(dir) => (dir, format!("transcript{variant}")),
             None => (
                 self.data_dir.join("transcripts"),
-                format!("{meeting_id}{variant}"),
+                // The id is part of a file name here: anything but a plain
+                // id gets a stable stand-in, so it can't steer the path.
+                format!("{}{variant}", crate::scratch::id_component(meeting_id)),
             ),
         };
         MirrorPaths {

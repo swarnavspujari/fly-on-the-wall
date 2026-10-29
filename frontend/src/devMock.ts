@@ -64,6 +64,7 @@
    ============================================================ */
 
 import { WHISPER_ENGINE_ID } from "./types";
+import { providerVendor, serverChangeNeedsKey } from "./settingsModel";
 
 const nowIso = () => new Date().toISOString();
 const ago = (mins: number) => new Date(Date.now() - mins * 60_000).toISOString();
@@ -1259,9 +1260,21 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         base_url: string | null;
         api_key: string | null;
       };
-      llmSettings.provider = u.provider;
       const info = llmSettings.providers.find((p) => p.id === u.provider);
+      // Same rule as llm_commands.rs apply_llm_settings: a saved key never
+      // follows the Base URL to another server unless it's entered again.
+      if (
+        info &&
+        u.api_key == null &&
+        serverChangeNeedsKey(u.provider, info.has_key, info.base_url, u.base_url ?? "")
+      ) {
+        throw `To use a different server for ${providerVendor(u.provider)}, enter the API key again. Nothing was changed.`;
+      }
+      llmSettings.provider = u.provider;
       if (info) {
+        if (serverChangeNeedsKey(u.provider, true, info.base_url, u.base_url ?? "")) {
+          info.has_key = false; // the old key never goes to the new server
+        }
         info.model = u.model;
         info.base_url = u.base_url;
         if (u.api_key != null) info.has_key = u.api_key !== "";

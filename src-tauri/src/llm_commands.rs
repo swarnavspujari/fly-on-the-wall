@@ -1162,12 +1162,81 @@ pub fn validate_base_url(provider: &str, url: &str) -> Result<(), String> {
     }
 }
 
+/// Where `provider`'s stored API key is sent: the origin (scheme, host,
+/// port) of `base_url`, or of the provider's default endpoint when it's
+/// empty. `None` for providers whose key can't be pointed elsewhere
+/// (Anthropic's host is fixed; Ollama holds no key).
+fn key_endpoint(provider: &str, base_url: Option<&str>) -> Option<String> {
+    use fly_llm::openai_compat::OpenAiCompatProvider;
+    let default = match provider {
+        "openai" => OpenAiCompatProvider::openai(String::new(), String::new()).base_url,
+        "nim" => OpenAiCompatProvider::nim(String::new(), String::new()).base_url,
+        _ => return None,
+    };
+    let url = base_url
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .unwrap_or(&default);
+    // An unparseable value can't be compared, so it counts as its own place.
+    Some(
+        tauri::Url::parse(url)
+            .map(|u| u.origin().ascii_serialization())
+            .unwrap_or_else(|_| format!("invalid:{url}")),
+    )
+}
+
+/// Refusal when an endpoint change arrives without the key.
+pub fn endpoint_needs_key(provider: &str) -> String {
+    format!(
+        "To use a different server for {}, enter the API key again. Nothing was changed.",
+        provider_vendor(provider)
+    )
+}
+
 #[tauri::command]
 pub fn set_llm_settings(state: State<'_, AppState>, update: LlmSettingsUpdate) -> CmdResult<()> {
+    apply_llm_settings(&state, update)
+}
+
+/// [`set_llm_settings`] without the Tauri wrapper.
+///
+/// The stored key goes wherever the saved base URL points, so it is tied to
+/// that endpoint: a change that sends it to a different server (another
+/// scheme, host or port) must bring the key with it. Without one the whole
+/// update is refused, so no script in the webview can point a saved key at
+/// a server of its choosing. On an endpoint change the old key is removed
+/// before the new URL is saved, so a failed key write leaves no key behind
+/// rather than the old key with the new URL.
+pub fn apply_llm_settings(state: &AppState, update: LlmSettingsUpdate) -> CmdResult<()> {
     if !PROVIDERS.iter().any(|(id, _, _)| *id == update.provider) {
         return Err(format!("unknown provider '{}'", update.provider));
     }
     validate_base_url(&update.provider, update.base_url.as_deref().unwrap_or(""))?;
+    let secret_name = secret_key_for(&update.provider);
+    let endpoint_changed = {
+        let saved = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_setting(&format!("llm.{}.base_url", update.provider))
+            .map_err(|e| e.to_string())?;
+        key_endpoint(&update.provider, saved.as_deref())
+            != key_endpoint(&update.provider, update.base_url.as_deref())
+    };
+    if let (true, Some(secret_name)) = (endpoint_changed, secret_name) {
+        // A key that can't be read counts as stored: refuse rather than guess.
+        let stored = state.secrets.get(secret_name).map_or(true, |k| k.is_some());
+        // `api_key: None` keeps the stored key; a new key or "" (clear) is fine.
+        if stored && update.api_key.is_none() {
+            return Err(endpoint_needs_key(&update.provider));
+        }
+        if stored {
+            state
+                .secrets
+                .delete(secret_name)
+                .map_err(|e| e.to_string())?;
+        }
+    }
     {
         let storage = state.storage.lock().unwrap();
         storage
@@ -1186,7 +1255,7 @@ pub fn set_llm_settings(state: State<'_, AppState>, update: LlmSettingsUpdate) -
             )
             .map_err(|e| e.to_string())?;
     }
-    if let (Some(key), Some(secret_name)) = (update.api_key, secret_key_for(&update.provider)) {
+    if let (Some(key), Some(secret_name)) = (update.api_key, secret_name) {
         if key.is_empty() {
             state
                 .secrets
@@ -1642,5 +1711,87 @@ mod security_tests {
     fn ollama_holds_no_key_so_http_is_fine() {
         assert!(validate_base_url("ollama", "http://192.168.1.20:11434").is_ok());
         assert!(validate_base_url("ollama", "javascript:alert(1)").is_err());
+    }
+
+    /// The webview's `set_llm_settings` payload can't point a saved key at
+    /// another server: an endpoint change without the key is refused and
+    /// changes nothing; with the key (or clearing it) it goes through. Same
+    /// server, a new path, or another field (Runs on, model) needs no key.
+    #[test]
+    fn a_saved_key_cant_be_pointed_at_another_server() {
+        use super::{apply_llm_settings, endpoint_needs_key, LlmSettingsUpdate};
+        use fly_secrets::SecretStore;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = std::sync::Arc::new(fly_secrets::MemorySecretStore::default());
+        let state =
+            crate::state::AppState::init_with(dir.path().to_path_buf(), secrets.clone()).unwrap();
+        // exactly what the frontend sends (api.ts setLlmSettings)
+        let send = |json: &str| {
+            let update: LlmSettingsUpdate = serde_json::from_str(json).unwrap();
+            apply_llm_settings(&state, update)
+        };
+        let saved_url = || {
+            state
+                .storage
+                .lock()
+                .unwrap()
+                .get_setting("llm.openai.base_url")
+                .unwrap()
+        };
+        let key = || secrets.get(fly_secrets::keys::OPENAI_API_KEY).unwrap();
+
+        send(r#"{"provider":"openai","model":null,"base_url":null,"api_key":"sk-one"}"#).unwrap();
+        assert_eq!(key().as_deref(), Some("sk-one"));
+
+        // the official host, spelled out: same server, no key needed
+        send(r#"{"provider":"openai","model":"gpt-4o","base_url":"https://api.openai.com/v1","api_key":null}"#)
+            .unwrap();
+        for other in [
+            "https://other.example/v1",
+            "https://api.openai.com.other.example/v1",
+            "https://api.openai.com:8443/v1",
+            "http://localhost:8080/v1",
+        ] {
+            let json = format!(
+                r#"{{"provider":"openai","model":null,"base_url":"{other}","api_key":null}}"#
+            );
+            assert_eq!(send(&json), Err(endpoint_needs_key("openai")), "{other}");
+            assert_eq!(saved_url().as_deref(), Some("https://api.openai.com/v1"));
+            assert_eq!(key().as_deref(), Some("sk-one"), "{other}");
+        }
+        // back to the default (empty) is the same server
+        send(r#"{"provider":"openai","model":null,"base_url":"","api_key":null}"#).unwrap();
+
+        // with the key re-entered, the move goes through
+        send(r#"{"provider":"openai","model":null,"base_url":"https://proxy.example/v1","api_key":"sk-two"}"#)
+            .unwrap();
+        assert_eq!(saved_url().as_deref(), Some("https://proxy.example/v1"));
+        assert_eq!(key().as_deref(), Some("sk-two"));
+        // same server, another path: fine
+        send(r#"{"provider":"openai","model":null,"base_url":"https://proxy.example/openai/v1","api_key":null}"#)
+            .unwrap();
+        assert_eq!(key().as_deref(), Some("sk-two"));
+
+        // clearing the key along with the move: nothing is left to send
+        send(r#"{"provider":"openai","model":null,"base_url":"https://third.example/v1","api_key":""}"#)
+            .unwrap();
+        assert_eq!(key(), None);
+        // and with no key stored, the endpoint is free to change
+        send(r#"{"provider":"openai","model":null,"base_url":"https://fourth.example/v1","api_key":null}"#)
+            .unwrap();
+
+        // Anthropic's host is fixed, so its stored URL never carries the key
+        secrets
+            .set(fly_secrets::keys::ANTHROPIC_API_KEY, "sk-ant")
+            .unwrap();
+        send(r#"{"provider":"anthropic","model":null,"base_url":"https://other.example","api_key":null}"#)
+            .unwrap();
+        assert_eq!(
+            secrets
+                .get(fly_secrets::keys::ANTHROPIC_API_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("sk-ant")
+        );
     }
 }

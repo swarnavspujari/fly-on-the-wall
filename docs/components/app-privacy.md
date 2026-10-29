@@ -128,7 +128,6 @@ The result (including `unknown`) is cached for the session under a mutex held ac
 - `hold_instance_lock` / `startup` are untested; `instance_lock_excludes_a_second_holder` exercises std's `File::lock`, not the 20 s wait or the global early return (`privacy.rs:638`, which ignores `data_dir`).
 - `spawn_retention` timing and `sweep_now`'s recording/pipeline guards aren't tested; tests inject `now` and a `busy` closure.
 - `busy_reason`'s "recording" branch, and the macOS `fdesetup` probe, have no tests.
-- Keep local is lost when a meeting is resurrected by self-heal (no manifest field), so a restored meeting can go to a cloud provider (fly-storage gap, T10).
 
 ## Changing it safely
 - Run `cargo test -p fly-app privacy` and `cargo test -p fly-storage`; `npm --prefix frontend test` for `privacy.test.ts` / Settings tests.

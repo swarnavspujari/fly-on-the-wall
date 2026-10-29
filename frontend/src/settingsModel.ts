@@ -215,6 +215,38 @@ const PROVIDER_VENDORS: Record<string, string> = {
 export const providerLabel = (id: string) => PROVIDER_LABELS[id] ?? id;
 export const providerVendor = (id: string) => PROVIDER_VENDORS[id] ?? id;
 
+/** Default endpoints of the providers whose saved key follows the Base URL
+ *  (llm_commands.rs key_endpoint). Anthropic's host is fixed; Ollama has no
+ *  key. */
+const KEY_ENDPOINT_DEFAULTS: Record<string, string> = {
+  openai: "https://api.openai.com/v1",
+  nim: "https://integrate.api.nvidia.com/v1",
+};
+
+function endpointOrigin(provider: string, url: string): string | null {
+  const fallback = KEY_ENDPOINT_DEFAULTS[provider];
+  if (!fallback) return null;
+  const raw = url.trim() || fallback;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return `invalid:${raw}`;
+  }
+}
+
+/** True when saving `draftUrl` would send `provider`'s saved key to another
+ *  server (scheme, host or port): the backend then wants the key entered
+ *  again with the change. */
+export function serverChangeNeedsKey(
+  provider: string,
+  hasKey: boolean,
+  savedUrl: string | null,
+  draftUrl: string,
+): boolean {
+  if (!hasKey) return false;
+  return endpointOrigin(provider, savedUrl ?? "") !== endpointOrigin(provider, draftUrl);
+}
+
 /* ------------------------------------------------------------- data tiles */
 
 export interface DataTile {

@@ -11,6 +11,7 @@ import {
   matchSections,
   mcpCommand,
   qualityHelper,
+  serverChangeNeedsKey,
 } from "./settingsModel";
 import type { AsrSettings, LlmSettings } from "./types";
 
@@ -247,5 +248,26 @@ describe("MCP instructions", () => {
     expect(claudeCodeCommand({ command: "/usr/bin/fly-mcp", args: ["--x"] })).toBe(
       "claude mcp add flyonthewall -- /usr/bin/fly-mcp --x",
     );
+  });
+});
+
+describe("serverChangeNeedsKey", () => {
+  it("asks for the key only when a saved key would go to another server", () => {
+    // no key saved: nothing to protect
+    expect(serverChangeNeedsKey("openai", false, null, "https://other.example/v1")).toBe(false);
+    // the default, blank or spelled out, is one server
+    expect(serverChangeNeedsKey("openai", true, null, "https://api.openai.com/v1")).toBe(false);
+    expect(serverChangeNeedsKey("openai", true, "https://api.openai.com/v1", "  ")).toBe(false);
+    // same server, another path
+    expect(
+      serverChangeNeedsKey("nim", true, "https://proxy.example/v1", "https://proxy.example/x/v1"),
+    ).toBe(false);
+    // another host, scheme or port
+    expect(serverChangeNeedsKey("openai", true, null, "https://other.example/v1")).toBe(true);
+    expect(serverChangeNeedsKey("openai", true, null, "https://api.openai.com:8443/v1")).toBe(true);
+    expect(serverChangeNeedsKey("nim", true, "https://proxy.example/v1", "")).toBe(true);
+    // Anthropic's host is fixed and Ollama has no key
+    expect(serverChangeNeedsKey("anthropic", true, null, "https://other.example")).toBe(false);
+    expect(serverChangeNeedsKey("ollama", true, null, "http://10.0.0.2:11434")).toBe(false);
   });
 });

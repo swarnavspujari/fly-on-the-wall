@@ -277,7 +277,12 @@ impl Storage {
             .execute("DELETE FROM citation_locators WHERE note_id = ?1", [id])?;
         tx.commit()?;
         self.checkpoint_after_delete();
-        for path in [mirror, self.data_dir.join("attachments").join(id)] {
+        // Both paths are contained (or skipped): the mirror under `notes/`,
+        // the attachments under `attachments/<id>/`.
+        for path in [mirror, self.note_attachments_dir(id)]
+            .into_iter()
+            .flatten()
+        {
             let res = if path.is_dir() {
                 std::fs::remove_dir_all(&path)
             } else {
@@ -329,17 +334,25 @@ impl Storage {
             (&note.id, &note.title, &body),
         )?;
         self.sync_note_chunks(note)?;
-        crate::atomic::write_atomic(&self.note_mirror_path(&note.id), note.to_markdown(false))?;
+        match self.note_mirror_path(&note.id) {
+            Some(path) => crate::atomic::write_atomic(&path, note.to_markdown(false))?,
+            None => {
+                tracing::warn!(note_id = %note.id, "note mirror path isn't under notes/; not written")
+            }
+        }
         let portable = crate::recovery::PortableNote::from_note(note);
         for meeting in self.meetings_for_note(&note.id)? {
-            let Some(rel) = meeting
+            // Same guard as the manifest writers: a row healed by an older
+            // build may carry unrebased paths, so write only inside
+            // `recordings/<folder>`.
+            let Some(dir) = meeting
                 .recording
                 .as_ref()
                 .and_then(crate::meetings::recording_dir_rel)
+                .and_then(|rel| crate::contained_recordings_dir(&self.data_dir, &rel))
             else {
                 continue;
             };
-            let dir = self.data_dir.join(rel);
             if dir.is_dir() {
                 crate::recovery::write_note_mirror(&dir, &portable)?;
             }
@@ -349,14 +362,16 @@ impl Storage {
 
     /// Absolute path of a note's markdown mirror, for callers that hand the
     /// file itself to the user (export). Same resolution as the writer side.
-    pub fn note_mirror_abs(&self, id: &str) -> std::path::PathBuf {
+    pub fn note_mirror_abs(&self, id: &str) -> Result<std::path::PathBuf> {
         self.note_mirror_path(id)
+            .ok_or_else(|| StorageError::Invalid("note has no usable markdown mirror path".into()))
     }
 
     /// Absolute path of a note's markdown mirror. Reads `disk_path`; a row
     /// without one (can't happen after the v2 migration) falls back to the
-    /// legacy `notes/<id>.md` name.
-    fn note_mirror_path(&self, id: &str) -> std::path::PathBuf {
+    /// legacy `notes/<id>.md` name. `None` when that isn't a plain
+    /// `notes/<file>` path, so a delete can never reach outside `notes/`.
+    fn note_mirror_path(&self, id: &str) -> Option<std::path::PathBuf> {
         let rel = self
             .conn
             .query_row("SELECT disk_path FROM notes WHERE id = ?1", [id], |r| {
@@ -367,7 +382,7 @@ impl Storage {
             .flatten()
             .flatten()
             .unwrap_or_else(|| format!("notes/{id}.md"));
-        self.data_dir.join(rel)
+        crate::safe_path::contained(&self.data_dir, &rel, &["notes"], 2)
     }
 
     /// First free `notes/<base>.md` (returned data-dir-relative), checking
@@ -418,8 +433,13 @@ impl Storage {
         }
         let new_rel = self.allocate_note_path(&base);
         if let Some(old) = old_rel {
-            // missing source is fine — sync_note_derived rewrites the mirror
-            let _ = std::fs::rename(self.data_dir.join(&old), self.data_dir.join(&new_rel));
+            // missing source is fine — sync_note_derived rewrites the mirror.
+            // Both ends stay under `notes/`.
+            let contain =
+                |rel: &str| crate::safe_path::contained(&self.data_dir, rel, &["notes"], 2);
+            if let (Some(from), Some(to)) = (contain(&old), contain(&new_rel)) {
+                let _ = std::fs::rename(from, to);
+            }
         }
         self.conn.execute(
             "UPDATE notes SET disk_path = ?1 WHERE id = ?2",

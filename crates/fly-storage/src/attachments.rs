@@ -7,9 +7,29 @@ use fly_core::{Attachment, Note};
 use crate::{Result, Storage, StorageError};
 
 impl Storage {
+    /// The note's `attachments/<note_id>/` folder, or `None` when the id
+    /// isn't one plain path component. Stored ids are treated as untrusted
+    /// here, so every write or delete under a note's attachments goes
+    /// through this.
+    pub fn note_attachments_dir(&self, note_id: &str) -> Option<std::path::PathBuf> {
+        crate::safe_path::is_plain_name(note_id)
+            .then(|| {
+                crate::safe_path::contained(
+                    &self.data_dir,
+                    &format!("attachments/{note_id}"),
+                    &["attachments"],
+                    2,
+                )
+            })
+            .flatten()
+    }
+
     /// Copy `src_path` into the note's attachment dir and record it.
     pub fn add_attachment(&self, note_id: &str, src_path: &std::path::Path) -> Result<Note> {
         let note = self.get_note(note_id)?;
+        let dir = self
+            .note_attachments_dir(note_id)
+            .ok_or_else(|| StorageError::Invalid("this note can't hold attachments".into()))?;
         if !src_path.is_file() {
             return Err(StorageError::Invalid(format!(
                 "not a file: {}",
@@ -22,7 +42,6 @@ impl Storage {
             .ok_or_else(|| StorageError::Invalid("attachment has no file name".into()))?
             .to_string();
 
-        let dir = self.data_dir.join("attachments").join(note_id);
         std::fs::create_dir_all(&dir)?;
 
         // avoid clobbering an existing attachment with the same name
@@ -59,7 +78,12 @@ impl Storage {
             )));
         };
         let removed = attachments.remove(pos);
-        let _ = std::fs::remove_file(self.data_dir.join(&removed.rel_path));
+        // Only a file inside the app's attachments folder is ever deleted.
+        if let Some(path) =
+            crate::safe_path::contained(&self.data_dir, &removed.rel_path, &["attachments"], 3)
+        {
+            let _ = std::fs::remove_file(path);
+        }
         self.set_note_attachments(note_id, &attachments)
     }
 
@@ -82,7 +106,19 @@ impl Storage {
     /// recording written straight to its final location) — no copy.
     pub fn add_attachment_in_place(&self, note_id: &str, rel_path: &str) -> Result<Note> {
         let note = self.get_note(note_id)?;
-        let abs = self.data_dir.join(rel_path);
+        let abs = self
+            .note_attachments_dir(note_id)
+            .and_then(|_| {
+                crate::safe_path::contained(&self.data_dir, rel_path, &["attachments"], 3)
+            })
+            .filter(|_| {
+                rel_path
+                    .replace('\\', "/")
+                    .starts_with(&format!("attachments/{note_id}/"))
+            })
+            .ok_or_else(|| {
+                StorageError::Invalid(format!("not inside this note's attachments: {rel_path}"))
+            })?;
         if !abs.is_file() {
             return Err(StorageError::Invalid(format!(
                 "not a file inside the data dir: {rel_path}"

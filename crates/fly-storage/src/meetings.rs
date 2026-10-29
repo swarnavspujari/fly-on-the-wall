@@ -360,7 +360,10 @@ impl Storage {
             if naming::already_labeled(&old_name, &base) {
                 continue; // already carries this title
             }
-            let old_abs = self.data_dir.join(&old_rel);
+            // Only ever rename a folder inside `recordings/`.
+            let Some(old_abs) = contained_recordings_dir(&self.data_dir, &old_rel) else {
+                continue;
+            };
             if !old_abs.is_dir() {
                 continue;
             }

@@ -52,6 +52,7 @@ import {
   providerLabel,
   providerVendor,
   qualityHelper,
+  serverChangeNeedsKey,
   type AsrDraft,
   type MadeOn,
   type Quality,
@@ -1591,6 +1592,20 @@ export default function SettingsModal({
                                 onChange={(e) => setLlmBaseUrl(e.target.value)}
                               />
                             </div>
+                            {provider &&
+                              serverChangeNeedsKey(
+                                provider.id,
+                                provider.has_key,
+                                provider.base_url,
+                                llmBaseUrl,
+                              ) &&
+                              !llmKey && (
+                                <p className="mt-2 text-warning-text" style={SMALL}>
+                                  Your saved key only goes to the server it was entered for. To use
+                                  this one, enter the {providerVendor(provider.id)} API key again,
+                                  then save.
+                                </p>
+                              )}
                             <div className="mt-2 flex items-center gap-2">
                               <Button
                                 variant="primary"

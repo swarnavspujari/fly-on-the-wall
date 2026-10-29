@@ -34,6 +34,19 @@ pub fn is_plain_name(name: &str) -> bool {
     !RESERVED.contains(&stem.as_str())
 }
 
+/// A note or meeting id that is safe to use as one path component: 1–64
+/// ASCII letters, digits, `-` or `_`. Every id this app creates is a UUID;
+/// ids read from a copied-in `manifest.json` / `note.json` must pass this
+/// before they become rows, because several paths are built from them
+/// (`attachments/<note_id>/`, the scratch dir).
+pub fn is_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// `rel` as a relative path whose first component is one of `roots` and
 /// which has at least `min_depth` components, every one a plain name.
 /// Returns the path joined onto `data_dir`, or `None`.
@@ -96,6 +109,32 @@ mod tests {
                 contained(base, bad, &["recordings"], 2).is_none(),
                 "{bad:?} must be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn only_short_plain_ids_are_safe() {
+        assert!(is_safe_id("862e2405-a77a-48ad-af38-fefcda797fa0"));
+        assert!(is_safe_id("m-orig"));
+        assert!(is_safe_id("n_1"));
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            r"a\b",
+            "/abs",
+            r"C:\x",
+            "C:x",
+            r"\\server\share",
+            "a.b",
+            "a b",
+            "NUL\u{0}",
+            "é",
+            &"x".repeat(65),
+        ] {
+            assert!(!is_safe_id(bad), "{bad:?} must not be a safe id");
         }
     }
 }
