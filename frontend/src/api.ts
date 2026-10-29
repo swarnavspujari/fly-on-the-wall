@@ -22,6 +22,7 @@ import type {
   CaptureTarget,
   DiskEncryption,
   ImportStaged,
+  LibraryStatus,
   ScreenStatus,
   AsrSettings,
   AsrSettingsUpdate,
@@ -49,6 +50,8 @@ import type {
 } from "./types";
 
 export const api = {
+  /** Works before the library is open (the startup upgrade gate). */
+  libraryStatus: () => invoke<LibraryStatus>("library_status"),
   ping: () => invoke<string>("ping"),
   appInfo: () => invoke<AppInfo>("app_info"),
 

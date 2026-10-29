@@ -63,7 +63,7 @@ Every entry in the workspace. Service = `com.flyonthewall.app` unless noted; the
 | `ms_oauth_token` | Microsoft Graph token set (JSON) | `crates/fly-calendar/src/msgraph.rs:53-56`, `196-199` | `msgraph.rs:39-40`, `187-190`; `calendar_commands.rs:158-163` | `disconnect_calendar`; `msgraph.rs:205-207`; delete-all |
 | `google_oauth_client_secret` | User-supplied Google OAuth client secret (not in `keys`; `calendar_commands.rs:24`) | `set_calendar_settings` (`calendar_commands.rs:190-202`) | `effective_google_secret` (`calendar_commands.rs:45-52`), `get_calendar_settings` (`calendar_commands.rs:144-149`) | empty value in `set_calendar_settings`; delete-all |
 
-Legacy service `com.looma.notetaker` (`src-tauri/src/state.rs:112`): at every `AppState::init` the 7 accounts above are copied into the new service when the new one lacks them (`state.rs:61-73`, `152-175`); the legacy entries are never deleted except by "Delete all my data", which deletes all 7 from both services (`src-tauri/src/privacy.rs:526-546`, `808`, `846`).
+Legacy service `com.looma.notetaker` (`src-tauri/src/state.rs:131`): at every `AppState::init` the 7 accounts above are copied into the new service when the new one lacks them (`state.rs:61-88`, `152-175`); the legacy entries are never deleted except by "Delete all my data", which deletes all 7 from both services (`src-tauri/src/privacy.rs:526-546`, `808`, `846`).
 
 The MCP binary (`fly-mcp`) does not depend on this crate (spec §2 item 5).
 
@@ -76,7 +76,7 @@ The MCP binary (`fly-mcp`) does not depend on this crate (spec §2 item 5).
 - Secret values are never logged; only key names (`lib.rs:3-5`; e.g. `src-tauri/src/privacy.rs:538` logs the key name only).
 - The webview never receives a stored secret: settings commands return `has_key` / `has_groq_key` / `google_has_secret` booleans (`llm_commands.rs:1109`, `asr_commands.rs:299`, `calendar_commands.rs:144`).
 - The MCP server holds no keys (spec §2 item 5; `crates/fly-mcp/Cargo.toml` has no `fly-secrets`).
-- "Delete all my data" removes every owned entry from the current and legacy services (THREAT_MODEL T13; `privacy.rs:526-546`). The owned list is `keys::ALL` plus the Google client secret, assembled by hand in two places (`privacy.rs:526-530`, `state.rs:157-168`).
+- "Delete all my data" removes every owned entry from the current and legacy services (THREAT_MODEL T13; `privacy.rs:526-546`). The owned list is `keys::ALL` plus the Google client secret, assembled by hand in two places (`privacy.rs:526-530`, `state.rs:176-187`).
 - Where a stored key may be sent is decided by the LLM layer's base-URL rules, not here (THREAT_MODEL T4; [app-llm](app-llm.md)).
 
 ## Tests
@@ -95,7 +95,7 @@ The MCP binary (`fly-mcp`) does not depend on this crate (spec §2 item 5).
 
 ## Changing it safely
 - Run `cargo test -p fly-secrets -p fly-calendar -p fly-app`; `cargo clippy --workspace --all-targets -D warnings`.
-- New secret: add the constant to `keys`, and to `keys::ALL` so delete-all erases it; if it predates nothing, don't add it to `migrated_secret_keys` (`state.rs:157`). Keep returning booleans, never values, to the webview.
+- New secret: add the constant to `keys`, and to `keys::ALL` so delete-all erases it; if it predates nothing, don't add it to `migrated_secret_keys` (`state.rs:176`). Keep returning booleans, never values, to the webview.
 - Never log values; never add secrets to `settings` or devMock fixtures with real-looking keys.
-- Changing the service name strands every user's keys unless a copy step like `copy_secrets` (`state.rs:172`) runs first.
+- Changing the service name strands every user's keys unless a copy step like `copy_secrets` (`state.rs:191`) runs first.
 - Upgrading `keyring` (v4 splits platform stores into separate crates): re-check that each OS still gets a persistent backend, ideally with a real-keychain smoke test on Windows and macOS runners.

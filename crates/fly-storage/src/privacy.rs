@@ -324,7 +324,7 @@ impl Storage {
         let mut stmt = self.conn.prepare(&format!(
             "{KEEP_LOCAL_CTE}SELECT c.id, c.title, c.text FROM embedding_chunks c
               WHERE (c.embedding IS NULL OR c.model IS NOT ?1) AND {SHAREABLE_CHUNK}
-              ORDER BY c.id LIMIT ?2"
+              ORDER BY c.id DESC LIMIT ?2"
         ))?;
         let rows = stmt.query_map((model, limit as i64), |r| {
             Ok(crate::PendingChunk {
@@ -337,6 +337,24 @@ impl Storage {
     }
 
     /// Backlog matching [`Storage::pending_embedding_chunks_shareable`].
+    /// [`Storage::has_pending_embeddings`] over the shareable queue.
+    pub fn has_pending_embeddings_shareable(&self, model: &str) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "{KEEP_LOCAL_CTE}SELECT c.id FROM embedding_chunks c
+                      WHERE (c.embedding IS NULL OR c.model IS NOT ?1) AND {SHAREABLE_CHUNK}
+                      ORDER BY c.id DESC LIMIT 1"
+                ),
+                [model],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn embedding_backlog_shareable(&self, model: &str) -> Result<usize> {
         let n: i64 = self.conn.query_row(
             &format!(

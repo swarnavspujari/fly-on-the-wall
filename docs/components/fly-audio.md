@@ -26,7 +26,7 @@ This crate defines the `AudioCapture` / `CaptureSession` traits and the one real
 | Traits | `AudioCapture` (`list_mic_devices`, `supports_system_loopback`, `start`, `capture_warnings`), `CaptureSession` (`pause`, `resume`, `stop`, `state`, `elapsed_ms`, `warnings`) (`lib.rs:80-144`) | `src-tauri/src/state.rs:20-23`, `recording.rs`; `src-tauri/tests/scheduling.rs` fakes `CaptureSession` |
 | Types | `AudioError`, `Result`, `AudioDevice`, `CaptureConfig`, `CaptureState`, `CaptureOutput` (`lib.rs:24-77`) | app-recording |
 | Consent probe | `SystemAudioPreflight` (serde `{"verdict", "detail"}`), `preflight_system_audio(duration_ms)` (`lib.rs:95-129`) | `recording.rs:341-351` |
-| Backends | `cpal_backend::CpalAudioCapture` (the only impl wired, at `state.rs:85`); `null::NullAudioCapture` (unused) | app composition root |
+| Backends | `cpal_backend::CpalAudioCapture` (the only impl wired, at `state.rs:106`); `null::NullAudioCapture` (unused) | app composition root |
 | Mix | `MIX_SAMPLE_RATE`, `read_wav_mono`, `resample_linear`, `normalize_peak`, `mix_tracks`, `write_wav_mono_16`, `write_mixdown`, `write_playback_mix` (`mix.rs`) | fly-asr `whisper_cpp.rs`, `groq.rs`; `pipeline.rs`, `import_commands.rs`, `gpu.rs`, `live.rs` |
 | VAD | `VadConfig`, `SpeechSpan`, `detect_speech_spans`, `StitchMap`, `stitch_spans`, `map_to_original` (`vad.rs`) | fly-asr `whisper_cpp.rs`, `groq.rs`, `checkpoint.rs`; `gpu.rs` |
 | TCC text | `tap_messages::{BUNDLE_ID, PRIVACY_PANE, tccutil_reset_command, silence_warning_text}` | `coreaudio_tap.rs:167`; the frontend copies the text (`recordingBar.ts`, `devMock.ts`) |
@@ -104,7 +104,7 @@ None.
 
 **Known gaps:**
 - **No automated test of real capture on any OS.** `cpal_backend.rs` (616 lines), `coreaudio_tap.rs` (564), `pulse_loopback.rs` (152) and `win_volume.rs` have no tests. The pad-to-clock, pause-discard and tail-pad logic is pure arithmetic, copied in three places, and untested. A timeline drift would desync the mic and system transcripts.
-- `NullAudioCapture` exists "for tests" (`null.rs:1-2`) but nothing uses it, and `AppState::init_with` hard-codes `CpalAudioCapture` (`state.rs:85`). So no app test can drive start/stop with a fake backend.
+- `NullAudioCapture` exists "for tests" (`null.rs:1-2`) but nothing uses it, and `AppState::init_with` hard-codes `CpalAudioCapture` (`state.rs:106`). So no app test can drive start/stop with a fake backend.
 - The Linux Pulse path has never been reported working on hardware (DECISIONS.md M13). The macOS tap depends on signing and TCC, which CI can't exercise.
 - VAD tests use pure tones and digital silence; there are no noisy-speech, music or near-threshold cases. The "long silence → Whisper loop" link is checked only by the ignored accuracy harness.
 - `wav_roundtrip_and_mixdown` would still pass if the system track were dropped from the ASR mixdown. The mic alone sets both the duration and the energy it checks.
