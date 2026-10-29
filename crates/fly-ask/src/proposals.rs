@@ -388,6 +388,30 @@ const WRITE_VERBS: &[&str] = &[
     "add", "create", "make", "log", "record", "track", "save", "put", "insert", "write", "note",
     "jot", "append", "paste", "copy", "capture", "set",
 ];
+/// What may come before a request's verb.
+const REQUEST_LEADS: &[&[&str]] = &[
+    &["please"],
+    &["can", "you"],
+    &["could", "you"],
+    &["would", "you"],
+    &["will", "you"],
+    &["can", "we"],
+    &["let", "s"],
+    &["lets"],
+    &["i", "want", "you", "to"],
+    &["i", "d", "like", "you", "to"],
+    &["go", "ahead", "and"],
+    &["ok"],
+    &["okay"],
+    &["so"],
+    &["and"],
+    &["also"],
+    &["then"],
+    &["now"],
+    &["yes"],
+    &["sure"],
+    &["hey"],
+];
 /// What an action-item request writes.
 const ITEM_WORDS: &[&str] = &[
     "action item",
@@ -410,16 +434,34 @@ impl Requested {
     /// From the question only (never from meeting text): a write verb with
     /// an action item (or "remind me"), or with the note as its target.
     pub fn from_question(question: &str) -> Self {
-        let words: Vec<String> = question
+        let all: Vec<String> = question
             .to_lowercase()
             .split(|c: char| !(c.is_alphanumeric() || c == '-'))
             .filter(|w| !w.is_empty())
             .map(str::to_string)
             .collect();
+        // A request form only: the verb comes first, or after a polite
+        // lead-in ("please", "can you", "let's" …). "What tasks did we
+        // create?" and "What's in the note?" ask about things; they don't
+        // ask for a change.
+        let mut i = 0;
+        'lead: loop {
+            for lead in REQUEST_LEADS {
+                if all[i..].starts_with(&lead.iter().map(|w| w.to_string()).collect::<Vec<_>>()) {
+                    i += lead.len();
+                    continue 'lead;
+                }
+            }
+            break;
+        }
+        let words = &all[i..];
+        let Some(first) = words.first() else {
+            return Self::default();
+        };
         let joined = format!(" {} ", words.join(" "));
         let has = |p: &str| joined.contains(&format!(" {p} "));
-        let verb = words.iter().any(|w| WRITE_VERBS.contains(&w.as_str()));
-        let remind = has("remind me") || has("remind us");
+        let verb = WRITE_VERBS.contains(&first.as_str());
+        let remind = first == "remind";
         let item = ITEM_WORDS.iter().any(|w| has(w));
         let into_note = NOTE_WORDS.iter().any(|n| {
             ["into", "to", "in", "onto"]
@@ -875,6 +917,9 @@ mod tests {
             "Remind me to send the deck",
             "Can you make a to-do for the kiln rota?",
             "Log a follow-up for Maren",
+            "Please note this as an action item",
+            "Let's add a task for the glaze order",
+            "I want you to create a reminder for Friday",
         ] {
             assert_eq!(
                 r(q),
@@ -897,6 +942,11 @@ mod tests {
             "Who is repainting the lobby sign?",
             "What did the note say about the kiln?",
             "Summarize the open house.",
+            // The review's two: questions about things, not requests.
+            "What tasks did we create last week?",
+            "What's in the note about the kiln?",
+            "Did anyone add an action item for the sign?",
+            "Who will put the rota in the notes?",
         ] {
             assert_eq!(r(q), Requested::default(), "{q}");
         }

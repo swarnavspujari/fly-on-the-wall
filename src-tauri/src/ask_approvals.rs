@@ -291,17 +291,22 @@ fn created_id(done: &Applied) -> Option<String> {
 }
 
 /// Segment ids of a note's transcripts.
-fn note_segment_ids(
+pub(crate) fn note_segment_ids(
     storage: &Storage,
     note_id: &str,
 ) -> Result<std::collections::HashSet<String>, String> {
-    let mut ids = std::collections::HashSet::new();
+    Ok(note_segments(storage, note_id)?.into_keys().collect())
+}
+
+/// A note's transcript segments: segment id → its meeting id.
+fn note_segments(storage: &Storage, note_id: &str) -> Result<HashMap<String, String>, String> {
+    let mut ids = HashMap::new();
     for m in storage
         .meetings_for_note(note_id)
         .map_err(|e| e.to_string())?
     {
         if let Some(t) = storage.get_transcript(&m.id).map_err(|e| e.to_string())? {
-            ids.extend(t.segments.into_iter().map(|s| s.id));
+            ids.extend(t.segments.into_iter().map(|s| (s.id, m.id.clone())));
         }
     }
     Ok(ids)
@@ -324,10 +329,23 @@ fn apply_insert(
         return Err("that answer is too long to insert".into());
     }
     let mut note = storage.get_note(note_id).map_err(|e| e.to_string())?;
-    let known = note_segment_ids(storage, note_id)?;
+    let known = note_segments(storage, note_id)?;
+    // Every source must be this note's own line: text backed by another
+    // note's meeting would be unsourced here (and could carry Keep-local
+    // content into a note that isn't).
+    if segment_ids.iter().any(|id| !known.contains_key(id)) {
+        return Err(
+            "That answer cites another note's meetings, so it can't be inserted into this note."
+                .into(),
+        );
+    }
+    let note_local = storage.note_keep_local(note_id);
     let mut ids: Vec<String> = Vec::new();
     for id in segment_ids {
-        if known.contains(id) && !ids.contains(id) {
+        if !note_local && storage.meeting_keep_local(&known[id]) {
+            return Err("That answer cites a Keep-local meeting, so it can't go into a note that isn't Keep local.".into());
+        }
+        if !ids.contains(id) {
             ids.push(id.clone());
         }
     }
@@ -511,7 +529,19 @@ mod tests {
         let f = fx();
         let a = Approvals::default();
         let now = Utc::now();
-        let ids = vec!["r01".to_string(), "not-in-this-note".to_string()];
+        // Another note's line: refused, nothing written.
+        let foreign = a.register_answer(
+            &f.note,
+            "Ilka posts it.",
+            &["not-in-this-note".to_string()],
+            now,
+        );
+        let (r, row) = a.approve(&f.s, &foreign, Kind::Insert, now);
+        assert!(r.is_err());
+        assert_eq!(row.outcome, Outcome::Rejected);
+        assert!(f.s.get_note(&f.note).unwrap().blocks.is_empty());
+
+        let ids = vec!["r01".to_string()];
         let md = "Ilka posts the kiln rota by Thursday. See [the rota](https://x.example).";
         let id = a.register_answer(&f.note, md, &ids, now);
         assert_eq!(id, a.register_answer(&f.note, md, &ids, now), "one button");

@@ -1252,15 +1252,25 @@ pub struct AskReply {
 
 /// An answer worth inserting: answered, with a sourced sentence. The
 /// Markdown of its sourced sentences only, and the lines they cite.
-fn insertable(a: &fly_ask::AskAnswer) -> Option<(String, Vec<String>)> {
-    insertable_parts(a.status, &a.sentences)
+/// Of those, only sentences whose every citation is one of `own` (the
+/// target note's lines).
+fn insertable_in(
+    a: &fly_ask::AskAnswer,
+    own: &std::collections::HashSet<String>,
+) -> Option<(String, Vec<String>)> {
+    insertable_parts(a.status, &a.sentences, own)
 }
 
 fn insertable_parts(
     status: fly_ask::AnswerStatus,
     sentences: &[fly_ask::AnswerSentence],
+    own: &std::collections::HashSet<String>,
 ) -> Option<(String, Vec<String>)> {
-    let sourced = |s: &&fly_ask::AnswerSentence| s.status == fly_ask::SentenceStatus::Sourced;
+    let sourced = |s: &&fly_ask::AnswerSentence| {
+        s.status == fly_ask::SentenceStatus::Sourced
+            && !s.citations.is_empty()
+            && s.citations.iter().all(|c| own.contains(c))
+    };
     if status != fly_ask::AnswerStatus::Answered || !sentences.iter().any(|s| sourced(&s)) {
         return None;
     }
@@ -1354,8 +1364,9 @@ pub async fn ask_meeting(
     // The embedding backlog steps aside while this runs (streaming and
     // tool rounds included); dropped on every return.
     let _foreground = state.foreground_ai();
-    // Stop (`cancel_ask`) for this run, until it returns.
-    let cancel = AskCancel::register(ask_id.as_deref());
+    // Stop (`cancel_ask`) for this run, until it returns. One run per
+    // ask_id, so Stop and connector cards stay with their answer.
+    let cancel = AskCancel::register(ask_id.as_deref())?;
     // The note is only the default scope: Home asks with an explicit scope
     // and no note ("" or none).
     let note_id = note_id.filter(|n| !n.trim().is_empty());
@@ -1450,8 +1461,14 @@ pub async fn ask_meeting(
             for p in &answer.proposals {
                 approvals.register_proposal(p, now);
             }
+            // Only sentences backed by that note's own lines can go into it.
             let insert_id = insert_note.as_deref().and_then(|n| {
-                insertable(&answer).map(|(md, ids)| approvals.register_answer(n, &md, &ids, now))
+                let own = {
+                    let s = state.storage.lock().unwrap();
+                    crate::ask_approvals::note_segment_ids(&s, n).ok()?
+                };
+                insertable_in(&answer, &own)
+                    .map(|(md, ids)| approvals.register_answer(n, &md, &ids, now))
             });
             Ok(AskReply {
                 trace_lines: answer.trace.lines(),
@@ -1478,18 +1495,20 @@ struct AskCancel {
 }
 
 impl AskCancel {
-    fn register(ask_id: Option<&str>) -> Self {
+    /// Err when `ask_id` is already running (a reused id).
+    fn register(ask_id: Option<&str>) -> Result<Self, String> {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let id = ask_id
             .filter(|id| !id.is_empty() && id.chars().count() <= MAX_ASK_ID_CHARS)
             .map(str::to_string);
         if let Some(id) = &id {
-            ASK_CANCELS
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(id.clone(), flag.clone());
+            let mut map = ASK_CANCELS.lock().unwrap_or_else(|p| p.into_inner());
+            if map.contains_key(id) {
+                return Err("That question is still being answered.".into());
+            }
+            map.insert(id.clone(), flag.clone());
         }
-        Self { id, flag }
+        Ok(Self { id, flag })
     }
 
     fn flag(&self) -> &std::sync::atomic::AtomicBool {
@@ -1528,13 +1547,37 @@ pub fn cancel_ask(ask_id: String) -> CmdResult<()> {
     Ok(())
 }
 
+/// How long the `@` list is reused before the library is scanned again.
+const ASK_PEOPLE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The last `@` list and when it was made.
+static ASK_PEOPLE: std::sync::LazyLock<
+    std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
+> = std::sync::LazyLock::new(Default::default);
+
 /// The `@` suggestions for the Ask composer: everyone in the library the
 /// router can match (attendees, speaker labels, item owners). For the
-/// user's own screen; never sent to a model.
+/// user's own screen; never sent to a model. Async (off the UI thread) and
+/// cached for two minutes: the scan reads many transcripts under the
+/// storage lock.
 #[tauri::command]
-pub fn list_ask_people(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
-    let storage = state.storage.lock().unwrap();
-    Ok(fly_ask::scope::people_for_suggestions(&storage))
+pub async fn list_ask_people(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    if let Some((at, people)) = ASK_PEOPLE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        if at.elapsed() < ASK_PEOPLE_TTL {
+            return Ok(people.clone());
+        }
+    }
+    let people = {
+        let storage = state.storage.lock().unwrap();
+        fly_ask::scope::people_for_suggestions(&storage)
+    };
+    *ASK_PEOPLE.lock().unwrap_or_else(|p| p.into_inner()) =
+        Some((std::time::Instant::now(), people.clone()));
+    Ok(people)
 }
 
 /// "Insert into note" for an Ask answer or an approved `insert_into_note`
@@ -1884,15 +1927,21 @@ mod security_tests {
                 SentenceStatus::Sourced,
             ),
         ];
-        let (md, ids) = super::insertable_parts(AnswerStatus::Answered, &sentences).unwrap();
-        assert_eq!(
-            md,
-            "The kiln opens Monday.
-- Maren books the slots."
-        );
+        let set = |ids: &[&str]| -> std::collections::HashSet<String> {
+            ids.iter().map(|s| s.to_string()).collect()
+        };
+        let own = set(&["r1", "r2", "r3"]);
+        let (md, ids) = super::insertable_parts(AnswerStatus::Answered, &sentences, &own).unwrap();
+        assert_eq!(md, "The kiln opens Monday.\n- Maren books the slots.");
         assert_eq!(ids, vec!["r1", "r3"]);
-        assert!(super::insertable_parts(AnswerStatus::Unverified, &sentences).is_none());
-        assert!(super::insertable_parts(AnswerStatus::Answered, &sentences[1..3]).is_none());
+        assert!(super::insertable_parts(AnswerStatus::Unverified, &sentences, &own).is_none());
+        assert!(super::insertable_parts(AnswerStatus::Answered, &sentences[1..3], &own).is_none());
+        // A sentence citing another note's line stays out of this note.
+        let (md, ids) =
+            super::insertable_parts(AnswerStatus::Answered, &sentences, &set(&["r1"])).unwrap();
+        assert_eq!(md, "The kiln opens Monday.");
+        assert_eq!(ids, vec!["r1"]);
+        assert!(super::insertable_parts(AnswerStatus::Answered, &sentences, &set(&[])).is_none());
     }
 
     #[test]
@@ -1900,24 +1949,26 @@ mod security_tests {
         use super::{cancel_ask, AskCancel, ASK_CANCELS};
         use std::sync::atomic::Ordering::Relaxed;
         let held = |id: &str| ASK_CANCELS.lock().unwrap().contains_key(id);
-        let a = AskCancel::register(Some("ask-test-1"));
+        let a = AskCancel::register(Some("ask-test-1")).unwrap();
         cancel_ask("ask-test-1".into()).unwrap();
         assert!(a.flag().load(Relaxed));
         drop(a);
         assert!(!held("ask-test-1"), "forgotten when the run returns");
-        // Reused id: the older run's end leaves the newer one's flag.
-        let old = AskCancel::register(Some("ask-test-2"));
-        let new = AskCancel::register(Some("ask-test-2"));
-        drop(old);
+        // A reused id is refused while its first run is in flight, and
+        // free again once it returns.
+        let first = AskCancel::register(Some("ask-test-2")).unwrap();
+        assert!(AskCancel::register(Some("ask-test-2")).is_err());
+        drop(first);
+        let again = AskCancel::register(Some("ask-test-2")).unwrap();
         cancel_ask("ask-test-2".into()).unwrap();
-        assert!(new.flag().load(Relaxed));
-        drop(new);
+        assert!(again.flag().load(Relaxed));
+        drop(again);
         assert!(!held("ask-test-2"));
         // No id, or an oversized one, isn't addressable.
         let long = "x".repeat(200);
-        let _quiet = AskCancel::register(Some(&long));
+        let _quiet = AskCancel::register(Some(&long)).unwrap();
         assert!(!held(&long));
-        let anon = AskCancel::register(None);
+        let anon = AskCancel::register(None).unwrap();
         cancel_ask(String::new()).unwrap();
         assert!(!anon.flag().load(Relaxed));
     }

@@ -47,6 +47,10 @@ pub async fn until_cancelled<F: std::future::Future>(
     let Some(flag) = cancel else {
         return Some(f.await);
     };
+    // Stopped already: don't start.
+    if flag.load(Ordering::Relaxed) {
+        return None;
+    }
     let watch = async {
         while !flag.load(Ordering::Relaxed) {
             tokio::time::sleep(CANCEL_POLL).await;
