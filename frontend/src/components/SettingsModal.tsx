@@ -35,6 +35,7 @@ import { useTheme } from "../theme";
 import { briefError } from "../pipelineNotice";
 import { useCloudConsent } from "./CloudConsent";
 import { useConfirm } from "./confirm";
+import ConnectorsSection from "./ConnectorsSection";
 import PrivacySection from "./PrivacySection";
 import RemindNoticeRow from "./RemindNoticeRow";
 import type { Updater } from "../updater";
@@ -2211,6 +2212,10 @@ export default function SettingsModal({
                       helper="Whatever the server returns goes to the AI model your app uses (for Claude Desktop, Anthropic's cloud) under that app's terms. It can read every note, including notes you keep local."
                     />
                   </SettingsGroup>
+                </Section>
+
+                <Section id="connectors" hidden={!show("connectors")} title="Connectors (beta)">
+                  <ConnectorsSection />
                 </Section>
 
                 <Section id="general" hidden={!show("general")} title="General">

@@ -472,3 +472,140 @@ export interface DiskEncryption {
   method: "BitLocker" | "FileVault" | null;
   volume: string | null;
 }
+
+/* ---- connectors (beta): MCP servers Ask can call ---- */
+
+export type ConnectorTransport =
+  | { kind: "http"; url: string }
+  | { kind: "stdio"; command: string; args: string[]; envNames: string[] };
+
+export type ConnectorAuth =
+  { kind: "none" } | { kind: "oauth"; scopes: string[]; clientId: string | null };
+
+export interface ConnectorConfigInput {
+  name: string;
+  transport: ConnectorTransport;
+  auth: ConnectorAuth;
+  /** Only with oauth + clientId; stored in the keychain, never returned. */
+  clientSecret?: string | null;
+}
+
+export type ConnectorToolStatus = "ok" | "changed" | "missing" | "unusable";
+
+export interface ConnectorFieldChange {
+  field: string;
+  before: string;
+  after: string;
+}
+
+export interface ConnectorTool {
+  name: string;
+  title: string | null;
+  description: string;
+  enabled: boolean;
+  /** The user's read-only mark. */
+  readOnly: boolean;
+  /** Effective kind: "read" only if marked read-only AND the server doesn't say it writes. */
+  kind: "read" | "write";
+  canMarkReadOnly: boolean;
+  destructive: boolean;
+  status: ConnectorToolStatus;
+  problem: string | null;
+  /** First 12 hex chars of the pinned definition hash. */
+  pinnedHash: string;
+  /** Full hash of a pending changed definition; pass back to accept. */
+  pendingHash: string | null;
+  diff: ConnectorFieldChange[];
+  inputSchema: unknown;
+}
+
+export interface Connector {
+  id: string;
+  name: string;
+  transport: ConnectorTransport;
+  auth: ConnectorAuth;
+  /** Host (web) or "local program <file>" (stdio). */
+  destination: string;
+  approved: boolean;
+  /** First 12 hex chars of the approved config hash. */
+  configHash: string;
+  /** null = this connector doesn't use sign-in. */
+  signedIn: boolean | null;
+  env: { name: string; set: boolean }[];
+  /** Unix seconds. */
+  lastSync: number | null;
+  tools: ConnectorTool[];
+}
+
+export interface ConnectorsOverview {
+  beta: boolean;
+  connectors: Connector[];
+}
+
+export interface ConnectorToolPermission {
+  tool: string;
+  enabled: boolean;
+  readOnly: boolean;
+}
+
+export interface ConnectorSaveResult {
+  saved: boolean;
+  connector: Connector | null;
+}
+
+export interface ConnectorCallProposal {
+  proposalId: string;
+  turnId: string;
+  serverId: string;
+  serverName: string;
+  destination: string;
+  tool: string;
+  toolTitle: string | null;
+  kind: "read" | "write";
+  destructive: boolean;
+  args: Record<string, unknown>;
+  inputSchema: unknown;
+}
+
+export interface ConnectorDecideResult {
+  ok: boolean;
+  error: string | null;
+}
+
+export type ConnectorCallOutcome = "ran" | "server_error" | "declined" | "refused" | "failed";
+
+export type ConnectorRefusal =
+  | "not_offered"
+  | "keep_local"
+  | "after_result"
+  | "budget"
+  | "invalid_arguments"
+  | "tool_changed"
+  | "not_approved"
+  | "timed_out";
+
+export interface ConnectorCallLogEntry {
+  /** Unix seconds. */
+  at: number;
+  serverId: string;
+  server: string;
+  tool: string;
+  kind: "read" | "write";
+  outcome: ConnectorCallOutcome;
+  refusal: ConnectorRefusal | null;
+  durationMs: number;
+  resultChars: number;
+  truncated: boolean;
+  schema: "none" | "valid" | "invalid";
+  argsEdited: boolean;
+}
+
+export interface ConnectorTestResult {
+  ok: boolean;
+  text: string;
+}
+
+export interface ConnectorSettled {
+  proposalId: string;
+  outcome: "ran" | "declined" | "withdrawn" | "timed_out";
+}

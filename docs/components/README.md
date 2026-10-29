@@ -18,7 +18,7 @@ Three layers:
 
 | Layer | Where | Components |
 |---|---|---|
-| **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 10 `ui-*` docs |
+| **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 11 `ui-*` docs |
 | **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 105 Tauri commands) | 15 `app-*` docs |
 | **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 11 `fly-*` docs |
 
@@ -74,6 +74,7 @@ Three layers:
 | [ui-recording-bar](ui-recording-bar.md) | `RecordingBar.tsx`, `recordingBar.ts`, `LivePane.tsx` | Recording controls, capture warnings, live captions. |
 | [ui-attendees](ui-attendees.md) | `AttendeeEditor.tsx`, `calendarMatch.ts` | Attendee roster, confirmation, re-diarize with undo. |
 | [ui-confirm-consent](ui-confirm-consent.md) | `confirm.tsx`, `CloudConsent.tsx` | The in-app confirm dialog, and every cloud-consent request (the backend shows the dialog). |
+| [ui-connectors](ui-connectors.md) | `ConnectorsSection.tsx`, `ConnectorCallCard.tsx`, `connectorsModel.ts` | Settings › Connectors (beta) and the confirm card for every connector call (trust grants happen in the backend's native dialogs). |
 
 ## Dependency diagrams
 

@@ -20,6 +20,15 @@ import type {
   CalendarStatus,
   CalendarToggle,
   CaptureTarget,
+  Connector,
+  ConnectorCallLogEntry,
+  ConnectorCallProposal,
+  ConnectorConfigInput,
+  ConnectorDecideResult,
+  ConnectorSaveResult,
+  ConnectorsOverview,
+  ConnectorTestResult,
+  ConnectorToolPermission,
   DiskEncryption,
   ImportStaged,
   ScreenStatus,
@@ -266,4 +275,43 @@ export const api = {
    *  source becomes yours). To remove one, edit it to empty text. */
   keepNoteBlock: (noteId: string, blockId: string) =>
     invoke<Note>("keep_note_block", { noteId, blockId }),
+
+  // connectors (beta): MCP servers Ask can call. Whatever grants trust
+  // (adding a server, enabling a tool, marking it read-only, accepting a
+  // changed tool) is confirmed by the backend in a native dialog; a decline
+  // there comes back as { saved: false }, not as an error.
+  connectorsOverview: () => invoke<ConnectorsOverview>("connectors_overview"),
+  addConnector: (config: ConnectorConfigInput) =>
+    invoke<ConnectorSaveResult>("add_connector", { config }),
+  /** Also deletes the connector's keychain entries (sign-in, variables). */
+  removeConnector: (id: string) => invoke<void>("remove_connector", { id }),
+  /** Connects and lists the server's tools; new tools arrive off. */
+  syncConnectorTools: (id: string) => invoke<Connector>("sync_connector_tools", { id }),
+  /** Only the tools whose permissions changed. */
+  saveConnectorTools: (id: string, changes: ConnectorToolPermission[]) =>
+    invoke<ConnectorSaveResult>("save_connector_tools", { id, changes }),
+  acceptConnectorToolChange: (id: string, tool: string, pendingHash: string) =>
+    invoke<ConnectorSaveResult>("accept_connector_tool_change", { id, tool, pendingHash }),
+  /** Opens the system browser; resolves once sign-in completes (up to 5 min). */
+  signInConnector: (id: string) => invoke<Connector>("sign_in_connector", { id }),
+  signOutConnector: (id: string) => invoke<Connector>("sign_out_connector", { id }),
+  /** A local program's variable, kept in the OS keychain; "" clears it. The
+   *  value is never returned. */
+  setConnectorEnv: (id: string, name: string, value: string) =>
+    invoke<Connector>("set_connector_env", { id, name, value }),
+  /** Oldest first. Never holds arguments or results. */
+  connectorCallLog: () => invoke<ConnectorCallLogEntry[]>("connector_call_log"),
+  clearConnectorCallLog: () => invoke<void>("clear_connector_call_log"),
+  pendingConnectorCalls: () => invoke<ConnectorCallProposal[]>("pending_connector_calls"),
+  /** `args` null = run with the proposed arguments unchanged. */
+  decideConnectorCall: (proposalId: string, run: boolean, args: Record<string, unknown> | null) =>
+    invoke<ConnectorDecideResult>("decide_connector_call", { proposalId, run, args }),
+  /** A call you start from Settings; it goes through the same confirm card. */
+  testConnectorTool: (id: string, tool: string, args: Record<string, unknown>) =>
+    invoke<ConnectorTestResult>("test_connector_tool", { id, tool, args }),
 };
+
+/** Tauri events for connectors (beta). */
+export const CONNECTORS_PROPOSAL_EVENT = "connectors:proposal"; // ConnectorCallProposal
+export const CONNECTORS_SETTLED_EVENT = "connectors:settled"; // ConnectorSettled
+export const CONNECTORS_CHANGED_EVENT = "connectors:changed"; // { id: string }
