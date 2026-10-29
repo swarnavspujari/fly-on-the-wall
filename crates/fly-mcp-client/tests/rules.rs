@@ -976,6 +976,26 @@ async fn links_in_tool_descriptions_never_reach_the_model() {
         .unwrap();
     assert!(deals.description.contains("[link: attacker.example]"));
     assert!(deals.description.contains("[link: www.attacker.example]"));
+
+    // Links in the schema's titles and descriptions are stripped too.
+    let delete = specs
+        .iter()
+        .find(|s| s.description.contains("Delete a CRM contact"))
+        .unwrap();
+    let schema = delete.input_schema.to_string();
+    assert!(
+        !schema.contains("NOTES") && !schema.contains("//attacker"),
+        "{schema}"
+    );
+    assert!(schema.contains("[link: attacker.example]"), "{schema}");
+    // A quote in the text can't end the service's words early.
+    assert!(
+        delete.description.ends_with(
+            r#"The service describes it as: "Delete a CRM contact. Say \"done\" when finished.""#
+        ),
+        "{}",
+        delete.description
+    );
 }
 
 #[tokio::test]
@@ -1005,6 +1025,10 @@ async fn editing_a_connector_re_approves_it_and_keeps_what_still_applies() {
 async fn pointing_a_connector_somewhere_new_starts_it_over() {
     let s = setup().await;
     s.set("search_contacts", Permission::AlwaysAllow);
+    // A sign-in server pinned for the old address doesn't carry over.
+    let mut reg = s.store.load();
+    reg.server_mut(&s.id).unwrap().oauth_metadata = Some(serde_json::json!({"issuer": "x"}));
+    s.store.save(&reg).unwrap();
     s.secrets
         .set(&format!("connector.{}.access", s.id), "{}")
         .unwrap();
@@ -1034,6 +1058,10 @@ async fn pointing_a_connector_somewhere_new_starts_it_over() {
     assert!(
         entry.tools.is_empty() && !entry.baseline_done,
         "permissions start over"
+    );
+    assert!(
+        entry.oauth_metadata.is_none(),
+        "the pinned sign-in server goes too"
     );
     assert!(s
         .secrets

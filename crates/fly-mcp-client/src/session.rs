@@ -208,6 +208,46 @@ impl ProcessTree {
     }
 }
 
+/// Resume a process started with `CREATE_SUSPENDED` (its only thread).
+#[cfg(windows)]
+fn resume_suspended(child: &tokio::process::Child) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    let pid = child.id().ok_or("the program stopped before it started")?;
+    let mut resumed = 0;
+    // SAFETY: a thread snapshot we own and close; threads of our own child,
+    // opened only to resume them and closed again.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return Err("couldn't start the program".into());
+        }
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut ok = Thread32First(snap, &mut entry) != 0;
+        while ok {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if !thread.is_null() {
+                    if ResumeThread(thread) != u32::MAX {
+                        resumed += 1;
+                    }
+                    CloseHandle(thread);
+                }
+            }
+            ok = Thread32Next(snap, &mut entry) != 0;
+        }
+        CloseHandle(snap);
+    }
+    if resumed == 0 {
+        return Err("couldn't start the program".into());
+    }
+    Ok(())
+}
+
 impl Drop for ProcessTree {
     fn drop(&mut self) {
         // SAFETY: closing our own job handle (KILL_ON_JOB_CLOSE ends every
@@ -315,8 +355,11 @@ pub async fn connect(
                 .kill_on_drop(true);
             #[cfg(windows)]
             {
+                // Started suspended, put in its Job Object, then resumed: it
+                // can't start anything outside the job first.
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                cmd.creation_flags(CREATE_NO_WINDOW);
+                const CREATE_SUSPENDED: u32 = 0x0000_0004;
+                cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
             }
             #[cfg(unix)]
             cmd.process_group(0);
@@ -328,6 +371,11 @@ pub async fn connect(
                 tracing::warn!(
                     "couldn't group a connector's processes; only the first will be stopped"
                 );
+            }
+            #[cfg(windows)]
+            if let Err(e) = resume_suspended(&child) {
+                let _ = child.start_kill();
+                return Err(SessionError::Spawn(e));
             }
             let stdout = child
                 .stdout

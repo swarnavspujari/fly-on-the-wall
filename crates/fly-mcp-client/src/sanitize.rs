@@ -3,23 +3,49 @@
 //!
 //! Removes characters that hide text from a reader while a model still sees
 //! it: control characters (except newline and tab), zero-width and
-//! bidirectional controls, Unicode "tag" characters (ASCII smuggling) and
-//! variation selectors.
+//! bidirectional controls, Unicode "tag" characters (ASCII smuggling),
+//! variation selectors, fake line breaks — every format character and every
+//! default-ignorable code point.
 
-/// True for characters [`clean_text`] removes.
+/// True for characters [`clean_text`] removes: control characters (except
+/// newline and tab), every format character (`Cf`: bidirectional controls,
+/// zero-width characters, tags…), line and paragraph separators (`Zl`, `Zp`:
+/// fake line breaks), and every Default_Ignorable_Code_Point (variation
+/// selectors, Hangul fillers, Mongolian free variation selectors…). The
+/// category check covers characters added to `Cf` later; the ignorable
+/// ranges are Unicode's derived property, which is stable by policy.
 pub fn is_hidden_char(c: char) -> bool {
-    let u = c as u32;
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
     (c.is_control() && c != '\n' && c != '\t')
-        || matches!(u,
-            0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180E
-            | 0x200B..=0x200F
-            | 0x202A..=0x202E
-            | 0x2060..=0x206F
-            | 0x3164 | 0xFEFF | 0xFFA0
-            | 0xFFF0..=0xFFF8
-            | 0xFE00..=0xFE0F
-            | 0xE0000..=0xE007F
-            | 0xE0100..=0xE01EF)
+        || matches!(
+            c.general_category(),
+            GeneralCategory::Format
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
+        )
+        || is_default_ignorable(c)
+}
+
+/// Unicode's Default_Ignorable_Code_Point (DerivedCoreProperties.txt).
+fn is_default_ignorable(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD
+        | 0x034F
+        | 0x061C
+        | 0x115F..=0x1160
+        | 0x17B4..=0x17B5
+        | 0x180B..=0x180F
+        | 0x200B..=0x200F
+        | 0x202A..=0x202E
+        | 0x2060..=0x206F
+        | 0x3164
+        | 0xFE00..=0xFE0F
+        | 0xFEFF
+        | 0xFFA0
+        | 0xFFF0..=0xFFF8
+        | 0x1BCA0..=0x1BCA3
+        | 0x1D173..=0x1D17A
+        | 0xE0000..=0xE0FFF)
 }
 
 /// Remove hidden characters and normalize line endings.
@@ -48,6 +74,34 @@ pub fn clean_capped(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_format_separator_and_ignorable_character_is_hidden() {
+        for c in [
+            '\u{2028}',
+            '\u{2029}',
+            '\u{180B}',
+            '\u{180F}',
+            '\u{FFF9}',
+            '\u{FFFB}',
+            '\u{1D173}',
+            '\u{1BCA0}',
+            '\u{200D}',
+            '\u{2066}',
+            '\u{FE0F}',
+            '\u{E0041}',
+            '\u{E01EF}',
+            '\u{13430}',
+            '\u{0600}',
+            '\u{FEFF}',
+            '\u{3164}',
+        ] {
+            assert!(is_hidden_char(c), "U+{:04X}", c as u32);
+        }
+        for c in ['a', 'é', 'ß', '中', '\n', '\t', ' ', '-', '…', '😀'] {
+            assert!(!is_hidden_char(c), "U+{:04X}", c as u32);
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -54,7 +54,7 @@ Errors are strings. Program output (a local connector that stopped at once) come
 | `connectors:changed` | `{ id }` | Stored state changed outside a Settings command (a tool blocked mid-turn because it changed) |
 
 ### Native dialogs
-Every dialog goes through `ask_consent_natively` (rfd), one at a time, with the safe answer as the default button. Server-provided text is cleaned and capped; the configuration in add, edit and turn-on dialogs is shown in full (configs that can't be are refused). Each kind of dialog is paced like cloud consent: after two declines in a row it stays quiet for a minute, and the command says so instead of asking. Call arguments show pretty-printed up to 40 lines, compact beyond that, and are refused (never cut) past 3,000 characters.
+Every dialog goes through `ask_consent_natively` (rfd), one at a time, with the safe answer as the default button. Server-provided text is cleaned and capped; the configuration in add, edit and turn-on dialogs is shown in full, and a configuration whose dialog would pass 3,000 characters or 40 lines is refused ("This connector's settings are too long to show in full…"), as are configs fly-mcp-client can't show. Each kind of dialog is paced like cloud consent: after two declines in a row it stays quiet for a minute, and the command says so instead of asking. Call arguments show pretty-printed up to 40 lines, compact beyond that, and are refused (never cut) past 3,000 characters.
 | Trust grant | Title | Buttons (default first) |
 |---|---|---|
 | Add web connector | Add "<name>" connector? | Cancel / Add connector |
@@ -110,7 +110,7 @@ Through [fly-mcp-client](fly-mcp-client.md): the https address of each web conne
 - **rmcp logs at `warn`** by default (`logging.rs`), since it logs an OAuth authorization code at debug.
 
 ## Tests
-- `connectors::tests` — backend-only keys, `stored_secret_keys` (registry, damaged registry, keychain index), the dialog copy (full address, headers, program path) and safe defaults, long arguments shown compact and too-long ones refused, scrubbed program output.
+- `connectors::tests` — backend-only keys, `stored_secret_keys` (registry, damaged registry, keychain index), the dialog copy (full address, headers, program path) and safe defaults, a config too long for the dialog, long arguments shown compact and too-long ones refused, scrubbed program output.
 - `commands::security_tests::webview_cannot_touch_connector_state`.
 - `privacy::tests::delete_all_empties_db_content_and_secrets` — connector tokens, chunks and settings are gone after delete-all.
 - The call-time rules themselves are tested in [fly-mcp-client](fly-mcp-client.md).

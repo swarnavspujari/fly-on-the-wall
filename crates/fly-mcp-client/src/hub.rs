@@ -307,7 +307,6 @@ impl ConnectorHub {
         Ok(out)
     }
 
-    /// Check a configuration (normalized) before asking the user to approve it.
     /// Pin a local connector's program to a full path before the user sees
     /// the approval dialog: a bare name like `npx` is looked up on PATH once,
     /// here, and the dialog and the stored config show the path that will
@@ -322,6 +321,7 @@ impl ConnectorHub {
         self.check_config(config)
     }
 
+    /// Check a configuration (normalized) before asking the user to approve it.
     pub fn check_config(&self, config: ServerConfig) -> Result<ServerConfig, HubError> {
         let config = config.normalized();
         config.validate(&self.policy)?;
@@ -430,6 +430,7 @@ impl ConnectorHub {
                 e.tools.clear();
                 e.baseline_done = false;
                 e.last_sync = None;
+                e.oauth_metadata = None;
             }
             Ok(())
         })?;
@@ -960,14 +961,20 @@ impl ConnectorTurn {
                         .as_deref()
                         .map(|t| format!("{t}. "))
                         .unwrap_or_default();
+                    // Quoted as a JSON string, so a quote in the text can't end
+                    // the service's words early.
+                    let words = serde_json::to_string(&format!(
+                        "{}{}",
+                        fence::strip_links(&what),
+                        fence::strip_links(&d.description)
+                    ))
+                    .unwrap_or_default();
                     specs.push(ToolSpec {
                         name: name.clone(),
                         description: format!(
                             "[{} connector, {label}; the user may review each call] The \
-                             service describes it as: \"{}{}\"",
+                             service describes it as: {words}",
                             entry.config.name,
-                            fence::strip_links(&what),
-                            fence::strip_links(&d.description)
                         ),
                         input_schema: d.input_schema.clone(),
                         strict: false,

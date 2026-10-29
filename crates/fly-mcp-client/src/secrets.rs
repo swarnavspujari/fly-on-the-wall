@@ -112,6 +112,9 @@ const INDEX_CHUNKS: usize = 32;
 
 type Index = std::collections::BTreeMap<String, Vec<String>>;
 
+/// Serializes the index's read-modify-write (one app, one keychain).
+static INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn index_load(store: &dyn SecretStore) -> Index {
     get_chunked_max(store, INDEX_KEY, INDEX_CHUNKS)
         .ok()
@@ -130,6 +133,7 @@ fn index_save(store: &dyn SecretStore, index: &Index) -> Result<(), ChunkError> 
 
 /// Record every key `entry` may own (merged with what was recorded before).
 pub fn index_record(store: &dyn SecretStore, entry: &ServerEntry) -> Result<(), ChunkError> {
+    let _one = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut index = index_load(store);
     let keys = index.entry(entry.id.clone()).or_default();
     for k in secret_keys_for(entry) {
@@ -141,6 +145,7 @@ pub fn index_record(store: &dyn SecretStore, entry: &ServerEntry) -> Result<(), 
 }
 
 pub fn index_forget(store: &dyn SecretStore, id: &str) -> Result<(), ChunkError> {
+    let _one = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut index = index_load(store);
     if index.remove(id).is_some() {
         index_save(store, &index)?;

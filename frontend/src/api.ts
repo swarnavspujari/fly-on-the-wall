@@ -294,7 +294,8 @@ export const api = {
   // after a "---" line is program output (see splitDetails).
   connectorsOverview: () => invoke<ConnectorsOverview>("connectors_overview"),
   connectorsDirectory: () => invoke<ConnectorDirectoryEntry[]>("connectors_directory"),
-  /** Web connectors only: its tools, or that it wants a browser sign-in. */
+  /** Asks natively first (showing the whole config); then lists its tools
+   *  unless a browser sign-in comes next. */
   addConnector: (input: ConnectorInput) => invoke<ConnectorSaveResult>("add_connector", { input }),
   updateConnector: (id: string, input: ConnectorInput) =>
     invoke<ConnectorSaveResult>("update_connector", { id, input }),

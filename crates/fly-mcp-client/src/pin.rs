@@ -177,7 +177,8 @@ impl ToolDefinition {
 pub const MAX_SCHEMA_STRING_CHARS: usize = 256;
 
 /// Prepare a schema for the model: drop annotation-only keys (`x-*`,
-/// `examples`, `$comment`), clean and cap `description` / `title` text, and
+/// `examples`, `$comment`), clean, link-strip and cap `description` /
+/// `title` text, and
 /// report anything that could smuggle hidden text past a reader: a hidden
 /// character in any other string or key, or an over-long string. Other
 /// strings aren't rewritten, since that would change what the server accepts;
@@ -200,7 +201,8 @@ fn clean_schema(v: &mut Value, depth: usize) -> Result<(), &'static str> {
                 }
                 if (k == "description" || k == "title") && child.is_string() {
                     let s = child.as_str().unwrap_or_default();
-                    *child = Value::String(clean_capped(s, MAX_DESCRIPTION_CHARS));
+                    let unlinked = crate::fence::strip_links(s);
+                    *child = Value::String(clean_capped(&unlinked, MAX_DESCRIPTION_CHARS));
                 } else {
                     clean_schema(child, depth + 1)?;
                 }

@@ -32,6 +32,8 @@ chrono.workspace = true
 uuid.workspace = true
 url = "2"
 http = "1"
+# General category (Cf, Zl, Zp) for the hidden-character check.
+unicode-properties = { version = "=0.1.4", default-features = false, features = ["general-category"] }
 rmcp = { version = "=3.8.0", default-features = false, features = [
     "client",
     "transport-async-rw",
@@ -43,7 +45,12 @@ rmcp = { version = "=3.8.0", default-features = false, features = [
 # Stop a local connector's whole process tree (npx.cmd → node → …), not just
 # the first process: a Job Object on Windows, a process group on Unix.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

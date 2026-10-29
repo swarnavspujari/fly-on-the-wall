@@ -145,26 +145,41 @@ pub const INHERITED_ENV: &[&str] = &[
 /// config, where its runtime fetches packages from, how it reaches the
 /// network or which certificates it trusts. A local connector can't set
 /// them, as a plain or a secret setting (secret values are never shown).
+///
+/// A list of names to refuse rather than a list to allow: servers name their
+/// own settings freely (`NOTION_TOKEN`, `GITHUB_PERSONAL_ACCESS_TOKEN`…), so
+/// an allowlist would refuse ordinary connectors.
 const RESERVED_ENV: &[&str] = &[
     "RUBYOPT",
     "RUBYLIB",
-    "PERL5OPT",
-    "PERL5LIB",
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
     "JDK_JAVA_OPTIONS",
     "CLASSPATH",
-    "DOTNET_STARTUP_HOOKS",
-    "DOTNET_ADDITIONAL_DEPS",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
+    "SSLKEYLOGFILE",
     "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE",
     "SHELL",
     "BASH_ENV",
     "ENV",
     "ZDOTDIR",
     "PSMODULEPATH",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HOMESHARE",
+    "GOFLAGS",
+    "GOPATH",
+    "GOROOT",
+    "GOENV",
+    "GOBIN",
+    "GOCACHE",
+    "GOMODCACHE",
+    "GOSUMDB",
+    "GONOSUMDB",
+    "GONOSUMCHECK",
+    "GOPRIVATE",
+    "GOINSECURE",
+    "GOTOOLCHAIN",
+    "GOEXPERIMENT",
 ];
 
 /// Prefixes of the same kinds of variables.
@@ -172,6 +187,7 @@ const RESERVED_ENV_PREFIXES: &[&str] = &[
     "LD_",
     "DYLD_",
     "PYTHON",
+    "PERL",
     "NODE_",
     "NPM_",
     "YARN_",
@@ -180,13 +196,20 @@ const RESERVED_ENV_PREFIXES: &[&str] = &[
     "DENO_",
     "PIP_",
     "UV_",
+    "GEM_",
+    "BUNDLE_",
     "CARGO_",
     "RUSTUP_",
     "GIT_",
     "XDG_",
     "ELECTRON_",
+    "DOTNET_",
+    "COMPLUS_",
     "CORECLR_",
     "COR_PROFILER",
+    "SSL_",
+    "OPENSSL_",
+    "CURL_",
 ];
 
 /// Whether a local connector may not set `name` (compared without case).
@@ -195,7 +218,7 @@ pub fn is_reserved_env(name: &str) -> bool {
     INHERITED_ENV.contains(&upper.as_str())
         || RESERVED_ENV.contains(&upper.as_str())
         || RESERVED_ENV_PREFIXES.iter().any(|p| upper.starts_with(p))
-        || upper.ends_with("_PROXY")
+        || upper.ends_with("PROXY")
 }
 
 /// Text a person couldn't see in full in a dialog.
@@ -715,6 +738,30 @@ mod tests {
             .validate(&p)
             .is_err());
         assert!(with_value("eu".into()).validate(&p).is_ok());
+        // Fake line breaks and other format or ignorable characters, by
+        // category: in the name, address, program, arguments and values.
+        for c in [
+            '\u{2028}',
+            '\u{2029}',
+            '\u{180B}',
+            '\u{FFF9}',
+            '\u{1D173}',
+            '\u{1BCA0}',
+        ] {
+            let mut named = http("https://mcp.example.com/mcp");
+            named.name = format!("Docs{c}");
+            assert!(named.validate(&p).is_err(), "name U+{:04X}", c as u32);
+            assert!(http(&format!("https://mcp.example.com/m{c}cp"))
+                .validate(&p)
+                .is_err());
+            assert!(with_arg(format!("--dir{c}x")).validate(&p).is_err());
+            assert!(with_value(format!("eu{c}")).validate(&p).is_err());
+            let mut prog = with_arg("x".into());
+            if let TransportConfig::Stdio { command, .. } = &mut prog.transport {
+                *command = format!("/opt/srv{c}/bin");
+            }
+            assert!(prog.validate(&p).is_err(), "program U+{:04X}", c as u32);
+        }
         assert!(http(&format!(
             "https://mcp.example.com/{}",
             "a".repeat(MAX_URL_CHARS)
@@ -739,6 +786,17 @@ mod tests {
             "HTTPS_PROXY",
             "http_proxy",
             "ALL_PROXY",
+            "GOPROXY",
+            "GOFLAGS",
+            "SSLKEYLOGFILE",
+            "OPENSSL_CONF",
+            "COMPlus_EnableDiagnostics",
+            "DOTNET_gcServer",
+            "PERLLIB",
+            "GEM_HOME",
+            "BUNDLE_GEMFILE",
+            "HOMEPATH",
+            "HOMEDRIVE",
             "ELECTRON_RUN_AS_NODE",
             "NPM_TOKEN",
             "CARGO_HOME",

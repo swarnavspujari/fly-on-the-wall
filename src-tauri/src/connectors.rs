@@ -78,6 +78,12 @@ const DIALOG_ARGS_CHARS: usize = 3000;
 /// Arguments longer than this many lines when pretty-printed are shown
 /// compact instead, so the dialog's buttons stay on screen.
 const DIALOG_ARGS_LINES: usize = 40;
+/// Longest add / edit / turn-on dialog. A configuration whose dialog would
+/// be longer is refused, so nothing runs unseen.
+const DIALOG_BODY_CHARS: usize = 3000;
+const DIALOG_BODY_LINES: usize = 40;
+const TOO_LONG_TO_SHOW: &str = "This connector's settings are too long to show in full. Shorten \
+     them, or make long values secrets, and try again.";
 /// Longest program output shown under "Show details".
 const DETAILS_CHARS: usize = 1500;
 
@@ -338,6 +344,16 @@ fn add_prompt(c: &ServerConfig, turning_on: bool) -> ConsentPrompt {
         .into(),
         decline: "Cancel".into(),
     }
+}
+
+/// The prompt, if the dialog can show all of it.
+fn shown_in_full(p: ConsentPrompt) -> CmdResult<ConsentPrompt> {
+    if p.message.chars().count() > DIALOG_BODY_CHARS
+        || p.message.lines().count() > DIALOG_BODY_LINES
+    {
+        return Err(TOO_LONG_TO_SHOW.into());
+    }
+    Ok(p)
 }
 
 fn edit_prompt(c: &ServerConfig, moved: bool) -> ConsentPrompt {
@@ -1008,7 +1024,8 @@ pub async fn add_connector(
     {
         return Err("A connector with that name already exists.".into());
     }
-    if !ask(&st, &app, "add", &add_prompt(&cfg, false)).await? {
+    let prompt = shown_in_full(add_prompt(&cfg, false))?;
+    if !ask(&st, &app, "add", &prompt).await? {
         return Ok(SaveResult {
             saved: false,
             connector: None,
@@ -1036,7 +1053,8 @@ pub async fn update_connector(
 ) -> CmdResult<SaveResult> {
     let cfg = pinned(&st, input.config)?;
     let moved = st.hub.edit_moves(&id, &cfg).map_err(err_str)?;
-    if !ask(&st, &app, "edit", &edit_prompt(&cfg, moved)).await? {
+    let prompt = shown_in_full(edit_prompt(&cfg, moved))?;
+    if !ask(&st, &app, "edit", &prompt).await? {
         return Ok(SaveResult {
             saved: false,
             connector: Some(view_of(&st.hub, &id)?),
@@ -1073,7 +1091,10 @@ pub async fn set_connector_enabled(
         if !entry.is_approved() || st.hub.check_config(entry.config.clone()).is_err() {
             return Err("Edit this connector to approve it again.".into());
         }
-        if !ask(&st, &app, "turn_on", &add_prompt(&entry.config, true)).await? {
+        let prompt = shown_in_full(add_prompt(&entry.config, true)).map_err(|_| {
+            "This connector's settings are too long to show in full. Edit it to shorten them."
+        })?;
+        if !ask(&st, &app, "turn_on", &prompt).await? {
             return Ok(SaveResult {
                 saved: false,
                 connector: Some(view_of(&st.hub, &id)?),
@@ -1330,7 +1351,8 @@ pub async fn import_claude_desktop_connector(
             .unwrap_or(base);
     }
     let cfg = pinned(&st, cfg)?;
-    if !ask(&st, &app, "add", &add_prompt(&cfg, false)).await? {
+    let prompt = shown_in_full(add_prompt(&cfg, false))?;
+    if !ask(&st, &app, "add", &prompt).await? {
         return Ok(SaveResult {
             saved: false,
             connector: None,
@@ -1641,6 +1663,48 @@ mod tests {
         assert!(add
             .message
             .contains("from your system keychain: X-Api-Key."));
+    }
+
+    #[test]
+    fn a_config_too_long_for_the_dialog_is_refused() {
+        let program = if cfg!(windows) {
+            r"C:\srv\docs-server.exe"
+        } else {
+            "/usr/bin/docs-server"
+        };
+        let env = (0..16)
+            .map(|i| EnvConfig {
+                name: format!("SETTING_{i}"),
+                value: Some("v".repeat(190)),
+            })
+            .collect();
+        let big = ServerConfig {
+            name: "Docs".into(),
+            transport: TransportConfig::Stdio {
+                command: program.into(),
+                args: vec!["--x".into()],
+                env,
+            },
+            auth: AuthConfig::None,
+        };
+        assert!(big
+            .validate(&fly_mcp_client::netguard::NetPolicy::strict())
+            .is_ok());
+        assert_eq!(
+            shown_in_full(add_prompt(&big, false)).unwrap_err(),
+            TOO_LONG_TO_SHOW
+        );
+        let small = ServerConfig {
+            name: "Docs".into(),
+            transport: TransportConfig::Stdio {
+                command: program.into(),
+                args: vec!["--x".into()],
+                env: vec![],
+            },
+            auth: AuthConfig::None,
+        };
+        assert!(shown_in_full(add_prompt(&small, false)).is_ok());
+        assert!(shown_in_full(edit_prompt(&small, true)).is_ok());
     }
 
     #[test]
