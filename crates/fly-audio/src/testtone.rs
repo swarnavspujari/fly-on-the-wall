@@ -177,8 +177,8 @@ pub struct ToneReport {
     /// Largest marker-spacing error that stayed under the gap threshold, ms
     /// (measurement noise; should be well under 1 ms).
     pub max_marker_jitter_ms: f64,
-    /// Captured hi/lo level ratio (the player's is `hi / lo`; much lower
-    /// means the tone wasn't found and `markers` stays 0).
+    /// Mean captured level ratio across the rising steps (the player's is
+    /// `hi / lo`; 0 when no step was found).
     pub level_ratio: f32,
     pub gaps: Vec<ToneGap>,
 }
@@ -235,64 +235,71 @@ pub fn analyze(samples: &[i16], rate: u32, spec: &ToneSpec) -> ToneReport {
         });
     }
 
-    // --- markers: one-period RMS crossing the midpoint between levels ---
+    // --- markers: the level steps ---
+    // Compare the energy of the period after each sample with the period
+    // before it. A sine's energy over one whole period doesn't depend on
+    // phase, so the ratio is 1 except at a step, where it peaks at hi/lo
+    // (or lo/hi) exactly on the step. Ratios, not absolute levels: the
+    // capture path can apply gain that drifts (system volume, loudness
+    // equalization ramps the level within each second on some laptops), but
+    // it can't fake a 2x jump inside one millisecond.
     let period = (rate as f64 / spec.freq_hz as f64).round().max(1.0) as usize;
-    let in_zero_run = |i: usize| zero_runs.iter().any(|&(s, l)| i + period > s && i < s + l);
-    // The capture's gain isn't the player's (system volume, loopback
-    // scaling), so learn the two levels from the recording: the 10th and
-    // 90th percentile of whole-period RMS.
-    let mut levels: Vec<f32> = region
-        .chunks_exact(period)
-        .map(|c| {
-            let e: f64 = c.iter().map(|&s| (s as f64) * (s as f64)).sum();
-            (e / period as f64).sqrt() as f32
-        })
-        .filter(|&r| r > 0.0)
-        .collect();
-    if levels.len() < 4 {
-        return report;
+    let in_zero_run = |i: usize| {
+        zero_runs
+            .iter()
+            .any(|&(s, l)| i + 2 * period > s && i < s + l)
+    };
+    let mut cum = Vec::with_capacity(region.len() + 1);
+    cum.push(0f64);
+    for &s in region {
+        let last = *cum.last().unwrap_or(&0.0);
+        cum.push(last + (s as f64) * (s as f64));
     }
-    levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let lo_level = levels[levels.len() / 10];
-    let hi_level = levels[levels.len() * 9 / 10];
-    report.level_ratio = hi_level / lo_level.max(1e-6);
-    let expected_ratio = spec.hi / spec.lo;
-    if report.level_ratio < 1.0 + (expected_ratio - 1.0) / 2.0 {
-        // no two-level tone in here (wrong signal, or heavy processing)
-        return report;
-    }
-    let mid = (hi_level + lo_level) / 2.0;
-    let floor = lo_level / 4.0;
-    // running sum of squares over one period
+    let energy = |a: usize, b: usize| cum[b] - cum[a];
+    // a step counts when the level moves by at least the square root of
+    // the tone's own step (≈1.41x for a 2x tone)
+    let threshold = ((spec.hi / spec.lo) as f64).ln().abs() / 2.0;
+    let refractory = rate as usize / 10; // 100 ms, well under a step
     let mut markers: Vec<usize> = Vec::new();
-    let mut state: Option<bool> = None; // Some(true) = hi
-                                        // a level change first seen right after a skipped stretch could have
-                                        // happened anywhere inside it: not usable as a timing marker
-    let mut after_skip = false;
-    let mut acc: f64 = 0.0;
-    for (i, &s) in region.iter().enumerate() {
-        acc += (s as f64) * (s as f64);
-        if i >= period {
-            let old = region[i - period] as f64;
-            acc -= old * old;
+    let mut best: Option<(usize, f64)> = None; // argmax inside a run over threshold
+                                               // Windows touching a zero run are skipped, so a step the zeros
+                                               // swallowed is never seen (its neighbours then sit two steps apart) and
+                                               // a step next to them is still measured on clean audio.
+    let mut steps_seen: Vec<f64> = Vec::new();
+    if region.len() > 2 * period {
+        for i in period..region.len() - period {
+            if in_zero_run(i - period) {
+                best = None;
+                continue;
+            }
+            let before = energy(i - period, i);
+            let after = energy(i, i + period);
+            if before <= 0.0 || after <= 0.0 {
+                continue;
+            }
+            let lr = (after / before).ln() / 2.0; // log of the RMS ratio
+            if lr.abs() >= threshold {
+                if best.is_none_or(|(_, b)| lr.abs() > b.abs()) {
+                    best = Some((i, lr));
+                }
+            } else if let Some((at, lr_at)) = best.take() {
+                // Gain control reacts to a step within a few ms, which can
+                // cross the threshold again: the step is the first crossing
+                // of each cluster.
+                if markers.last().is_none_or(|&m| at - m > refractory) {
+                    markers.push(at);
+                    steps_seen.push(lr_at.exp());
+                }
+            }
         }
-        if i + 1 < period {
-            continue;
-        }
-        let start = i + 1 - period;
-        let rms = (acc.max(0.0) / period as f64).sqrt() as f32;
-        if rms < floor || in_zero_run(start) {
-            after_skip = true;
-            continue;
-        }
-        let hi = rms > mid;
-        if state.is_some_and(|prev| prev != hi) && !after_skip {
-            // the window [start, i] straddles the step; the crossing sits a
-            // fixed offset from it for both directions, so spacing is exact
-            markers.push(start + period / 2);
-        }
-        after_skip = false;
-        state = Some(hi);
+    }
+    if !steps_seen.is_empty() {
+        let ups: Vec<f64> = steps_seen.iter().copied().filter(|r| *r > 1.0).collect();
+        report.level_ratio = if ups.is_empty() {
+            0.0
+        } else {
+            (ups.iter().sum::<f64>() / ups.len() as f64) as f32
+        };
     }
     report.markers = markers.len();
 
@@ -436,6 +443,33 @@ mod tests {
         assert_eq!(r.markers, 7);
         assert_eq!(r.gaps.len(), 1, "{:?}", r.gaps);
         assert!((r.gaps[0].ms - 20.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn loudness_equalization_ramps_are_not_markers() {
+        // what this laptop's speaker path does to loopback: after every
+        // step the gain dips, then climbs ~3.5x over the second
+        let mut s: Vec<i16> = tone(9.0, 0)
+            .iter()
+            .enumerate()
+            .map(|(n, &v)| {
+                let t = (n % RATE as usize) as f32 / RATE as f32;
+                // fast attack: a sharp dip 5..15 ms after the step
+                let attack = if n >= RATE as usize && (0.005..0.015).contains(&t) {
+                    0.5
+                } else {
+                    1.0
+                };
+                (v as f32 * (1.0 + 2.5 * t) * attack) as i16
+            })
+            .collect();
+        let at = (6.25 * RATE as f64) as usize;
+        s.drain(at..at + 1_440); // 30 ms removed
+        let r = analyze(&s, RATE, &ToneSpec::default());
+        assert_eq!(r.markers, 8, "{:?}", r.gaps);
+        assert_eq!(r.gaps.len(), 1, "{:?}", r.gaps);
+        assert_eq!(r.gaps[0].kind, "removed");
+        assert!((r.gaps[0].ms - 30.0).abs() < 1.0);
     }
 
     #[test]
