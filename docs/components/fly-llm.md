@@ -15,7 +15,7 @@ The `LLMProvider` trait and its two HTTP implementations: `AnthropicProvider` (`
 - `crates/fly-llm/src/stream.rs`: byte→line framing (`LineBuffer`, 8 MiB line cap), `decode_body`, `replay`, `collect`, `Accumulator`.
 - `crates/fly-llm/src/repair.rs`: `classify()` reads a text reply as a plain answer, a recoverable tool call, or a malformed one.
 - `crates/fly-llm/src/tool_loop.rs`: `run_tool_loop` with budgets, a corrective turn, and content-free run records (dormant).
-- `crates/fly-llm/src/external_tools.rs`: `ExternalTools`, the per-turn interface for tools outside the Ask harness (connectors). Implemented by `fly-mcp-client`'s `ConnectorTurn`; the harness offers its `specs()` and routes calls it `owns()`.
+- `crates/fly-llm/src/external_tools.rs`: `ExternalTools`, the per-turn interface for tools outside the Ask harness (connectors): `specs()`, `owns()`, `call()`, the Keep-local tripwire `mark_keep_local()`, and `sealed()`, true once an outside service's words are in the turn (the harness then makes no further proposals). The harness and the connector client depend only on this trait, not on each other.
 - `crates/fly-llm/src/mock.rs`: `MockLLMProvider`: canned `chat()` text, or a scripted list of `converse()` replies with request recording.
 - `crates/fly-llm/src/golden.rs` (`#[cfg(test)]`): byte-identity test for legacy `chat()` bodies.
 - `crates/fly-llm/tests/golden/legacy_bodies.jsonl`: 105 golden cases (7 request shapes × 15 provider/model/variant combos).

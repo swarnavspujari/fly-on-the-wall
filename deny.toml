@@ -17,6 +17,10 @@ all-features = true
 # only fail for crates in our own workspace — transitive "unmaintained"
 # advisories (mostly deep in the Tauri/GTK tree) are not actionable here.
 unmaintained = "workspace"
+# Same for "unsound" notices (cargo-deny's default, spelled out): they fail
+# only for our own crates. Transitive ones are reviewed by hand when they
+# show up elsewhere (e.g. a Dependabot alert); see the glib note below.
+unsound = "workspace"
 yanked = "deny"
 ignore = [
   # quick-xml — reached only through the build-time plist / bundler path
@@ -33,6 +37,15 @@ ignore = [
   { id = "RUSTSEC-2026-0367", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
   { id = "RUSTSEC-2026-0368", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
   { id = "RUSTSEC-2026-0369", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
+  # RUSTSEC-2024-0429 (glib < 0.20, "unsound", GHSA-wrw7-89jp-8q8g) needs no
+  # entry: it's an informational unsound notice on a transitive crate, so
+  # `unsound = "workspace"` above already leaves it out. Reviewed 2026-10-28:
+  # glib 0.18 comes in on Linux only, through Tauri's GTK stack (tauri / wry /
+  # tao / muda -> gtk 0.18, webkit2gtk 2.0). webkit2gtk =2.0.x needs glib
+  # ^0.18 and no tauri 2.x (or 3.0 alpha) release moves off it, so there is no
+  # bump yet. The unsound glib::VariantStrIter is made only by
+  # Variant::array_iter_str, which neither our code nor any locked GTK/Tauri
+  # crate calls. Revisit when the Tauri Linux stack reaches glib >= 0.20.
 ]
 
 [bans]
