@@ -38,7 +38,7 @@ const OUTSIDE_SCOPE: &str = "That is outside the meetings this question is about
 
 /// The tools on offer (fly-context's read tools + proposals). Strict
 /// schemas where the provider supports them for every tool.
-pub fn tool_specs(caps: &fly_llm::Capabilities) -> Vec<ToolSpec> {
+pub fn tool_specs(caps: &fly_llm::Capabilities, requested: proposals::Requested) -> Vec<ToolSpec> {
     let defs = fly_context::tool_defs();
     let n = defs.len() + 2;
     let strict = caps.strict_tools && (caps.max_strict_tools == 0 || caps.max_strict_tools >= n);
@@ -55,7 +55,8 @@ pub fn tool_specs(caps: &fly_llm::Capabilities) -> Vec<ToolSpec> {
             strict,
         })
         .collect();
-    out.extend(proposals::tool_specs());
+    // Proposal tools only for a question that asks for that change.
+    out.extend(proposals::tool_specs_for(requested));
     out
 }
 
@@ -75,6 +76,8 @@ pub struct ToolState<'a, S, E> {
     pub external: Option<&'a dyn fly_llm::external_tools::ExternalTools>,
     /// The Ask's cancel flag (a connector call may wait minutes).
     pub cancel: Option<&'a std::sync::atomic::AtomicBool>,
+    /// The proposals the user's question asked for.
+    pub requested: proposals::Requested,
 }
 
 fn args<T: DeserializeOwned>(tool: &str, v: &Value) -> Result<T, String> {
@@ -154,7 +157,14 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
             searched: AtomicBool::new(false),
             external: None,
             cancel: None,
+            requested: proposals::Requested::default(),
         }
+    }
+
+    /// The proposals the user's question asked for (others are refused).
+    pub fn with_requested(mut self, requested: proposals::Requested) -> Self {
+        self.requested = requested;
+        self
     }
 
     /// Stop a connector call at the Ask's cancel request.
@@ -244,6 +254,22 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
         // (The tool loop answers calls to tools that weren't offered
         // without executing anything.)
         if let Some(t) = proposals::ProposalTool::parse(&name) {
+            let allowed = match t {
+                proposals::ProposalTool::AddActionItem => self.requested.action_item,
+                proposals::ProposalTool::InsertIntoNote => self.requested.insert,
+            };
+            if !allowed {
+                let refusal = proposals::ProposalRefusal {
+                    tool: Some(t),
+                    reason: proposals::RefusalReason::NotRequested,
+                };
+                let msg = proposals::ack(&Err(refusal.clone()));
+                self.refusals
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(refusal);
+                return msg;
+            }
             if self.sealed() {
                 let refusal = proposals::ProposalRefusal {
                     tool: Some(t),

@@ -282,6 +282,11 @@ fn reach(on_device: bool, provider: &dyn LLMProvider) -> Reach {
 }
 
 /// Display text: sentences joined, bullets on their own lines.
+/// Sentences as display Markdown (a list item starts its own line).
+pub fn join_sentences(sentences: &[AnswerSentence]) -> String {
+    join(sentences)
+}
+
 fn join(sentences: &[AnswerSentence]) -> String {
     let mut out = String::new();
     for s in sentences {
@@ -725,6 +730,8 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     let local_model = env.provider.is_local();
     let profile = fly_core::prompt_profile::profile_for(env.provider.model());
     let uses_tools = budget.uses_tools() && tier.uses_tools();
+    // Proposal tools only when the user asked for that change.
+    let requested = proposals::Requested::from_question(input.question);
     let mut messages = vec![Message::system(
         profile.apply_preamble(prompt::system(tier)),
     )];
@@ -741,7 +748,7 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     let req = ConverseRequest {
         messages,
         tools: if uses_tools {
-            let mut t = agent::tool_specs(&env.provider.capabilities());
+            let mut t = agent::tool_specs(&env.provider.capabilities(), requested);
             if let Some(x) = external {
                 // Never one that shadows the harness's own tools.
                 let own: Vec<String> = t.iter().map(|s| s.name.clone()).collect();
@@ -777,7 +784,8 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
         pf.evidence.clone(),
     )
     .with_external(external)
-    .with_cancel(env.cancel);
+    .with_cancel(env.cancel)
+    .with_requested(requested);
 
     let mut first = synthesize(&metered, &req, budget, &state).await;
     // One bounded retry of a transient provider failure.

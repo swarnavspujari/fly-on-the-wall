@@ -1250,22 +1250,32 @@ pub struct AskReply {
     pub insert_id: Option<String>,
 }
 
-/// An answer worth inserting: answered, with a sourced sentence. Its
-/// Markdown and the lines its sourced sentences cite.
+/// An answer worth inserting: answered, with a sourced sentence. The
+/// Markdown of its sourced sentences only, and the lines they cite.
 fn insertable(a: &fly_ask::AskAnswer) -> Option<(String, Vec<String>)> {
+    insertable_parts(a.status, &a.sentences)
+}
+
+fn insertable_parts(
+    status: fly_ask::AnswerStatus,
+    sentences: &[fly_ask::AnswerSentence],
+) -> Option<(String, Vec<String>)> {
     let sourced = |s: &&fly_ask::AnswerSentence| s.status == fly_ask::SentenceStatus::Sourced;
-    if a.status != fly_ask::AnswerStatus::Answered || !a.sentences.iter().any(|s| sourced(&s)) {
+    if status != fly_ask::AnswerStatus::Answered || !sentences.iter().any(|s| sourced(&s)) {
         return None;
     }
+    // Only what the citations back goes into the note: unsourced and
+    // flagged sentences stay in the answer, where they're marked.
+    let kept: Vec<fly_ask::AnswerSentence> = sentences.iter().filter(sourced).cloned().collect();
     let mut ids: Vec<String> = Vec::new();
-    for s in a.sentences.iter().filter(sourced) {
+    for s in &kept {
         for c in &s.citations {
             if !ids.contains(c) {
                 ids.push(c.clone());
             }
         }
     }
-    Some((a.text.clone(), ids))
+    Some((fly_ask::join_sentences(&kept), ids))
 }
 
 /// Payload of the `ask:event` stream (only when the caller passes an
@@ -1854,6 +1864,36 @@ pub async fn test_llm_connection(state: State<'_, AppState>) -> CmdResult<String
 #[cfg(test)]
 mod security_tests {
     use super::{check_cloud_policy, validate_base_url};
+
+    #[test]
+    fn only_sourced_sentences_are_inserted() {
+        use fly_ask::{AnswerSentence, AnswerStatus, SentenceStatus};
+        let s = |text: &str, cites: &[&str], status| AnswerSentence {
+            text: text.into(),
+            citations: cites.iter().map(|c| c.to_string()).collect(),
+            status,
+            flags: vec![],
+        };
+        let sentences = vec![
+            s("The kiln opens Monday.", &["r1"], SentenceStatus::Sourced),
+            s("It costs a fortune.", &[], SentenceStatus::Unsourced),
+            s("- Ilka runs it.", &["r2"], SentenceStatus::Flagged),
+            s(
+                "- Maren books the slots.",
+                &["r3", "r1"],
+                SentenceStatus::Sourced,
+            ),
+        ];
+        let (md, ids) = super::insertable_parts(AnswerStatus::Answered, &sentences).unwrap();
+        assert_eq!(
+            md,
+            "The kiln opens Monday.
+- Maren books the slots."
+        );
+        assert_eq!(ids, vec!["r1", "r3"]);
+        assert!(super::insertable_parts(AnswerStatus::Unverified, &sentences).is_none());
+        assert!(super::insertable_parts(AnswerStatus::Answered, &sentences[1..3]).is_none());
+    }
 
     #[test]
     fn stop_reaches_only_a_running_ask() {

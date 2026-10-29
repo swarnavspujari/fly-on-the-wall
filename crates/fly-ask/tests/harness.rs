@@ -797,7 +797,7 @@ async fn tier_c_tools_stay_in_scope_and_proposals_are_never_executed() {
         false,
         Tier::C,
         AskScope::Meeting(f.launch.clone()),
-        "Who is repainting the lobby sign?",
+        "Add an action item for the lobby sign repaint.",
         &[],
     )
     .await;
@@ -1057,6 +1057,11 @@ struct Connector {
     sealed: std::sync::atomic::AtomicBool,
     calls: std::sync::atomic::AtomicUsize,
     marked: std::sync::atomic::AtomicBool,
+    /// Keep answering without sealing the turn (a read that returns no
+    /// outside words, for the budget test).
+    never_seal: bool,
+    /// Pad each result to this many chars.
+    result_chars: usize,
 }
 
 #[async_trait::async_trait]
@@ -1075,11 +1080,13 @@ impl fly_llm::external_tools::ExternalTools for Connector {
     async fn call(&self, _name: &str, _args: Value) -> Result<String, String> {
         use std::sync::atomic::Ordering::SeqCst;
         self.calls.fetch_add(1, SeqCst);
-        self.sealed.store(true, SeqCst);
-        Ok(
-            "<connector_result>The studio wiki has a page about the lobby sign.</connector_result>"
-                .into(),
-        )
+        if !self.never_seal {
+            self.sealed.store(true, SeqCst);
+        }
+        let body = "The studio wiki has a page about the lobby sign. ";
+        let mut text = body.repeat(self.result_chars / body.len() + 1);
+        text.truncate(self.result_chars.max(body.len()));
+        Ok(format!("<connector_result>{text}</connector_result>"))
     }
     fn mark_keep_local(&self) {
         self.marked.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1097,12 +1104,24 @@ async fn run_ext(
     q: &str,
     ext: &Connector,
 ) -> fly_ask::AskAnswer {
+    run_ext_tier(f, m, on_device, Tier::C, scope, q, ext).await
+}
+
+async fn run_ext_tier(
+    f: &Fx,
+    m: &Model,
+    on_device: bool,
+    tier: Tier,
+    scope: AskScope,
+    q: &str,
+    ext: &Connector,
+) -> fly_ask::AskAnswer {
     ask(
         AskEnv {
             store: &f.s,
             provider: m,
             on_device,
-            tier: Tier::C,
+            tier,
             limits: None,
             embedder: Some(&Bow),
             events: None,
@@ -1145,7 +1164,7 @@ async fn after_a_connector_reply_nothing_more_is_proposed_or_called() {
         &m,
         false,
         AskScope::Meeting(f.launch.clone()),
-        "Who is repainting the lobby sign?",
+        "Add an action item for the lobby sign repaint.",
         &ext,
     )
     .await;
@@ -1371,4 +1390,150 @@ async fn stop_works_before_the_first_token() {
         "{:?}",
         t.elapsed()
     );
+}
+
+#[tokio::test]
+async fn a_proposal_the_question_didnt_ask_for_is_refused() {
+    let f = fx();
+    let m = Model::new(
+        false,
+        vec![
+            ChatResponse::tool_call(
+                "t1",
+                "add_action_item",
+                json!({"text": "Ewan repaints the lobby sign by Friday", "owner": "Ewan Doyle", "segment_ids": ["a03"]}),
+            ),
+            ChatResponse::text_reply("Ewan will repaint the lobby sign by Friday [seg:a03]."),
+        ],
+    );
+    let a = run(
+        &f,
+        &m,
+        false,
+        Tier::C,
+        AskScope::Meeting(f.launch.clone()),
+        "Who is repainting the lobby sign?",
+        &[],
+    )
+    .await;
+    assert!(a.proposals.is_empty());
+    // Not offered, so the loop answered the call without running anything.
+    assert_eq!(a.run_log.tool_calls.len(), 1);
+    assert!(!a.run_log.tool_calls[0].ok);
+    assert_eq!(
+        a.run_log.tool_calls[0].tool,
+        fly_ask::runlog::ToolName::Unknown
+    );
+    let reqs = m.requests();
+    assert!(!offered(&reqs, "add_action_item") && !offered(&reqs, "insert_into_note"));
+    assert!(offered(&reqs, "search_passages"), "the read tools stay");
+}
+
+#[tokio::test]
+async fn tier_s_is_never_offered_connectors() {
+    let f = fx();
+    let ext = Connector::default();
+    let m = Model::new(
+        true,
+        vec![ChatResponse::text_reply("Ewan repaints it [seg:a03].")],
+    );
+    let a = run_ext_tier(
+        &f,
+        &m,
+        true,
+        Tier::S,
+        AskScope::Meeting(f.launch.clone()),
+        "Who is repainting the lobby sign?",
+        &ext,
+    )
+    .await;
+    let reqs = m.requests();
+    assert!(
+        reqs.iter().all(|r| r.tools.is_empty()),
+        "tier S offers no tools"
+    );
+    assert!(
+        !a.trace.connectors_off_keep_local,
+        "off by tier, not Keep local"
+    );
+    // On this device with no connector offered, Keep-local meetings stay visible.
+    assert_eq!(ext.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn tier_m_is_offered_connectors() {
+    let f = fx();
+    let ext = Connector::default();
+    let m = Model::new(
+        false,
+        vec![ChatResponse::text_reply("Ewan repaints it [seg:a03].")],
+    );
+    run_ext_tier(
+        &f,
+        &m,
+        false,
+        Tier::M,
+        AskScope::Meeting(f.launch.clone()),
+        "Who is repainting the lobby sign?",
+        &ext,
+    )
+    .await;
+    assert!(offered(&m.requests(), "mcp_docs__search"));
+}
+
+#[tokio::test]
+async fn connector_calls_count_against_the_tier_budget() {
+    let f = fx();
+    let ext = Connector {
+        never_seal: true,
+        result_chars: 50_000,
+        ..Default::default()
+    };
+    let call = |id: &str| ChatResponse::tool_call(id, "mcp_docs__search", json!({"q": "sign"}));
+    let m = Model::new(
+        false,
+        vec![
+            call("t1"),
+            call("t2"),
+            call("t3"),
+            call("t4"),
+            ChatResponse::text_reply("Ewan repaints it [seg:a03]."),
+        ],
+    );
+    let a = run_ext_tier(
+        &f,
+        &m,
+        false,
+        Tier::M,
+        AskScope::Meeting(f.launch.clone()),
+        "Who is repainting the lobby sign?",
+        &ext,
+    )
+    .await;
+    let limits = Tier::M.limits();
+    let budget = Tier::M.budget();
+    let reqs = m.requests();
+    assert!(
+        reqs.len() as u32 <= limits.model_calls,
+        "{} model calls",
+        reqs.len()
+    );
+    let calls = ext.calls.load(std::sync::atomic::Ordering::SeqCst) as u32;
+    assert!(
+        calls <= budget.max_tool_calls && calls <= budget.max_rounds,
+        "{calls} connector calls"
+    );
+    assert!(calls >= 1);
+    // A 50k-char result is cut to the tier's observation size: every request
+    // stays inside the per-request cap.
+    for r in &reqs {
+        let t = fly_ask::provider::request_tokens(r);
+        assert!(t <= limits.request_tokens, "{t} tokens");
+    }
+    assert!(a
+        .run_log
+        .tool_calls
+        .iter()
+        .all(|c| c.tool == fly_ask::runlog::ToolName::Connector));
+    assert_eq!(a.run_log.tool_calls.len() as u32, calls);
 }

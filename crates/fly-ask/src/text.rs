@@ -247,8 +247,9 @@ fn renders(word: &str) -> bool {
     }) {
         return true;
     }
-    // A reference definition `[1]:` or a footnote link `[the brief][1]`.
-    if l.ends_with("]:") {
+    // A reference definition (`[1]:`, `[ref]:/x`, `[ref]:tel:…`, glued
+    // to its target or not) or a footnote link `[the brief][1]`.
+    if l.contains("]:") {
         return true;
     }
     // Protocol-relative `//host.tld/...`.
@@ -610,7 +611,7 @@ mod tests {
         [
             "](",
             "][",
-            "]: ",
+            "]:",
             "<a ",
             "<a>",
             "<img",
@@ -668,6 +669,9 @@ mod tests {
             "Protocol relative //cdn.example.invalid/p.png here",
             "<object data=x> <embed src=x> <video> <audio> <source> <link> <base> <form action=x>",
             "Tags not on any list: <details open ontoggle=go()>x</details> <marquee>hi</marquee>",
+            "Glued definitions: [ref]:/x [ref]:tel:+15550100 [ref]:evil.example",
+            "See [the brief].\n\n[the brief]:\t/relative/path",
+            "See [x].\n[x]:\u{a0}//evil.example/p",
             "Case and slashes: <SVG/onload=go()> <math><mi xlink:href=x>y</mi></math>",
         ] {
             let (s, n) = strip_links(t);
