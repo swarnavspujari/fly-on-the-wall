@@ -24,6 +24,7 @@ const reply = (extra: Partial<AskReply> = {}): AskReply => ({
   sources: [
     {
       meeting_id: "m1",
+      note_id: "n1",
       meeting_title: "Falcon sync",
       started_at: null,
       label: "Falcon sync",
@@ -36,6 +37,7 @@ const reply = (extra: Partial<AskReply> = {}): AskReply => ({
   refusals: [],
   trace_lines: [],
   on_device: true,
+  insert_id: null,
   trace: {
     tier: "M",
     scope: "all",
@@ -204,6 +206,16 @@ describe("copy", () => {
     expect(refusalCopy({ tool: null, reason: "bad_arguments" })).toBe(
       "Ask tried a step that doesn't exist, so it was skipped.",
     );
+  });
+
+  it("the harness's newer refusals: injected and sealed are said, not-requested isn't", () => {
+    expect(refusalCopy({ tool: "add_action_item", reason: "injected_instruction" })).toBe(
+      "Ask suggested an action item but didn't offer it: it came from something said in a meeting, not from you.",
+    );
+    expect(refusalCopy({ tool: "insert_into_note", reason: "sealed" })).toContain(
+      "it came after a connector call",
+    );
+    expect(refusalCopy({ tool: "insert_into_note", reason: "not_requested" })).toBeNull();
   });
 
   it("proposals expire", () => {

@@ -23,7 +23,6 @@ import {
 import {
   CITE_STATUS_COPY,
   citeGroups,
-  citedIds,
   clock,
   layoutSentences,
   locateLine,
@@ -44,8 +43,13 @@ import type { AskChat, AskTurn } from "./AskPanel";
    Insert. Everything shown came back sanitized from the harness (no links,
    no images, no reasoning) and is rendered without raw HTML. */
 
-/** Open a meeting's transcript at these lines (a chip or a source line). */
-export type OpenSource = (target: { meetingId: string; segmentIds: string[] }) => void;
+/** Open a meeting's transcript at these lines (a chip or a source line).
+ *  `noteId` is the note that holds the meeting (from the source). */
+export type OpenSource = (target: {
+  meetingId: string;
+  noteId?: string;
+  segmentIds: string[];
+}) => void;
 
 /** A proposal's approval, kept in the chat (not the sheet) so closing and
  *  reopening the sheet can never approve it twice. */
@@ -478,7 +482,12 @@ export function AskTurnView({
     ? async (g: CiteGroup) => {
         const now = await check(g.meetingId);
         const ids = g.lines.map((l) => now.get(l.segment_id)?.segmentId ?? l.segment_id);
-        onOpenSource({ meetingId: g.meetingId, segmentIds: [...new Set(ids)] });
+        const noteId = reply?.sources.find((s) => s.meeting_id === g.meetingId)?.note_id;
+        onOpenSource({
+          meetingId: g.meetingId,
+          noteId: noteId || undefined,
+          segmentIds: [...new Set(ids)],
+        });
       }
     : undefined;
 
@@ -486,13 +495,17 @@ export function AskTurnView({
   const keptLocalOut =
     wide && (turn.found?.keptLocalNotSearched || (reply?.trace?.kept_local_not_searched ?? 0) > 0);
 
+  // The backend holds what this answer may insert (its sourced sentences
+  // that cite only this note's lines) under `insert_id`; a second click adds
+  // nothing there either.
   const insert = async () => {
-    if (!insertNoteId || !reply || inserting) return;
+    const id = reply?.insert_id;
+    if (!insertNoteId || !id || inserting) return;
     setInserting(true);
     setInsertError(null);
     try {
-      const note = await api.insertAskAnswer(insertNoteId, reply.text, citedIds(reply.sentences));
-      onNoteChanged?.(note);
+      const note = await api.insertAskAnswer(id);
+      if (note.id === insertNoteId) onNoteChanged?.(note);
       chat.markInserted(turn.id);
       focusComposer();
     } catch (e) {
@@ -509,12 +522,13 @@ export function AskTurnView({
     approving.current.add(p.id);
     chat.setProposal(p.id, { phase: "pending" });
     try {
+      // Approved by id: the backend applies what it validated, once.
       if (p.tool === "insert_into_note") {
-        const note = await api.insertAskAnswer(p.note_id, p.markdown ?? "", p.segment_ids);
+        const note = await api.insertAskAnswer(p.id);
         // only the open note is on screen; another note just changed on disk
         if (note.id === insertNoteId) onNoteChanged?.(note);
       } else {
-        await api.addActionItem(p.meeting_id, p.text ?? "", p.owner ?? null, p.segment_ids);
+        await api.addActionItem(p.id);
       }
       chat.setProposal(p.id, { phase: "done" });
       focusComposer();
@@ -786,14 +800,24 @@ export function AskTurnView({
         </p>
       )}
 
-      {answered && insertNoteId && (
+      {answered && insertNoteId && !reply.insert_id && (
+        <p
+          className="m-0 px-1 text-[12px]"
+          style={{ color: "var(--text-3)" }}
+          data-testid="ask-no-insert"
+        >
+          Nothing here is backed by this note's own lines, so there's nothing to insert.
+        </p>
+      )}
+
+      {answered && insertNoteId && reply.insert_id && (
         <div className="flex flex-wrap items-center gap-2">
           {chat.inserted.has(turn.id) ? (
             <span
               className="inline-flex items-center gap-2 px-1 text-[12px] font-semibold"
               style={{ color: "var(--success-text)" }}
             >
-              ✓ Added to your note as an AI block with its sources
+              ✓ Added to your note as an AI block, with its sources
               {onShowInserted && (
                 <button
                   type="button"
@@ -809,7 +833,7 @@ export function AskTurnView({
             <Button
               variant="soft"
               size="xs"
-              title="Add this answer to your note, with its sources"
+              title="Add the lines backed by this note's transcript, with their sources"
               disabled={inserting}
               onClick={() => void insert()}
               style={

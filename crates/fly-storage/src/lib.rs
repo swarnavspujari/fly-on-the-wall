@@ -34,6 +34,7 @@ pub mod naming;
 mod notes;
 pub mod privacy;
 pub mod query;
+mod recording_store;
 mod recovery;
 pub mod safe_path;
 pub mod scratch;
@@ -46,7 +47,7 @@ mod transcripts;
 pub use atomic::rename_with_retry;
 pub use citations::{CitationLocator, CitationStatus};
 pub use embeddings::{ChunkOwner, PendingChunk, VectorHit, VectorResults};
-pub use items::ItemFilter;
+pub use items::{ItemFilter, USER_ITEM_PREFIX};
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::MeetingFilter;
 pub use meetings::{contained_recordings_dir, recording_dir_rel, IMPORT_STAGED_PREFIX};
@@ -55,6 +56,7 @@ pub use notes::NoteSummary;
 pub use privacy::{
     AudioPurge, EraseOutcome, MeetingPrivacy, AUDIO_RETENTION_SETTING, RETENTION_CHOICES,
 };
+pub use recording_store::{manifest_is_newer, recording_file_in_folder};
 pub use recovery::{
     HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR,
     NOTE_MIRROR_VERSION, RECORDING_MANIFEST,
@@ -221,6 +223,10 @@ pub struct Storage {
     data_dir: PathBuf,
     /// Embedding vectors kept between searches (see `cache.rs`).
     read_cache: cache::ReadCache,
+    /// Meetings whose folder a background job is working inside (recording
+    /// compression). Folder renames skip them, like a running transcription.
+    /// In memory: a crash releases every lease.
+    folder_leases: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Storage {
@@ -256,6 +262,7 @@ impl Storage {
             read_cache: cache::ReadCache::watching(&conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
+            folder_leases: Default::default(),
         };
         storage.migrate(progress)?;
         storage.seed_builtin_templates()?;
@@ -353,6 +360,7 @@ impl Storage {
             read_cache: cache::ReadCache::watching(&conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
+            folder_leases: Default::default(),
         })
     }
 

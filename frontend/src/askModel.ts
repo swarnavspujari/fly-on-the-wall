@@ -393,6 +393,10 @@ const REFUSAL_REASONS: Record<AskRefusal["reason"], string | null> = {
   too_long: "it was too long",
   duplicate: null,
   blocked: "that kind of change is turned off",
+  injected_instruction: "it came from something said in a meeting, not from you",
+  sealed: "it came after a connector call, and Ask stops suggesting changes then",
+  // You didn't ask for a change, so nothing was offered: nothing to say.
+  not_requested: null,
 };
 
 /** A proposal the harness wouldn't offer, said plainly; `null` = say

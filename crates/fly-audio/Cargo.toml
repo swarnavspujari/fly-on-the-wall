@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# the contention bench's marker tone (src-tauri dev-dependency only)
+testtone = []
+
 [dependencies]
 fly-core.workspace = true
 serde.workspace = true
@@ -11,6 +15,11 @@ thiserror.workspace = true
 tracing.workspace = true
 cpal.workspace = true
 hound.workspace = true
+# lock-free SPSC ring between the capture callbacks and the WAV writer
+rtrb = "0.3"
+flacenc.workspace = true
+claxon.workspace = true
+md-5.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
@@ -18,6 +27,10 @@ windows = { version = "0.62", features = [
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
   "Win32_System_Com",
+  # AvSetMmThreadCharacteristicsW: real-time (MMCSS) capture threads
+  "Win32_System_Threading",
+  # QueryPerformanceCounter: capture backlog on the WASAPI timestamp clock
+  "Win32_System_Performance",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

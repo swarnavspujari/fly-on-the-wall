@@ -399,6 +399,14 @@ impl Storage {
                 );
                 continue;
             }
+            // Recording compression works inside the folder; same policy.
+            if self.meeting_folder_leased(&meeting.id) {
+                tracing::info!(
+                    meeting_id = meeting.id,
+                    "recording compression running; keeping the meeting folder's old name"
+                );
+                continue;
+            }
             let Some(old_rel) = recording_dir_rel(rec) else {
                 continue;
             };

@@ -25,6 +25,7 @@ import {
   Folder as FolderIcon,
   LayoutTemplate,
   List,
+  Loader2,
   Lock,
   LockOpen,
   Mic,
@@ -105,7 +106,7 @@ interface Props {
   onRelabel: (speakerKey: string, label: string) => void;
   onEditSegment: (segmentId: string, text: string) => void;
   /** An Ask source in a meeting of another note: open that note there. */
-  onOpenSourceElsewhere?: (meetingId: string, segmentIds: string[]) => void;
+  onOpenSourceElsewhere?: (meetingId: string, segmentIds: string[], noteId?: string) => void;
   /** Open the transcript at these lines once this note shows (an Ask source
    *  opened from Home or another note). `nonce` makes each request one. */
   pendingZoom?: { noteId: string; meetingId: string; segmentIds: string[]; nonce: number } | null;
@@ -144,19 +145,37 @@ function fmtWhen(iso: string): string {
 
 /* ---- Audio player: embeds the local recording via the asset protocol so it
    plays and scrubs in-app (round violet play/pause, progress-filled waveform,
-   mono timecodes). Falls back to opening the OS player if the src is missing. ---- */
+   mono timecodes). Falls back to opening the OS player if the src is missing.
+   A compressed recording (lossless FLAC, no stored mix) rebuilds its
+   playback mix on the first Play (`onBuild`), then starts playing. While it
+   plays, `onKeepAlive` tells the backend now and then so background
+   compression leaves the file alone; `onSourceError` asks again for the
+   file when the one loaded went away (compressed while paused). ---- */
 const BAR_COUNT = 56;
+/** How often a playing recording tells the backend it's still in use (the
+    backend leaves a played meeting alone for 30 minutes after each). */
+const PLAYBACK_KEEP_ALIVE_MS = 5 * 60_000;
 function AudioPlayer({
   src,
   durationMs,
   onFallback,
+  onBuild,
+  onKeepAlive,
+  onSourceError,
 }: {
   src: string | null;
   durationMs: number;
   onFallback: () => void;
+  /** Set when the mix must be rebuilt first; resolves to the new src. */
+  onBuild?: () => Promise<string | null>;
+  onKeepAlive?: () => void;
+  onSourceError?: () => void;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const playWhenReady = useRef(false);
+  const lastKeepAlive = useRef(0);
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(durationMs / 1000);
 
@@ -168,6 +187,18 @@ function AudioPlayer({
 
   const toggle = () => {
     const a = audioRef.current;
+    if (!src && onBuild) {
+      if (building) return;
+      setBuilding(true);
+      onBuild()
+        .then((s) => {
+          if (s) playWhenReady.current = true;
+          else onFallback();
+        })
+        .catch(onFallback)
+        .finally(() => setBuilding(false));
+      return;
+    }
     if (!a || !src) {
       onFallback();
       return;
@@ -196,9 +227,29 @@ function AudioPlayer({
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onEnded={() => setPlaying(false)}
-          onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
+          onTimeUpdate={(e) => {
+            setCur(e.currentTarget.currentTime);
+            const now = Date.now();
+            if (
+              onKeepAlive &&
+              !e.currentTarget.paused &&
+              now - lastKeepAlive.current >= PLAYBACK_KEEP_ALIVE_MS
+            ) {
+              lastKeepAlive.current = now;
+              onKeepAlive();
+            }
+          }}
+          onError={() => {
+            setPlaying(false);
+            onSourceError?.();
+          }}
           onLoadedMetadata={(e) => {
             if (Number.isFinite(e.currentTarget.duration)) setDur(e.currentTarget.duration);
+          }}
+          onCanPlay={(e) => {
+            if (!playWhenReady.current) return;
+            playWhenReady.current = false;
+            void e.currentTarget.play().catch(onFallback);
           }}
         />
       )}
@@ -206,11 +257,14 @@ function AudioPlayer({
         variant="primary"
         size="sm"
         onClick={toggle}
-        title={playing ? "Pause" : "Play recording"}
-        aria-label={playing ? "Pause" : "Play recording"}
+        disabled={building}
+        title={building ? "Preparing the recording…" : playing ? "Pause" : "Play recording"}
+        aria-label={building ? "Preparing the recording" : playing ? "Pause" : "Play recording"}
         className="!h-[38px] !w-[38px] !rounded-full !p-0"
       >
-        {playing ? (
+        {building ? (
+          <Loader2 size={16} strokeWidth={2} className="animate-spin" />
+        ) : playing ? (
           <Pause size={16} strokeWidth={2} />
         ) : (
           <Play size={16} strokeWidth={2} style={{ marginLeft: 2 }} />
@@ -1259,16 +1313,18 @@ export default function Editor({
   const ownsMeeting = (id: string) => meeting?.id === id || meetings.some((m) => m.id === id);
   const openAskSource = ({
     meetingId,
+    noteId,
     segmentIds,
   }: {
     meetingId: string;
+    noteId?: string;
     segmentIds: string[];
   }) => {
     // A floating sheet would cover the line it opens; a pinned one doesn't.
     // (The chat stays: reopening the sheet shows it.)
     if (!askPinned) setAskOpen(false);
-    if (ownsMeeting(meetingId)) zoom(segmentIds, meetingId);
-    else onOpenSourceElsewhere?.(meetingId, segmentIds);
+    if (ownsMeeting(meetingId) || noteId === note.id) zoom(segmentIds, meetingId);
+    else onOpenSourceElsewhere?.(meetingId, segmentIds, noteId);
   };
   // A source opened from elsewhere lands here once this note (and the
   // recording it points into) is loaded.
@@ -1312,19 +1368,70 @@ export default function Editor({
 
   const rec = meeting?.recording ?? null;
   // full-quality playback mix first; older recordings fall back to the
-  // 16 kHz ASR mixdown, then raw channels
+  // 16 kHz ASR mixdown, then raw channels (also what "open in your player"
+  // and "show in folder" use)
   const audioPath =
     rec?.playback_path || rec?.mixed_path || rec?.mic_path || rec?.system_path || null;
-  // Absolute path → asset URL so the <audio> element can stream it in-app.
-  const audioSrc =
-    dataDir && audioPath
-      ? convertFileSrc(
-          `${dataDir.replace(/[\\/]+$/, "")}/${audioPath.replace(/^[\\/]+/, "")}`.replace(
-            /\\/g,
-            "/",
-          ),
-        )
-      : null;
+  // The backend picks the file to stream (prepare_playback): the stored mix,
+  // or, for a compressed recording, a mix rebuilt from its lossless sources
+  // on the first Play. Absolute path -> asset URL for the <audio> element.
+  const meetingId = meeting?.id ?? null;
+  const [playback, setPlayback] = useState<{
+    meetingId: string;
+    path: string | null;
+    needsBuild: boolean;
+  } | null>(null);
+  const recKey = rec
+    ? `${rec.mic_path}|${rec.system_path}|${rec.mixed_path}|${rec.playback_path ?? ""}`
+    : "";
+  useEffect(() => {
+    setPlayback(null);
+    if (!meetingId || !recKey) return;
+    let live = true;
+    api
+      .preparePlayback(meetingId, false)
+      .then((p) => {
+        if (live && p) setPlayback({ meetingId, path: p.path, needsBuild: p.needs_build });
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [meetingId, recKey]);
+  const shown = playback && playback.meetingId === meetingId ? playback : null;
+  const audioSrc = shown?.path ? convertFileSrc(shown.path) : null;
+  const buildPlayback =
+    shown?.needsBuild && meetingId
+      ? async () => {
+          const p = await api.preparePlayback(meetingId, true);
+          if (!p?.path) return null;
+          setPlayback({ meetingId, path: p.path, needsBuild: false });
+          return convertFileSrc(p.path);
+        }
+      : undefined;
+  // Playing: keep background compression off this meeting's files.
+  const keepPlaybackAlive = meetingId
+    ? () => void api.preparePlayback(meetingId, false).catch(() => {})
+    : undefined;
+  // The loaded file went away (compressed while the note was open): ask
+  // again, once per file, so Play rebuilds from what's stored now.
+  const erroredPath = useRef<string | null>(null);
+  const reloadPlayback =
+    meetingId && shown?.path
+      ? () => {
+          const failedPath = shown.path;
+          if (erroredPath.current === failedPath) return;
+          erroredPath.current = failedPath;
+          api
+            .preparePlayback(meetingId, false)
+            .then((p) => {
+              if (p && p.path !== failedPath) {
+                setPlayback({ meetingId, path: p.path, needsBuild: p.needs_build });
+              }
+            })
+            .catch(() => {});
+        }
+      : undefined;
   const videos = note.attachments.filter(isVideo);
   const playAudio = () => {
     if (audioPath) void api.openAttachment(audioPath);
@@ -1575,6 +1682,9 @@ export default function Editor({
                     src={audioSrc}
                     durationMs={rec?.duration_ms ?? 0}
                     onFallback={playAudio}
+                    onBuild={buildPlayback}
+                    onKeepAlive={keepPlaybackAlive}
+                    onSourceError={reloadPlayback}
                   />
                 )}
                 {clipStrip(false)}

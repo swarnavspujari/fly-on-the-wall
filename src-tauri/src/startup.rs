@@ -19,7 +19,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
-use crate::{embeddings, hw, llm_commands, models, privacy, scheduler, state};
+use crate::{audio_store, embeddings, hw, llm_commands, models, privacy, scheduler, state};
 
 /// Event carrying a [`LibraryStatus`] whenever the startup upgrade moves.
 pub const UPGRADE_EVENT: &str = "library:upgrade";
@@ -287,6 +287,9 @@ pub fn finish(app: &AppHandle, app_state: AppState) {
     embeddings::spawn(app.clone());
     // Audio retention: shortly after startup, then daily.
     privacy::spawn_retention(app.clone());
+    // Recording storage v2: losslessly compress finished recordings in the
+    // background (low priority, steps aside for real work).
+    audio_store::spawn(app.clone());
 }
 
 #[cfg(test)]

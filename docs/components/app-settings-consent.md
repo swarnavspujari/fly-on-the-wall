@@ -80,6 +80,7 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 | `llm.provider` | app-settings-consent | `build_provider` (`llm_commands.rs:581`), `ensure_provider_ready` (487), `cloud_consent_question` (213, launch wording), `get_llm_settings` (1117), `ollama_delete` (`ollama.rs:261`) | `set_llm_settings` (`llm_commands.rs:1174`) | no |
 | `llm.<provider>.model` | app-settings-consent | `build_provider` (587), `get_llm_settings` (1112), `ollama_delete` (`llm.ollama.model`, `ollama.rs:262`) | `set_llm_settings` (1177-1181; `""` = default); `migrate_anthropic_model` (`llm.anthropic.model`, 49) | no |
 | `llm.<provider>.base_url` | app-settings-consent | `build_provider` (588, re-validated), `get_llm_settings` (1113), `ollama::root_url` (`llm.ollama.base_url`, `ollama.rs:37`) → Ollama probe/spawn, embedding worker and query embeds ([app-search](app-search.md)) | `set_llm_settings` (validated; a change of origin for a keyed provider needs the key again) | no |
+| `ask.tool_smoke.<provider>.<hash of server, model, digest>` | app-llm | `ask_tier` (`llm_commands.rs`, Ask section): skips the smoke test when cached | `ask_tier`: `passed` or a failure code, after the first Ask with a large local model (a transport error isn't cached) | no |
 | `migration.cloud_consent_reset_v2_4` | app-settings-consent | `reset_unseen_cloud_consent` (`llm_commands.rs:95`) | same (104) | no (`llm_commands.rs:1314`) |
 | `asr.tier` | app-pipeline | `get_asr_settings` (`asr_commands.rs:295`), `pipeline.rs:228` | `set_asr_settings` (`asr_commands.rs:336`) | no |
 | `asr.model_id` | app-pipeline | `asr_commands.rs:296`, `pipeline.rs:233` | `asr_commands.rs:340,343` | no |
@@ -99,6 +100,8 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 | `privacy.audio_retention_days` | app-privacy | `crates/fly-storage/src/privacy.rs:451` | `crates/fly-storage/src/privacy.rs:460-462` (choices only) | no |
 | `privacy.retention_last_sweep` | app-privacy | `privacy.rs:187` | `privacy.rs:225` | no |
 | `privacy.retention_held` | app-privacy | `privacy.rs:316` | `privacy.rs:215`; deleted 183, 223 | no |
+| `storage.compress.saved_bytes` | app-audio-store | `audio_store.rs` (`spawn`, `run_pass`) | `audio_store.rs` (`run_pass`) | no |
+| `storage.compress.notice` | app-audio-store | `audio_store.rs` (`run_pass`) | `audio_store.rs` (`run_pass` → `pending`, `dismiss_compress_notice` → `shown`) | no |
 | `connectors.registry` | app-connectors | `connectors.rs` (`SettingsStore::load`) | `connectors.rs` (`SettingsStore::save`), only from connector commands; trust grants only after a native-dialog yes | **no: not readable either.** Outside the read allowlist and listed in `BACKEND_ONLY` (`commands.rs`; test `webview_cannot_touch_connector_state`) |
 | `connectors.call_log` | app-connectors | `connectors.rs` (`connector_call_log`) | `connectors.rs` (calls, `clear_connector_call_log`) | no |
 | `ui.beta.connectors` | ui-connectors | `connectors.rs` (`beta_enabled`: shows the feature, lets `turn_for_ask` offer tools; grants nothing); `ConnectorsSection.tsx` | `ConnectorsSection.tsx` | yes |

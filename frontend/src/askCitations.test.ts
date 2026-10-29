@@ -47,6 +47,7 @@ describe("layoutSentences", () => {
 const SOURCES: AskSource[] = [
   {
     meeting_id: "m1",
+    note_id: "n1",
     meeting_title: "Renewal review",
     started_at: null,
     label: "",
@@ -57,6 +58,7 @@ const SOURCES: AskSource[] = [
   },
   {
     meeting_id: "m2",
+    note_id: "n2",
     meeting_title: "Weekly 1:1",
     started_at: null,
     label: "",

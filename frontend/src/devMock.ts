@@ -34,11 +34,17 @@
                                      can't convert screen-walkthrough.mp4:
                                      that row shows its cause, the others
                                      convert; "Retry failed file" succeeds
-     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "none"
+     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "lost" | "device" | "disk" | "none"
                                    → with fotwMockRecording, the capture's
                                      warnings are the exact backend sentence
                                      for that case (recording bar chips;
-                                     "worst": two warnings + a 1 h timer)
+                                     "worst": two warnings + a 1 h timer;
+                                     "lost": audio lost on both sides;
+                                     "device": the output changed; "disk":
+                                     the mic's audio couldn't be saved)
+     fotwMockAudioLost = "1"       → Stop emits recording:audio_lost (1.2 s
+                                     mic, 0.4 s system): the "Part of the last
+                                     recording is missing" notice
      fotwMockNoAttendees = "1"     → Record starts with no attendees, as with
                                      no calendar event (speaker card, typed)
      fotwMockConsentReset = "1"    → no cloud consent recorded (as after the
@@ -930,6 +936,45 @@ const mockPrivacy: Record<
   { keep_local: boolean; participants_notified: boolean; audio_deleted_at: string | null }
 > = {};
 let mockRetentionDays: number | null = null;
+// Recording storage v2 (audio_store.rs). fotwMockCompress = working |
+// paused | done (default) picks the job state Settings › Storage shows;
+// fotwMockCompressNotice = "1" shows the one-time notice; fotwMockCompressed
+// = "1" makes the player need a Play-time rebuild (prepare_playback);
+// fotwMockCompressFailed = "1" ends the pass with one failed and one
+// skipped meeting. Sizes are made up.
+let mockCompressNoticeDismissed = false;
+const GB = 1024 * 1024 * 1024;
+function mockStorageReport() {
+  const state = mockFlag("fotwMockCompress") ?? "done";
+  const working = state === "working" || state === "paused";
+  const failed = mockFlag("fotwMockCompressFailed") === "1";
+  return {
+    audio_bytes: working ? 5.9 * GB : 2.8 * GB,
+    wav_bytes: working ? 4.5 * GB : 0,
+    imported_video_bytes: 3 * GB,
+    imported_video_files: 2,
+    screen_recording_bytes: 1.5 * GB,
+    screen_recording_files: 4,
+    other_attachment_bytes: 0.05 * GB,
+    compress: {
+      state,
+      paused_for: state === "paused" ? "recording" : null,
+      meetings_total: 12,
+      meetings_done: working ? 5 : 12,
+      meetings_skipped: failed && !working ? 1 : 0,
+      meetings_failed: failed && !working ? 1 : 0,
+      bytes_total: 8 * GB,
+      bytes_done: working ? 3.5 * GB : 8 * GB,
+      saved_bytes: working ? 2 * GB : 5.2 * GB,
+      kept_files: 0,
+      notice_pending: mockFlag("fotwMockCompressNotice") === "1" && !mockCompressNoticeDismissed,
+      last_error:
+        failed && !working
+          ? "not enough free disk space to compress recordings (120 MB free, about 380 MB needed)"
+          : null,
+    },
+  };
+}
 let mockBackfillPending = 3;
 function meetingPrivacy(meetingId: string) {
   const p = (mockPrivacy[meetingId] ??= {
@@ -1004,7 +1049,9 @@ const MOCK_VENDORS: Record<string, string> = {
    sources → model-turn frames → checking → the final checked frame), then
    resolves with the harness's answer shape. The question picks the case:
      "zebra" / "unicorn"        → not found (nothing matched)
-     "action" / "follow-up"     → proposals (an action item, a note insert)
+     "add … action items" /     → proposals (an action item, a note insert);
+     "add … to my note"           like the harness, only a request for a
+                                  change gets them
      "price" / "pricing"        → a flagged number (the spoken-number check)
      "crm" / "look up"          → with a cloud provider, the model first
                                   proposes a connector call (Acme CRM): its
@@ -1022,6 +1069,28 @@ const MOCK_ASK_EXTRA_ERRORS: Record<string, string> = {
   budget: "Ask used up its budget before the model answered.",
 };
 const mockAskCancelled = new Set<string>();
+/** Like the backend's approvals: what each id an answer handed out may do,
+ *  once (an answer's `insert_id`, or a proposal's `id`). */
+type MockApproval =
+  | {
+      kind: "insert";
+      id: string;
+      noteId: string;
+      markdown: string;
+      segmentIds: string[];
+      applied: boolean;
+    }
+  | {
+      kind: "action";
+      id: string;
+      meetingId: string;
+      text: string;
+      owner: string | null;
+      segmentIds: string[];
+      applied: boolean;
+    };
+const mockApprovals = new Map<string, MockApproval>();
+let mockApprovalSeq = 0;
 
 type MockSentence = {
   text: string;
@@ -1051,6 +1120,7 @@ function mockSource(meetingId: string, ids: string[], stale = false) {
   }
   return {
     meeting_id: meetingId,
+    note_id: meta.id,
     meeting_title: meta.title,
     started_at: meta.happened_at,
     lines,
@@ -1058,9 +1128,16 @@ function mockSource(meetingId: string, ids: string[], stale = false) {
   };
 }
 
-function mockAskAnswer(question: string, wide: boolean, local: boolean, stale: boolean) {
+function mockAskAnswer(
+  question: string,
+  wide: boolean,
+  local: boolean,
+  stale: boolean,
+  // the meeting a narrow scope points at (one fixture serves them all)
+  meetingId = "m1",
+) {
   const q = question.toLowerCase();
-  const sources = [mockSource("m1", ["t1", "t3", "t4", "t5"], stale)];
+  const sources = [mockSource(meetingId, ["t1", "t3", "t4", "t5"], stale)];
   if (wide) sources.push({ ...mockSource("m2", []), lines: [mockLine("t2")] });
   if (/zebra|unicorn/.test(q)) {
     return { status: "not_found", sentences: [] as MockSentence[], sources: [], floor: true };
@@ -1120,11 +1197,14 @@ function mockAskAnswer(question: string, wide: boolean, local: boolean, stale: b
 }
 
 function mockAskProposals(question: string) {
-  if (!/action|follow-up|follow up/.test(question.toLowerCase())) return [];
+  // Like the harness: only a request for a change gets proposals.
+  if (!/\b(add|create|make|put|insert)\b.*\b(action items?|follow-ups?|note)\b/i.test(question))
+    return [];
   const expires = new Date(Date.now() + 30 * 60_000).toISOString();
-  return [
+  const n = ++mockApprovalSeq;
+  const proposals = [
     {
-      id: "prop-sow",
+      id: `prop-sow-${n}`,
       tool: "add_action_item",
       gate: "review",
       meeting_id: "m1",
@@ -1136,7 +1216,7 @@ function mockAskProposals(question: string) {
       executed: false,
     },
     {
-      id: "prop-legal",
+      id: `prop-legal-${n}`,
       tool: "insert_into_note",
       gate: "review",
       meeting_id: "m1",
@@ -1147,16 +1227,77 @@ function mockAskProposals(question: string) {
       executed: false,
     },
   ];
+  for (const p of proposals) {
+    mockApprovals.set(
+      p.id,
+      p.tool === "insert_into_note"
+        ? {
+            kind: "insert",
+            id: p.id,
+            noteId: p.note_id,
+            markdown: p.markdown ?? "",
+            segmentIds: p.segment_ids,
+            applied: false,
+          }
+        : {
+            kind: "action",
+            id: p.id,
+            meetingId: p.meeting_id,
+            text: p.text ?? "",
+            owner: p.owner ?? null,
+            segmentIds: p.segment_ids,
+            applied: false,
+          },
+    );
+  }
+  return proposals;
+}
+
+/** Like the backend: an answer can be inserted into the note it was asked
+ *  about, as its sourced sentences that cite only that note's own lines.
+ *  Returns the id `insert_ask_answer` takes, or null. */
+function mockInsertId(
+  status: string,
+  sentences: MockSentence[],
+  sources: { meeting_id: string; lines: { segment_id: string }[] }[],
+  noteId: string | null,
+): string | null {
+  if (status !== "answered" || !noteId) return null;
+  const meetingId = noteMeta.find((m) => m.id === noteId)?.meeting_id;
+  if (!meetingId) return null;
+  // A cited line is the note's own when its source is the note's meeting.
+  const meetingOf = new Map<string, string>();
+  for (const src of sources) for (const l of src.lines) meetingOf.set(l.segment_id, src.meeting_id);
+  const own = (id: string) => meetingOf.get(id) === meetingId;
+  const kept = sentences.filter(
+    (s) => s.status === "sourced" && s.citations.length > 0 && s.citations.every(own),
+  );
+  if (kept.length === 0) return null;
+  const id = `mock-insert-${++mockApprovalSeq}`;
+  mockApprovals.set(id, {
+    kind: "insert",
+    id,
+    noteId,
+    markdown: kept
+      .map((x, i) => (i && x.text.startsWith("- ") ? "\n" : i ? " " : "") + x.text)
+      .join(""),
+    segmentIds: [...new Set(kept.flatMap((x) => x.citations))],
+    applied: false,
+  });
+  return id;
 }
 
 function mockAsk(args: Record<string, unknown>): Promise<unknown> {
   const forced = mockFlag("fotwMockAskError");
   const provider = llmSettings.provider;
   const info = llmSettings.providers.find((p) => p.id === provider);
-  const scope = (args.scope as { kind: string; id?: string } | null) ?? {
-    kind: "note",
-    id: String(args.noteId ?? ""),
-  };
+  // Like the backend: the note is the default scope and where an answer
+  // can be inserted; Ask on Home sends no note and an explicit scope.
+  const askedNote = typeof args.noteId === "string" && args.noteId.trim() ? args.noteId : null;
+  const askedScope = (args.scope as { kind: string; id?: string } | null) ?? null;
+  if (!askedScope && !askedNote) return Promise.reject("Ask needs a note or a scope to search.");
+  const scope = askedScope ?? { kind: "note", id: askedNote! };
+  const insertNote = askedNote ?? (scope.kind === "note" ? (scope.id ?? null) : null);
   const narrowNote = scope.kind === "note" ? scope.id : null;
   const meetingId = narrowNote
     ? (noteMeta.find((n) => n.id === narrowNote)?.meeting_id ?? null)
@@ -1182,7 +1323,7 @@ function mockAsk(args: Record<string, unknown>): Promise<unknown> {
   const wide = scope.kind === "all" || scope.kind === "folder" || scope.kind === "person";
   const stale = mockFlag("fotwMockAskStale") === "1";
   const forcedStatus = mockFlag("fotwMockAskReply");
-  const shaped = mockAskAnswer(question, wide, local, stale);
+  const shaped = mockAskAnswer(question, wide, local, stale, meetingId ?? "m1");
   const step = mockFlag("fotwMockAskSlow") === "1" ? 450 : 90;
   const tier = local ? "S" : "C";
   const keptLocalOut = wide && !local ? 2 : 0;
@@ -1274,9 +1415,10 @@ function mockAsk(args: Record<string, unknown>): Promise<unknown> {
           sources: status === "answered" || status === "unverified" ? shaped.sources : [],
           proposals: status === "answered" ? mockAskProposals(question) : [],
           refusals:
-            status === "answered" && /action|follow/.test(question.toLowerCase())
+            status === "answered" && /\b(add|create|make)\b.*action items?/i.test(question)
               ? [{ tool: "add_action_item", reason: "unknown_owner" }]
               : [],
+          insert_id: mockInsertId(status, sentences as MockSentence[], shaped.sources, insertNote),
           trace: {
             tier,
             scope: scope.kind,
@@ -2428,6 +2570,15 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     }
     case "live_status":
       return null;
+    case "prepare_playback":
+      if (mockFlag("fotwMockCompressed") === "1" && !args.build)
+        return { path: null, needs_build: true };
+      return { path: "/mock/recording.playback.wav", needs_build: false };
+    case "storage_report":
+      return mockStorageReport();
+    case "dismiss_compress_notice":
+      mockCompressNoticeDismissed = true;
+      return null;
     case "get_transcript":
       // staged import: no transcript until the mock pipeline finishes
       if (args.meetingId === IMPORT_MEETING_ID && !mockImportDone) return null;
@@ -2643,35 +2794,48 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "ask_meeting":
       return mockAsk(args);
     case "cancel_ask":
+      // Like the backend: stops the running answer with this id; an id
+      // that isn't running does nothing.
       mockAskCancelled.add(String(args.askId));
       return null;
+    case "list_ask_people":
+      // Everyone the router can match (attendees, speakers, item owners).
+      return ["Dana Osei", "Marc Reyes", "Priya N.", "You"];
     case "insert_ask_answer": {
-      // Like the backend: an AI block citing the given lines (links dropped).
-      const md = String(args.markdown ?? "")
-        .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
-        .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-        .trim();
-      if (!md) throw "nothing to insert";
-      blocks.push({
-        id: `ask-${blocks.length + 1}`,
-        origin: { kind: "ai", source_segment_ids: (args.segmentIds as string[]) ?? [] },
-        markdown: md,
-      });
-      return JSON.parse(JSON.stringify(note(String(args.noteId ?? "n1"))));
+      // Like the backend: only an id it handed out (an answer's insert_id
+      // or an insert proposal's id), applied once; a second click returns
+      // the note unchanged.
+      const held = mockApprovals.get(String(args.proposalId));
+      if (!held || held.kind !== "insert")
+        throw "This suggestion has expired. Ask again to get a fresh one.";
+      if (!held.applied) {
+        blocks.push({
+          id: `ask-${blocks.length + 1}`,
+          origin: { kind: "ai", source_segment_ids: held.segmentIds },
+          markdown: held.markdown,
+        });
+        held.applied = true;
+      }
+      return JSON.parse(JSON.stringify(note(held.noteId)));
     }
-    case "add_action_item":
+    case "add_action_item": {
+      const held = mockApprovals.get(String(args.proposalId));
+      if (!held || held.kind !== "action")
+        throw "This suggestion has expired. Ask again to get a fresh one.";
+      held.applied = true;
       return {
-        id: `item-${Date.now()}`,
-        meeting_id: String(args.meetingId),
+        id: `item-${held.id}`,
+        meeting_id: held.meetingId,
         kind: "action_item",
-        text: String(args.text),
-        owner: (args.owner as string | null) ?? null,
+        text: held.text,
+        owner: held.owner,
         status: "open",
         speaker_key: null,
-        segment_ids: (args.segmentIds as string[]) ?? [],
+        segment_ids: held.segmentIds,
         created_at: new Date().toISOString(),
         extracted_by: "user:ask",
       };
+    }
     case "test_llm_connection": {
       const refused = mockConsentRefusal();
       if (refused) throw refused;
@@ -2912,6 +3076,16 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       // the capture ends; the meeting comes back like the backend's
       mockRecPaused = false;
       if (typeof localStorage !== "undefined") localStorage.removeItem("fotwMockRecording");
+      // fotwMockAudioLost=1: the capture had gaps (recording.rs
+      // record_capture_health emits this right before returning)
+      if (mockFlag("fotwMockAudioLost") === "1") {
+        mockEmit("recording:audio_lost", {
+          meeting_id: "m1",
+          note_id: "n1",
+          mic_lost_ms: 1200,
+          system_lost_ms: 400,
+        });
+      }
       return meeting("n1");
     default:
       return null;
@@ -2989,6 +3163,18 @@ const MOCK_REC_WARNINGS: Record<string, string[]> = {
   ],
   macos: [
     "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall. If it already shows as allowed, the grant belongs to a previously installed build: remove Fly on the Wall from that list with the − button and re-add it (or run `tccutil reset ScreenCapture com.flyonthewall.app` in Terminal), then relaunch.",
+  ],
+  // device_lost_warning / write_failed_warning (crates/fly-audio/src/cpal_backend.rs)
+  device: [
+    "The sound output changed or disconnected — the other participants may be missing from the rest of this recording. Stop and record again to follow the current output.",
+  ],
+  disk: [
+    "Part of your microphone audio couldn't be saved — the disk may be full or unavailable. Free up space; the recording keeps trying.",
+  ],
+  // lost_audio_warning (crates/fly-audio/src/cpal_backend.rs)
+  lost: [
+    "Your microphone has gaps: 1.2 s was lost because the computer was too busy (most recently at 2:31). The rest is still recording — closing heavy apps can help.",
+    "The other participants' audio has gaps: 0.4 s was lost because the computer was too busy (most recently at 2:31). The rest is still recording — closing heavy apps can help.",
   ],
 };
 function mockRecordingQa() {

@@ -187,6 +187,8 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                     // start a batch only to abandon it when the pass begins,
                     // and polish would re-chunk the meeting anyway.
                     state.embed_notify.notify_one();
+                    // Transcript final → its recording can be compressed.
+                    state.audio_store.nudge();
                     emit_final(&on_stage, &meeting_id, None)
                 }
                 Tick::Retrying {

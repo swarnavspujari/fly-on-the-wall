@@ -53,11 +53,13 @@ import type {
   NoteSummary,
   OllamaStatus,
   PolishResult,
+  PlaybackSource,
   PrivacySettings,
   RecordingStatus,
   ReDiarizeOutcome,
   SearchHit,
   SpeakerUndoState,
+  StorageReport,
   SweepReport,
   SystemAudioPreflight,
   Template,
@@ -140,6 +142,14 @@ export const api = {
       "live_status",
       { meetingId },
     ),
+  /** The file the player streams. `build` rebuilds a compressed recording's
+   *  playback mix (on Play); without it, opening a note never does work. */
+  preparePlayback: (meetingId: string, build: boolean) =>
+    invoke<PlaybackSource | null>("prepare_playback", { meetingId, build }),
+  /** Settings › Storage: sizes by kind plus the compression job's status. */
+  storageReport: () => invoke<StorageReport>("storage_report"),
+  /** The one-time "recordings compressed" notice was seen. */
+  dismissCompressNotice: () => invoke<void>("dismiss_compress_notice"),
   // Set the meeting's start date/time (RFC 3339 UTC). Length is preserved
   // (ended_at shifts); the meeting folder + manifest re-mirror the date.
   updateMeetingStartedAt: (meetingId: string, startedAt: string) =>
@@ -190,25 +200,26 @@ export const api = {
   // sourced/unsourced/flagged status, sources, proposals, trace). Scope
   // defaults to the note; `askId` streams "ask:event" (stage, sources,
   // sanitized frames) for that id.
-  // `noteId` is only the default scope; global Ask (no note open) passes ""
-  // with an explicit scope.
-  askMeeting: (noteId: string, history: AskMessage[], scope?: AskScope, askId?: string) =>
+  // `noteId` is the default scope and the note an answer can be inserted
+  // into; Ask on Home passes null with an explicit scope.
+  askMeeting: (noteId: string | null, history: AskMessage[], scope?: AskScope, askId?: string) =>
     invoke<AskReply>("ask_meeting", {
       noteId,
       history,
       scope: scope ?? null,
       askId: askId ?? null,
     }),
-  // Stop an answer that is still being written (Ask's Stop button). Requested
-  // from the harness (3.4); until the backend has it, the call fails and Stop
-  // only drops the answer in the UI.
+  // Stop an answer that is still being written (the Ask sheet's Stop):
+  // the backend drops the request, proposes nothing, and askMeeting rejects
+  // with "Ask was cancelled.". An id that isn't running does nothing.
   cancelAsk: (askId: string) => invoke<void>("cancel_ask", { askId }),
-  // Approved Ask results. Each validates again: links removed, citations
-  // kept only if they belong to that note / meeting.
-  insertAskAnswer: (noteId: string, markdown: string, segmentIds: string[]) =>
-    invoke<Note>("insert_ask_answer", { noteId, markdown, segmentIds }),
-  addActionItem: (meetingId: string, text: string, owner: string | null, segmentIds: string[]) =>
-    invoke<MeetingItem>("add_action_item", { meetingId, text, owner, segmentIds }),
+  // The composer's `@` suggestions (people the router can match).
+  listAskPeople: () => invoke<string[]>("list_ask_people"),
+  // Approve an Ask result by the id `askMeeting` returned (an answer's
+  // `insert_id`, or a proposal's `id`). The backend applies what it
+  // validated, validates it again, and a second click adds nothing.
+  insertAskAnswer: (proposalId: string) => invoke<Note>("insert_ask_answer", { proposalId }),
+  addActionItem: (proposalId: string) => invoke<MeetingItem>("add_action_item", { proposalId }),
   listTemplates: () => invoke<Template[]>("list_templates"),
   saveTemplate: (template: Template) => invoke<void>("save_template", { template }),
   deleteTemplate: (id: string) => invoke<void>("delete_template", { id }),

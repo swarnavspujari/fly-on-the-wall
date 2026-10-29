@@ -351,7 +351,7 @@ export function useAskChat(noteId: string | null, { hasMeeting = true } = {}): A
     // typed meanwhile, or when a quick prompt was clicked).
     setInput((cur) => (cur.trim() === content ? "" : cur));
     api
-      .askMeeting(noteId ?? "", history, asked.scope, id)
+      .askMeeting(noteId, history, asked.scope, id)
       .then(
         (reply) => {
           if (mine !== seq.current) return;
@@ -434,13 +434,15 @@ export function useAskChat(noteId: string | null, { hasMeeting = true } = {}): A
   };
 }
 
-/** What @ can pick, read once when you first type @: recent meetings and
- *  folders from the backend, people from what's on screen. */
+/** What @ can pick, read once when you first type @: recent meetings,
+ *  folders and everyone the router can match (`list_ask_people`) from the
+ *  backend, plus the open meeting's names (they show before the list loads,
+ *  and cover a name too new for the backend's two-minute cache). */
 function useMentionCatalog(people: string[]): {
   catalog: MentionCatalog;
   load: () => void;
 } {
-  const [loaded, setLoaded] = useState<Omit<MentionCatalog, "people"> | null>(null);
+  const [loaded, setLoaded] = useState<MentionCatalog | null>(null);
   const started = useRef(false);
   const load = useCallback(() => {
     if (started.current) return;
@@ -448,17 +450,24 @@ function useMentionCatalog(people: string[]): {
     void Promise.all([
       api.listRecentNotes(200).catch(() => []),
       api.listFolders().catch(() => []),
-    ]).then(([notes, folders]) =>
+      api.listAskPeople().catch(() => [] as string[]),
+    ]).then(([notes, folders, known]) =>
       setLoaded({
         meetings: notes
           .filter((n) => n.meeting_id)
           .map((n) => ({ id: n.id, title: n.title.trim() || "Untitled" })),
         folders: folders.map((f) => ({ id: f.id, name: f.name })),
+        people: known,
       }),
     );
   }, []);
+  // mentionOptions drops duplicates (by case), so on-screen names first.
   const catalog = useMemo(
-    () => ({ meetings: loaded?.meetings ?? [], folders: loaded?.folders ?? [], people }),
+    () => ({
+      meetings: loaded?.meetings ?? [],
+      folders: loaded?.folders ?? [],
+      people: [...people, ...(loaded?.people ?? [])],
+    }),
     [loaded, people],
   );
   return { catalog, load };

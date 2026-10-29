@@ -39,6 +39,7 @@ const reply = (text: string, onDevice = true, extra: Partial<AskReply> = {}): As
   refusals: [],
   trace_lines: [],
   on_device: onDevice,
+  insert_id: null,
   ...extra,
 });
 
@@ -225,6 +226,7 @@ beforeEach(() => {
   vi.spyOn(api, "listRecentNotes").mockResolvedValue(NOTES);
   vi.spyOn(api, "listFolders").mockResolvedValue(FOLDERS);
   vi.spyOn(api, "pendingConnectorCalls").mockResolvedValue([]);
+  vi.spyOn(api, "listAskPeople").mockResolvedValue(["Marc Reyes"]);
 });
 
 afterEach(() => {
@@ -272,6 +274,7 @@ const consent = async (yes: boolean) => {
 /** One meeting's cited lines, as the harness lists them. */
 const SOURCE_M1 = {
   meeting_id: "m1",
+  note_id: "n1",
   meeting_title: "Renewal review",
   started_at: null,
   label: "Renewal review",
@@ -391,6 +394,7 @@ describe("Ask composer and sheet", () => {
       reply("Send the SOW today.", true, {
         sentences: [{ text: "Send the SOW today.", citations: ["a2"], status: "sourced" }],
         sources: [SOURCE_M1],
+        insert_id: "ins-1",
       }),
     );
     const updated = { id: "n1" } as Note;
@@ -405,11 +409,33 @@ describe("Ask composer and sheet", () => {
     expect(sheet()!.textContent).toContain("Ask only changes your note when you click this.");
     act(() => button("Insert into note")!.click());
     await flush();
-    expect(insert).toHaveBeenCalledWith("n1", "Send the SOW today.", ["a2"]);
+    // approved by the id the answer carried; the backend inserts what it held
+    expect(insert).toHaveBeenCalledWith("ins-1");
     expect(onNoteChanged).toHaveBeenCalledWith(updated);
-    expect(sheet()!.textContent).toContain("Added to your note as an AI block with its sources");
+    expect(sheet()!.textContent).toContain("Added to your note as an AI block, with its sources");
     expect(button("Insert into note")).toBeUndefined();
     expect(document.activeElement).toBe(input());
+  });
+
+  it("offers no Insert when nothing is backed by this note's own lines", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue(
+      reply("Dana owns pricing.", true, {
+        sentences: [{ text: "Dana owns pricing.", citations: ["a1"], status: "sourced" }],
+        sources: [{ ...SOURCE_M1, meeting_id: "m9", note_id: "n9" }],
+        insert_id: null,
+      }),
+    );
+    const insert = vi.spyOn(api, "insertAskAnswer");
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("Who owns pricing?");
+    key(input(), "Enter");
+    await flush();
+    expect(button("Insert into note")).toBeUndefined();
+    expect(sheet()!.querySelector('[data-testid="ask-no-insert"]')!.textContent).toBe(
+      "Nothing here is backed by this note's own lines, so there's nothing to insert.",
+    );
+    expect(insert).not.toHaveBeenCalled();
   });
 
   it("shows a human error naming the provider it went to, and retries", async () => {
@@ -1002,10 +1028,18 @@ describe("Ask harness answers", () => {
     );
     act(() => moved.click());
     await flush();
-    expect(onOpenSource).toHaveBeenLastCalledWith({ meetingId: "m1", segmentIds: ["a2"] });
+    expect(onOpenSource).toHaveBeenLastCalledWith({
+      meetingId: "m1",
+      noteId: "n1",
+      segmentIds: ["a2"],
+    });
     key(ok, "Enter");
     await flush();
-    expect(onOpenSource).toHaveBeenLastCalledWith({ meetingId: "m1", segmentIds: ["a1"] });
+    expect(onOpenSource).toHaveBeenLastCalledWith({
+      meetingId: "m1",
+      noteId: "n1",
+      segmentIds: ["a1"],
+    });
   });
 
   it("the trace pill starts collapsed, lists the steps, and holds no meeting text", async () => {
@@ -1141,6 +1175,7 @@ describe("Ask harness answers", () => {
         refusals: [
           { tool: "add_action_item", reason: "unknown_owner" },
           { tool: "add_action_item", reason: "duplicate" },
+          { tool: "insert_into_note", reason: "not_requested" },
         ],
       }),
     );
@@ -1171,7 +1206,7 @@ describe("Ask harness answers", () => {
     });
     await flush();
     expect(add).toHaveBeenCalledTimes(1);
-    expect(add).toHaveBeenCalledWith("m1", "Send the SOW", "You", ["a2"]);
+    expect(add).toHaveBeenCalledWith("p1");
     expect(cards()[0].querySelector("button")!.textContent).toBe("Adding…");
     expect(cards()[0].querySelector("button")!.disabled).toBe(true);
     await act(async () => done());
@@ -1180,12 +1215,12 @@ describe("Ask harness answers", () => {
     // the note insert
     act(() => cardButton(1, "Insert into note").click());
     await flush();
-    expect(insert).toHaveBeenCalledWith("n1", "## Next\n- Send the SOW", ["a2"]);
+    expect(insert).toHaveBeenCalledWith("p2");
     expect(onNoteChanged).toHaveBeenCalledWith(updated);
     // expired: can't be approved
     expect(cards()[2].querySelector("button")!.disabled).toBe(true);
     expect(cards()[2].textContent).toContain("This suggestion expired.");
-    // a refusal is said, a duplicate isn't
+    // a refusal is said; a duplicate or an unasked-for change isn't
     expect(sheet()!.querySelector('[data-testid="ask-refusals"]')!.textContent).toBe(
       "Ask suggested an action item but didn't offer it: its owner isn't someone in that meeting.",
     );
@@ -1372,8 +1407,9 @@ describe("Ask harness answers", () => {
     type("Who owns pricing?");
     key(input(), "Enter");
     await flush();
+    // no note: Home asks with an explicit scope only
     expect(ask).toHaveBeenCalledWith(
-      "",
+      null,
       [{ role: "user", content: "Who owns pricing?" }],
       { kind: "all" },
       expect.any(String),

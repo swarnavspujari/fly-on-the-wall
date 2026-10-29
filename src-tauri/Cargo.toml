@@ -26,6 +26,7 @@ fly-calendar.workspace = true
 fly-capture-screen.workspace = true
 fly-storage.workspace = true
 fly-secrets.workspace = true
+fly-ask.workspace = true
 fly-mcp-client.workspace = true
 async-trait.workspace = true
 serde.workspace = true
@@ -64,6 +65,32 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(any(windows, target_os = "macos", target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
 rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
 
+# Recording compression runs on a background-priority thread (CPU + I/O).
+# Same windows version fly-audio already builds; only a feature is added.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Threading"] }
+# On macOS (QoS class) and Linux (per-thread nice): already in the tree.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+# the contention bench's marker tone; not in the shipped app
+fly-audio = { workspace = true, features = ["testtone"] }
 tempfile = "3"
 async-trait.workspace = true
+
+# tests/ask_live.rs (ignored) runs the Ask harness on the evals' fixture
+# corpus and records replays with their RecordingProvider. Behind a feature
+# that's off by default, so neither the app nor its CI test build links the
+# evals (an evals API change can't break them):
+#   cargo test -p fly-app --features ask-live --test ask_live -- --ignored --nocapture
+[features]
+ask-live = ["dep:fly-evals"]
+
+[dependencies.fly-evals]
+path = "../evals/runner"
+optional = true
+
+[[test]]
+name = "ask_live"
+required-features = ["ask-live"]

@@ -74,12 +74,57 @@ export interface AppInfo {
 }
 
 export interface RecordingRef {
+  /** WAV, or lossless FLAC once the recording is compressed. */
   mic_path: string | null;
   system_path: string | null;
+  /** 16 kHz ASR mixdown. null on a compressed recording (it regenerates). */
   mixed_path: string | null;
-  /** Full-quality playback mix; null on recordings made before it existed. */
+  /** Full-quality playback mix; null on recordings made before it existed
+   *  and on compressed recordings (ask prepare_playback for the file). */
   playback_path?: string | null;
   duration_ms: number;
+}
+
+/** prepare_playback: the file the player streams (absolute path). */
+export interface PlaybackSource {
+  /** null until a compressed recording's mix is rebuilt (needs_build). */
+  path: string | null;
+  /** Call prepare_playback again with build=true (on Play). */
+  needs_build: boolean;
+}
+
+/** The background "Compress recordings" job (storage:compress event). */
+export interface CompressStatus {
+  state: "waiting" | "working" | "paused" | "done" | "stopped" | "";
+  paused_for: "recording" | "transcribing" | "ai" | null;
+  meetings_total: number;
+  meetings_done: number;
+  /** Of the finished ones, this pass: left for a later pass (in use, just
+   * played), and failed (originals kept; the latest reason is last_error). */
+  meetings_skipped: number;
+  meetings_failed: number;
+  bytes_total: number;
+  bytes_done: number;
+  /** Freed so far, across every pass. */
+  saved_bytes: number;
+  /** WAVs left as they are (not in the layout capture writes). */
+  kept_files: number;
+  /** The one-time "recordings compressed" notice is due. */
+  notice_pending: boolean;
+  last_error: string | null;
+}
+
+/** Settings › Storage: media in the data folder, by kind. */
+export interface StorageReport {
+  audio_bytes: number;
+  /** The part of audio_bytes still stored as uncompressed WAV. */
+  wav_bytes: number;
+  imported_video_bytes: number;
+  imported_video_files: number;
+  screen_recording_bytes: number;
+  screen_recording_files: number;
+  other_attachment_bytes: number;
+  compress: CompressStatus;
 }
 
 /** One participant besides the user. Calendar-seeded attendees start with
@@ -351,6 +396,8 @@ export interface AskSourceLine {
 
 export interface AskSource {
   meeting_id: string;
+  /** The note that holds the meeting. */
+  note_id: string;
   meeting_title: string;
   started_at: string | null;
   lines: AskSourceLine[];
@@ -392,6 +439,10 @@ export interface AskReply {
   /** The typed run log (ids, counts and enum codes like "reach_cloud").
    *  The UI reads only `reach`, `provider` and `prefetch`. */
   run_log?: AskRunLog;
+  /** The id `insert_ask_answer` takes to insert this answer: its sourced
+   *  sentences that cite only the asked-about note's own lines. null when
+   *  there are none (or no note was asked about). */
+  insert_id: string | null;
 }
 
 /** A proposal the harness refused (fly-ask `ProposalRefusal`). */
@@ -408,7 +459,10 @@ export interface AskRefusal {
     | "unknown_owner"
     | "too_long"
     | "duplicate"
-    | "blocked";
+    | "blocked"
+    | "injected_instruction"
+    | "sealed"
+    | "not_requested";
 }
 
 /** fly-ask `Tier`: S answers from what the prefetch found; M and C may
@@ -430,8 +484,8 @@ export interface AskTrace {
   context_truncated: boolean;
   floor_not_found: boolean;
   budget_forced: boolean;
-  /** Requested from the harness (3.4): connectors were off for this question
-   *  because its scope holds a Keep-local meeting. */
+  /** Connectors were available but off for this question: its explicit
+   *  scope holds a Keep-local meeting. (Optional for older replies.) */
   connectors_off_keep_local?: boolean;
 }
 

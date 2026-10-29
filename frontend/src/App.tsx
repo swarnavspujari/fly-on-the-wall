@@ -605,8 +605,10 @@ export default function App() {
     [isDeleted],
   );
 
-  const openSourceAt = async (meetingId: string, segmentIds: string[]) => {
-    let noteId = notesRef.current.find((n) => n.meeting_id === meetingId)?.id;
+  const openSourceAt = async (meetingId: string, segmentIds: string[], sourceNoteId?: string) => {
+    // The source names its note (any recording of it); older replies
+    // didn't, so fall back to the notes' latest meetings.
+    let noteId = sourceNoteId || notesRef.current.find((n) => n.meeting_id === meetingId)?.id;
     if (!noteId) {
       const recent = await api.listRecentNotes(500).catch(() => [] as NoteSummary[]);
       noteId = recent.find((n) => n.meeting_id === meetingId)?.id;
@@ -1110,7 +1112,9 @@ export default function App() {
             }}
             onRelabel={(k, l) => void relabel(k, l)}
             onEditSegment={(id, text) => void editSegment(id, text)}
-            onOpenSourceElsewhere={(meetingId, ids) => void openSourceAt(meetingId, ids)}
+            onOpenSourceElsewhere={(meetingId, ids, noteId) =>
+              void openSourceAt(meetingId, ids, noteId)
+            }
             pendingZoom={pendingZoom}
             onPendingZoomDone={clearPendingZoom}
           />
@@ -1134,7 +1138,9 @@ export default function App() {
             />
             <GlobalAsk
               chat={globalAsk}
-              onOpenSource={({ meetingId, segmentIds }) => void openSourceAt(meetingId, segmentIds)}
+              onOpenSource={({ meetingId, noteId, segmentIds }) =>
+                void openSourceAt(meetingId, segmentIds, noteId)
+              }
             />
           </div>
         )}
