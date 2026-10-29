@@ -635,3 +635,26 @@ describe("App: the seeded failed note (dev mock)", () => {
     expect(host!.textContent).not.toContain("whisper-cli exited with status 3221225477");
   });
 });
+
+describe("App: editing a meeting's date", () => {
+  it("re-reads the open note, whose in-place attachments may have moved", async () => {
+    await boot();
+    await click(rowFor("Acme — renewal review"));
+    await settle(100);
+    await click(
+      Array.from(host!.querySelectorAll("button")).find((b) =>
+        b.title.startsWith("Edit meeting date"),
+      ),
+    );
+    await click(button("Next"));
+    const before = calls.length;
+    await click(button("Save"));
+    await settle(100);
+    const after = calls.slice(before).map((c) => c.cmd);
+    const saved = after.indexOf("update_meeting_started_at");
+    expect(saved).toBeGreaterThanOrEqual(0);
+    expect(
+      calls.slice(before + saved).some((c) => c.cmd === "get_note" && c.args.id === "n1"),
+    ).toBe(true);
+  });
+});
