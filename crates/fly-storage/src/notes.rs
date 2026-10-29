@@ -197,7 +197,8 @@ impl Storage {
         // The manifests carry the title too — including folders that kept
         // their old name (busy, or a transcription running).
         self.refresh_manifests_for_notes(&[id.to_string()]);
-        Ok(note)
+        // re-read: a folder rename moves attachments listed in place there
+        self.get_note(id)
     }
 
     pub fn update_note_scratchpad(&self, id: &str, scratchpad: &str) -> Result<Note> {

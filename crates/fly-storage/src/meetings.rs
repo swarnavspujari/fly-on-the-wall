@@ -330,6 +330,37 @@ impl Storage {
         Ok(dir)
     }
 
+    /// Point the note's attachments that sit directly in `old_rel` (a renamed
+    /// meeting folder) at `new_rel`. Attachments aren't in the note's
+    /// mirrors, so only the row changes.
+    fn rebase_note_attachments(&self, note_id: &str, old_rel: &str, new_rel: &str) -> Result<()> {
+        let Ok(note) = self.get_note(note_id) else {
+            return Ok(());
+        };
+        let prefix = format!("{old_rel}/");
+        let mut changed = false;
+        let attachments: Vec<fly_core::Attachment> = note
+            .attachments
+            .into_iter()
+            .map(|mut a| {
+                if let Some(file) = a.rel_path.strip_prefix(&prefix) {
+                    if !file.is_empty() && !file.contains('/') {
+                        a.rel_path = format!("{new_rel}/{file}");
+                        changed = true;
+                    }
+                }
+                a
+            })
+            .collect();
+        if changed {
+            self.conn.execute(
+                "UPDATE notes SET attachments_json = ?1 WHERE id = ?2",
+                (serde_json::to_string(&attachments)?, note_id),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Title-edit policy for meeting folders: renaming a note renames the
     /// folders of its meetings too — best-effort. A folder currently in use
     /// (active capture or a pipeline holding files open) fails to rename on
@@ -417,6 +448,9 @@ impl Storage {
                 "UPDATE meetings SET recording_json = ?1 WHERE id = ?2",
                 (serde_json::to_string(&updated)?, &meeting.id),
             )?;
+            // Files the note lists in place from this folder (imported
+            // videos) move with it.
+            self.rebase_note_attachments(&meeting.note_id, &old_rel, &new_rel)?;
             // The manifest inside the folder still carries the old relative
             // paths — rewrite it, or a post-rename resurrection resolves to
             // the folder's old (gone) name. Best-effort like the rename.
@@ -762,6 +796,71 @@ mod tests {
         assert!(!rec_dir.exists());
         let moved = s.get_meeting(&meeting.id).unwrap().recording.unwrap();
         assert!(dir.path().join(moved.mixed_path.unwrap()).is_file());
+    }
+
+    /// A video listed in place from the meeting folder (an import) follows
+    /// the folder when a title or date edit renames it; copied attachments
+    /// under `attachments/` are untouched, and the title edit returns the
+    /// note with the new paths.
+    #[test]
+    fn folder_rename_moves_attachments_listed_in_place() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("Design review", None).unwrap();
+        let meeting = s.create_meeting("Design review", &note.id, &[]).unwrap();
+        let rec_dir = s
+            .allocate_meeting_dir("Design review", meeting.started_at)
+            .unwrap();
+        let old_rel = format!(
+            "recordings/{}",
+            rec_dir.file_name().unwrap().to_string_lossy()
+        );
+        std::fs::write(rec_dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        std::fs::write(rec_dir.join("screen share.mp4"), b"ftyp").unwrap();
+        s.end_meeting(
+            &meeting.id,
+            &RecordingRef {
+                mic_path: None,
+                system_path: None,
+                mixed_path: Some(format!("{old_rel}/recording.mixed.wav")),
+                playback_path: None,
+                duration_ms: 1_000,
+            },
+        )
+        .unwrap();
+        s.add_attachment_in_place(&note.id, &format!("{old_rel}/screen share.mp4"))
+            .unwrap();
+        let doc = dir.path().join("agenda.txt");
+        std::fs::write(&doc, b"agenda").unwrap();
+        let copied = s.add_attachment(&note.id, &doc).unwrap().attachments[1]
+            .rel_path
+            .clone();
+
+        let renamed = s.update_note_title(&note.id, "Launch review").unwrap();
+        let video = &renamed.attachments[0].rel_path;
+        assert_ne!(video, &format!("{old_rel}/screen share.mp4"));
+        assert!(video.ends_with("/screen share.mp4"), "{video}");
+        assert!(dir.path().join(video).is_file(), "{video}");
+        assert_eq!(renamed.attachments[1].rel_path, copied);
+        assert_eq!(
+            s.get_note(&note.id).unwrap().attachments,
+            renamed.attachments
+        );
+
+        // a date edit renames the folder again; the video follows
+        s.set_meeting_started_at(&meeting.id, meeting.started_at - chrono::Duration::days(3))
+            .unwrap();
+        let after = s.get_note(&note.id).unwrap().attachments;
+        assert_ne!(&after[0].rel_path, video);
+        assert!(dir.path().join(&after[0].rel_path).is_file());
+        let folder = s
+            .get_meeting(&meeting.id)
+            .unwrap()
+            .recording
+            .as_ref()
+            .and_then(super::recording_dir_rel)
+            .unwrap();
+        assert_eq!(after[0].rel_path, format!("{folder}/screen share.mp4"));
+        assert_eq!(after[1].rel_path, copied);
     }
 
     /// A title rename must also rewrite the manifest inside the renamed
