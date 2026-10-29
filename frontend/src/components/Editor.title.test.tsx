@@ -6,7 +6,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { ImportFile, ImportStaged, Note } from "../types";
+import type { ImportFile, ImportStaged, Meeting, Note } from "../types";
 import Editor from "./Editor";
 import { ConfirmProvider } from "./confirm";
 
@@ -37,12 +37,20 @@ const file = (id: string, file_name: string, over: Partial<ImportFile> = {}): Im
   ...over,
 });
 
-function Harness({ start, staged }: { start: Note; staged: ImportStaged | null }) {
+function Harness({
+  start,
+  staged,
+  meeting = null,
+}: {
+  start: Note;
+  staged: ImportStaged | null;
+  meeting?: Meeting | null;
+}) {
   const [current, setCurrent] = useState(start);
   return (
     <Editor
       note={current}
-      meeting={null}
+      meeting={meeting}
       meetings={[]}
       onSelectMeeting={noop}
       transcript={null}
@@ -96,14 +104,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function mount(start: Note, staged: ImportStaged | null = null) {
+async function mount(
+  start: Note,
+  staged: ImportStaged | null = null,
+  meeting: Meeting | null = null,
+) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
   act(() =>
     root!.render(
       <ConfirmProvider>
-        <Harness start={start} staged={staged} />
+        <Harness start={start} staged={staged} meeting={meeting} />
       </ConfirmProvider>,
     ),
   );
@@ -133,6 +145,15 @@ describe("Editor › title", () => {
       vi.advanceTimersByTime(2000);
     });
     expect(save).toHaveBeenCalledWith("nt", "B");
+  });
+
+  it('typing that passes through "Untitled" stays on screen', async () => {
+    vi.spyOn(api, "updateNoteTitle").mockImplementation(async (_id, t) => note(t));
+    await mount(note("Untitled"));
+    for (const step of ["U", "Untitle", "Untitled", "Untitled ", "Untitled 2"]) {
+      typeInto(titleInput(), step);
+      expect(titleInput().value).toBe(step);
+    }
   });
 
   it("a real title is shown as text", async () => {
@@ -182,5 +203,41 @@ describe("Editor › title", () => {
       host!.querySelector<HTMLElement>('button[aria-label="Remove Kickoff part 1.m4a"]')!.click();
     });
     expect(titleInput().value).toBe("Customer kickoff");
+  });
+
+  it("after the files are joined into the recording, the title stays put", async () => {
+    const save = vi.spyOn(api, "updateNoteTitle").mockImplementation(async (_id, t) => note(t));
+    const staged: ImportStaged = {
+      note_id: "nt",
+      meeting_id: "mt",
+      files: [
+        file("a", "Kickoff part 1.m4a", { convert_error: "Its audio couldn't be converted." }),
+        file("b", "Kickoff part 2.m4a"),
+      ],
+      boundaries_ms: [],
+      started: false,
+    };
+    const joined: Meeting = {
+      id: "mt",
+      title: "Kickoff part 1",
+      note_id: "nt",
+      attendees: [],
+      attendees_confirmed: false,
+      started_at: "2026-10-27T10:00:00Z",
+      ended_at: "2026-10-27T10:30:00Z",
+      recording: {
+        mic_path: null,
+        system_path: null,
+        mixed_path: "recordings/imp/recording.mixed.wav",
+        playback_path: null,
+        duration_ms: 60_000,
+      },
+    };
+    await mount(note("Kickoff part 1"), staged, joined);
+    await act(async () => {
+      host!.querySelector<HTMLElement>('button[aria-label="Remove Kickoff part 1.m4a"]')!.click();
+    });
+    expect(titleInput().value).toBe("Kickoff part 1");
+    expect(save).not.toHaveBeenCalled();
   });
 });

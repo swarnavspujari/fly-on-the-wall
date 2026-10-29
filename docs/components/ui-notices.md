@@ -32,7 +32,6 @@ Every app-wide notice in one bottom-right corner: a failed user action, the macO
 | `UpdateBanner` | `UpdateBanner.tsx:15` | `updater: Updater`. |
 
 ### Tauri commands
-- The skipped-cleanup notice reads "Review and allow" (consent missing), "Run them now", or, while the saved cloud provider has no API key, "Add a key", which calls the `onOpenLlmKeySettings` prop (App opens Settings at the key field).
 - Calls through `useConsentSkips` (mounted by `AppNotices.tsx:59`): `consent_skipped_meetings`, `get_llm_settings`, `get_app_setting`, `retry_consent_skipped`, and `request_cloud_consent` (the backend asks in a native dialog and records a yes).
 - `RemindNoticeRow`: `get_app_setting`, `set_app_setting` for `ui.recording.remind_notice` (`RemindNoticeRow.tsx:13-32`).
 - `RestartRequired`: `delete_all_data` on "Try again" (`RestartRequired.tsx:75`); `relaunch()` from `@tauri-apps/plugin-process`.
@@ -86,6 +85,7 @@ None. `RestartRequired` lists keychain entries a wipe couldn't remove (`WipeRepo
 - The engine notice is chosen by matching backend text: `/whisper-cli is not installed/i` (`pipelineNotice.ts:36`) ← `"{name} is not installed — …"` (`src-tauri/src/models.rs:292`, `:377-380`); `/download (failed|interrupted)/i` (`pipelineNotice.ts:38`) ← `src-tauri/src/models.rs:293`, `:530-553`, `:711`; `/^engine install failed/i` (`pipelineNotice.ts:42`) ← App's own tag (`App.tsx:749`). No test checks these against the Rust strings.
 - The tccutil command names the bundle id from a TS copy (`notices.ts:32`) of `src-tauri/tauri.conf.json:5` and `crates/fly-audio/src/tap_messages.rs:11`.
 - Skipped cleanup runs only once the provider is allowed: "Run" asks through `request_cloud_consent` (the backend's native dialog) when there's no consent yet, and a decline records nothing and runs nothing (`CloudConsent.tsx:163-176`). The backend enforces consent again in `build_provider` (spec §2 item 1).
+- The skipped-cleanup notice reads "Review and allow" (consent missing), "Run them now", or, while the saved cloud provider has no API key, "Add a key", which calls the `onOpenLlmKeySettings` prop (App opens Settings at the key field).
 - After a wipe, the restart screen blocks the app until it restarts; a clean wipe relaunches by itself after 1.5 s; other outcomes wait for the user (`RestartRequired.tsx:14-66`; `privacy.ts:127-131`).
 - A failed update check stays in Settings; only a failed download/install shows in the stack (`notices.ts:108-124`).
 

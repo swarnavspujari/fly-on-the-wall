@@ -103,7 +103,8 @@ export function importTitle(files: readonly ImportFile[]): string | null {
   const name = files[0]?.file_name;
   if (!name) return null;
   const dot = name.lastIndexOf(".");
-  return dot > 0 ? name.slice(0, dot) : name;
+  // trimmed, as the backend's create_note stores it
+  return (dot > 0 ? name.slice(0, dot) : name).trim() || null;
 }
 
 /** The note's new title after the queue went from `before` to `after`, or

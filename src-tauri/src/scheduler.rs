@@ -128,6 +128,8 @@ pub async fn tick(
 
     match pipeline::run_with(state, on_stage, on_model, &meeting_id).await {
         Ok(_) => {
+            // a cancel that landed after the last batch poll is moot now
+            state.cancel_requests.lock().unwrap().remove(&meeting_id);
             set_job_state(state, |s| s.mark_transcription_done(&meeting_id));
             Tick::Completed(meeting_id)
         }

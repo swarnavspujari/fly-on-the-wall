@@ -50,11 +50,11 @@ import ImportQueue from "./ImportQueue";
 import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
+import EnhancedDoc from "./EnhancedDoc";
+import { AskComposer, AskSheet, useAskChat, useWideWindow } from "./AskPanel";
 
 /** The title a new note starts with (App.tsx `newNote`). */
 const UNTITLED = "Untitled";
-import EnhancedDoc from "./EnhancedDoc";
-import { AskComposer, AskSheet, useAskChat, useWideWindow } from "./AskPanel";
 
 interface Props {
   note: Note;
@@ -981,6 +981,10 @@ export default function Editor({
   onEditSegment,
 }: Props) {
   const [title, setTitle] = useState(note.title);
+  // A note opened with the "Untitled" it was created with shows that as the
+  // placeholder, so typing replaces it. Cleared by the first edit, so text
+  // the user types that happens to read "Untitled" stays on screen.
+  const [untitledPristine, setUntitledPristine] = useState(note.title === UNTITLED);
   const [scratchpad, setScratchpad] = useState(note.scratchpad);
   // Bumped when the editable content must reload (note switch / external insert);
   // NOT bumped on the user's own typing, so the caret never jumps.
@@ -1067,6 +1071,7 @@ export default function Editor({
     if (noteIdRef.current !== note.id) {
       noteIdRef.current = note.id;
       setTitle(note.title);
+      setUntitledPristine(note.title === UNTITLED);
       setScratchpad(note.scratchpad);
       setNotesRev((r) => r + 1);
       setSaveState("saved");
@@ -1111,6 +1116,9 @@ export default function Editor({
   // An imported note is titled after its first file. Until it's renamed,
   // the title follows the queue's first file as files are removed or moved.
   const followImportTitle = (before: ImportFile[], after: ImportFile[]) => {
+    // Only before the files are joined into the meeting's recording: after
+    // that, the staged list's paths point into the meeting folder.
+    if (meeting?.recording) return;
     const to = followedImportTitle(title, before, after);
     if (to == null) return;
     setTitle(to);
@@ -1395,10 +1403,9 @@ export default function Editor({
         <div className="px-6 pb-3.5 pt-5">
           <div className="mx-auto max-w-[var(--content-max)]">
             <input
-              // A new note's "Untitled" is shown as the placeholder, so
-              // typing replaces it instead of adding to it.
-              value={title === UNTITLED ? "" : title}
+              value={untitledPristine && title === UNTITLED ? "" : title}
               onChange={(e) => {
+                setUntitledPristine(false);
                 setTitle(e.target.value);
                 scheduleSave(e.target.value, scratchpad);
               }}

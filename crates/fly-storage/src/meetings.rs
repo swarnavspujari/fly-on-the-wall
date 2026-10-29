@@ -39,6 +39,11 @@ pub fn recording_dir_rel(rec: &RecordingRef) -> Option<String> {
     path.rsplit_once('/').map(|(dir, _)| dir.to_string())
 }
 
+/// Settings-key prefix of a staged media import's file list
+/// (`import.staged.<meeting_id>`, written by the app's import commands until
+/// the meeting has a transcript). Its paths point into the meeting folder.
+pub const IMPORT_STAGED_PREFIX: &str = "import.staged.";
+
 /// Resolve a data-dir-relative recordings folder for a recursive delete, or
 /// `None` when it isn't strictly `recordings/<folder>[/…]` inside the data
 /// dir. Recording paths can come from a `manifest.json` copied in from
@@ -336,6 +341,20 @@ impl Storage {
             let Some(rec) = &meeting.recording else {
                 continue;
             };
+            // A staged media import lists its files by their paths inside
+            // this folder until it's transcribed; renaming would strand them.
+            // Keep the old name: the next title/date edit renames once the
+            // import is done (its staged list is removed then).
+            if self
+                .get_setting(&format!("{IMPORT_STAGED_PREFIX}{}", meeting.id))?
+                .is_some()
+            {
+                tracing::info!(
+                    meeting_id = meeting.id,
+                    "staged import pending; keeping the meeting folder's old name"
+                );
+                continue;
+            }
             // A running pipeline captured absolute paths at start; renaming
             // under it invalidates hours of ASR. Keep the old name — the
             // next title/date edit renames once the job is over.
@@ -701,6 +720,45 @@ mod tests {
         let label = crate::naming::disk_label(meeting.started_at, "Power Writing Course v2");
         assert!(dir.path().join("recordings").join(&label).is_dir());
         assert!(!rec_dir.exists());
+    }
+
+    /// A meeting with a staged media import keeps its folder name: the
+    /// import's file list points into the folder by path. Once the list is
+    /// gone (the import finished), the next edit renames as usual.
+    #[test]
+    fn rename_skips_meetings_with_a_staged_import() {
+        let (dir, s) = test_storage();
+        let note = s.create_note("Kickoff part 1", None).unwrap();
+        let meeting = s.create_meeting("Kickoff part 1", &note.id, &[]).unwrap();
+        let rec_dir = s
+            .allocate_meeting_dir("Kickoff part 1", meeting.started_at)
+            .unwrap();
+        std::fs::write(rec_dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        let rec = RecordingRef {
+            mic_path: None,
+            system_path: None,
+            mixed_path: Some(format!(
+                "recordings/{}/recording.mixed.wav",
+                rec_dir.file_name().unwrap().to_string_lossy()
+            )),
+            playback_path: None,
+            duration_ms: 1_000,
+        };
+        s.end_meeting(&meeting.id, &rec).unwrap();
+        let key = format!("{}{}", super::IMPORT_STAGED_PREFIX, meeting.id);
+        s.set_setting(&key, "{}").unwrap();
+
+        s.update_note_title(&note.id, "Kickoff part 2").unwrap();
+        assert!(rec_dir.is_dir(), "folder keeps its name while staged");
+        s.set_meeting_started_at(&meeting.id, meeting.started_at + chrono::Duration::hours(1))
+            .unwrap();
+        assert!(rec_dir.is_dir(), "a date edit doesn't rename it either");
+
+        s.delete_setting(&key).unwrap();
+        s.update_note_title(&note.id, "Customer kickoff").unwrap();
+        assert!(!rec_dir.exists());
+        let moved = s.get_meeting(&meeting.id).unwrap().recording.unwrap();
+        assert!(dir.path().join(moved.mixed_path.unwrap()).is_file());
     }
 
     /// A title rename must also rewrite the manifest inside the renamed

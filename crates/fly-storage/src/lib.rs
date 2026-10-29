@@ -47,7 +47,7 @@ pub use embeddings::{PendingChunk, VectorHit};
 pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::MeetingFilter;
-pub use meetings::{contained_recordings_dir, recording_dir_rel};
+pub use meetings::{contained_recordings_dir, recording_dir_rel, IMPORT_STAGED_PREFIX};
 pub use notes::NoteSummary;
 pub use privacy::{
     AudioPurge, EraseOutcome, MeetingPrivacy, AUDIO_RETENTION_SETTING, RETENTION_CHOICES,

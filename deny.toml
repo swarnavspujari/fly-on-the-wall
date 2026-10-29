@@ -14,12 +14,14 @@ all-features = true
 
 [advisories]
 # Vulnerabilities (and yanked crates) fail the build. Unmaintained notices
-# only fail for crates in our own workspace — transitive "unmaintained"
-# advisories (mostly deep in the Tauri/GTK tree) are not actionable here.
+# only fail for direct dependencies of our workspace crates — transitive
+# "unmaintained" advisories (mostly deep in the Tauri/GTK tree) are not
+# actionable here.
 unmaintained = "workspace"
 # Same for "unsound" notices (cargo-deny's default, spelled out): they fail
-# only for our own crates. Transitive ones are reviewed by hand when they
-# show up elsewhere (e.g. a Dependabot alert); see the glib note below.
+# only for direct dependencies of our workspace crates. Transitive ones are
+# reviewed by hand when they show up elsewhere (e.g. a Dependabot alert); see
+# the glib note below.
 unsound = "workspace"
 yanked = "deny"
 ignore = [
@@ -45,7 +47,8 @@ ignore = [
   # ^0.18 and no tauri 2.x (or 3.0 alpha) release moves off it, so there is no
   # bump yet. The unsound glib::VariantStrIter is made only by
   # Variant::array_iter_str, which neither our code nor any locked GTK/Tauri
-  # crate calls. Revisit when the Tauri Linux stack reaches glib >= 0.20.
+  # crate calls. Revisit when the Tauri Linux stack reaches glib >= 0.20, and
+  # re-check the upstream versions by 2027-04-30 either way.
 ]
 
 [bans]
