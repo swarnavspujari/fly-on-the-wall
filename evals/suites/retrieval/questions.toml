@@ -1029,3 +1029,21 @@ id = "u26"
 kind = "off_corpus"
 question = "When is the company holiday party?"
 why = "No party or social event is discussed."
+
+# --- Keep local through a parent folder flag (m17, People/Reviews) --------
+
+[[answerable]]
+id = "q48"
+question = "What raise did I put Anouk forward for?"
+must_cite = ["m17-08"]
+evidence = ["nine percent raise"]
+answer = "A nine percent raise, starting the first of January."
+category = ["keep_local", "numbers"]
+keep_local = true
+
+[[unanswerable]]
+id = "u27"
+kind = "near_miss"
+question = "What raise is Anouk getting?"
+why = "Discussed only in m17, which is Keep local through its parent folder flag (People/Reviews), so a shareable view must find nothing; pay elsewhere is only m06's support lead band."
+visibility = "shareable"

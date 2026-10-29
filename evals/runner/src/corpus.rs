@@ -444,6 +444,8 @@ pub struct Db {
     pub seg_ids: BTreeMap<String, String>,
     /// every database id this build made → its placeholder or fixture id
     reverse: HashMap<String, String>,
+    /// A separate read-only connection: settings reads and write detection.
+    watch: rusqlite::Connection,
 }
 
 impl Db {
@@ -624,13 +626,14 @@ impl Db {
             }
         }
         Ok(Db {
-            _dir: dir,
             storage,
             meeting_ids,
             note_ids,
             folder_ids,
             seg_ids,
             reverse,
+            watch: read_only(&dir.path().join(DB_FILE))?,
+            _dir: dir,
         })
     }
 
@@ -677,6 +680,28 @@ impl Db {
         Ok(Storage::open(self._dir.path())?)
     }
 
+    /// An independent copy of this database (same ids), made by SQLite
+    /// itself (`VACUUM INTO` on the read-only connection): much faster than
+    /// a rebuild. Fork from a database nothing else writes to.
+    pub fn fork(&self) -> Result<Db> {
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join(DB_FILE);
+        self.watch
+            .execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])
+            .context("copy the eval database")?;
+        let storage = Storage::open(dir.path())?;
+        Ok(Db {
+            storage,
+            meeting_ids: self.meeting_ids.clone(),
+            note_ids: self.note_ids.clone(),
+            folder_ids: self.folder_ids.clone(),
+            seg_ids: self.seg_ids.clone(),
+            reverse: self.reverse.clone(),
+            watch: read_only(&target)?,
+            _dir: dir,
+        })
+    }
+
     /// Fixture meeting id for a database meeting id.
     pub fn fixture_of(&self, meeting_id: &str) -> Option<&str> {
         self.meeting_ids
@@ -709,22 +734,36 @@ impl Db {
         let mut out = String::new();
         let mut rest = s;
         while let Some(i) = rest.find('{') {
-            let Some(j) = rest[i..].find('}') else { break };
-            let inner = &rest[i + 1..i + j];
-            let value = match inner.split_once(':') {
-                Some(("meeting", id)) => self.meeting_ids.get(id),
-                Some(("note", id)) => self.note_ids.get(id),
-                Some(("folder", p)) => self.folder_ids.get(p),
-                Some(("seg", id)) => self.seg_ids.get(id),
+            // A placeholder is `{kind:value}`: a lowercase kind, then a value
+            // without braces, quotes or line breaks. Anything else (JSON
+            // text in a script, say) is copied as is.
+            let tail = &rest[i + 1..];
+            let close = tail.find(['{', '}', '"', '\n']);
+            let inner = match close {
+                Some(j) if tail.as_bytes()[j] == b'}' => Some(&tail[..j]),
                 _ => None,
             };
+            let parsed = inner
+                .and_then(|x| x.split_once(':'))
+                .filter(|(k, _)| !k.is_empty() && k.bytes().all(|c| c.is_ascii_lowercase()));
+            let Some((kind, id)) = parsed else {
+                out.push_str(&rest[..=i]);
+                rest = tail;
+                continue;
+            };
+            let value = match kind {
+                "meeting" => self.meeting_ids.get(id),
+                "note" => self.note_ids.get(id),
+                "folder" => self.folder_ids.get(id),
+                "seg" => self.seg_ids.get(id),
+                _ => None,
+            };
+            let Some(v) = value else {
+                bail!("unknown placeholder {{{kind}:{id}}}");
+            };
             out.push_str(&rest[..i]);
-            match value {
-                Some(v) => out.push_str(v),
-                None if inner.contains(':') => bail!("unknown placeholder {{{inner}}}"),
-                None => out.push_str(&rest[i..i + j + 1]),
-            }
-            rest = &rest[i + j + 1..];
+            out.push_str(v);
+            rest = &tail[kind.len() + id.len() + 2..];
         }
         out.push_str(rest);
         Ok(self.map_fixture_seg_ids(&out))
@@ -824,18 +863,32 @@ impl Db {
     /// `consent.*` and `llm.*` settings, read through a separate read-only
     /// connection (fly-storage can't list settings).
     fn watched_settings(&self) -> Result<Vec<(String, String)>> {
-        let path = self._dir.path().join("flyonthewall.db");
-        let conn = rusqlite::Connection::open_with_flags(
-            &path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .with_context(|| format!("open {} read-only", path.display()))?;
-        let mut stmt = conn.prepare(WATCHED_SETTINGS)?;
+        let mut stmt = self.watch.prepare(WATCHED_SETTINGS)?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    /// Changes whenever any other connection commits to the database
+    /// (SQLite's `PRAGMA data_version`, read on the watch connection): a
+    /// write by the harness, through any table or connection, moves it.
+    pub fn write_mark(&self) -> Result<i64> {
+        Ok(self
+            .watch
+            .query_row("PRAGMA data_version", [], |r| r.get(0))?)
+    }
+}
+
+/// The database file inside the data dir (fly-storage `Storage::DB_FILE`).
+const DB_FILE: &str = "flyonthewall.db";
+
+fn read_only(path: &Path) -> Result<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("open {} read-only", path.display()))
 }
 
 fn is_uuid(s: &str) -> bool {
@@ -854,7 +907,12 @@ mod tests {
     fn the_committed_fixtures_load_and_validate() {
         let c = Corpus::load(&crate::evals_dir().join("fixtures")).unwrap();
         assert!(c.meetings.len() >= 10);
-        assert_eq!(c.keep_local_meetings().count(), 1);
+        let kl: Vec<&str> = c.keep_local_meetings().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            kl,
+            ["m10", "m17"],
+            "the note-flagged and the folder-flagged meeting"
+        );
         // Long meetings: many ~160-word passages, so recall@8 measures
         // passage ranking, not just finding the right meeting.
         let long = c
@@ -902,12 +960,40 @@ mod tests {
             db.normalize_ids(&format!("{sub} {}", db.meeting_ids["m05"])),
             "[seg:m05-01] m05-02 xm05-01 m05-999 {meeting:m05}"
         );
-        // A settings write shows up in the snapshot.
+        // A settings write shows up in the snapshot and moves the mark;
+        // reads don't move it.
         let before = db.snapshot().unwrap();
+        let mark = db.write_mark().unwrap();
+        db.storage.get_note(&db.note_ids["m05"]).unwrap();
+        assert_eq!(db.write_mark().unwrap(), mark);
         db.storage
             .set_setting("consent.cloud_llm.anthropic", "true")
             .unwrap();
         assert_ne!(before, db.snapshot().unwrap());
+        assert_ne!(db.write_mark().unwrap(), mark);
+        // A fork is an independent copy with the same ids.
+        let f = db.fork().unwrap();
+        assert_eq!(
+            f.storage
+                .get_setting("consent.cloud_llm.anthropic")
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+        f.storage.set_setting("llm.provider", "openai").unwrap();
+        assert_eq!(
+            db.storage.get_setting("llm.provider").unwrap().as_deref(),
+            Some("ollama")
+        );
+        assert_eq!(
+            f.storage
+                .get_transcript(&f.meeting_ids["m05"])
+                .unwrap()
+                .unwrap()
+                .segments[0]
+                .id,
+            db.seg_ids["m05-01"]
+        );
         assert!(db.storage.note_keep_local(&db.note_ids["m10"]));
         assert_eq!(
             db.substitute_str("x {meeting:m01} {folder:Customers/Harrowgate} {y}")

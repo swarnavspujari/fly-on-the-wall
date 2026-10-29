@@ -503,25 +503,68 @@ pub fn strip_markers(text: &str) -> String {
     out
 }
 
-/// Rendered links or images in displayed text: Markdown links/images,
-/// HTML anchors/images, autolinks and bare URLs.
+/// What makes text render as a link, image or embed: Markdown inline and
+/// reference links (`](`, `][`, `]: `), HTML that loads or links
+/// (`<a`, `<img`, `<iframe`, `<svg`, `src=`, ...) and URLs.
+pub const LINK_PATTERNS: &[&str] = &[
+    "](",
+    "][",
+    "]: ",
+    "<a ",
+    "<a>",
+    "<img",
+    "<iframe",
+    "<svg",
+    "<object",
+    "<embed",
+    "<video",
+    "<audio",
+    "<source",
+    "<link",
+    "<base",
+    "<form",
+    "src=",
+    "href=",
+    "srcset=",
+    "http://",
+    "https://",
+    "ftp://",
+    "file://",
+    "www.",
+    "data:",
+    "javascript:",
+    "vbscript:",
+];
+
+/// Protocol-relative URLs (`//host.tld/...`) not already counted as
+/// `scheme://`.
+fn protocol_relative(lower: &str) -> usize {
+    lower
+        .match_indices("//")
+        .filter(|(i, _)| {
+            let prev = lower[..*i].chars().last();
+            let rest = &lower[i + 2..];
+            !matches!(prev, Some(':') | Some('/'))
+                && rest
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+                && rest
+                    .split(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\''))
+                    .next()
+                    .is_some_and(|host| host.contains('.'))
+        })
+        .count()
+}
+
+/// Rendered links, images or embeds in displayed text.
 pub fn links(text: &str) -> usize {
     let lower = text.to_lowercase();
-    let mut n = 0;
-    for pat in [
-        "](",
-        "<a ",
-        "<a>",
-        "<img",
-        "http://",
-        "https://",
-        "www.",
-        "data:",
-        "javascript:",
-    ] {
-        n += lower.matches(pat).count();
-    }
-    n
+    LINK_PATTERNS
+        .iter()
+        .map(|p| lower.matches(p).count())
+        .sum::<usize>()
+        + protocol_relative(&lower)
 }
 
 #[cfg(test)]
@@ -607,9 +650,21 @@ mod tests {
         assert_eq!(strip_markers("x [seg:m01-05]."), "x .");
         assert_eq!(
             links("see ![logo](https://e.example/p.png) and <a href=x>"),
-            3
+            4
         );
-        assert_eq!(links("no links here"), 0);
+        assert_eq!(links("no links here, 3.2 million and/or 1/2"), 0);
+        for s in [
+            "<iframe x>",
+            "<svg onload=y>",
+            "an img src=x",
+            "see [x][1]
+
+[1]: //evil.example/p",
+            "go to //evil.example/x",
+            "(//cdn.example.invalid/a.png)",
+        ] {
+            assert!(links(s) >= 1, "{s}");
+        }
         assert_eq!(
             names("Starter, Team and Fleet. It's Hana's call, not API's."),
             ["api", "fleet", "hana", "starter", "team"]

@@ -1,0 +1,14 @@
+{
+  "why": "A reference-style link to a protocol-relative URL.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Offline mode is the top ask [seg:m11-03]. See [the brief][1].\n\n[1]: //docs.example.invalid/brief"
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

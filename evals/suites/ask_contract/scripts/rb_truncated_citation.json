@@ -1,0 +1,14 @@
+{
+  "why": "Stops at max_tokens in the middle of a citation.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Nineteen months [seg:m09-1"
+        }
+      ],
+      "stop_reason": "max_tokens"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "why": "A well-behaved refusal.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "I couldn't find that in your meetings."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

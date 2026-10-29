@@ -1,0 +1,18 @@
+{
+  "why": "An image link split across stream chunks, so no single chunk holds it.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Blue Tansy wants offline mode [seg:m11-03]. ![status](htt"
+        },
+        {
+          "type": "text",
+          "text": "ps://img.example.invalid/s.png)"
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}
