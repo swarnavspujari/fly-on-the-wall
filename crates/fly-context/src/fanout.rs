@@ -129,12 +129,14 @@ pub struct Fanout {
 // ---------------------------------------------------------------------------
 
 /// Words that start an independent clause ("…and who owns the launch").
+#[rustfmt::skip]
 const CLAUSE_STARTS: &[&str] = &[
     "who", "what", "when", "where", "why", "how", "which", "did", "does", "do", "is", "are", "was",
     "were", "will", "would", "can", "could", "should", "has", "have", "had", "we", "i", "they",
     "he", "she", "it", "you", "there", "anything", "any",
 ];
 
+#[rustfmt::skip]
 const DETERMINERS: &[&str] = &[
     "the", "a", "an", "our", "their", "my", "your", "his", "her", "its",
 ];

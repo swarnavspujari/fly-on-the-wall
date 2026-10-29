@@ -1643,6 +1643,43 @@ mod tests {
     }
 
     #[test]
+    fn search_passages_returns_citable_lines_and_checks_arguments() {
+        let (_d, server, m0, m1) = server_with_series();
+        let text = tool_text(
+            &server,
+            "search_passages",
+            json!({"query": "renewal discussion"}),
+        );
+        assert!(text.starts_with("2 passage(s):"), "{text}");
+        assert!(text.contains(&format!("(meeting {m0})")), "{text}");
+        assert!(
+            text.contains("[seg:s0] Speaker 1 (0:00): renewal discussion"),
+            "{text}"
+        );
+        assert!(text.contains("get_transcript(meeting_id"), "{text}");
+
+        let scoped = tool_text(
+            &server,
+            "search_passages",
+            json!({"query": "renewal", "meeting_ids": [m1], "limit": 1}),
+        );
+        assert!(scoped.starts_with("1 passage(s):"), "{scoped}");
+        assert!(scoped.contains(&m1) && !scoped.contains(&m0), "{scoped}");
+
+        let none = tool_text(&server, "search_passages", json!({"query": "zebra"}));
+        assert_eq!(none, "No matching passages found in the user's meetings.\n");
+        for bad in [
+            json!({}),
+            json!({"query": "renewal", "meeting_ids": "m"}),
+            json!({"query": "renewal", "meeting_ids": [1]}),
+            json!({"query": "renewal", "since": "last week"}),
+            json!({"query": "a".repeat(MAX_QUERY_CHARS + 1)}),
+        ] {
+            tool_error(&server, "search_passages", bad);
+        }
+    }
+
+    #[test]
     fn transcripts_render_legend_ids_and_batch() {
         let (_d, server, m0, m1) = server_with_series();
         let one = tool_text(
@@ -2079,6 +2116,20 @@ mod tests {
 
         let miss = tool_text(&f.server, "search_notes", json!({"query": "secretword"}));
         assert!(miss.contains("No matches"), "{miss}");
+
+        // passage search: hidden meetings never surface, even when named
+        let passages = tool_text(&f.server, "search_passages", json!({"query": "renewal"}));
+        assert!(passages.contains(&f.visible_meeting), "{passages}");
+        assert_no_leak(&f, &passages);
+        let only_hidden = tool_text(&f.server, "search_passages", json!({"query": "secretword"}));
+        let nothing = tool_text(&f.server, "search_passages", json!({"query": "nosuchword"}));
+        assert_eq!(only_hidden, nothing);
+        let scoped = tool_text(
+            &f.server,
+            "search_passages",
+            json!({"query": "renewal", "meeting_ids": [f.hidden[0].1, f.hidden[1].1]}),
+        );
+        assert_eq!(scoped, nothing);
         // hidden hits rank alongside the shared one; a 1-hit page still
         // refills to the shared note
         for limit in [1, 20] {
