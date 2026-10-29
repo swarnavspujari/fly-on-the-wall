@@ -9,11 +9,95 @@
 //!   manifest first (it must never point at files about to be deleted), then
 //!   `recording_json`. Callers delete the old files only after it succeeds.
 
+use std::path::{Path, PathBuf};
+
 use fly_core::{Meeting, RecordingRef};
 
 use crate::meetings::{contained_recordings_dir, recording_dir_rel};
 use crate::recovery::{RecordingManifest, MANIFEST_VERSION, RECORDING_MANIFEST};
 use crate::{Result, Storage, StorageError};
+
+/// `path_rel` (data-dir relative) as an absolute path, but only when it is a
+/// plain file name directly inside the meeting folder `folder_rel`, itself
+/// contained in `recordings/`. Recording paths can arrive from a copied-in
+/// manifest, so a role pointing anywhere else (`..`, another meeting's
+/// folder, an absolute path) is never converted, replaced or deleted.
+pub fn recording_file_in_folder(
+    data_dir: &Path,
+    folder_rel: &str,
+    path_rel: &str,
+) -> Option<PathBuf> {
+    let unified = path_rel.replace('\\', "/");
+    let (parent, name) = unified.rsplit_once('/')?;
+    if parent != folder_rel.replace('\\', "/") || !crate::safe_path::is_plain_name(name) {
+        return None;
+    }
+    contained_recordings_dir(data_dir, folder_rel).map(|dir| dir.join(name))
+}
+
+/// Every path in `rec` is a file directly inside `folder_rel`.
+fn all_paths_in_folder(data_dir: &Path, folder_rel: &str, rec: &RecordingRef) -> bool {
+    [
+        &rec.mic_path,
+        &rec.system_path,
+        &rec.mixed_path,
+        &rec.playback_path,
+    ]
+    .into_iter()
+    .flatten()
+    .all(|p| recording_file_in_folder(data_dir, folder_rel, p).is_some())
+}
+
+/// Keep local only ever stays on: on if either side says on; a side that
+/// doesn't say (`None`) defers to the other.
+fn either_keeps_local(disk: Option<bool>, db: Option<bool>) -> Option<bool> {
+    match (disk, db) {
+        (Some(a), Some(b)) => Some(a || b),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+/// The manifest to write when a meeting's files are replaced: the one on
+/// disk with only `recording` and `version` changed, so whatever it records
+/// that the rows don't (or record differently) survives. Fields it lacks
+/// (a v1/v2 manifest) are filled from the rows, and Keep local is merged so
+/// it never turns off. No usable manifest on disk → the rows' manifest.
+fn merged_manifest(
+    on_disk: Option<RecordingManifest>,
+    from_rows: RecordingManifest,
+) -> RecordingManifest {
+    let Some(mut m) = on_disk else {
+        return from_rows;
+    };
+    m.version = MANIFEST_VERSION;
+    m.recording = from_rows.recording;
+    m.title = m.title.or(from_rows.title);
+    m.started_at = m.started_at.or(from_rows.started_at);
+    m.attendees = m.attendees.or(from_rows.attendees);
+    m.attendees_confirmed = m.attendees_confirmed.or(from_rows.attendees_confirmed);
+    m.keep_local = either_keeps_local(m.keep_local, from_rows.keep_local);
+    match (&m.folder_path, &from_rows.folder_path) {
+        (None, Some(_)) => {
+            m.folder_path = from_rows.folder_path;
+            m.folder_keep_local = from_rows.folder_keep_local;
+        }
+        (Some(disk), Some(rows)) if disk == rows => {
+            match (&mut m.folder_keep_local, from_rows.folder_keep_local) {
+                (Some(ours), Some(theirs)) if ours.len() == theirs.len() => {
+                    for (o, t) in ours.iter_mut().zip(theirs) {
+                        *o |= t;
+                    }
+                }
+                (ours @ None, theirs) => *ours = theirs,
+                _ => {}
+            }
+        }
+        // Filed differently on disk: the mirror owns that; leave it.
+        _ => {}
+    }
+    m
+}
 
 /// The manifest in a meeting folder was written by a NEWER build: rewriting
 /// it would lower its version and drop what this build doesn't know, so the
@@ -71,10 +155,11 @@ impl Storage {
     /// referenced somewhere and must be kept; the caller deletes them only
     /// after this returns `Ok`.
     ///
-    /// The manifest is rebuilt from the rows (the full current payload, Keep
-    /// local included), never with a lower version: a manifest from a newer
-    /// build is refused. Keep local only ever stays on: if the file says on
-    /// and the row says off (a heal hasn't merged them yet), it stays on.
+    /// Every path, old and new, must be a file directly inside the meeting's
+    /// own folder. The manifest on disk is kept and only its `recording`
+    /// (and version) replaced ([`merged_manifest`]); a manifest from a newer
+    /// build, or one naming another meeting, is refused. Missing or
+    /// unreadable → written fresh from the rows.
     pub fn replace_meeting_recording(&self, id: &str, recording: &RecordingRef) -> Result<Meeting> {
         let meeting = self.get_meeting(id)?;
         let old = meeting
@@ -91,6 +176,13 @@ impl Storage {
         let dir = contained_recordings_dir(&self.data_dir, &rel).ok_or_else(|| {
             StorageError::Invalid(format!("recording folder outside recordings/: {rel}"))
         })?;
+        if !all_paths_in_folder(&self.data_dir, &rel, old)
+            || !all_paths_in_folder(&self.data_dir, &rel, recording)
+        {
+            return Err(StorageError::Invalid(
+                "a recording file is outside its meeting folder".into(),
+            ));
+        }
         let next = Meeting {
             recording: Some(recording.clone()),
             ..meeting
@@ -100,29 +192,19 @@ impl Storage {
                 "the folder's manifest is from a newer version of the app".into(),
             ));
         }
-        let mut manifest = self
+        let from_rows = self
             .build_portable_manifest(&next)
             .ok_or_else(|| StorageError::Invalid("no manifest for this meeting".into()))?;
         let on_disk: Option<RecordingManifest> =
             std::fs::read_to_string(dir.join(RECORDING_MANIFEST))
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok());
-        if let Some(disk) = on_disk.filter(|d| d.meeting_id == manifest.meeting_id) {
-            if disk.keep_local == Some(true) {
-                manifest.keep_local = Some(true);
-            }
-            if disk.folder_path == manifest.folder_path {
-                match (&mut manifest.folder_keep_local, disk.folder_keep_local) {
-                    (Some(ours), Some(theirs)) if ours.len() == theirs.len() => {
-                        for (o, t) in ours.iter_mut().zip(theirs) {
-                            *o |= t;
-                        }
-                    }
-                    (ours @ None, theirs) => *ours = theirs,
-                    _ => {}
-                }
-            }
+        if on_disk.as_ref().is_some_and(|d| d.meeting_id != id) {
+            return Err(StorageError::Invalid(
+                "the folder's manifest belongs to another meeting".into(),
+            ));
         }
+        let manifest = merged_manifest(on_disk, from_rows);
         crate::recovery::write_recording_manifest(&dir, &manifest)?;
         self.conn.execute(
             "UPDATE meetings SET recording_json = ?1 WHERE id = ?2",
@@ -275,6 +357,133 @@ mod tests {
         // nothing changed
         let m = s.get_meeting(&id).unwrap();
         assert!(m.recording.unwrap().mic_path.unwrap().ends_with(".wav"));
+    }
+
+    fn flac_next(folder: &str) -> RecordingRef {
+        RecordingRef {
+            mic_path: Some(format!("recordings/{folder}/recording.mic.flac")),
+            system_path: Some(format!("recordings/{folder}/recording.system.flac")),
+            mixed_path: None,
+            playback_path: None,
+            duration_ms: 1000,
+        }
+    }
+
+    fn read_manifest(s: &crate::Storage, folder: &str) -> RecordingManifest {
+        serde_json::from_str(
+            &std::fs::read_to_string(
+                s.data_dir()
+                    .join("recordings")
+                    .join(folder)
+                    .join(RECORDING_MANIFEST),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn replace_keeps_what_the_manifest_on_disk_records() {
+        let (_d, s) = test_storage();
+        let id = recorded(&s, "a");
+        let dir = s.data_dir().join("recordings/a");
+        // Written by another copy of the app: a different title and
+        // attendees than the rows, and Keep local on.
+        let disk = format!(
+            r#"{{"version": {v}, "meeting_id": "{id}", "note_id": "n-disk",
+                "ended_at": "2026-01-01T00:00:00Z",
+                "recording": {{"mic_path": "recordings/a/recording.mic.wav", "system_path": null, "mixed_path": null, "duration_ms": 1000}},
+                "title": "Title on disk", "attendees": [{{"name": "Sample Person"}}],
+                "keep_local": true}}"#,
+            v = crate::MANIFEST_VERSION
+        );
+        std::fs::write(dir.join(RECORDING_MANIFEST), disk).unwrap();
+        s.replace_meeting_recording(&id, &flac_next("a")).unwrap();
+        let m = read_manifest(&s, "a");
+        assert_eq!(m.recording, flac_next("a"), "only the recording changes");
+        assert_eq!(m.title.as_deref(), Some("Title on disk"));
+        assert_eq!(m.note_id, "n-disk");
+        assert_eq!(m.attendees.as_ref().map(Vec::len), Some(1));
+        assert_eq!(m.keep_local, Some(true));
+        assert_eq!(m.ended_at.to_rfc3339(), "2026-01-01T00:00:00+00:00");
+        assert_eq!(m.version, crate::MANIFEST_VERSION);
+    }
+
+    #[test]
+    fn replace_fills_what_an_old_manifest_lacks_from_the_rows() {
+        let (_d, s) = test_storage();
+        let id = recorded(&s, "a");
+        let dir = s.data_dir().join("recordings/a");
+        // A v1 manifest: no version field, no title, no Keep local.
+        let v1 = format!(
+            r#"{{"meeting_id": "{id}", "note_id": "n", "ended_at": "2026-01-01T00:00:00Z",
+                "recording": {{"mic_path": "recordings/a/recording.mic.wav", "system_path": null, "mixed_path": null, "duration_ms": 1000}}}}"#
+        );
+        std::fs::write(dir.join(RECORDING_MANIFEST), v1).unwrap();
+        s.replace_meeting_recording(&id, &flac_next("a")).unwrap();
+        let m = read_manifest(&s, "a");
+        assert_eq!(m.version, crate::MANIFEST_VERSION);
+        assert_eq!(m.title.as_deref(), Some("Weekly sync"), "from the rows");
+        assert_eq!(m.keep_local, Some(false), "from the rows");
+        assert!(m.started_at.is_some() && m.attendees.is_some());
+    }
+
+    #[test]
+    fn replace_refuses_a_manifest_that_names_another_meeting() {
+        let (_d, s) = test_storage();
+        let id = recorded(&s, "a");
+        let dir = s.data_dir().join("recordings/a");
+        let other = r#"{"version": 1, "meeting_id": "someone-else", "note_id": "n", "ended_at": "2026-01-01T00:00:00Z",
+            "recording": {"mic_path": null, "system_path": null, "mixed_path": null, "duration_ms": 0}}"#;
+        std::fs::write(dir.join(RECORDING_MANIFEST), other).unwrap();
+        assert!(s.replace_meeting_recording(&id, &flac_next("a")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(RECORDING_MANIFEST)).unwrap(),
+            other
+        );
+        let rec = s.get_meeting(&id).unwrap().recording.unwrap();
+        assert!(rec.mic_path.unwrap().ends_with(".wav"), "row untouched");
+    }
+
+    #[test]
+    fn replace_writes_a_fresh_manifest_over_an_unreadable_one() {
+        let (_d, s) = test_storage();
+        let id = recorded(&s, "a");
+        let dir = s.data_dir().join("recordings/a");
+        std::fs::write(dir.join(RECORDING_MANIFEST), "{ torn").unwrap();
+        s.replace_meeting_recording(&id, &flac_next("a")).unwrap();
+        let m = read_manifest(&s, "a");
+        assert_eq!(m.meeting_id, id);
+        assert_eq!(m.recording, flac_next("a"));
+    }
+
+    #[test]
+    fn replace_refuses_any_file_outside_the_meeting_folder() {
+        let (_d, s) = test_storage();
+        let id = recorded(&s, "a");
+        for stray in [
+            "recordings/b/recording.playback.wav",
+            "recordings/a/../b/recording.playback.wav",
+            "recordings/a/sub/recording.playback.wav",
+        ] {
+            let next = RecordingRef {
+                playback_path: Some(stray.into()),
+                ..flac_next("a")
+            };
+            assert!(s.replace_meeting_recording(&id, &next).is_err(), "{stray}");
+        }
+        let rec = s.get_meeting(&id).unwrap().recording.unwrap();
+        assert!(rec.mic_path.unwrap().ends_with(".wav"), "row untouched");
+        // and the helper itself
+        let d = s.data_dir();
+        assert!(
+            super::recording_file_in_folder(d, "recordings/a", "recordings/a/x.flac").is_some()
+        );
+        assert!(
+            super::recording_file_in_folder(d, "recordings/a", "recordings/b/x.flac").is_none()
+        );
+        assert!(super::recording_file_in_folder(d, "recordings/a", "recordings/a/..").is_none());
+        assert!(super::recording_file_in_folder(d, "../a", "../a/x.flac").is_none());
     }
 
     #[test]

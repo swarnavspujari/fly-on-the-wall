@@ -344,7 +344,9 @@ pub fn encode_pcm16_wav_to_flac(
 /// Decode `flac` with claxon (an implementation independent of the encoder)
 /// and prove it holds exactly the samples of `wav`: same rate, channel count
 /// and bit depth, the same number of samples, every sample equal, and the
-/// STREAMINFO MD5 equal to the digest of the decoded audio.
+/// STREAMINFO MD5 equal to the digest of the decoded audio. The WAV's own
+/// header is read twice, by this module and by hound, and both readings
+/// must agree on its format and length.
 pub fn verify_flac_matches_wav(
     flac: &Path,
     wav: &Path,
@@ -352,6 +354,28 @@ pub fn verify_flac_matches_wav(
 ) -> Result<u64> {
     let wav_info = inspect_pcm16_wav(wav)?;
     let mismatch = |why: String| FlacError::Mismatch(why);
+    {
+        let other = hound::WavReader::open(wav)
+            .map_err(|e| mismatch(format!("a second WAV reader can't read it: {e}")))?;
+        let spec = other.spec();
+        if spec.sample_rate != wav_info.sample_rate
+            || spec.channels != wav_info.channels
+            || spec.bits_per_sample != 16
+            || spec.sample_format != hound::SampleFormat::Int
+            || u64::from(other.duration()) != wav_info.frames()
+        {
+            return Err(mismatch(format!(
+                "two WAV readers disagree: {} Hz/{} ch/{} bit/{} frames vs {} Hz/{} ch/16 bit/{} frames",
+                spec.sample_rate,
+                spec.channels,
+                spec.bits_per_sample,
+                other.duration(),
+                wav_info.sample_rate,
+                wav_info.channels,
+                wav_info.frames()
+            )));
+        }
+    }
     let dec = |e: claxon::Error| FlacError::Decode(e.to_string());
     let mut reader = claxon::FlacReader::new(BufReader::with_capacity(1 << 20, File::open(flac)?))
         .map_err(dec)?;

@@ -41,9 +41,22 @@ export function compressLine(c: CompressStatus): string {
         c.kept_files > 0
           ? ` ${c.kept_files} file${c.kept_files === 1 ? " was" : "s were"} left as recorded (not in the usual format).`
           : "";
-      return saved
-        ? `Every recording is stored losslessly as FLAC. ${saved} freed.${kept}`
-        : `Every recording is stored losslessly as FLAC.${kept}`;
+      const skipped = c.meetings_skipped;
+      const failed = c.meetings_failed;
+      const later =
+        skipped > 0
+          ? ` ${skipped} meeting${skipped === 1 ? " was" : "s were"} in use and will be compressed later.`
+          : "";
+      const why = c.last_error ? ` (${c.last_error})` : "";
+      const notDone =
+        failed > 0
+          ? ` ${failed} meeting${failed === 1 ? "" : "s"} couldn’t be compressed and ${failed === 1 ? "is" : "are"} kept as recorded${why}.`
+          : "";
+      const head =
+        skipped + failed + c.kept_files === 0
+          ? "Every recording is stored losslessly as FLAC."
+          : "Recordings are stored losslessly as FLAC.";
+      return `${head}${saved ? ` ${saved} freed.` : ""}${later}${notDone}${kept}`;
     }
   }
 }

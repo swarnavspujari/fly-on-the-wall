@@ -66,6 +66,9 @@ rfd = { version = "0.16", default-features = false, features = ["common-controls
 # Same windows version fly-audio already builds; only a feature is added.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_System_Threading"] }
+# On macOS (QoS class) and Linux (per-thread nice): already in the tree.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

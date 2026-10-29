@@ -344,10 +344,12 @@ fn sweep_now(state: &AppState, explicit: bool) -> SweepReport {
         .chain(state.audio_store.current())
         .collect();
     let storage = state.storage.lock().unwrap();
+    // The lease is taken under this same lock, so a meeting the job picked
+    // up after `busy_ids` was read is still skipped.
     sweep_retention(
         &storage,
         Utc::now(),
-        &|id| busy_ids.iter().any(|b| b == id),
+        &|id| busy_ids.iter().any(|b| b == id) || storage.meeting_folder_leased(id),
         explicit,
     )
 }
@@ -882,18 +884,23 @@ pub async fn delete_all_data(
         if let Some(why) = busy_reason(&state) {
             return Err(format!("{why} — nothing was deleted"));
         }
-        // Background compression works inside meeting folders: stop it for
-        // the rest of this run (the wipe restarts the app anyway).
+        // Background compression works inside meeting folders: stop it (the
+        // wipe restarts the app). Refused or failed → it picks up again.
         if !crate::audio_store::halt(&state, Duration::from_secs(20)) {
+            crate::audio_store::resume(&state);
             return Err(
                 "recording compression didn't stop in time — nothing was deleted; try again".into(),
             );
         }
-        perform_delete_all(
+        let result = perform_delete_all(
             &state,
             include_models,
             &fly_secrets::KeychainSecretStore::with_service(crate::state::LEGACY_KEYCHAIN_SERVICE),
-        )
+        );
+        if result.is_err() {
+            crate::audio_store::resume(&state);
+        }
+        result
     })
     .await
     .map_err(err_str)?
@@ -1545,6 +1552,29 @@ mod tests {
         let r = sweep_retention(&s, Utc::now(), &|_| true, false);
         assert_eq!(r.meetings, 0);
         assert!(r.held.is_none());
+    }
+
+    /// A meeting folder the compression job holds is skipped by the sweep,
+    /// even before the job has said which meeting it's on.
+    #[test]
+    fn sweep_skips_a_folder_the_compression_job_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        let id = {
+            let s = state.storage.lock().unwrap();
+            old_meeting(&s, dir.path(), "a", 100);
+            s.set_audio_retention_days(Some(30)).unwrap();
+            let id = s.meetings_with_stored_audio().unwrap().remove(0);
+            assert!(s.lease_meeting_folder(&id));
+            id
+        };
+        assert_eq!(sweep_now(&state, true).meetings, 0);
+        state.storage.lock().unwrap().release_meeting_folder(&id);
+        assert_eq!(sweep_now(&state, true).meetings, 1);
     }
 
     /// The review list for meetings heal kept local without a recorded

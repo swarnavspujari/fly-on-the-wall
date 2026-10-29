@@ -99,6 +99,10 @@ export interface CompressStatus {
   paused_for: "recording" | "transcribing" | "importing" | null;
   meetings_total: number;
   meetings_done: number;
+  /** Of the finished ones, this pass: left for a later pass (in use, just
+   * played), and failed (originals kept; the latest reason is last_error). */
+  meetings_skipped: number;
+  meetings_failed: number;
   bytes_total: number;
   bytes_done: number;
   /** Freed so far, across every pass. */

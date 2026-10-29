@@ -8,6 +8,8 @@ const status = (p: Partial<CompressStatus> = {}): CompressStatus => ({
   paused_for: null,
   meetings_total: 4,
   meetings_done: 4,
+  meetings_skipped: 0,
+  meetings_failed: 0,
   bytes_total: 10 * GB,
   bytes_done: 10 * GB,
   saved_bytes: 0,
@@ -42,14 +44,36 @@ describe("compressLine", () => {
   });
 
   it("reports what was freed when done, and files left as recorded", () => {
-    expect(compressLine(status({ saved_bytes: 23.1 * GB }))).toBe(
-      "Every recording is stored losslessly as FLAC. 23 GB freed.",
+    expect(compressLine(status({ saved_bytes: 12.4 * GB }))).toBe(
+      "Every recording is stored losslessly as FLAC. 12 GB freed.",
     );
     expect(compressLine(status())).toBe("Every recording is stored losslessly as FLAC.");
     expect(compressLine(status({ kept_files: 1 }))).toMatch(
       /1 file was left as recorded \(not in the usual format\)/,
     );
     expect(compressLine(status({ kept_files: 3 }))).toMatch(/3 files were left/);
+    expect(compressLine(status({ kept_files: 3 }))).toMatch(/^Recordings are stored/);
+  });
+
+  it("doesn't claim every recording when some failed or wait for later", () => {
+    expect(
+      compressLine(
+        status({
+          saved_bytes: GB,
+          meetings_failed: 2,
+          meetings_skipped: 1,
+          last_error: "not enough free disk space",
+        }),
+      ),
+    ).toBe(
+      "Recordings are stored losslessly as FLAC. 1.0 GB freed. 1 meeting was in use and will be compressed later. 2 meetings couldn’t be compressed and are kept as recorded (not enough free disk space).",
+    );
+    expect(compressLine(status({ meetings_failed: 1 }))).toBe(
+      "Recordings are stored losslessly as FLAC. 1 meeting couldn’t be compressed and is kept as recorded.",
+    );
+    expect(compressLine(status({ meetings_skipped: 3 }))).toMatch(
+      /3 meetings were in use and will be compressed later\.$/,
+    );
   });
 
   it("before the first pass", () => {
@@ -64,9 +88,9 @@ describe("videoLine", () => {
   const report = (p: Partial<StorageReport> = {}): StorageReport => ({
     audio_bytes: 0,
     wav_bytes: 0,
-    imported_video_bytes: 14 * GB,
-    imported_video_files: 6,
-    screen_recording_bytes: 5.6 * GB,
+    imported_video_bytes: 3 * GB,
+    imported_video_files: 2,
+    screen_recording_bytes: 1.5 * GB,
     screen_recording_files: 1,
     other_attachment_bytes: 0,
     compress: status(),
@@ -74,7 +98,7 @@ describe("videoLine", () => {
   });
   it("lists both kinds with sizes and says they're left alone", () => {
     expect(videoLine(report())).toBe(
-      "6 imported meeting videos (14 GB), 1 screen recording (5.6 GB). Kept as they are: lossless compression doesn’t shrink video.",
+      "2 imported meeting videos (3.0 GB), 1 screen recording (1.5 GB). Kept as they are: lossless compression doesn’t shrink video.",
     );
   });
   it("no videos", () => {
@@ -86,9 +110,9 @@ describe("videoLine", () => {
 
 describe("compressNoticeCopy", () => {
   it("names the space freed and promises nothing changed", () => {
-    const c = compressNoticeCopy(23.1 * GB);
+    const c = compressNoticeCopy(12.4 * GB);
     expect(c.title).toBe("Recordings compressed");
-    expect(c.cause).toMatch(/freeing 23 GB/);
+    expect(c.cause).toMatch(/freeing 12 GB/);
     expect(c.cause).toMatch(/Every sample is kept/);
   });
 });

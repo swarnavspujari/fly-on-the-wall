@@ -34,10 +34,18 @@ describe("Settings › Storage rows", () => {
     localStorage.setItem("fotwMockCompress", "working");
     const el = await mount(<StorageRows />);
     expect(el.textContent).toContain("Recordings");
-    expect(el.textContent).toContain("Compressing recordings without losing anything: 53%.");
-    expect(el.querySelector('[data-testid="storage-audio"]')!.textContent).toBe("16 GB");
-    expect(el.querySelector('[data-testid="storage-video"]')!.textContent).toBe("20 GB");
-    expect(el.textContent).toContain("6 imported meeting videos (14 GB), 11 screen recordings");
+    expect(el.textContent).toContain("Compressing recordings without losing anything: 43%.");
+    expect(el.querySelector('[data-testid="storage-audio"]')!.textContent).toBe("5.9 GB");
+    expect(el.querySelector('[data-testid="storage-video"]')!.textContent).toBe("4.5 GB");
+    expect(el.textContent).toContain("2 imported meeting videos (3.0 GB), 4 screen recordings");
+  });
+
+  it("after a pass, says what failed and why, and what waits for later", async () => {
+    localStorage.setItem("fotwMockCompressFailed", "1");
+    const el = await mount(<StorageRows />);
+    expect(el.textContent).toContain(
+      "Recordings are stored losslessly as FLAC. 5.2 GB freed. 1 meeting was in use and will be compressed later. 1 meeting couldn’t be compressed and is kept as recorded (not enough free disk space",
+    );
   });
 
   it("renders nothing until the report arrives", async () => {
@@ -62,7 +70,7 @@ describe("one-time compressed notice", () => {
     const dismiss = vi.spyOn(api, "dismissCompressNotice");
     const el = await mount(<NoticeProbe />);
     const b = el.querySelector("button")!;
-    expect(Number(b.dataset.saved)).toBeGreaterThan(20 * 1024 ** 3);
+    expect(Number(b.dataset.saved)).toBeGreaterThan(5 * 1024 ** 3);
     act(() => b.click());
     expect(b.dataset.saved).toBe("none");
     expect(dismiss).toHaveBeenCalledTimes(1);

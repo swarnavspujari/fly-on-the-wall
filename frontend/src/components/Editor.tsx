@@ -139,24 +139,35 @@ function fmtWhen(iso: string): string {
    plays and scrubs in-app (round violet play/pause, progress-filled waveform,
    mono timecodes). Falls back to opening the OS player if the src is missing.
    A compressed recording (lossless FLAC, no stored mix) rebuilds its
-   playback mix on the first Play (`onBuild`), then starts playing. ---- */
+   playback mix on the first Play (`onBuild`), then starts playing. While it
+   plays, `onKeepAlive` tells the backend now and then so background
+   compression leaves the file alone; `onSourceError` asks again for the
+   file when the one loaded went away (compressed while paused). ---- */
 const BAR_COUNT = 56;
+/** How often a playing recording tells the backend it's still in use (the
+    backend leaves a played meeting alone for 30 minutes after each). */
+const PLAYBACK_KEEP_ALIVE_MS = 5 * 60_000;
 function AudioPlayer({
   src,
   durationMs,
   onFallback,
   onBuild,
+  onKeepAlive,
+  onSourceError,
 }: {
   src: string | null;
   durationMs: number;
   onFallback: () => void;
   /** Set when the mix must be rebuilt first; resolves to the new src. */
   onBuild?: () => Promise<string | null>;
+  onKeepAlive?: () => void;
+  onSourceError?: () => void;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [building, setBuilding] = useState(false);
   const playWhenReady = useRef(false);
+  const lastKeepAlive = useRef(0);
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(durationMs / 1000);
 
@@ -208,7 +219,22 @@ function AudioPlayer({
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onEnded={() => setPlaying(false)}
-          onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
+          onTimeUpdate={(e) => {
+            setCur(e.currentTarget.currentTime);
+            const now = Date.now();
+            if (
+              onKeepAlive &&
+              !e.currentTarget.paused &&
+              now - lastKeepAlive.current >= PLAYBACK_KEEP_ALIVE_MS
+            ) {
+              lastKeepAlive.current = now;
+              onKeepAlive();
+            }
+          }}
+          onError={() => {
+            setPlaying(false);
+            onSourceError?.();
+          }}
           onLoadedMetadata={(e) => {
             if (Number.isFinite(e.currentTarget.duration)) setDur(e.currentTarget.duration);
           }}
@@ -1321,6 +1347,29 @@ export default function Editor({
           return convertFileSrc(p.path);
         }
       : undefined;
+  // Playing: keep background compression off this meeting's files.
+  const keepPlaybackAlive = meetingId
+    ? () => void api.preparePlayback(meetingId, false).catch(() => {})
+    : undefined;
+  // The loaded file went away (compressed while the note was open): ask
+  // again, once per file, so Play rebuilds from what's stored now.
+  const erroredPath = useRef<string | null>(null);
+  const reloadPlayback =
+    meetingId && shown?.path
+      ? () => {
+          const failedPath = shown.path;
+          if (erroredPath.current === failedPath) return;
+          erroredPath.current = failedPath;
+          api
+            .preparePlayback(meetingId, false)
+            .then((p) => {
+              if (p && p.path !== failedPath) {
+                setPlayback({ meetingId, path: p.path, needsBuild: p.needs_build });
+              }
+            })
+            .catch(() => {});
+        }
+      : undefined;
   const videos = note.attachments.filter(isVideo);
   const playAudio = () => {
     if (audioPath) void api.openAttachment(audioPath);
@@ -1572,6 +1621,8 @@ export default function Editor({
                     durationMs={rec?.duration_ms ?? 0}
                     onFallback={playAudio}
                     onBuild={buildPlayback}
+                    onKeepAlive={keepPlaybackAlive}
+                    onSourceError={reloadPlayback}
                   />
                 )}
                 {clipStrip(false)}

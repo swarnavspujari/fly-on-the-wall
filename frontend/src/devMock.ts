@@ -895,31 +895,39 @@ let mockRetentionDays: number | null = null;
 // Recording storage v2 (audio_store.rs). fotwMockCompress = working |
 // paused | done (default) picks the job state Settings › Storage shows;
 // fotwMockCompressNotice = "1" shows the one-time notice; fotwMockCompressed
-// = "1" makes the player need a Play-time rebuild (prepare_playback).
+// = "1" makes the player need a Play-time rebuild (prepare_playback);
+// fotwMockCompressFailed = "1" ends the pass with one failed and one
+// skipped meeting. Sizes are made up.
 let mockCompressNoticeDismissed = false;
 const GB = 1024 * 1024 * 1024;
 function mockStorageReport() {
   const state = mockFlag("fotwMockCompress") ?? "done";
   const working = state === "working" || state === "paused";
+  const failed = mockFlag("fotwMockCompressFailed") === "1";
   return {
-    audio_bytes: working ? 15.8 * GB : 3.6 * GB,
-    wav_bytes: working ? 12.4 * GB : 0,
-    imported_video_bytes: 14.1 * GB,
-    imported_video_files: 6,
-    screen_recording_bytes: 5.6 * GB,
-    screen_recording_files: 11,
-    other_attachment_bytes: 0.12 * GB,
+    audio_bytes: working ? 5.9 * GB : 2.8 * GB,
+    wav_bytes: working ? 4.5 * GB : 0,
+    imported_video_bytes: 3 * GB,
+    imported_video_files: 2,
+    screen_recording_bytes: 1.5 * GB,
+    screen_recording_files: 4,
+    other_attachment_bytes: 0.05 * GB,
     compress: {
       state,
       paused_for: state === "paused" ? "recording" : null,
-      meetings_total: working ? 25 : 25,
-      meetings_done: working ? 11 : 25,
-      bytes_total: 26.4 * GB,
-      bytes_done: working ? 14 * GB : 26.4 * GB,
-      saved_bytes: working ? 10.6 * GB : 23.1 * GB,
+      meetings_total: 12,
+      meetings_done: working ? 5 : 12,
+      meetings_skipped: failed && !working ? 1 : 0,
+      meetings_failed: failed && !working ? 1 : 0,
+      bytes_total: 8 * GB,
+      bytes_done: working ? 3.5 * GB : 8 * GB,
+      saved_bytes: working ? 2 * GB : 5.2 * GB,
       kept_files: 0,
       notice_pending: mockFlag("fotwMockCompressNotice") === "1" && !mockCompressNoticeDismissed,
-      last_error: null,
+      last_error:
+        failed && !working
+          ? "not enough free disk space to compress recordings (120 MB free, about 380 MB needed)"
+          : null,
     },
   };
 }

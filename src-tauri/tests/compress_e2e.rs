@@ -245,6 +245,8 @@ fn transcripts_and_diarization_are_identical_from_flac_and_wav() {
                 may_commit: &|_| Ok(()),
                 storage: &flac_state.storage,
                 on_file_done: &mut done,
+                skip_leftover: &|_| false,
+                free_space: &fly_app_lib::audio_store::free_space,
             };
             compress_meeting(&mut ctx, &flac_id)
                 .unwrap_or_else(|e| panic!("{}: compress failed: {e}", src.name));
