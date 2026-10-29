@@ -35,6 +35,7 @@ fly-calendar = { path = "crates/fly-calendar" }
 fly-capture-screen = { path = "crates/fly-capture-screen" }
 fly-storage = { path = "crates/fly-storage" }
 fly-secrets = { path = "crates/fly-secrets" }
+fly-ask = { path = "crates/fly-ask" }
 
 # shared external deps — pinned once here so every crate agrees
 serde = { version = "1", features = ["derive"] }

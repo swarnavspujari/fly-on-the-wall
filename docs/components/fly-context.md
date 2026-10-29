@@ -9,7 +9,7 @@
 > - The chunker lockstep test compares `segment_ids` / `end_ms` instead of text, because chunk text becomes label-free.
 > - `MIGRATION.md` is rewritten to record the landed v3 schema.
 >
-> **Dormant**: no app or MCP caller yet. The Ask harness PR 3.3 will wire it.
+> **Called by the Ask harness** ([fly-ask](fly-ask.md), PR 3.3) for every Ask read; no MCP caller yet.
 
 ## Purpose
 Typed, read-only access to the user's meetings for AI readers: the Ask harness, Enhance, and eventually the MCP server. It offers six "tool" functions with JSON schemas, serializable results, and compact model-facing text that cites transcript lines as `[seg:ID]`. A `Context` is built with a `Visibility`. Under `ShareableOnly` (any cloud model or external AI tool), Keep-local meetings and notes are excluded on every path, and a failed Keep-local lookup fails closed. The crate has no LLM, keys or network.

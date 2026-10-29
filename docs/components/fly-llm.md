@@ -14,7 +14,7 @@ The `LLMProvider` trait and its two HTTP implementations: `AnthropicProvider` (`
 - `crates/fly-llm/src/conversation.rs`: block types (`ContentBlock`, `Message`, `ToolSpec`, `ToolChoice`, `ConverseRequest`, `ChatResponse`, `StreamEvent`, `Usage`, `Capabilities`) and schema helpers (`closed_schema`, `strict_schema`).
 - `crates/fly-llm/src/stream.rs`: byte→line framing (`LineBuffer`, 8 MiB line cap), `decode_body`, `replay`, `collect`, `Accumulator`.
 - `crates/fly-llm/src/repair.rs`: `classify()` reads a text reply as a plain answer, a recoverable tool call, or a malformed one.
-- `crates/fly-llm/src/tool_loop.rs`: `run_tool_loop` with budgets, a corrective turn, and content-free run records (dormant).
+- `crates/fly-llm/src/tool_loop.rs`: `run_tool_loop` with budgets, a corrective turn, and content-free run records; `run_tool_loop_async` (the same loop with an async executor, used by the Ask harness [fly-ask](fly-ask.md) so a model's search can embed its query; `run_tool_loop` delegates to it).
 - `crates/fly-llm/src/mock.rs`: `MockLLMProvider`: canned `chat()` text, or a scripted list of `converse()` replies with request recording.
 - `crates/fly-llm/src/golden.rs` (`#[cfg(test)]`): byte-identity test for legacy `chat()` bodies.
 - `crates/fly-llm/tests/golden/legacy_bodies.jsonl`: 105 golden cases (7 request shapes × 15 provider/model/variant combos).
@@ -31,7 +31,7 @@ The `LLMProvider` trait and its two HTTP implementations: `AnthropicProvider` (`
 | Anthropic | `AnthropicProvider { api_key, model, base_url, relax_on_400 }` + `new()` (`anthropic.rs:116-134`), `ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-5-5"`, `ANTHROPIC_FAST_MODEL = "claude-haiku-5-5"`, `successor_model()`, `MAX_STRICT_TOOLS = 20`, `parse_messages_response(_checked)`, `parse_messages_converse` |
 | OpenAI-compatible | `OpenAiCompatProvider { provider_id, base_url, api_key, model, local }` + `openai()`, `nim()`, `ollama()` (`openai_compat.rs:38-76`), `parse_chat_completion`, `parse_native_chat`, `parse_native_response`, `parse_openai_response` |
 | Streaming | `stream::{LineBuffer, MAX_LINE_BYTES, sse_data, replay, response_events, collect, Accumulator, parse_tool_args}` |
-| Tool loop (dormant) | `tool_loop::{run_tool_loop, ToolLoopLimits (default 8 calls / 5 rounds / 6,000 chars), LoopEnd, ToolCallRecord, ToolLoopOutcome, ToolExecutor, UNKNOWN_TOOL}` |
+| Tool loop (fly-ask) | `tool_loop::{run_tool_loop, run_tool_loop_async, ToolLoopLimits (default 8 calls / 5 rounds / 6,000 chars), LoopEnd, ToolCallRecord, ToolLoopOutcome, ToolExecutor, UNKNOWN_TOOL}` |
 | Repair | `repair::{classify, TextToolCall}` |
 | Mock | `mock::MockLLMProvider::{new, with_response, scripted, requests, remaining}` |
 | Unused by the app | `ProviderSettings` (`lib.rs:163-167`) |

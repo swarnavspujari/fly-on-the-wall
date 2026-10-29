@@ -8,7 +8,7 @@ The process entry point and the only place platform implementations are chosen. 
 
 ## Files it owns
 - `src-tauri/src/main.rs` — 6-line shim; `windows_subsystem = "windows"` in release.
-- `src-tauri/src/lib.rs` — `run()`: pre-builder startup, plugin order, `setup` tasks, command registration (105 commands, `lib.rs:182-288`), Exit hook.
+- `src-tauri/src/lib.rs` — `run()`: pre-builder startup, plugin order, `setup` tasks, command registration (107 commands, `lib.rs:182-290`), Exit hook.
 - `src-tauri/src/state.rs` — `AppState`, data-dir resolution, Looma→FlyOnTheWall folder move, legacy keychain copy.
 - `src-tauri/src/logging.rs` — tracing subscriber, rolling file logs, panic hook, the log-hygiene rule and its lexical test.
 - `src-tauri/src/nav_guard.rs` — the `nav-guard` plugin (`on_navigation`).

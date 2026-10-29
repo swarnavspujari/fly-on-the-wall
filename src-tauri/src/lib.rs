@@ -242,6 +242,8 @@ pub fn run() {
             llm_commands::edit_note_block,
             llm_commands::keep_note_block,
             llm_commands::ask_meeting,
+            llm_commands::insert_ask_answer,
+            llm_commands::add_action_item,
             llm_commands::list_templates,
             llm_commands::save_template,
             llm_commands::delete_template,

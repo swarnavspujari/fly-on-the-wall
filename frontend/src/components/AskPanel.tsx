@@ -168,7 +168,17 @@ export function useAskChat(noteId: string): AskChat {
       .then(
         (reply) => {
           if (mine !== seq.current) return;
-          setHistory([...next, { role: "assistant", content: reply }]);
+          // Keep where the answer ran and what it cited: the backend never
+          // sends an on-device answer to an off-device model next turn.
+          setHistory([
+            ...next,
+            {
+              role: "assistant",
+              content: reply.text,
+              on_device: reply.on_device,
+              citations: [...new Set(reply.sentences.flatMap((s) => s.citations))],
+            },
+          ]);
           const n = next.filter((m) => m.role === "user").length;
           setAnnouncement(`Answer ${n} is ready.`);
         },

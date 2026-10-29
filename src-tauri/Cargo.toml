@@ -26,6 +26,7 @@ fly-calendar.workspace = true
 fly-capture-screen.workspace = true
 fly-storage.workspace = true
 fly-secrets.workspace = true
+fly-ask.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
@@ -65,3 +66,6 @@ rfd = { version = "0.16", default-features = false, features = ["common-controls
 [dev-dependencies]
 tempfile = "3"
 async-trait.workspace = true
+# ask_live.rs (ignored): runs the harness on the evals' fixture corpus and
+# records replays with their RecordingProvider. Tests only.
+fly-evals = { path = "../evals/runner" }

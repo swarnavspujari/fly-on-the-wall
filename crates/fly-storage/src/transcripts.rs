@@ -264,12 +264,15 @@ impl Storage {
         let mut transcript = self
             .get_transcript(meeting_id)?
             .ok_or_else(|| StorageError::NotFound(format!("transcript for {meeting_id}")))?;
+        let old_label = transcript.label_for(speaker_key);
         relabel(&mut transcript);
         self.save_transcript(&transcript)?;
         if let Some(mut cleaned) = self.get_cleaned_transcript(meeting_id)? {
             relabel(&mut cleaned);
             self.save_cleaned_transcript(&cleaned)?;
         }
+        // Items owned by the old label ("Speaker 2") now name the new one.
+        self.rename_item_owner(meeting_id, &old_label, label)?;
         Ok(transcript)
     }
 

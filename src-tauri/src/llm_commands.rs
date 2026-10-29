@@ -570,6 +570,25 @@ pub fn build_provider(
     state: &AppState,
     scope: DataScope<'_>,
 ) -> Result<Box<dyn LLMProvider>, String> {
+    build_provider_with_reach(state, scope).map(|b| b.provider)
+}
+
+/// A provider and where it runs.
+pub struct BuiltProvider {
+    pub provider: Box<dyn LLMProvider>,
+    /// The model runs on this machine: Ollama at a loopback address. This,
+    /// not `provider.is_local()`, decides what Keep-local content a reader
+    /// (the Ask harness) may show it — an Ollama at a remote URL is local in
+    /// kind but sends data off the device.
+    pub on_device: bool,
+}
+
+/// [`build_provider`], also reporting `on_device`. The one constructor:
+/// consent and Keep local are enforced here for every caller.
+pub fn build_provider_with_reach(
+    state: &AppState,
+    scope: DataScope<'_>,
+) -> Result<BuiltProvider, String> {
     let storage = state.storage.lock().unwrap();
     let get = |k: &str| {
         storage
@@ -621,7 +640,7 @@ pub fn build_provider(
             .ok_or_else(|| format!("no API key stored for {provider} — add one in Settings"))
     };
 
-    Ok(match provider.as_str() {
+    let provider: Box<dyn LLMProvider> = match provider.as_str() {
         "openai" => {
             let mut p = fly_llm::openai_compat::OpenAiCompatProvider::openai(
                 key(fly_secrets::keys::OPENAI_API_KEY)?,
@@ -649,6 +668,10 @@ pub fn build_provider(
         _ => Box::new(fly_llm::openai_compat::OpenAiCompatProvider::ollama(
             base_url, model,
         )),
+    };
+    Ok(BuiltProvider {
+        provider,
+        on_device,
     })
 }
 
@@ -914,6 +937,158 @@ pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResu
 pub struct AskMessage {
     pub role: String, // "user" | "assistant"
     pub content: String,
+    /// Assistant turns: the model that wrote it ran on this device (the
+    /// answer's `on_device`). Missing = assumed on device, so the turn is
+    /// never sent to a model that isn't.
+    #[serde(default)]
+    pub on_device: Option<bool>,
+    /// Assistant turns: the segment ids that answer cited.
+    #[serde(default)]
+    pub citations: Vec<String>,
+}
+
+/// Most chat turns (user + assistant messages) kept from the history.
+const MAX_ASK_TURNS: usize = 40;
+
+/// The chat (oldest first, ending on the question) → earlier question /
+/// answer pairs + the question. Empty turns are dropped; a question with no
+/// answer (it failed) is skipped.
+pub fn split_ask_history(history: Vec<AskMessage>) -> Result<(Vec<fly_ask::Turn>, String), String> {
+    let mut msgs: Vec<AskMessage> = history
+        .into_iter()
+        .filter(|m| !m.content.trim().is_empty())
+        .collect();
+    let skip = msgs.len().saturating_sub(MAX_ASK_TURNS);
+    msgs.drain(..skip);
+    let question = match msgs.pop() {
+        Some(m) if m.role != "assistant" => m.content,
+        _ => return Err("ask a question first".into()),
+    };
+    let mut turns = Vec::new();
+    let mut pending: Option<String> = None;
+    for m in msgs {
+        if m.role == "assistant" {
+            if let Some(q) = pending.take() {
+                turns.push(fly_ask::Turn {
+                    question: q,
+                    answer: m.content,
+                    citations: m.citations,
+                    on_device: m.on_device.unwrap_or(true),
+                });
+            }
+        } else {
+            pending = Some(m.content);
+        }
+    }
+    Ok((turns, question))
+}
+
+/// Query embeddings through the local Ollama (`embeddinggemma`), when it's
+/// running; otherwise none (keyword search only).
+struct AppEmbedder<'a>(&'a AppState);
+
+impl fly_ask::QueryEmbedder for AppEmbedder<'_> {
+    fn model(&self) -> &str {
+        crate::embeddings::EMBED_MODEL
+    }
+    async fn embed(&self, text: &str) -> Option<Vec<f32>> {
+        crate::embeddings::embed_query(self.0, text).await
+    }
+}
+
+/// Settings key caching a model's tool smoke test (backend-only; not
+/// webview-writable).
+fn tool_smoke_key(provider: &dyn LLMProvider) -> String {
+    format!("ask.tool_smoke.{}.{}", provider.id(), provider.model())
+}
+
+/// The Ask tier by measured capability (spec §4.2 step 3): probe the
+/// model's capabilities and, for a large local model that can call tools,
+/// run the tool smoke test once (cached per model).
+pub async fn ask_tier(state: &AppState, provider: &dyn LLMProvider) -> fly_ask::Tier {
+    let caps = provider
+        .probe_capabilities()
+        .await
+        .unwrap_or_else(|_| provider.capabilities());
+    let mut inputs = fly_ask::TierInputs {
+        local_model: provider.is_local(),
+        model: provider.model(),
+        caps,
+        tool_smoke: None,
+    };
+    if fly_ask::tier::smoke_worth_running(inputs) {
+        let key = tool_smoke_key(provider);
+        let cached = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_setting(&key)
+            .ok()
+            .flatten();
+        let passed = match cached {
+            Some(v) => v == "passed",
+            None => {
+                let r = fly_ask::tool_smoke(provider).await;
+                let code = serde_json::to_value(r)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                // A transport error says nothing about the model: retry next time.
+                if r != fly_ask::tier::SmokeResult::Error {
+                    let _ = state.storage.lock().unwrap().set_setting(&key, &code);
+                }
+                r == fly_ask::tier::SmokeResult::Passed
+            }
+        };
+        inputs.tool_smoke = Some(passed);
+    }
+    fly_ask::measure_tier(inputs)
+}
+
+/// The run log file (`<data dir>/logs`); past this size it rolls once.
+const ASK_RUN_LOG: &str = "ask-runs.jsonl";
+const ASK_RUN_LOG_MAX: u64 = 2_000_000;
+
+/// Append an answer's run log (typed, no free text) — the durable record
+/// per answer (spec §4.2 step 7). Best effort: a write failure is logged,
+/// never shown.
+fn record_ask_run(state: &AppState, log: &fly_ask::RunLog) {
+    use std::io::Write as _;
+    let dir = state.data_dir.join(crate::logging::LOGS_DIR);
+    let path = dir.join(ASK_RUN_LOG);
+    let result = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > ASK_RUN_LOG_MAX) {
+            std::fs::rename(&path, dir.join("ask-runs.1.jsonl"))?;
+        }
+        let line = serde_json::to_string(log).map_err(std::io::Error::other)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        writeln!(f, "{line}")
+    })();
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "couldn't write the Ask run log");
+    }
+}
+
+/// What Ask returns: the harness's answer (sentences with citations and
+/// sourced/unsourced/flagged status, sources, proposals, trace) plus the
+/// trace as display lines. `text` is the answer for a plain renderer.
+#[derive(Serialize)]
+pub struct AskReply {
+    #[serde(flatten)]
+    pub answer: fly_ask::AskAnswer,
+    pub trace_lines: Vec<String>,
+}
+
+/// Payload of the `ask:event` stream (only when the caller passes an
+/// `ask_id`): stage changes, the prefetched sources, sanitized frames.
+#[derive(Serialize, Clone)]
+struct AskEventPayload {
+    ask_id: String,
+    event: fly_ask::AskEvent,
 }
 
 /// Assemble the Ask system prompt (assistant instruction + meeting context)
@@ -963,68 +1138,206 @@ pub fn build_ask_system(
     ))
 }
 
+/// Ask a question about a note (default), a meeting, a folder, a person or
+/// every meeting, through the Ask harness (fly-ask): deterministic
+/// retrieval, a capability tier, citations validated against what the
+/// model was shown, "not found", proposals that never execute, and a run
+/// log per answer. The provider comes from `build_provider`, which enforces
+/// consent and Keep local; its `on_device` decides Keep-local visibility.
+/// A model failure (empty, cut off, provider error) is an `Err` with a
+/// message for the user, as before.
 #[tauri::command]
 pub async fn ask_meeting(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     note_id: String,
     history: Vec<AskMessage>,
-) -> CmdResult<String> {
+    scope: Option<fly_ask::AskScope>,
+    ask_id: Option<String>,
+) -> CmdResult<AskReply> {
+    use tauri::Emitter as _;
     ensure_provider_ready(&state).await?;
-    let provider = build_provider(&state, DataScope::Note(&note_id))?;
-    let profile = profile_for(provider.model());
-    let system = {
-        let storage = state.storage.lock().unwrap();
-        let note = storage.get_note(&note_id).map_err(|e| e.to_string())?;
-        let transcript = match &note.meeting_id {
-            Some(mid) => storage.get_transcript(mid).map_err(|e| e.to_string())?,
-            None => None,
-        };
-        build_ask_system(&note, transcript.as_ref(), profile)
+    let scope = scope.unwrap_or(fly_ask::AskScope::Note(note_id));
+    let data_scope = match &scope {
+        fly_ask::AskScope::Note(id) => DataScope::Note(id),
+        fly_ask::AskScope::Meeting(id) => DataScope::Meeting(id),
+        // Wide scopes: the harness excludes Keep-local meetings in its
+        // queries for an off-device model.
+        _ => DataScope::NoMeetingData,
     };
-
-    let mut messages = vec![ChatMessage::system(system)];
-    // Empty turns are a 400 on Anthropic, and the conversation must end on the
-    // user's question (an assistant last turn is a "prefill", also a 400 on
-    // current Claude models). Bound the history so a runaway chat can't grow
-    // the request without limit.
-    const MAX_ASK_TURNS: usize = 40;
-    let history: Vec<_> = history
-        .into_iter()
-        .filter(|m| !m.content.trim().is_empty())
-        .collect();
-    let skip = history.len().saturating_sub(MAX_ASK_TURNS);
-    // After trimming, the conversation must still open on a user turn.
-    let kept = history
-        .into_iter()
-        .skip(skip)
-        .skip_while(|m| m.role == "assistant");
-    for m in kept {
-        messages.push(if m.role == "assistant" {
-            ChatMessage::assistant(m.content)
-        } else {
-            ChatMessage::user(m.content)
-        });
+    let built = build_provider_with_reach(&state, data_scope)?;
+    let (turns, question) = split_ask_history(history)?;
+    let provider = built.provider.as_ref();
+    let tier = ask_tier(&state, provider).await;
+    let embedder = AppEmbedder(&state);
+    let sink = {
+        let app = app.clone();
+        let id = ask_id.clone().unwrap_or_default();
+        move |event: fly_ask::AskEvent| {
+            let _ = app.emit(
+                "ask:event",
+                AskEventPayload {
+                    ask_id: id.clone(),
+                    event,
+                },
+            );
+        }
+    };
+    let answer = fly_ask::ask(
+        fly_ask::AskEnv {
+            store: &state.storage,
+            provider,
+            on_device: built.on_device,
+            tier,
+            limits: None,
+            embedder: Some(&embedder),
+            events: ask_id.as_ref().map(|_| &sink as fly_ask::EventSink<'_>),
+            cancel: None,
+        },
+        fly_ask::AskInput {
+            question: &question,
+            history: &turns,
+            scope,
+            now: chrono::Utc::now(),
+        },
+    )
+    .await;
+    record_ask_run(&state, &answer.run_log);
+    match answer.status {
+        fly_ask::AnswerStatus::ModelFailed => Err(answer
+            .failure
+            .map(|f| f.message)
+            .unwrap_or_else(|| "The model didn't answer.".into())),
+        fly_ask::AnswerStatus::Cancelled => Err("Ask was cancelled.".into()),
+        _ => Ok(AskReply {
+            trace_lines: answer.trace.lines(),
+            answer,
+        }),
     }
-    if messages.len() < 2 || messages.last().map(|m| m.role) != Some(fly_llm::Role::User) {
-        return Err("ask a question first".into());
-    }
+}
 
-    provider
-        .chat(ChatRequest {
-            effort: profile.effort.ask.map(String::from),
-            messages,
-            temperature: Some(0.3),
-            max_tokens: Some(profile.max_tokens.ask.unwrap_or(2048)),
-            // Same profile-driven opt-out as enhance_note above.
-            thinking: if profile.thinking_disabled() {
-                ThinkingMode::Disabled
-            } else {
-                ThinkingMode::Default
-            },
-            format: None,
-        })
-        .await
+/// Segment ids of a note's transcripts.
+fn note_segment_ids(
+    storage: &fly_storage::Storage,
+    note_id: &str,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut ids = std::collections::HashSet::new();
+    for m in storage
+        .meetings_for_note(note_id)
+        .map_err(|e| e.to_string())?
+    {
+        if let Some(t) = storage.get_transcript(&m.id).map_err(|e| e.to_string())? {
+            ids.extend(t.segments.into_iter().map(|s| s.id));
+        }
+    }
+    Ok(ids)
+}
+
+/// Longest AI block an Ask insert may add.
+const MAX_ASK_INSERT_CHARS: usize = 8_000;
+
+/// "Insert into note" for an Ask answer (or an approved `insert_into_note`
+/// proposal): appends an AI block citing its source lines (spec §3.5 #6).
+/// Validated again here: links removed, only segment ids of this note's own
+/// transcripts kept (citation locators are recorded by the block write).
+#[tauri::command]
+pub fn insert_ask_answer(
+    state: State<'_, AppState>,
+    note_id: String,
+    markdown: String,
+    segment_ids: Vec<String>,
+) -> CmdResult<Note> {
+    let markdown = fly_ask::text::strip_links(markdown.trim()).0;
+    if markdown.trim().is_empty() {
+        return Err("nothing to insert".into());
+    }
+    if markdown.chars().count() > MAX_ASK_INSERT_CHARS {
+        return Err("that answer is too long to insert".into());
+    }
+    let storage = state.storage.lock().unwrap();
+    let mut note = storage.get_note(&note_id).map_err(|e| e.to_string())?;
+    let known = note_segment_ids(&storage, &note_id)?;
+    let mut ids: Vec<String> = Vec::new();
+    for id in segment_ids {
+        if known.contains(&id) && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    note.blocks.push(fly_core::NoteBlock::ai(markdown, ids));
+    storage
+        .update_note_blocks(&note_id, &note.blocks)
         .map_err(|e| e.to_string())
+}
+
+/// Longest action item an Ask proposal may add.
+const MAX_ASK_ITEM_CHARS: usize = 400;
+
+/// Add an action item from an approved Ask `add_action_item` proposal.
+/// Validated again here: it must cite lines of this meeting; its owner is
+/// nobody, or a speaker or attendee of the meeting (never inferred). Kept
+/// across re-extraction (`extracted_by` = `user:ask`).
+#[tauri::command]
+pub fn add_action_item(
+    state: State<'_, AppState>,
+    meeting_id: String,
+    text: String,
+    owner: Option<String>,
+    segment_ids: Vec<String>,
+) -> CmdResult<fly_core::MeetingItem> {
+    let text = fly_ask::text::strip_links(text.trim()).0;
+    if text.trim().is_empty() {
+        return Err("the action item is empty".into());
+    }
+    if text.chars().count() > MAX_ASK_ITEM_CHARS {
+        return Err("that action item is too long".into());
+    }
+    let storage = state.storage.lock().unwrap();
+    let meeting = storage
+        .get_meeting(&meeting_id)
+        .map_err(|e| e.to_string())?;
+    let transcript = storage
+        .get_transcript(&meeting.id)
+        .map_err(|e| e.to_string())?
+        .ok_or("this meeting has no transcript yet")?;
+    let mut ids: Vec<String> = Vec::new();
+    for id in segment_ids {
+        if transcript.segments.iter().any(|s| s.id == id) && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let Some(first) = ids
+        .first()
+        .and_then(|id| transcript.segments.iter().find(|s| &s.id == id))
+    else {
+        return Err("an action item needs a source line from this meeting".into());
+    };
+    let owner = owner
+        .map(|o| o.trim().to_string())
+        .filter(|o| !o.is_empty());
+    if let Some(o) = &owner {
+        let known = transcript
+            .speakers
+            .iter()
+            .map(|s| s.label.as_str())
+            .chain(meeting.attendees.iter().map(|a| a.display_name()));
+        if !known.into_iter().any(|k| k.trim().eq_ignore_ascii_case(o)) {
+            return Err("the owner must be a speaker or attendee of this meeting".into());
+        }
+    }
+    let item = fly_core::MeetingItem {
+        id: fly_core::new_id(),
+        meeting_id: meeting.id.clone(),
+        kind: fly_core::ItemKind::ActionItem,
+        text,
+        owner,
+        status: Some("open".into()),
+        speaker_key: Some(first.speaker_key.clone()),
+        segment_ids: ids,
+        created_at: chrono::Utc::now(),
+        extracted_by: format!("{}ask", fly_storage::USER_ITEM_PREFIX),
+    };
+    storage.add_meeting_item(&item).map_err(|e| e.to_string())?;
+    Ok(item)
 }
 
 // ---------------------------------------------------------------------------

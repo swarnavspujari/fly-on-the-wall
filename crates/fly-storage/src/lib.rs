@@ -44,7 +44,7 @@ mod transcripts;
 pub use atomic::rename_with_retry;
 pub use citations::{CitationLocator, CitationStatus};
 pub use embeddings::{PendingChunk, VectorHit};
-pub use items::ItemFilter;
+pub use items::{ItemFilter, USER_ITEM_PREFIX};
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::MeetingFilter;
 pub use meetings::{contained_recordings_dir, recording_dir_rel};

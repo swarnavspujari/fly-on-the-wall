@@ -955,7 +955,26 @@ const MOCK_VENDORS: Record<string, string> = {
 };
 const MOCK_ASK_ANSWER =
   "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
-function mockAsk(args: Record<string, unknown>): Promise<string> {
+/** `ask_meeting`'s reply shape (the harness's answer), unsourced in the mock. */
+function mockAskReply(text: string) {
+  const local = llmSettings.providers.find((p) => p.id === llmSettings.provider)?.is_local ?? true;
+  return {
+    status: "answered",
+    text,
+    sentences: text
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => ({ text: l, citations: [] as string[], status: "unsourced" })),
+    sources: [],
+    proposals: [],
+    refusals: [],
+    trace: {},
+    trace_lines: ["Searched this meeting"],
+    on_device: local,
+    run_log: {},
+  };
+}
+function mockAsk(args: Record<string, unknown>): Promise<ReturnType<typeof mockAskReply>> {
   const forced = mockFlag("fotwMockAskError");
   const provider = llmSettings.provider;
   const info = llmSettings.providers.find((p) => p.id === provider);
@@ -969,7 +988,7 @@ function mockAsk(args: Record<string, unknown>): Promise<string> {
     else if (!info.has_key) error = MOCK_ASK_ERRORS.no_key.replace("openai", provider);
   }
   return new Promise((resolve, reject) =>
-    setTimeout(() => (error ? reject(error) : resolve(MOCK_ASK_ANSWER)), 700),
+    setTimeout(() => (error ? reject(error) : resolve(mockAskReply(MOCK_ASK_ANSWER))), 700),
   );
 }
 
@@ -1327,6 +1346,33 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mcpSnippet;
     case "ask_meeting":
       return mockAsk(args);
+    case "insert_ask_answer": {
+      // Like the backend: an AI block citing the given lines (links dropped).
+      const md = String(args.markdown ?? "")
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+        .trim();
+      if (!md) throw "nothing to insert";
+      blocks.push({
+        id: `ask-${blocks.length + 1}`,
+        origin: { kind: "ai", source_segment_ids: (args.segmentIds as string[]) ?? [] },
+        markdown: md,
+      });
+      return JSON.parse(JSON.stringify(note(String(args.noteId ?? "n1"))));
+    }
+    case "add_action_item":
+      return {
+        id: `item-${Date.now()}`,
+        meeting_id: String(args.meetingId),
+        kind: "action_item",
+        text: String(args.text),
+        owner: (args.owner as string | null) ?? null,
+        status: "open",
+        speaker_key: null,
+        segment_ids: (args.segmentIds as string[]) ?? [],
+        created_at: new Date().toISOString(),
+        extracted_by: "user:ask",
+      };
     case "test_llm_connection": {
       const refused = mockConsentRefusal();
       if (refused) throw refused;

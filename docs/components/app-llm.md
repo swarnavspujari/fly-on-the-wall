@@ -1,10 +1,10 @@
 # LLM: Enhance, Ask, polish, extraction (`app-llm`)
 
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0), plus backend-only cloud consent (#102). Line references into `llm_commands.rs`, `lib.rs`, `api.ts`, `askModel.ts`, `CloudConsent.tsx` and `devMock.ts` are as of #102.
-> In flight: The Ask harness (PR 3.3, not open yet) will add an agentic Ask caller over the dormant fly-context/fly-llm tool loop; it must go through `build_provider` too.
+> Ask runs through the Ask harness ([fly-ask](fly-ask.md), spec v2.5 PR 3.3) since that PR; the Ask rows below describe it. Line numbers elsewhere are as of #102.
 
 ## Purpose
-Every LLM call the app makes: Enhance (scratchpad + transcript → provenance-tagged blocks), Ask (ephemeral chat over one note), transcript polish (a cleaned variant stored next to the raw one), and structured item extraction into `meeting_items`. It owns `build_provider`, the only place a provider is constructed, and so the only place cloud consent and **Keep local** are enforced (spec §2 item 1). It also owns templates, the block-level edit/keep commands, and two startup migrations of LLM settings.
+Every LLM call the app makes: Enhance (scratchpad + transcript → provenance-tagged blocks), Ask (ephemeral chat over a note, a meeting, a folder, a person or everything, through the [fly-ask](fly-ask.md) harness: validated citations, "not found", proposals), transcript polish (a cleaned variant stored next to the raw one), and structured item extraction into `meeting_items`. It owns `build_provider`, the only place a provider is constructed, and so the only place cloud consent and **Keep local** are enforced (spec §2 item 1). It also owns templates, the block-level edit/keep commands, and two startup migrations of LLM settings.
 
 ## Files it owns
 - `src-tauri/src/llm_commands.rs` — `build_provider`, policy helpers, Enhance, Ask, polish, templates, Test connection, startup migrations. (The settings and consent commands in this file, including `request_cloud_consent` and its native dialog, belong to [app-settings-consent](app-settings-consent.md).)
@@ -18,14 +18,17 @@ Policy and construction (`llm_commands.rs`):
 |---|---|---|
 | `PROVIDERS: &[(id, default_model, is_local)]` (`ollama`, `openai`, `anthropic`, `nim`) | 17-27 | `build_provider`, `get_llm_settings`, `ollama.rs:255` |
 | `enum DataScope { NoMeetingData, Note(&str), Meeting(&str) }` | 501-510 | every caller of `build_provider` |
-| `build_provider(&AppState, DataScope) -> Result<Box<dyn LLMProvider>, String>` | 569-653 | Enhance, Ask, polish, extraction, Test connection |
+| `build_provider(&AppState, DataScope) -> Result<Box<dyn LLMProvider>, String>` | 569-575 (delegates) | Enhance, polish, extraction, Test connection |
+| `build_provider_with_reach(&AppState, DataScope) -> Result<BuiltProvider{provider, on_device}, String>` (the one constructor; `build_provider` calls it) | after `build_provider` | Ask (`on_device` decides Keep-local visibility in the harness), `build_provider` |
+| `split_ask_history(Vec<AskMessage>) -> (Vec<fly_ask::Turn>, question)` | Ask section | `ask_meeting` |
+| `ask_tier(&AppState, &dyn LLMProvider) -> fly_ask::Tier` (probe + cached tool smoke test) | Ask section | `ask_meeting` |
 | `ensure_provider_ready(&AppState)` (starts managed Ollama when provider = `ollama`) | 482-497 | the same five callers, always **before** `build_provider` |
 | `check_cloud_policy(provider, is_local, on_device, consented, keep_local)` (pure) | 541-566 | `build_provider`, tests |
 | `keep_local_refusal`, `is_consent_refusal`, `record_consent_skip` | 514-519, 438-455 | `build_provider`; `scheduler.rs:404`; `extraction.rs:317` |
 | `is_loopback_url`, `validate_base_url` | 522-533, 1134-1163 | `build_provider`, `set_llm_settings`, `embeddings.rs:172,198` |
 | `migrate_anthropic_model(&Storage)`, `reset_unseen_cloud_consent(&Storage)`, `CLOUD_CONSENT_RESET_FLAG` | 42-59, 72-119 | `lib.rs:111-117` (startup) |
 | `run_polish(&AppState, meeting_id) -> Result<PolishResult, String>` | 821-907 | `polish_transcript`, `scheduler.rs:393` (background AI pass) |
-| `build_ask_system(&Note, Option<&Transcript>, &PromptProfile)` | 922-964 | `ask_meeting`, `tests/llm_bench.rs:670` |
+| `build_ask_system(&Note, Option<&Transcript>, &PromptProfile)` (the pre-harness whole-transcript prompt) | Ask section | `tests/llm_bench.rs:670` only (the July baseline) |
 
 Extraction (`extraction.rs`): `build_extraction_prompt` (78-112), `extraction_items_schema` (117-133), `parse_extraction_response` (153-160), `validate_items` (165-221), `extract_items(&dyn LLMProvider, …)` (225-266, pure w.r.t. storage), `run_extraction(&AppState, meeting_id)` (271-309), `extract_after_transcribe` (313-325, best-effort; called from `scheduler.rs:219` and `asr_commands.rs:161`).
 
@@ -46,7 +49,7 @@ No network call happens inside `build_provider`. But each caller runs `ensure_pr
 | Caller | Scope | Line | Background? |
 |---|---|---|---|
 | `enhance_note` | `Note(note_id)` | `llm_commands.rs:668` | no |
-| `ask_meeting` | `Note(note_id)` | `llm_commands.rs:973` | no |
+| `ask_meeting` | from its `scope`: `Note(id)` (default) → `Note`, `Meeting(id)` → `Meeting`, `Folder`/`Person`/`All` → `NoMeetingData` (the harness then excludes Keep-local meetings in its queries for an off-device model) | `llm_commands.rs` `ask_meeting` | no |
 | `run_polish` ← `polish_transcript` (no UI caller) and `scheduler::polish_after_transcribe` (AI pass) | `Meeting(meeting_id)` | `llm_commands.rs:823` | AI pass: yes |
 | `run_extraction` ← `extract_meeting_items` (no UI caller), `backfill_meeting_items` (per meeting), `extract_after_transcribe` (AI pass `scheduler.rs:219`; re-diarize/revert `asr_commands.rs:132,152`) | `Meeting(meeting_id)` | `extraction.rs:273` | AI pass and re-diarize: yes |
 | `test_llm_connection` | `NoMeetingData` | `llm_commands.rs:1208` | no |
@@ -77,7 +80,9 @@ devMock copies these strings by hand (`frontend/src/devMock.ts:931-950`).
 | `polish_transcript` | `meeting_id: String` | `Result<PolishResult, String>` | none (`api.polishTranscript` exists at `api.ts:135`, no component calls it; the AI pass calls `run_polish` directly) |
 | `edit_note_block` | `note_id: String, block_id: String, markdown: String` | `Result<Note, String>` | `ui-editor` (`EnhancedDoc.tsx:525,565`; empty markdown deletes the block), via `api.editNoteBlock` |
 | `keep_note_block` | `note_id: String, block_id: String` | `Result<Note, String>` | `ui-editor` (`EnhancedDoc.tsx:501`), via `api.keepNoteBlock` |
-| `ask_meeting` | `note_id: String, history: Vec<AskMessage{role, content}>` | `Result<String, String>` | `ui-ask` (`AskPanel.tsx:167`), via `api.askMeeting` |
+| `ask_meeting` | `note_id: String, history: Vec<AskMessage{role, content, on_device?, citations?}>, scope: Option<fly_ask::AskScope>` (`{kind, id}` with kind `note`, `meeting`, `folder` or `person`, or `{kind: "all"}`; default the note), `ask_id: Option<String>` (streams `ask:event`) | `Result<AskReply, String>`: the harness answer (`status`, `text`, `sentences[{text, citations, status, flags}]`, `sources`, `proposals`, `refusals`, `trace`, `on_device`, `run_log`) + `trace_lines`. A model failure (empty, cut off, provider error, budget) is `Err(message)` as before | `ui-ask` (`AskPanel.tsx`), via `api.askMeeting` (the panel shows `text` and keeps `on_device`/`citations` per answer) |
+| `insert_ask_answer` | `note_id: String, markdown: String, segment_ids: Vec<String>` | `Result<Note, String>`: an AI block appended, links stripped, only ids of this note's transcripts kept (locators recorded by the block write) | none yet (PR 3.4: "Insert into note" and approved `insert_into_note` proposals), via `api.insertAskAnswer` |
+| `add_action_item` | `meeting_id: String, text: String, owner: Option<String>, segment_ids: Vec<String>` | `Result<MeetingItem, String>`: an open action item with `extracted_by = "user:ask"`; needs ≥ 1 source line of that meeting; owner = nobody or a speaker/attendee of it | none yet (PR 3.4: approved `add_action_item` proposals), via `api.addActionItem` |
 | `list_templates` | — | `Result<Vec<Template>, String>` | `ui-app-shell` (`App.tsx:266,1150`), `ui-settings` (`SettingsModal.tsx:372,806,811`), via `api.listTemplates` |
 | `save_template` | `template: Template` (empty id → new id, `built_in=false`) | `Result<(), String>` | `ui-settings` (`SettingsModal.tsx:804`), via `api.saveTemplate` |
 | `delete_template` | `id: String` | `Result<(), String>` | `ui-settings` (`SettingsModal.tsx:810`), via `api.deleteTemplate` |
@@ -92,6 +97,7 @@ devMock mirrors all of these except `polish_transcript` and `extract_meeting_ite
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
 | `llm:consent-skips` | emitted by `scheduler::ai_pass` (`scheduler.rs:229`) from state this component writes (`record_consent_skip`) | `string[]`, every meeting id currently skipped | `ui-confirm-consent` (`CloudConsent.tsx:122`), `ui-notices` (`AppNotices.tsx:169`) |
+| `ask:event` | emitted by `ask_meeting` when called with an `ask_id` | `{ask_id, event: fly_ask::AskEvent}`: `stage`, `sources` (sanitized, + the kept-local count for the trace), `turn_start`, `frame` (the reply so far, links and reasoning removed) | `ui-ask` (PR 3.4; nothing listens yet) |
 | `pipeline:progress` stage `polishing` | emitted by the scheduler around `run_polish` (`scheduler.rs:390`) | `PipelineProgress` | `app-pipeline` / `ui-editor` |
 | — | `extract_after_transcribe` from re-diarize/revert (`asr_commands.rs:158-163`) records consent skips but **emits nothing** | — | the notice only catches up on the next mount or the next AI pass |
 
@@ -102,6 +108,7 @@ devMock mirrors all of these except `polish_transcript` and `extract_meeting_ite
 | `llm.<id>.model` | read (587); write `llm.anthropic.model` in `migrate_anthropic_model` (49) | no | model override |
 | `llm.<id>.base_url` | read (588) | no | custom endpoint; re-validated at use |
 | `consent.cloud_llm.<id>` | read (602); bulk delete in `reset_unseen_cloud_consent` (102); written only by `record_cloud_consent` ([app-settings-consent](app-settings-consent.md)) | no: readable, but `set_app_setting` refuses it (`commands.rs:68-79`) | `"true"` = cloud consent recorded |
+| `ask.tool_smoke.<provider>.<model>` | read/write (`ask_tier`) | no | cached tool smoke result for a large local model (`passed` or the failure code); decides tier M vs S |
 | `migration.cloud_consent_reset_v2_4` | read/write (75, 95, 104) | no | one-time v2.4 consent reset ran |
 
 Full registry: [app-settings-consent](app-settings-consent.md#settings-keys).
@@ -112,7 +119,7 @@ Full registry: [app-settings-consent](app-settings-consent.md#settings-keys).
 | `notes` | `blocks_json`, `scratchpad`, `title`, `meeting_id` | read (Enhance, Ask); write `blocks_json` via `update_note_blocks` / `edit_note_block` / `keep_note_block` (`crates/fly-storage/src/notes.rs:211-246`) |
 | `transcripts` | `segments`/speakers JSON, `cleaned_json` | read raw + cleaned; polish writes `cleaned_json` (`crates/fly-storage/src/transcripts.rs:96-115`) |
 | `meetings`, `folders` | `keep_local`, `title`, `attendees_json`, `started_at` | read (keep-local, extraction metadata) |
-| `meeting_items` | `id, meeting_id, kind, text, owner, status, speaker_key, segment_ids_json, created_at, extracted_by` | write (`replace_meeting_items`, `mark_extracted`); read `meetings_missing_items` for backfill (`items.rs:167-176`) |
+| `meeting_items` | `id, meeting_id, kind, text, owner, status, speaker_key, segment_ids_json, created_at, extracted_by` | write (`replace_meeting_items` — keeps `user:` items, `mark_extracted`, `add_meeting_item` for `add_action_item`); read `meetings_missing_items` for backfill; Ask reads through fly-context |
 | `templates` | `id, name, system_prompt, structure_hint, built_in` | CRUD; built-ins are seeded once and can be edited or deleted (no backend guard) |
 | `settings` | see above | read; startup migrations write |
 | `notes_fts`, `embedding_chunks` | — | written indirectly by fly-storage's `sync_note_derived` on every block write (`notes.rs:320-329`); `state.embed_notify` nudges the indexer (`llm_commands.rs:738,756`) |
@@ -120,6 +127,7 @@ Full registry: [app-settings-consent](app-settings-consent.md#settings-keys).
 ### Files and directories written
 All through fly-storage:
 - `<data_dir>/notes/<date> <title>.md` (note mirror) and the meeting folder's `note.json` after Enhance / edit / keep (`notes.rs:329-340`).
+- `<data_dir>/logs/ask-runs.jsonl`: one Ask run log per answer (typed, allowlisted, no free text — [fly-ask](fly-ask.md#run-log)); past 2 MB it rolls once to `ask-runs.1.jsonl` (`record_ask_run`, best effort).
 - `<data_dir>/recordings/<meeting folder>/transcript.cleaned.{md,json,vtt}` after polish, or `<data_dir>/transcripts/<meeting_id>.cleaned.*` when the meeting has no folder (`transcripts.rs:108-112,299-311`).
 
 ### Network egress
@@ -155,7 +163,8 @@ Background AI pass after every successful transcription (`scheduler.rs:169-173`)
 - Polish never overwrites the raw transcript, and refuses to save a variant whose ids/speakers/timestamps drifted (`llm_commands.rs:889-898`; DECISIONS.md M4 provenance contract).
 - Enhance never saves an empty or unusable block list (720-731).
 - Background polish/extraction never fail or stall the transcription job (10-minute cap `scheduler.rs:382`; `extract_after_transcribe` swallows errors `extraction.rs:313-325`).
-- Ask history: empty turns dropped, at most 40 turns, must open and end on a user turn (`llm_commands.rs:990-1010`).
+- Ask history (`split_ask_history`): empty turns dropped, at most 40 messages, must end on the question; an assistant turn without `on_device` is treated as on device, so it never reaches an off-device model.
+- Ask gets Keep-local visibility from `build_provider_with_reach`'s `on_device`, never `provider.is_local()` (a remote Ollama is local in kind). The harness never constructs a provider, reads a key or writes; the two Ask writes (`insert_ask_answer`, `add_action_item`) are separate user-clicked commands that validate again.
 - The MCP binary never calls an LLM; it only reads `meeting_items` (spec §2 item 5; `extraction.rs:1-8`).
 
 ## Tests
@@ -167,6 +176,7 @@ Background AI pass after every successful transcription (`scheduler.rs:169-173`)
 | integration (runs in CI) | `src-tauri/tests/polish_flow.rs` | 2 | cleanup prompt → mock → id-keyed merge, drop-content guard, raw kept |
 | integration (runs in CI) | `src-tauri/tests/llm_bench.rs` (`bench_fixtures_parse`) | 1 | bench fixtures parse |
 | ignored e2e/harness | `src-tauri/tests/llm_bench.rs` (`llm_bench`), `polish_harness.rs`, `anthropic_live.rs` | 1 + 1 + 5 | real-model contract rates, latency, request shapes accepted by the Anthropic API (metrics printed, not asserted) |
+| unit + integration (runs in CI) | `crates/fly-ask` (`cargo test -p fly-ask`) | 51 | the Ask harness: citations, claim check, floor, failures, Keep local off device, tiers, proposals, run log — see [fly-ask](fly-ask.md#tests) |
 | vitest | `frontend/src/askModel.test.ts`, `components/AskPanel.test.tsx`, `Editor.enhanced.test.tsx`, `EnhancedDoc.test.tsx` | — | UI side only, against `vi.spyOn(api)` / devMock |
 
 **Known gaps:**
