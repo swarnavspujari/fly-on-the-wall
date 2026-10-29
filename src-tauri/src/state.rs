@@ -64,6 +64,9 @@ pub struct AppState {
     /// Recording storage v2: the background "Compress recordings" job's
     /// status and controls, plus playback regeneration (audio_store.rs).
     pub audio_store: crate::audio_store::StoreState,
+    /// The opt-in video job: imported videos to audio only, screen
+    /// recordings to a visually lossless re-encode (video_store.rs).
+    pub video_store: crate::video_store::VideoState,
 }
 
 impl AppState {
@@ -107,6 +110,7 @@ impl AppState {
             consent_prompt: tokio::sync::Mutex::new(Default::default()),
             embed_notify: tokio::sync::Notify::new(),
             audio_store: Default::default(),
+            video_store: Default::default(),
         })
     }
 

@@ -36,6 +36,7 @@ import type {
   OllamaStatus,
   PolishResult,
   PlaybackSource,
+  ShrinkEstimate,
   PrivacySettings,
   RecordingStatus,
   ReDiarizeOutcome,
@@ -43,6 +44,8 @@ import type {
   SpeakerUndoState,
   StorageReport,
   SweepReport,
+  VideoJobKind,
+  VideoJobStatus,
   SystemAudioPreflight,
   Template,
   Transcript,
@@ -130,6 +133,14 @@ export const api = {
   storageReport: () => invoke<StorageReport>("storage_report"),
   /** The one-time "recordings compressed" notice was seen. */
   dismissCompressNotice: () => invoke<void>("dismiss_compress_notice"),
+  /** Opt-in video storage: start a job (the UI confirms first). */
+  startVideoJob: (kind: VideoJobKind) => invoke<VideoJobStatus>("start_video_job", { kind }),
+  cancelVideoJob: () => invoke<void>("cancel_video_job"),
+  /** "audio_only" also starts the job for the videos already imported. */
+  setImportVideoPolicy: (policy: "keep" | "audio_only") =>
+    invoke<VideoJobStatus>("set_import_video_policy", { policy }),
+  /** What shrinking the screen recordings would save (30 s sample). */
+  estimateScreenShrink: () => invoke<ShrinkEstimate | null>("estimate_screen_shrink"),
   // Set the meeting's start date/time (RFC 3339 UTC). Length is preserved
   // (ended_at shifts); the meeting folder + manifest re-mirror the date.
   updateMeetingStartedAt: (meetingId: string, startedAt: string) =>

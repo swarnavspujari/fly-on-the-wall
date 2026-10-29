@@ -187,6 +187,8 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                     emit_final(&on_stage, &meeting_id, None);
                     // transcript final → its recording can be compressed
                     state.audio_store.nudge();
+                    // and, with the audio-only policy, an import's video copy
+                    crate::video_store::after_transcription(&app);
                 }
                 Tick::Retrying {
                     meeting_id,

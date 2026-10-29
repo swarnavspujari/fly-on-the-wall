@@ -132,6 +132,55 @@ impl Storage {
     }
 }
 
+impl Storage {
+    /// Point every note attachment at `old_rel` (a video copy being
+    /// replaced by its audio) to `new_rel`, renaming its display name and
+    /// MIME type to match. Returns how many attachments changed.
+    pub fn repoint_attachments(&self, old_rel: &str, new_rel: &str) -> Result<usize> {
+        let new_name = new_rel.rsplit('/').next().unwrap_or(new_rel).to_string();
+        let ids: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM notes WHERE instr(attachments_json, ?1) > 0")?;
+            let rows = stmt.query_map([old_rel], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let mut changed = 0;
+        for id in ids {
+            let note = self.get_note(&id)?;
+            let mut attachments = note.attachments.clone();
+            let mut hit = false;
+            for a in attachments.iter_mut().filter(|a| a.rel_path == old_rel) {
+                a.rel_path = new_rel.to_string();
+                a.file_name = new_name.clone();
+                a.mime = audio_mime(&new_name);
+                hit = true;
+                changed += 1;
+            }
+            if hit {
+                self.set_note_attachments(&id, &attachments)?;
+            }
+        }
+        Ok(changed)
+    }
+}
+
+fn audio_mime(name: &str) -> Option<String> {
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(
+        match ext.as_str() {
+            "m4a" => "audio/mp4",
+            "mp3" => "audio/mpeg",
+            "ogg" => "audio/ogg",
+            "flac" => "audio/flac",
+            "wav" => "audio/wav",
+            "mka" => "audio/x-matroska",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::recovery::{RecordingManifest, RECORDING_MANIFEST};
@@ -253,6 +302,51 @@ mod tests {
             .mic_path
             .unwrap()
             .ends_with(".wav"));
+    }
+
+    #[test]
+    fn repoint_attachments_moves_a_video_attachment_to_its_audio() {
+        let (_d, s) = test_storage();
+        let note = s.create_note("Board call", None).unwrap();
+        let rel = "recordings/a/Board call.mp4";
+        s.set_note_attachments(
+            &note.id,
+            &[fly_core::Attachment {
+                id: "att1".into(),
+                file_name: "Board call.mp4".into(),
+                rel_path: rel.into(),
+                mime: Some("video/mp4".into()),
+                added_at: chrono::Utc::now(),
+            }],
+        )
+        .unwrap();
+        let other = s.create_note("Other", None).unwrap();
+        assert_eq!(
+            s.repoint_attachments(rel, "recordings/a/Board call.m4a")
+                .unwrap(),
+            1
+        );
+        let a = &s.get_note(&note.id).unwrap().attachments[0];
+        assert_eq!(
+            (
+                a.id.as_str(),
+                a.rel_path.as_str(),
+                a.file_name.as_str(),
+                a.mime.as_deref()
+            ),
+            (
+                "att1",
+                "recordings/a/Board call.m4a",
+                "Board call.m4a",
+                Some("audio/mp4")
+            )
+        );
+        assert!(s.get_note(&other.id).unwrap().attachments.is_empty());
+        assert_eq!(
+            s.repoint_attachments(rel, "x").unwrap(),
+            0,
+            "nothing left to move"
+        );
     }
 
     #[test]

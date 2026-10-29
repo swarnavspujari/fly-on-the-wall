@@ -342,6 +342,7 @@ fn sweep_now(state: &AppState, explicit: bool) -> SweepReport {
         .keys()
         .cloned()
         .chain(state.audio_store.current())
+        .chain(state.video_store.current_meeting())
         .collect();
     let storage = state.storage.lock().unwrap();
     sweep_retention(
@@ -884,9 +885,12 @@ pub async fn delete_all_data(
         }
         // Background compression works inside meeting folders: stop it for
         // the rest of this run (the wipe restarts the app anyway).
-        if !crate::audio_store::halt(&state, Duration::from_secs(20)) {
+        if !crate::audio_store::halt(&state, Duration::from_secs(20))
+            || !crate::video_store::halt(&state, Duration::from_secs(20))
+        {
             return Err(
-                "recording compression didn't stop in time — nothing was deleted; try again".into(),
+                "background storage work didn't stop in time — nothing was deleted; try again"
+                    .into(),
             );
         }
         perform_delete_all(

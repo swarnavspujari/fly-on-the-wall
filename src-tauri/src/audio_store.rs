@@ -226,7 +226,7 @@ pub fn halt(state: &AppState, timeout: Duration) -> bool {
 /// with the search-indexing work: a recording, live captions, or any
 /// pipeline stage but "waiting"; a merely queued job doesn't count), plus a
 /// media import, which copies and converts files.
-fn busy_reason(state: &AppState) -> Option<&'static str> {
+pub(crate) fn busy_reason(state: &AppState) -> Option<&'static str> {
     if crate::scheduler::recording_active(state) {
         return Some("recording");
     }
@@ -721,7 +721,7 @@ fn ctx_stopped(e: &fly_audio::AudioError) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Lower this thread's CPU and I/O priority (Windows background mode).
-fn enter_background_priority() {
+pub(crate) fn enter_background_priority() {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::Threading::{
@@ -1221,6 +1221,8 @@ pub struct StorageReport {
     /// Other attachments (files, other videos).
     pub other_attachment_bytes: u64,
     pub compress: CompressStatus,
+    /// The opt-in video job (video_store.rs).
+    pub videos: crate::video_store::VideoJobStatus,
 }
 
 fn ext_of(p: &Path) -> String {
@@ -1296,6 +1298,7 @@ pub async fn storage_report(state: tauri::State<'_, AppState>) -> Result<Storage
         .await
         .map_err(|e| e.to_string())?;
     report.compress = state.audio_store.status();
+    report.videos = crate::video_store::status_for(&state);
     Ok(report)
 }
 

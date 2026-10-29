@@ -301,6 +301,14 @@ pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String
         .unwrap()
         .delete_note(&id)
         .map_err(err_str)?;
+    // The opt-in video job may be reading one of this note's files.
+    let meeting_ids: Vec<String> = meetings.iter().map(|m| m.id.clone()).collect();
+    crate::video_store::stop_for_note(
+        &state,
+        &id,
+        &meeting_ids,
+        std::time::Duration::from_secs(15),
+    );
     for m in &meetings {
         let running = {
             let stages = state.pipeline_stage.lock().unwrap();
