@@ -79,3 +79,17 @@ export function healthChips(warnings: readonly string[], paused: boolean): Healt
     return { side, tone: "warn", label: `${name} · ${mine[0].label}${more}`, warnings: mine };
   });
 }
+
+/** The warning popover's heading. Lost audio (gaps, the rest recorded) reads
+ *  milder than a side that may be missing from the recording entirely. */
+export function chipHeading(chip: Pick<HealthChip, "side" | "warnings">): string {
+  const onlyGaps = chip.warnings.length > 0 && chip.warnings.every((w) => w.label === "Audio lost");
+  if (chip.side === "you") {
+    return onlyGaps
+      ? "Part of your microphone audio was lost"
+      : "Your microphone may be missing from this recording";
+  }
+  return onlyGaps
+    ? "Part of the other participants’ audio was lost"
+    : "The other participants may be missing from this recording";
+}

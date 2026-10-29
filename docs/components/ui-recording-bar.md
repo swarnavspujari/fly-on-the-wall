@@ -18,6 +18,7 @@ The one-row bar pinned above every view while audio is recording: indicator and 
 | `RecordingBar` (default) | `RecordingBar.tsx:329` | Props: `status: RecordingStatus`, `noteTitle`, `screenActive?`, `screenSource?`, `onPause`, `onResume`, `onStop`, `onOpenNote`, `onOpenPrivacySettings?`. Renders nothing unless `status.active` (`:344`). |
 | `fmtElapsed(ms)` | `RecordingBar.tsx:32-40` | `m:ss` or `h:mm:ss`; also used by `LivePane`. |
 | `classifyWarning(text)` | `recordingBar.ts` | → `{side, label, text, privacyPane}`. |
+| `chipHeading(chip)` | `recordingBar.ts` | The warning popover's heading: "Part of your microphone audio was lost" / "Part of the other participants’ audio was lost" when every warning on the side is "Audio lost", else the "may be missing from this recording" heading. |
 | `healthChips(warnings, paused)` | `recordingBar.ts:64-76` | Always two chips, You first. No warning: You = `unmonitored`, Others = `ok` (both `paused` while paused). With warnings: `"Others · <first label> +N"`. |
 | `REMIND_NOTICE_KEY`, `remindNoticeOn` | `recordingBar.ts:9-14` | `ui.recording.remind_notice`; on unless the stored value is `"false"`. |
 | `MACOS_PRIVACY_PANE` | `recordingBar.ts:18` | `"Screen & System Audio Recording"`, a copy of `PRIVACY_PANE` (`crates/fly-audio/src/tap_messages.rs:15`). |
@@ -93,7 +94,7 @@ None.
 | Kind | File | Tests | Covers |
 |---|---|---|---|
 | vitest (jsdom, devMock backend) | `frontend/src/components/RecordingBar.test.tsx` | 17 | One-row bar, Stop label, chips and popovers, focus return, notice copy, notified state, reminder rules, Pause/Resume |
-| vitest (node) | `frontend/src/recordingBar.test.ts` | 15 | Classifier labels (incl. lost audio on each side), chip tones, remind default |
+| vitest (node) | `frontend/src/recordingBar.test.ts` | 17 | Classifier labels (incl. lost audio on each side), chip tones, popover heading, remind default |
 | vitest (jsdom, devMock) | `frontend/src/App.test.tsx` | 1 (mounts `LivePane` while recording) | Only with a `scrollIntoView` stub; nothing asserted about the pane |
 
 **Known gaps:**

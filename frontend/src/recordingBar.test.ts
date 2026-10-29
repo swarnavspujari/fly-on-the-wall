@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { classifyWarning, healthChips, remindNoticeOn, REMIND_NOTICE_KEY } from "./recordingBar";
+import {
+  chipHeading,
+  classifyWarning,
+  healthChips,
+  remindNoticeOn,
+  REMIND_NOTICE_KEY,
+} from "./recordingBar";
 
 // The exact sentences the backend sends today (fly-audio cpal_backend.rs,
 // win_volume, tap_messages.rs). The chip labels key off these.
@@ -111,5 +117,18 @@ describe("remind setting", () => {
     expect(remindNoticeOn(undefined)).toBe(true);
     expect(remindNoticeOn("true")).toBe(true);
     expect(remindNoticeOn("false")).toBe(false);
+  });
+});
+
+describe("chipHeading", () => {
+  it("says audio was lost when that's the only problem on a side", () => {
+    const [you, others] = healthChips([MIC_LOST, SYSTEM_LOST], false);
+    expect(chipHeading(you)).toBe("Part of your microphone audio was lost");
+    expect(chipHeading(others)).toBe("Part of the other participants’ audio was lost");
+  });
+
+  it("keeps the stronger heading when a side may be missing entirely", () => {
+    const others = healthChips([SYSTEM_LOST, MUTED], false)[1];
+    expect(chipHeading(others)).toBe("The other participants may be missing from this recording");
   });
 });
