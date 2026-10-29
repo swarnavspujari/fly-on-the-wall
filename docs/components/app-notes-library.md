@@ -78,7 +78,7 @@ None.
 None.
 
 ## Dependencies
-- **Inbound:** `lib.rs:185-206` (registration); the frontend callers above.
+- **Inbound:** `lib.rs:97-118` (registration); the frontend callers above.
 - **Outbound:** [fly-storage](fly-storage.md) (notes, folders, attachments, meetings, `attachment_abs_path`, `note_mirror_abs`), `scheduler::cancel` / `stage_emitter` and `import_commands::purge_staged_import` (on delete), `AppState.recording` / `pipeline_stage` / `embed_notify`, tauri-plugin-dialog, -opener, -clipboard-manager.
 
 ## Invariants

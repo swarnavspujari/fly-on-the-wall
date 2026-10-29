@@ -20,8 +20,21 @@ import type {
   CalendarStatus,
   CalendarToggle,
   CaptureTarget,
+  Connector,
+  ConnectorCallLogEntry,
+  ConnectorCallProposal,
+  ConnectorCardAction,
+  ConnectorClaudeImport,
+  ConnectorDecideResult,
+  ConnectorDirectoryEntry,
+  ConnectorInput,
+  ConnectorPermissionChange,
+  ConnectorSaveResult,
+  ConnectorsOverview,
+  ConnectorTestResult,
   DiskEncryption,
   ImportStaged,
+  LibraryStatus,
   ScreenStatus,
   AsrSettings,
   AsrSettingsUpdate,
@@ -35,11 +48,13 @@ import type {
   NoteSummary,
   OllamaStatus,
   PolishResult,
+  PlaybackSource,
   PrivacySettings,
   RecordingStatus,
   ReDiarizeOutcome,
   SearchHit,
   SpeakerUndoState,
+  StorageReport,
   SweepReport,
   SystemAudioPreflight,
   Template,
@@ -49,6 +64,8 @@ import type {
 } from "./types";
 
 export const api = {
+  /** Works before the library is open (the startup upgrade gate). */
+  libraryStatus: () => invoke<LibraryStatus>("library_status"),
   ping: () => invoke<string>("ping"),
   appInfo: () => invoke<AppInfo>("app_info"),
 
@@ -120,6 +137,14 @@ export const api = {
       "live_status",
       { meetingId },
     ),
+  /** The file the player streams. `build` rebuilds a compressed recording's
+   *  playback mix (on Play); without it, opening a note never does work. */
+  preparePlayback: (meetingId: string, build: boolean) =>
+    invoke<PlaybackSource | null>("prepare_playback", { meetingId, build }),
+  /** Settings › Storage: sizes by kind plus the compression job's status. */
+  storageReport: () => invoke<StorageReport>("storage_report"),
+  /** The one-time "recordings compressed" notice was seen. */
+  dismissCompressNotice: () => invoke<void>("dismiss_compress_notice"),
   // Set the meeting's start date/time (RFC 3339 UTC). Length is preserved
   // (ended_at shifts); the meeting folder + manifest re-mirror the date.
   updateMeetingStartedAt: (meetingId: string, startedAt: string) =>
@@ -273,4 +298,57 @@ export const api = {
    *  source becomes yours). To remove one, edit it to empty text. */
   keepNoteBlock: (noteId: string, blockId: string) =>
     invoke<Note>("keep_note_block", { noteId, blockId }),
+
+  // connectors (beta): MCP servers Ask and Enhance can call. Anything that
+  // grants trust (adding or turning on a connector, loosening a tool's
+  // permission, approving a changed tool, a write call) is confirmed by the
+  // backend in a native dialog; a decline comes back as `saved: false` (or
+  // `ok: false, error: null`), not as an error. Errors are strings; text
+  // after a "---" line is program output (see splitDetails).
+  connectorsOverview: () => invoke<ConnectorsOverview>("connectors_overview"),
+  connectorsDirectory: () => invoke<ConnectorDirectoryEntry[]>("connectors_directory"),
+  /** Asks natively first (showing the whole config); then lists its tools
+   *  unless a browser sign-in comes next. */
+  addConnector: (input: ConnectorInput) => invoke<ConnectorSaveResult>("add_connector", { input }),
+  updateConnector: (id: string, input: ConnectorInput) =>
+    invoke<ConnectorSaveResult>("update_connector", { id, input }),
+  /** Off applies at once; on asks in a native dialog. */
+  setConnectorEnabled: (id: string, enabled: boolean) =>
+    invoke<ConnectorSaveResult>("set_connector_enabled", { id, enabled }),
+  /** Also deletes its sign-in and saved secrets from the keychain. */
+  removeConnector: (id: string) => invoke<void>("remove_connector", { id }),
+  syncConnectorTools: (id: string) => invoke<Connector>("sync_connector_tools", { id }),
+  /** Tightening applies at once; loosening asks in a native dialog. */
+  setConnectorToolPermissions: (id: string, changes: ConnectorPermissionChange[]) =>
+    invoke<ConnectorSaveResult>("set_connector_tool_permissions", { id, changes }),
+  approveConnectorTool: (id: string, tool: string, reviewHash: string) =>
+    invoke<ConnectorSaveResult>("approve_connector_tool", { id, tool, reviewHash }),
+  /** Opens the system browser; resolves when sign-in finishes (up to 5 min). */
+  signInConnector: (id: string) => invoke<ConnectorSaveResult>("sign_in_connector", { id }),
+  signOutConnector: (id: string) => invoke<Connector>("sign_out_connector", { id }),
+  /** Reads Claude Desktop's config (never writes it). */
+  claudeDesktopCandidates: () => invoke<ConnectorClaudeImport>("claude_desktop_candidates"),
+  importClaudeDesktopConnector: (key: string) =>
+    invoke<ConnectorSaveResult>("import_claude_desktop_connector", { key }),
+  /** Native file picker for a local connector's program; null if cancelled. */
+  pickConnectorProgram: () => invoke<string | null>("pick_connector_program"),
+  /** Oldest first. Never holds arguments or results. */
+  connectorCallLog: () => invoke<ConnectorCallLogEntry[]>("connector_call_log"),
+  /** Asks natively first; false when the user kept the log. */
+  clearConnectorCallLog: () => invoke<boolean>("clear_connector_call_log"),
+  pendingConnectorCalls: () => invoke<ConnectorCallProposal[]>("pending_connector_calls"),
+  /** `args` null = send the proposed arguments unchanged. */
+  decideConnectorCall: (
+    proposalId: string,
+    action: ConnectorCardAction,
+    args: Record<string, unknown> | null,
+  ) => invoke<ConnectorDecideResult>("decide_connector_call", { proposalId, action, args }),
+  /** A call started from Settings; it follows the same rules and cards. */
+  testConnectorTool: (id: string, tool: string, args: Record<string, unknown>) =>
+    invoke<ConnectorTestResult>("test_connector_tool", { id, tool, args }),
 };
+
+/** Tauri events for connectors (beta). */
+export const CONNECTORS_PROPOSAL_EVENT = "connectors:proposal"; // ConnectorCallProposal
+export const CONNECTORS_SETTLED_EVENT = "connectors:settled"; // ConnectorSettled
+export const CONNECTORS_CHANGED_EVENT = "connectors:changed"; // { id: string }

@@ -39,7 +39,7 @@ The cross-cutting store of non-secret settings: the generic `get_app_setting` / 
 5. `build_provider` reads the same row (`llm_commands.rs:602`) and refuses without it ([app-llm](app-llm.md#build_provider-what-runs-in-order-llm_commandsrs569-653)).
 6. Background AI-pass refusals for missing consent or a missing API key (`is_consent_refusal` / `is_missing_key`) land in `consent_skipped` (`record_consent_skip`, called at `scheduler.rs:404` and `extraction.rs:317`). After each AI pass, `scheduler::ai_pass` emits the whole list as `llm:consent-skips` (`scheduler.rs:229`).
 7. The notice (`useConsentSkips`, `CloudConsent.tsx`) catches up with `consent_skipped_meetings` at mount and then follows the event. While the saved cloud provider has no key it offers "Add a key", which opens Settings at the key field (`initialFocus: "llm-key"`); otherwise "Run" asks for consent if needed, then calls `retry_consent_skipped`. That empties the list, drops meetings that are transcribing or whose last transcription failed (`scheduler.rs:263-280`), and re-runs `ai_pass` for the rest in the background. Every re-run goes through `build_provider` again, and a re-run that still has no key puts the meeting back on the list.
-8. At startup, once per data dir, `reset_unseen_cloud_consent` deletes every `consent.cloud_llm.*` row recorded before v2.4. Those rows were written while the old async `window.confirm` made every prompt count as yes. The flag `migration.cloud_consent_reset_v2_4` records that the reset ran (`llm_commands.rs:72-119`, `lib.rs:115`). Consents given since v2.4 are kept.
+8. At startup, once per data dir, `reset_unseen_cloud_consent` deletes every `consent.cloud_llm.*` row recorded before v2.4. Those rows were written while the old async `window.confirm` made every prompt count as yes. The flag `migration.cloud_consent_reset_v2_4` records that the reset ran (`llm_commands.rs:72-119`, `startup.rs:193`). Consents given since v2.4 are kept.
 
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
@@ -67,7 +67,7 @@ devMock mirrors all seven (`devMock.ts:1252-1269,1335-1340,1365-1380`). Drift:
 Not emitted: re-extraction after re-diarize/revert (`asr_commands.rs:158-163`) can add to `consent_skipped` without an event.
 
 ### Settings keys
-The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly-storage/src/lib.rs:484-487`). "Delete all my data" erases every row (`crates/fly-storage/src/privacy.rs:375`). Webview-settable means `is_webview_writable_setting_key` accepts it, so any webview script can read and write it. Webview-readable keys (`is_webview_setting_key`) are the same set plus `consent.cloud_llm.*`.
+The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly-storage/src/lib.rs:620-623`). "Delete all my data" erases every row (`crates/fly-storage/src/privacy.rs:375`). Webview-settable means `is_webview_writable_setting_key` accepts it, so any webview script can read and write it. Webview-readable keys (`is_webview_setting_key`) are the same set plus `consent.cloud_llm.*`.
 
 | Key (or prefix) | Owner | Reader(s) | Writer(s) | Webview-settable? |
 |---|---|---|---|---|
@@ -99,9 +99,14 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 | `privacy.audio_retention_days` | app-privacy | `crates/fly-storage/src/privacy.rs:451` | `crates/fly-storage/src/privacy.rs:460-462` (choices only) | no |
 | `privacy.retention_last_sweep` | app-privacy | `privacy.rs:187` | `privacy.rs:225` | no |
 | `privacy.retention_held` | app-privacy | `privacy.rs:316` | `privacy.rs:215`; deleted 183, 223 | no |
+| `storage.compress.saved_bytes` | app-audio-store | `audio_store.rs` (`spawn`, `run_pass`) | `audio_store.rs` (`run_pass`) | no |
+| `storage.compress.notice` | app-audio-store | `audio_store.rs` (`run_pass`) | `audio_store.rs` (`run_pass` → `pending`, `dismiss_compress_notice` → `shown`) | no |
+| `connectors.registry` | app-connectors | `connectors.rs` (`SettingsStore::load`) | `connectors.rs` (`SettingsStore::save`), only from connector commands; trust grants only after a native-dialog yes | **no: not readable either.** Outside the read allowlist and listed in `BACKEND_ONLY` (`commands.rs`; test `webview_cannot_touch_connector_state`) |
+| `connectors.call_log` | app-connectors | `connectors.rs` (`connector_call_log`) | `connectors.rs` (calls, `clear_connector_call_log`) | no |
+| `ui.beta.connectors` | ui-connectors | `connectors.rs` (`beta_enabled`: shows the feature, lets `turn_for_ask` offer tools; grants nothing); `ConnectorsSection.tsx` | `ConnectorsSection.tsx` | yes |
 | `privacy.last_wipe_report` | app-privacy | `privacy.rs:311` | `privacy.rs:775`; deleted 375 | no |
 
-Any other key under `consent.`, `capture.` or `ui.` (except `consent.cloud_llm.*`) can also be created by the webview. Today no backend code reads one.
+Any other key under `consent.`, `capture.` or `ui.` (except `consent.cloud_llm.*`) can also be created by the webview. Backend code reads one of them, `ui.beta.connectors`, as a show/hide switch only: what connectors may do is decided by native-dialog approvals stored in `connectors.*`.
 
 ### Database
 | Table | Columns | Read / write |
@@ -123,7 +128,7 @@ None. The consent dialog is an OS dialog shown in-process (Windows TaskDialog, m
 | `openai_api_key`, `anthropic_api_key`, `nim_api_key` | `get_llm_settings` reads them only to report `has_key` (`llm_commands.rs:1109-1111`). `set_llm_settings` sets or deletes them (`llm_commands.rs:1189-1201`). Keys never return to the webview. |
 
 ## Dependencies
-- **Inbound:** frontend (`api.ts:95-96,173-187`); `scheduler.rs` (`ai_pass`, `retry_consent_skipped`, `take_consent_rerun`); `extraction.rs:317` and `scheduler.rs:404` (`record_consent_skip`); `lib.rs:111-117,210-211,248-253`.
+- **Inbound:** frontend (`api.ts:95-96,173-187`); `scheduler.rs` (`ai_pass`, `retry_consent_skipped`, `take_consent_rerun`); `extraction.rs:317` and `scheduler.rs:404` (`record_consent_skip`); `startup.rs:187-195`, `lib.rs:122-123,160-165`.
 - **Outbound:** [fly-storage](fly-storage.md) `settings.rs`, [fly-secrets](fly-secrets.md), [app-pipeline](app-pipeline.md) (`scheduler::retry_consent_skipped`, `ai_pass`), [app-llm](app-llm.md) (`PROVIDERS`, `provider_vendor`, `secret_key_for`, `validate_base_url`); the `rfd` crate for the native dialog (the same version and features tauri-plugin-dialog already builds, desktop targets only), and Tauri's `AppHandle` (main thread, main window as the dialog's parent).
 
 ## Invariants
@@ -158,7 +163,7 @@ None. The consent dialog is an OS dialog shown in-process (Windows TaskDialog, m
 - devMock's settings commands skip the allowlist (apart from refusing `consent.cloud_llm.*` writes), so jsdom tests can't catch a UI that writes a disallowed key.
 
 ## Changing it safely
-- New setting the UI must write: prefer a dedicated validating command. Use the `ui.` prefix only for harmless view state, never for anything a backend path trusts. A record only the backend may write goes in `BACKEND_ONLY` in `is_webview_writable_setting_key`.
+- New setting the UI must write: prefer a dedicated validating command. Use the `ui.` prefix only for harmless view state, never for anything a backend path trusts. A record only the backend may write goes in `BACKEND_ONLY` in `is_webview_writable_setting_key` (today: `consent.cloud_llm.` and `connectors.`).
 - Changing the consent words: edit `cloud_consent_prompt` and devMock's `mockConsentPrompt` together. `consent_dialog_says_what_the_in_app_prompt_said` and `dev_mock_shows_the_same_disclosure` pin both.
 - Changing the dialog (an `rfd` upgrade, a new platform path, other buttons): check again what each backend reports for each button, Esc and closing, and update `each_platforms_dialog_results_map_to_the_right_answer`. Keep decline as the first (default) button, and count only a click on allow as yes.
 - Add the key to the registry table above, and to devMock if the UI reads it.

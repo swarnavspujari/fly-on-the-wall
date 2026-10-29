@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { AudioLines, CircleAlert, Lock, Sparkles } from "lucide-react";
+import { AudioLines, CircleAlert, HardDrive, Lock, Sparkles } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   NOTICE_PRIORITY,
@@ -12,8 +12,10 @@ import {
 import type { PipelineFailure } from "../pipelineFailures";
 import { pipelineFailureCopy, selectPipelineNotice } from "../pipelineNotice";
 import type { Updater } from "../updater";
+import { compressNoticeCopy } from "../storageModel";
 import { recoveredKeptLocalCopy, useRecoveredKeptLocal } from "./useRecoveredKeptLocal";
 import { useConsentSkips } from "./CloudConsent";
+import { useCompressNotice } from "./CompressNotice";
 import SystemAudioNotice from "./SystemAudioNotice";
 import UpdateBanner from "./UpdateBanner";
 import { Button, Notice, NoticeStack, type StackedNotice } from "./ui";
@@ -73,6 +75,7 @@ export default function AppNotices({
 }: Props) {
   const notices: StackedNotice[] = [];
   const skips = useConsentSkips();
+  const compressed = useCompressNotice();
   const recovered = useRecoveredKeptLocal();
   const [audioLost, dismissAudioLost] = useAudioLost();
 
@@ -231,6 +234,27 @@ export default function AppNotices({
               </Button>
             </>
           }
+        >
+          {copy.cause}
+        </Notice>
+      ),
+    });
+  }
+
+  // Recordings were compressed losslessly (once, after an upgrade). Good
+  // news only, so it waits out a recording.
+  if (compressed.savedBytes !== null && !recordingActive) {
+    const copy = compressNoticeCopy(compressed.savedBytes);
+    notices.push({
+      id: "compressed",
+      priority: NOTICE_PRIORITY.compressed,
+      node: (
+        <Notice
+          tone="success"
+          icon={<HardDrive size={18} strokeWidth={1.75} />}
+          title={copy.title}
+          onDismiss={compressed.dismiss}
+          dismissLabel="Dismiss"
         >
           {copy.cause}
         </Notice>

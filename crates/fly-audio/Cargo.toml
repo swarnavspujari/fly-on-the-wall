@@ -17,6 +17,9 @@ cpal.workspace = true
 hound.workspace = true
 # lock-free SPSC ring between the capture callbacks and the WAV writer
 rtrb = "0.3"
+flacenc.workspace = true
+claxon.workspace = true
+md-5.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [

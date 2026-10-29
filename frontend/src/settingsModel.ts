@@ -5,7 +5,7 @@
 import type { AsrSettings, AsrSettingsUpdate, LlmSettings, ModelStatus } from "./types";
 
 export type SectionId =
-  "recording" | "transcripts" | "ai" | "calendars" | "files" | "apps" | "general";
+  "recording" | "transcripts" | "ai" | "calendars" | "files" | "apps" | "connectors" | "general";
 
 export interface SettingsSection {
   id: SectionId;
@@ -14,7 +14,7 @@ export interface SettingsSection {
   keywords: string;
 }
 
-/** The seven sections, in nav order (spec §3.8 / Appendix A). */
+/** The sections, in nav order (spec §3.8 / Appendix A, plus Connectors). */
 export const SETTINGS_SECTIONS: SettingsSection[] = [
   {
     id: "recording",
@@ -44,12 +44,18 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     id: "files",
     title: "Your files and privacy",
     keywords:
-      "folder data location storage search index backfill disk encryption bitlocker filevault delete audio after retention delete all my data wipe erase privacy keep local",
+      "folder data location storage space size recordings videos compress compression flac lossless search index backfill disk encryption bitlocker filevault delete audio after retention delete all my data wipe erase privacy keep local",
   },
   {
     id: "apps",
     title: "Other AI apps",
     keywords: "mcp claude desktop claude code cursor vs code connect integrations config snippet",
+  },
+  {
+    id: "connectors",
+    title: "Connectors",
+    keywords:
+      "connectors beta mcp servers tools apps browse custom local claude desktop import hubspot notion linear github oauth sign in api key permissions always allow needs approval blocked activity",
   },
   {
     id: "general",

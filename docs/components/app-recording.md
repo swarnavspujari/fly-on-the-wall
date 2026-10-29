@@ -88,6 +88,7 @@ Stop also calls `jobs_notify.notify_one()` in-process.
   - `recording.playback.wav` (only when both channels exist),
   - at stop: `recording.manifest.json` and `note.json` (`recovery.rs:35,40,680-719`),
   - at stop: `recording.capture.json` — `{schema: 1, duration_ms, mic, system}` with each channel's `fly_audio::ChannelReport` (lost / overflow / padded ms, events, xruns, last loss time, write errors, real-time priority, the most audio ever waiting in the OS buffer, losses dropped upstream by the OS audio engine). Written for every recording, so a clean capture is on record as clean. Not media: retention and "delete audio" leave it, like the manifest.
+- After the transcript is final, recording storage v2 ([app-audio-store](app-audio-store.md)) replaces the mic/system WAVs with lossless `recording.{mic,system}.flac` and drops `mixed`/`playback` when they regenerate bit-identically. Capture itself is unchanged and still writes WAV.
 - Stored paths are data-dir-relative with `/` separators (`recording.rs:241-245`). A path outside `<data_dir>` silently becomes `None` (inferred edge).
 - A date edit renames the folder (only once a recording is attached) and rewrites the manifest (`meetings.rs:173-182`).
 - Live captions write `<scratch_root>/<meeting id>/live-tmp/{you|them}-<start_sample>.wav` (16 kHz chunks). Each chunk is deleted after transcription, and the folder is removed when the loop ends (`live.rs:202-206,242,295,325`). After a crash, the startup scratch sweep removes leftovers (`scratch.rs:1-16`).
@@ -110,7 +111,7 @@ No meeting audio or text leaves the machine from this component.
 None.
 
 ## Dependencies
-- **Inbound:** `src-tauri/src/lib.rs:214-225` (command registration); `calendar_commands.rs:470-471` (`start_meeting_from_event`). These read `AppState.recording`: `scheduler.rs:468-470`, `privacy.rs:259,405`, `commands.rs:285`, and `live.rs:223-232` itself. `src-tauri/tests/scheduling.rs` injects a fake `ActiveRecording`.
+- **Inbound:** `src-tauri/src/lib.rs:128-139` (command registration); `calendar_commands.rs:470-471` (`start_meeting_from_event`). These read `AppState.recording`: `scheduler.rs:468-470`, `privacy.rs:259,405`, `commands.rs:285`, and `live.rs:223-232` itself. `src-tauri/tests/scheduling.rs` injects a fake `ActiveRecording`.
 - **Outbound:**
   - [fly-audio](fly-audio.md): the capture trait, `preflight_system_audio`, `mix::{resample_linear, write_wav_mono_16}`.
   - [fly-storage](fly-storage.md): `create_note`, `create_meeting`, `allocate_meeting_dir`, `stash_recording_manifest`, `end_meeting`, `get_meeting_for_note`, `meetings_for_note`, `set_meeting_started_at`, `get_setting`, `scratch::meeting_scratch_dir`.
@@ -125,7 +126,7 @@ None.
 - **The audio never depends on SQLite.** The manifest is stashed before `end_meeting`, and startup self-heal re-attaches from it (`recording.rs:254-271`; `recovery.rs:1-23`; DB incident 2026-07-13).
 - **Recording into an existing note keeps its title;** the seed fills only attendees (`recording.rs:83-87`).
 - **No transcription, retention sweep or wipe runs during a capture** (`scheduler.rs:91-100`; `privacy.rs:258-261,404-406`).
-- **An update never interrupts a recording.** Enforced only in the frontend (`updater.ts:10-13,148-163`; `AppNotices.tsx:198`; `SettingsModal.tsx:1216,1234`).
+- **An update never interrupts a recording.** Enforced only in the frontend (`updater.ts:10-13,148-163`; `AppNotices.tsx:298`; `SettingsModal.tsx:1216,1234`).
 - **The macOS TCC probe runs only after the recording notice is accepted** (spec §2 item 6). Enforced only in the frontend (`App.tsx:273-292`). The backend command has no consent check, and `start_recording` on macOS also builds a tap without one.
 - **Live captions stay on CPU, never the GPU,** with a quarter-core budget, so they can't starve the capture or the call (`live_engine`).
 - **Lost audio is never silent.** The recording bar shows it live (fly-audio's lost-audio warning, "Audio lost" chip), Stop stores it in `recording.capture.json` and raises the `recording:audio_lost` notice. The gap itself is silence of the same length, so transcripts stay aligned.
@@ -148,7 +149,7 @@ None.
 | manual | `docs/TESTING.md` (M2, M9, M11, M14, auto-update) | — | real capture; mute warning within ~1 s; live partials within ~20 s; no update banner while recording |
 
 **Known gaps:**
-- **No test drives start, pause, resume or stop through this module.** The commands need an `AppHandle`, and `AppState::init_with` hard-codes `CpalAudioCapture` (`state.rs:85`). So the manifest-before-database ordering, path relativizing, the stop error path and status warnings ordering are untested here.
+- **No test drives start, pause, resume or stop through this module.** The commands need an `AppHandle`, and `AppState::init_with` hard-codes `CpalAudioCapture` (`state.rs:144`). So the manifest-before-database ordering, path relativizing, the stop error path and status warnings ordering are untested here.
 - **Spec §2 item 7 has no CI test at any seam.** The seed test doesn't touch the flag. The storage test checks "unconfirmed" only with an empty list (`meetings.rs:476-478`). `speaker_hint` has no test, and the only confirmed→`num_speakers` check is `#[ignore]`d.
 - **Stop failure orphans the audio (inferred).** If `session.stop()` fails (mixdown or finalize error, dead audio thread), the command returns before the manifest is written (`recording.rs:236-239`). A crash mid-recording is the same. Self-heal only scans folders that have a manifest (`recovery.rs:172-176`), so the WAVs stay in the folder with nothing pointing at them.
 - **Live captions under load.** The contention bench measures caption lag (`take_chunk` now reads only the new samples). There is still no catch-up when transcription runs slower than real time, and partials skip `guard_loops` while feeding the previous text back as the prompt, a known Whisper loop amplifier.
@@ -156,7 +157,7 @@ None.
 - **Spec §2 item 6 ordering** (no probe before consent) and `calendarMatch.ts` (`pickInProgressEvent`, `seedFromEvent`) have no vitest.
 
 ## Changing it safely
-- **New or renamed command:** register it in `src-tauri/src/lib.rs:214-225`, wrap it in `api.ts`, add a `types.ts` type, and mirror it in `devMock.ts` (spec §2 item 4). Then document it here.
+- **New or renamed command:** register it in `src-tauri/src/lib.rs:128-139`, wrap it in `api.ts`, add a `types.ts` type, and mirror it in `devMock.ts` (spec §2 item 4). Then document it here.
 - **Payload shapes** (`RecordingStatus`, `LiveStatus`, `LiveSegment`) are copied in `types.ts` and in local interfaces in `LivePane.tsx:7-18`. Change them together.
 - **Warning strings** come from fly-audio; `recordingBar.ts` and devMock match them by substring.
 - **Keep the stash-before-database order** in `stop_recording`. Never put a fallible step between `session.stop()` and the manifest without also writing a manifest on failure.

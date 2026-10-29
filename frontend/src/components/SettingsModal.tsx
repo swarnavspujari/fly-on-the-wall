@@ -35,7 +35,9 @@ import { useTheme } from "../theme";
 import { briefError } from "../pipelineNotice";
 import { useCloudConsent } from "./CloudConsent";
 import { useConfirm } from "./confirm";
+import ConnectorsSection from "./ConnectorsSection";
 import PrivacySection from "./PrivacySection";
+import StorageRows from "./StorageRows";
 import RemindNoticeRow from "./RemindNoticeRow";
 import type { Updater } from "../updater";
 import {
@@ -149,7 +151,7 @@ function Section({
   children,
 }: {
   id: SectionId;
-  title: string;
+  title: ReactNode;
   hidden: boolean;
   children: ReactNode;
 }) {
@@ -2144,6 +2146,7 @@ export default function SettingsModal({
                         </Button>
                       }
                     />
+                    <StorageRows />
                     <SettingsRow
                       title="Search index"
                       helper="Pulls decisions and action items out of meetings recorded before this existed, so Ask and other AI apps can find them. Uses your Ask and Enhance provider."
@@ -2259,6 +2262,21 @@ export default function SettingsModal({
                       helper="Whatever the server returns goes to the AI model your app uses (for Claude Desktop, Anthropic's cloud) under that app's terms. It can read every note, including notes you keep local."
                     />
                   </SettingsGroup>
+                </Section>
+
+                <Section
+                  id="connectors"
+                  hidden={!show("connectors")}
+                  title={
+                    <>
+                      Connectors{" "}
+                      <Badge tone="primary" style={{ verticalAlign: "middle" }}>
+                        Beta
+                      </Badge>
+                    </>
+                  }
+                >
+                  <ConnectorsSection />
                 </Section>
 
                 <Section id="general" hidden={!show("general")} title="General">

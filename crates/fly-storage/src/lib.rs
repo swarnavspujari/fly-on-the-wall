@@ -34,6 +34,7 @@ pub mod naming;
 mod notes;
 pub mod privacy;
 pub mod query;
+mod recording_store;
 mod recovery;
 pub mod safe_path;
 pub mod scratch;
@@ -45,15 +46,17 @@ mod transcripts;
 
 pub use atomic::rename_with_retry;
 pub use citations::{CitationLocator, CitationStatus};
-pub use embeddings::{PendingChunk, VectorHit, VectorResults};
+pub use embeddings::{ChunkOwner, PendingChunk, VectorHit, VectorResults};
 pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::MeetingFilter;
 pub use meetings::{contained_recordings_dir, recording_dir_rel, IMPORT_STAGED_PREFIX};
+pub use migrations::{UpgradeProgress, UpgradeStage};
 pub use notes::NoteSummary;
 pub use privacy::{
     AudioPurge, EraseOutcome, MeetingPrivacy, AUDIO_RETENTION_SETTING, RETENTION_CHOICES,
 };
+pub use recording_store::{manifest_is_newer, recording_file_in_folder};
 pub use recovery::{
     HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR,
     NOTE_MIRROR_VERSION, RECORDING_MANIFEST,
@@ -108,6 +111,17 @@ impl OpenRetry {
         attempts: 6,
         backoff: Duration::from_millis(2500),
     };
+}
+
+/// A schema step that the next [`Storage::open`] of a data dir will run
+/// (see [`Storage::pending_upgrade`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingUpgrade {
+    /// `user_version` the file is stamped with now.
+    pub from_version: i64,
+    /// Transcripts the step re-indexes (its cost is about linear in their
+    /// segments).
+    pub transcripts: u64,
 }
 
 /// Tables every current-schema database has (checked by
@@ -209,6 +223,10 @@ pub struct Storage {
     data_dir: PathBuf,
     /// Embedding vectors kept between searches (see `cache.rs`).
     read_cache: cache::ReadCache,
+    /// Meetings whose folder a background job is working inside (recording
+    /// compression). Folder renames skip them, like a running transcription.
+    /// In memory: a crash releases every lease.
+    folder_leases: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Storage {
@@ -218,6 +236,16 @@ impl Storage {
 
     /// Open (creating if needed) the app data dir and its SQLite index.
     pub fn open(data_dir: &Path) -> Result<Self> {
+        Self::open_with_progress(data_dir, &mut |_| {})
+    }
+
+    /// [`open`](Self::open), reporting the one-time schema step's progress
+    /// (throttled; see [`UpgradeProgress`]). Nothing is reported when no
+    /// step runs, which [`pending_upgrade`](Self::pending_upgrade) predicts.
+    pub fn open_with_progress(
+        data_dir: &Path,
+        progress: &mut dyn FnMut(UpgradeProgress),
+    ) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         for sub in ["notes", "transcripts", "attachments", "recordings"] {
             std::fs::create_dir_all(data_dir.join(sub))?;
@@ -234,8 +262,9 @@ impl Storage {
             read_cache: cache::ReadCache::watching(&conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
+            folder_leases: Default::default(),
         };
-        storage.migrate()?;
+        storage.migrate(progress)?;
         storage.seed_builtin_templates()?;
         Ok(storage)
     }
@@ -247,6 +276,52 @@ impl Storage {
     /// path (e.g. the startup error dialog) is reached only after retrying.
     pub fn open_with_retry(data_dir: &Path, retry: OpenRetry) -> Result<Self> {
         Self::retry_open(retry, || Self::open(data_dir))
+    }
+
+    /// [`open_with_retry`](Self::open_with_retry) with
+    /// [`open_with_progress`](Self::open_with_progress)'s reports. An attempt
+    /// that fails mid-step rolls back, so the next one reports from 0 again.
+    pub fn open_with_retry_and_progress(
+        data_dir: &Path,
+        retry: OpenRetry,
+        progress: &mut dyn FnMut(UpgradeProgress),
+    ) -> Result<Self> {
+        Self::retry_open(retry, || Self::open_with_progress(data_dir, &mut *progress))
+    }
+
+    /// Whether opening `data_dir` will run the one-time schema step (the
+    /// slow part of a first launch after an update), and roughly how big it
+    /// is. Read-only: creates, renames and migrates nothing. `None` when
+    /// there's no database yet (a fresh install) or the step won't run; the
+    /// condition is the one [`migrate`](Self::migrate) applies.
+    pub fn pending_upgrade(data_dir: &Path) -> Result<Option<PendingUpgrade>> {
+        use rusqlite::OpenFlags;
+        let Some(db) = migrations::db_file_to_open(data_dir) else {
+            return Ok(None);
+        };
+        let conn = Connection::open_with_flags(
+            &db,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let from: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let fresh = from == 0 && Self::has_no_tables(&conn)?;
+        if !Self::runs_v3_step(from, fresh) {
+            return Ok(None);
+        }
+        let has_transcripts: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transcripts')",
+            [],
+            |r| r.get(0),
+        )?;
+        let transcripts: i64 = if has_transcripts {
+            conn.query_row("SELECT COUNT(*) FROM transcripts", [], |r| r.get(0))?
+        } else {
+            0
+        };
+        Ok(Some(PendingUpgrade {
+            from_version: from,
+            transcripts: transcripts.max(0) as u64,
+        }))
     }
 
     /// Open an index the app has ALREADY created, for secondary processes
@@ -285,6 +360,7 @@ impl Storage {
             read_cache: cache::ReadCache::watching(&conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
+            folder_leases: Default::default(),
         })
     }
 
@@ -441,7 +517,14 @@ impl Storage {
     ///   again on its next open.
     pub const SCHEMA_VERSION: i64 = 3;
 
-    fn migrate(&self) -> Result<()> {
+    /// Whether [`migrate`](Self::migrate) runs the v3 step for a file at
+    /// `from` (`fresh`: no tables before this open). Shared with
+    /// [`pending_upgrade`](Self::pending_upgrade) so the two always agree.
+    fn runs_v3_step(from: i64, fresh: bool) -> bool {
+        (from < 3 || from > Self::SCHEMA_VERSION) && !fresh
+    }
+
+    fn migrate(&self, progress: &mut dyn FnMut(UpgradeProgress)) -> Result<()> {
         let (conn, data_dir) = (&self.conn, self.data_dir.as_path());
         let from: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Checked BEFORE the baseline tables are created below.
@@ -467,8 +550,8 @@ impl Storage {
         // v3: per-segment index, label-free chunks with exact spans, citation
         // locators. Also re-run after a downgrade, and when a newer build's
         // file is opened (see SCHEMA_VERSION).
-        if (from < 3 || from > Self::SCHEMA_VERSION) && !fresh {
-            migrations::to_v3(self)?;
+        if Self::runs_v3_step(from, fresh) {
+            migrations::to_v3(self, progress)?;
         }
         conn.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         Ok(())

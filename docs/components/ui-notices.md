@@ -20,10 +20,11 @@ Every app-wide notice in one bottom-right corner: a failed user action, the macO
 ### Public API
 | Export | Where | Notes |
 |---|---|---|
-| `AppNotices` | `AppNotices.tsx:42` | Props: `os`, `recordingActive`, `systemAudioBlocked`, `appError`, `pipelineFailures`, `engine`, `updater`, callbacks. |
-| `NOTICE_PRIORITY` | `notices.ts` | appError 4 > systemAudio 3 > audioLost 2.5 > pipeline 2 > consentSkips 1.5 > update 1. |
+| `AppNotices` | `AppNotices.tsx:58` | Props: `os`, `recordingActive`, `systemAudioBlocked`, `appError`, `pipelineFailures`, `engine`, `updater`, callbacks. |
+| `NOTICE_PRIORITY` | `notices.ts:12-22` | appError 4 > systemAudio 3 > audioLost 2.5 > pipeline 2 > consentSkips 1.5 > recoveredKeptLocal 1.2 > update 1 > compressed 0.5. |
 | `audioLostCopy(lost)` | `notices.ts` | "Part of the last recording is missing": seconds lost per side, one fix step. |
-| `systemAudioCopy`, `appErrorCopy`, `consentSkipsCopy`, `updateNoticeVisible`, `updateCopy`, `MACOS_BUNDLE_ID`, `NoticeCopy` | `notices.ts:20-153` | Copy shape: cause → numbered fix → collapsible details. |
+| `useCompressNotice` | `CompressNotice.tsx` | The one-time "Recordings compressed" notice (`storage_report` → `compress.notice_pending`, `storage:compress`); Dismiss calls `dismiss_compress_notice`, so it never returns. Waits out a recording. Copy: `storageModel.compressNoticeCopy`. |
+| `systemAudioCopy`, `appErrorCopy`, `consentSkipsCopy`, `updateNoticeVisible`, `updateCopy`, `MACOS_BUNDLE_ID`, `NoticeCopy` | `notices.ts:54-196` | Copy shape: cause → numbered fix → collapsible details. |
 | `briefError(error, max=260)` | `pipelineNotice.ts:26-32` | Strips `http(s)://…`, collapses whitespace, caps with "…". |
 | `selectPipelineNotice`, `pipelineFailureCopy`, `PipelineNoticeKind` | `pipelineNotice.ts:47-152` | Also used inline by the transcript panel ([ui-editor](ui-editor.md)). |
 | `failuresReducer`, `FailureAction`, `PipelineFailure`, `isBackgroundFailure`, `failureFrom`, `shouldAddFailure` | `pipelineFailures.ts` | Actions: `event`, `add`, `retry`, `dismiss`, `noteDeleted`. Unchanged state returns the same array. |

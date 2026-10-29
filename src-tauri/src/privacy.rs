@@ -334,18 +334,22 @@ fn sweep_now(state: &AppState, explicit: bool) -> SweepReport {
     }
     // Transcribe, retranscribe and re-diarize all hold a pipeline_stage
     // entry while they read a meeting's audio.
+    // Recording compression holds one meeting's folder at a time.
     let busy_ids: Vec<String> = state
         .pipeline_stage
         .lock()
         .unwrap()
         .keys()
         .cloned()
+        .chain(state.audio_store.current())
         .collect();
     let storage = state.storage.lock().unwrap();
+    // The lease is taken under this same lock, so a meeting the job picked
+    // up after `busy_ids` was read is still skipped.
     sweep_retention(
         &storage,
         Utc::now(),
-        &|id| busy_ids.iter().any(|b| b == id),
+        &|id| busy_ids.iter().any(|b| b == id) || storage.meeting_folder_leased(id),
         explicit,
     )
 }
@@ -870,16 +874,30 @@ pub async fn delete_all_data(
     if confirmation != WIPE_CONFIRMATION {
         return Err("confirmation text doesn't match — nothing was deleted".into());
     }
+    // Stop connector programs and drop connections before their keys go.
+    crate::connectors::close_all(&app).await;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         if let Some(why) = busy_reason(&state) {
             return Err(format!("{why} — nothing was deleted"));
         }
-        perform_delete_all(
+        // Background compression works inside meeting folders: stop it (the
+        // wipe restarts the app). Refused or failed → it picks up again.
+        if !crate::audio_store::halt(&state, Duration::from_secs(20)) {
+            crate::audio_store::resume(&state);
+            return Err(
+                "recording compression didn't stop in time — nothing was deleted; try again".into(),
+            );
+        }
+        let result = perform_delete_all(
             &state,
             include_models,
             &fly_secrets::KeychainSecretStore::with_service(crate::state::LEGACY_KEYCHAIN_SERVICE),
-        )
+        );
+        if result.is_err() {
+            crate::audio_store::resume(&state);
+        }
+        result
     })
     .await
     .map_err(err_str)?
@@ -905,6 +923,12 @@ fn perform_delete_all(
         .map_err(|e| format!("couldn't start deleting (data folder not writable): {e}"))?;
 
     let mut report = WipeReport::default();
+    // Connector keychain entries are named after connector ids, which live in
+    // the database: list them before the database is emptied.
+    let connector_keys = crate::connectors::stored_secret_keys(
+        &state.storage.lock().unwrap(),
+        state.secrets.as_ref(),
+    );
     // The storage lock covers only the database work, never file deletes.
     let erased = state
         .storage
@@ -917,6 +941,12 @@ fn perform_delete_all(
     report.removed = files.removed;
     report.failed = files.failed;
     report.secrets_failed = delete_owned_secrets(&[state.secrets.as_ref(), legacy_secrets]);
+    for key in &connector_keys {
+        if let Err(e) = state.secrets.delete(key) {
+            tracing::warn!(key, error = %e, "could not delete a connector keychain entry");
+            report.secrets_failed.push(key.clone());
+        }
+    }
     report.restart_required = true;
     Ok(report)
 }
@@ -1367,9 +1397,39 @@ mod tests {
         let state = AppState::init_with(dir.path().to_path_buf(), secrets.clone()).unwrap();
         let legacy = MemorySecretStore::default();
         legacy.set(fly_secrets::keys::OPENAI_API_KEY, "sk").unwrap();
+        // A connector with tokens and a stdio variable in the keychain.
+        let mut connectors = fly_mcp_client::Registry::default();
+        let connector = connectors
+            .add_approved(
+                fly_mcp_client::ServerConfig {
+                    name: "Docs".into(),
+                    transport: fly_mcp_client::TransportConfig::Stdio {
+                        command: "docs-mcp".into(),
+                        args: vec![],
+                        env: vec![fly_mcp_client::EnvConfig {
+                            name: "DOCS_TOKEN".into(),
+                            value: None,
+                        }],
+                    },
+                    auth: fly_mcp_client::AuthConfig::None,
+                },
+                0,
+            )
+            .unwrap();
+        let connector_keys = [
+            format!("connector.{connector}.access"),
+            format!("connector.{connector}.access.0"),
+            format!("connector.{connector}.refresh"),
+            format!("connector.{connector}.env.DOCS_TOKEN"),
+        ];
+        for k in &connector_keys {
+            secrets.set(k, "secret").unwrap();
+        }
         {
             let s = state.storage.lock().unwrap();
             s.create_note("Confidential", None).unwrap();
+            s.set_setting(crate::connectors::REGISTRY_KEY, &connectors.to_json())
+                .unwrap();
         }
         std::fs::create_dir_all(dir.path().join("recordings/m")).unwrap();
         std::fs::write(dir.path().join("recordings/m/a.wav"), b"x").unwrap();
@@ -1381,6 +1441,9 @@ mod tests {
         assert!(report.clean(), "{report:?}");
         assert!(report.secrets_failed.is_empty());
         assert_eq!(secrets.get(fly_secrets::keys::GROQ_API_KEY).unwrap(), None);
+        for k in &connector_keys {
+            assert_eq!(secrets.get(k).unwrap(), None, "{k} survived delete-all");
+        }
         assert_eq!(legacy.get(fly_secrets::keys::OPENAI_API_KEY).unwrap(), None);
         assert!(!dir.path().join("recordings").exists());
         let marker: WipeMarker =
@@ -1531,6 +1594,29 @@ mod tests {
         let r = sweep_retention(&s, Utc::now(), &|_| true, false);
         assert_eq!(r.meetings, 0);
         assert!(r.held.is_none());
+    }
+
+    /// A meeting folder the compression job holds is skipped by the sweep,
+    /// even before the job has said which meeting it's on.
+    #[test]
+    fn sweep_skips_a_folder_the_compression_job_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        let id = {
+            let s = state.storage.lock().unwrap();
+            old_meeting(&s, dir.path(), "a", 100);
+            s.set_audio_retention_days(Some(30)).unwrap();
+            let id = s.meetings_with_stored_audio().unwrap().remove(0);
+            assert!(s.lease_meeting_folder(&id));
+            id
+        };
+        assert_eq!(sweep_now(&state, true).meetings, 0);
+        state.storage.lock().unwrap().release_meeting_folder(&id);
+        assert_eq!(sweep_now(&state, true).meetings, 1);
     }
 
     /// The review list for meetings heal kept local without a recorded

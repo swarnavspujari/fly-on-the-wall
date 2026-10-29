@@ -23,13 +23,13 @@ Turns a meeting's recorded WAVs into a saved, diarized transcript, then runs the
 | `pipeline::{PipelineProgress, StageSink, ReDiarizeOutcome, TierKind, MIC_SPEAKER_KEY = "mic", ERR_NO_RECORDING_FILES, sidecar_threads}` | `pipeline.rs:26`, `pipeline.rs:100-111`, `pipeline.rs:139-144`, `pipeline.rs:718-722`, `pipeline.rs:906-910` | scheduler, import, tests |
 | `scheduler::enqueue(state, on_stage, meeting_id)` (idempotent) | `scheduler.rs:56-68` | `transcribe_meeting`, `import_transcribe` (`import_commands.rs:745`) |
 | `scheduler::tick` / `Tick::{Idle, RecordingActive, Completed, Cancelled, Retrying, GaveUp}` | `scheduler.rs:34-151` | `spawn` loop; tests |
-| `scheduler::spawn(app)` | `scheduler.rs:156-201` | `lib.rs:173` (app setup) |
+| `scheduler::spawn(app)` | `scheduler.rs:156-201` | `startup.rs:248` (app setup) |
 | `scheduler::cancel(state, on_stage, meeting_id) -> Result<bool>` | `scheduler.rs:306-344` | `delete_note` (`commands.rs:296`), `cancel_staged_transcription` (`import_commands.rs:369`) |
 | `scheduler::{finish_cancelled, emit_cancelled (crate), recover, stage_emitter, last_failure, retry_consent_skipped, recording_active (crate)}` | `scheduler.rs:237-470` | import, `llm_commands.rs:476` (`retry_consent_skipped`), `privacy.rs:259`, `privacy.rs:405` (`recording_active`) |
 | `scheduler::{MAX_ATTEMPTS = 3, WAITING_STAGE = "waiting"}` | `scheduler.rs:24-26` | tests, UI stage handling |
 
 ### Tauri commands
-All are registered in `src-tauri/src/lib.rs` (`cancel_transcription` at `lib.rs:198`; the rest at `lib.rs:226-238`).
+All are registered in `src-tauri/src/lib.rs` (`cancel_transcription` at `lib.rs:110`; the rest at `lib.rs:138-150`).
 
 | Command | Arguments | Returns | Called from (UI) |
 |---|---|---|---|
@@ -113,6 +113,10 @@ A cancel request stays until it's honoured: `run_with` doesn't clear it, so an a
 | `<data_dir>/recordings/<meeting folder>/transcript.*` mirrors | `storage.save_transcript` ([fly-storage](fly-storage.md)) | permanent |
 | `recordings/_unlinked/<name>` renamed back to `recordings/<name>` | `restore_parked_recording` | self-heal for a raced v2 migration; the target must be a plain `recordings/<folder>` (`contained_recordings_dir`), else nothing moves |
 
+| `<scratch_root>/<meeting_id>/mixdown.16k.wav` | `audio_store::regenerate_mixdown_for_asr` (single-track run of a compressed recording whose stored mixdown was dropped) | deleted with the other intermediates |
+
+Inputs may be WAV or lossless FLAC (recording storage v2, [app-audio-store](app-audio-store.md)): `prep`, re-diarize and the GPU sample read through `fly_audio::mix::read_audio_mono`, which yields the same f32 samples either way, so the 16 kHz intermediates (and therefore transcripts and diarization) are byte-identical. A compressed single-track recording gets its mixdown rebuilt, byte-identical to the one capture wrote, before `prep`.
+
 Intermediates never go next to the recordings: a title or date edit renames the meeting folder mid-run. That rename caused the 2026-07-19 import incident (`pipeline.rs:462-475`, `crates/fly-storage/src/scratch.rs:1-18`).
 
 ### Network egress
@@ -155,6 +159,8 @@ A GPU tier failure pins that model to CPU for later meetings. A cloud failure ne
 - **Cancel is not a failure.** It is never retried and never fails over, and it ends in a `cancelled` event (`pipeline.rs:1072-1074`; `scheduler.rs:122-128`, `:367-377`). A last gate stops a deleted note from getting a transcript saved (`pipeline.rs:683-687`).
 - **Unfixable failures fail once.** Missing files, deleted audio, 4xx, missing engine and failed download are parked on the first attempt; everything else retries up to 3 times, 10 s apart (`scheduler.rs:24-29`, `:77-82`, `:129-149`).
 - **Re-diarize changes only speaker keys and labels.** Segment ids, text and boundaries are unchanged, and the cleaned variant's text is untouched (`pipeline.rs:724-730`, `:865-888`). Test: ignored `rediarize_e2e`.
+- **Readers are format-blind.** Never call `read_wav_mono` on a stored recording; use `read_audio_mono` (a source may be FLAC), and keep the single-track input order mixed → mic → system with the mixdown regenerated for storage-v2 recordings.
+- **A finished transcript wakes recording compression** (`state.audio_store.nudge()` after `emit_final`), which yields while any `pipeline_stage` entry exists. Re-diarize claims its `pipeline_stage` entry (`starting`) in the same lock as its duplicate check, before it reads the recording.
 - **Intermediates live in machine-local scratch keyed by meeting id.** They are kept after a failure so the retry resumes (`pipeline.rs:462-475`, `:701-710`).
 
 ## Tests

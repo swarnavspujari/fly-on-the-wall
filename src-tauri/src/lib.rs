@@ -2,9 +2,11 @@
 //! and wired to the UI. `fly-core` and the frontend never see an OS API.
 
 mod asr_commands;
+pub mod audio_store;
 mod calendar_commands;
 mod calendar_defaults;
 mod commands;
+pub mod connectors;
 pub mod embeddings;
 pub mod extraction;
 pub mod gpu;
@@ -21,9 +23,10 @@ pub mod privacy;
 pub mod recording;
 pub mod scheduler;
 mod screen_commands;
+mod startup;
 pub mod state;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 pub fn run() {
     // Resolve (and legacy-migrate) the data dir BEFORE file logging exists:
@@ -73,126 +76,24 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app.handle().plugin(tauri_plugin_process::init())?;
             }
-            // A failed storage open must NEVER be a silent flash-crash: the
-            // window closes before the user can read anything and it looks
-            // like the app is broken (seen in the wild with a database that
-            // was replaced under a live connection). Tell them what happened
-            // and that their data folder is intact, then exit cleanly.
+            let handle = app.handle().clone();
+            // A first launch after a schema update can take tens of seconds
+            // on a large library: open it off the main thread so the window
+            // shows the upgrade screen instead of freezing (startup.rs).
+            if startup::upgrade_pending() {
+                startup::open_in_background(handle);
+                return Ok(());
+            }
+            app.manage(startup::LibraryGate::ready());
             let app_state = match state::AppState::init() {
                 Ok(s) => s,
-                Err(e) => {
-                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-                    tracing::error!(error = %e, "storage failed to open");
-                    app.dialog()
-                        .message(format!(
-                            "Fly on the Wall couldn't open its database:\n\n{e}\n\n\
-                             Your recordings, notes, and transcripts are separate \
-                             files and are intact in the app data folder. Close any \
-                             other program that may be using the database (or restore \
-                             a backup of flyonthewall.db) and start the app again."
-                        ))
-                        .kind(MessageDialogKind::Error)
-                        .title("Fly on the Wall can't start")
-                        .blocking_show();
-                    std::process::exit(1);
-                }
+                Err(e) => startup::storage_failed(&handle, &e),
             };
-            // Let the webview stream recordings and attachments (audio player,
-            // video thumbnails) over the asset protocol — those two folders
-            // only. The database, logs and settings stay unreadable from the
-            // webview even if a script ever ran there.
-            for sub in ["recordings", "attachments"] {
-                let dir = app_state.data_dir.join(sub);
-                let _ = std::fs::create_dir_all(&dir);
-                let _ = app.asset_protocol_scope().allow_directory(&dir, true);
-            }
-            // Saved Claude Sonnet/Haiku picks from older releases → their 5.5
-            // successors (a settings-row rewrite; Opus/Fable picks untouched).
-            {
-                let storage = app_state.storage.lock().unwrap();
-                llm_commands::migrate_anthropic_model(&storage);
-                // Consents recorded while the prompt couldn't show are void.
-                llm_commands::reset_unseen_cloud_consent(&storage);
-                privacy::record_pending_wipe(&storage);
-            }
-            privacy::spawn_disk_encryption_check(app_state.data_dir.clone());
-            app.manage(app_state);
-            // Warm the hardware cache off the startup path: detection shells
-            // out to nvidia-smi and must never sit in front of first paint.
-            {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = tauri::async_runtime::spawn_blocking(move || {
-                        let state = handle.state::<state::AppState>();
-                        hw::detect_and_cache(&state.storage.lock().unwrap());
-                    })
-                    .await;
-                });
-            }
-            // Reclaim disk from download temp files a crashed run stranded
-            // (per-attempt unique names — nothing else ever opens them).
-            {
-                let data_dir = app.state::<state::AppState>().data_dir.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = tauri::async_runtime::spawn_blocking(move || {
-                        models::sweep_stale_downloads(
-                            &data_dir,
-                            std::time::Duration::from_secs(60 * 60),
-                        );
-                    })
-                    .await;
-                });
-            }
-            // Recording self-heal: re-attach (or fully resurrect) finished
-            // recordings whose database write was lost — the manifests written
-            // at stop time make this possible even after the database itself
-            // was replaced. Off the startup path; a healthy install no-ops.
-            {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = tauri::async_runtime::spawn_blocking(move || {
-                        let state = handle.state::<state::AppState>();
-                        let healed = state.storage.lock().unwrap().self_heal_recordings();
-                        match healed {
-                            Ok(r) if !r.is_empty() => {
-                                tracing::info!(
-                                    attached = r.attached.len(),
-                                    resurrected = r.resurrected.len(),
-                                    kept_local_unconfirmed = r.kept_local_unconfirmed.len(),
-                                    "recording self-heal repaired meetings"
-                                );
-                                // Kept local only because the manifest didn't
-                                // say: ask the user to review them.
-                                if !r.kept_local_unconfirmed.is_empty() {
-                                    let entries = privacy::note_recovered_kept_local(
-                                        &state,
-                                        &r.kept_local_unconfirmed,
-                                    );
-                                    let _ =
-                                        handle.emit(privacy::RECOVERED_KEPT_LOCAL_EVENT, entries);
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(error = %e, "recording self-heal failed")
-                            }
-                        }
-                    })
-                    .await;
-                });
-            }
-            // Drain queued transcriptions (incl. jobs surviving a restart)
-            // whenever no recording is active.
-            scheduler::spawn(app.handle().clone());
-            // Semantic-search indexer: chunk-backfills existing content, then
-            // embeds pending chunks through Ollama in the background. Fully
-            // best-effort — without Ollama, search stays FTS-only.
-            embeddings::spawn(app.handle().clone());
-            // Audio retention: shortly after startup, then daily.
-            privacy::spawn_retention(app.handle().clone());
+            startup::finish(&handle, app_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            startup::library_status,
             commands::ping,
             commands::app_info,
             commands::list_folders,
@@ -236,6 +137,9 @@ pub fn run() {
             recording::preflight_system_audio,
             recording::open_privacy_settings,
             live::live_status,
+            audio_store::prepare_playback,
+            audio_store::storage_report,
+            audio_store::dismiss_compress_notice,
             asr_commands::transcribe_meeting,
             asr_commands::get_transcript,
             asr_commands::get_cleaned_transcript,
@@ -300,13 +204,38 @@ pub fn run() {
             privacy::disk_encryption_status,
             privacy::recovered_kept_local,
             privacy::dismiss_recovered_kept_local,
+            connectors::connectors_overview,
+            connectors::connectors_directory,
+            connectors::add_connector,
+            connectors::update_connector,
+            connectors::set_connector_enabled,
+            connectors::remove_connector,
+            connectors::sync_connector_tools,
+            connectors::set_connector_tool_permissions,
+            connectors::approve_connector_tool,
+            connectors::sign_in_connector,
+            connectors::sign_out_connector,
+            connectors::claude_desktop_candidates,
+            connectors::import_claude_desktop_connector,
+            connectors::connector_call_log,
+            connectors::clear_connector_call_log,
+            connectors::pending_connector_calls,
+            connectors::decide_connector_call,
+            connectors::test_connector_tool,
+            connectors::pick_connector_program,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fly on the Wall")
         .run(|app, event| {
             // The managed `ollama serve` child must not outlive the app.
+            // `try_state`: quitting during a startup upgrade exits before
+            // AppState exists (the open's transaction just rolls back).
             if let tauri::RunEvent::Exit = event {
-                ollama::shutdown(&app.state::<state::AppState>());
+                if let Some(state) = app.try_state::<state::AppState>() {
+                    ollama::shutdown(&state);
+                }
+                // Stdio connector programs stop with the app.
+                connectors::shutdown(app);
             }
         });
 }
