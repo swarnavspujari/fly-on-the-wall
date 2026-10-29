@@ -491,6 +491,33 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
   });
 });
 
+describe("AppNotices › audio lost in the last recording", () => {
+  const notice = (host: HTMLElement) =>
+    [...host.querySelectorAll<HTMLElement>(".fly-notice")].find((n) =>
+      n.textContent?.includes("Part of the last recording is missing"),
+    );
+
+  it("appears on recording:audio_lost with both sides, even while recording, and Dismiss hides it", async () => {
+    const { host, rerender } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(notice(host)).toBeUndefined();
+    act(() =>
+      eventHandlers["recording:audio_lost"]({
+        payload: { meeting_id: "m1", note_id: "n1", mic_lost_ms: 1200, system_lost_ms: 400 },
+      }),
+    );
+    await flush();
+    expect(notice(host)!.textContent).toContain(
+      "1.2 s of your microphone and 0.4 s of the other participants’ audio were lost",
+    );
+    // it's about the recording that ended: a new one doesn't hide it
+    rerender(<AppNotices {...props({ recordingActive: true })} />);
+    expect(notice(host)).toBeDefined();
+    click(button(host, "Dismiss"));
+    expect(notice(host)).toBeUndefined();
+  });
+});
+
 describe("AppNotices › recovered meetings set to Keep local", () => {
   const notice = (host: HTMLElement) =>
     [...host.querySelectorAll<HTMLElement>(".fly-notice")].find((n) =>

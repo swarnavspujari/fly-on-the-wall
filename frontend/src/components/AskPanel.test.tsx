@@ -3,7 +3,20 @@ import { act, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { LlmSettings } from "../types";
+import type { AskReply, LlmSettings } from "../types";
+
+/** An `ask_meeting` reply with this text (one unsourced sentence). */
+const reply = (text: string, onDevice = true): AskReply => ({
+  status: "answered",
+  text,
+  sentences: [{ text, citations: [], status: "unsourced" }],
+  sources: [],
+  proposals: [],
+  refusals: [],
+  trace_lines: [],
+  on_device: onDevice,
+  insert_id: null,
+});
 import { AskComposer, AskSheet, useAskChat } from "./AskPanel";
 import { ConfirmProvider } from "./confirm";
 import { answerConsent, consentRequest, holdConsentRequests } from "./cloudConsentTesting";
@@ -201,7 +214,7 @@ describe("Ask composer and sheet", () => {
   });
 
   it("keeps the quick prompts, and a prompt asks the meeting", async () => {
-    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue("Two decisions.");
+    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue(reply("Two decisions."));
     render(<Harness noteId="n1" />);
     await openSheet();
     for (const q of [
@@ -226,7 +239,7 @@ describe("Ask composer and sheet", () => {
   });
 
   it("Enter sends; Shift+Enter adds a line", async () => {
-    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue("ok");
+    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue(reply("ok"));
     render(<Harness noteId="n1" />);
     await openSheet();
     type("first line");
@@ -241,7 +254,7 @@ describe("Ask composer and sheet", () => {
   });
 
   it("sends once, however fast you press Enter", async () => {
-    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue("ok");
+    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue(reply("ok"));
     render(<Harness noteId="n1" />);
     await openSheet();
     type("Summary?");
@@ -259,7 +272,7 @@ describe("Ask composer and sheet", () => {
   });
 
   it("writes nothing until you click Insert into note", async () => {
-    vi.spyOn(api, "askMeeting").mockResolvedValue("Send the SOW today.");
+    vi.spyOn(api, "askMeeting").mockResolvedValue(reply("Send the SOW today."));
     const onInsert = vi.fn();
     render(<Harness noteId="n1" onInsert={onInsert} />);
     await openSheet();
@@ -274,13 +287,49 @@ describe("Ask composer and sheet", () => {
     expect(button("Insert into note")).toBeUndefined();
   });
 
+  it("lists sentences no cited line backs, and what wasn't searched", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue({
+      ...reply("The kiln opens Monday. It costs a lot."),
+      sentences: [
+        { text: "The kiln opens Monday.", citations: ["s1"], status: "sourced" },
+        { text: "It costs a lot.", citations: [], status: "unsourced" },
+        { text: "Ilka runs it.", citations: ["s2"], status: "flagged" },
+      ],
+      trace_lines: ["Searched all your meetings", "1 kept-local meeting not searched"],
+    });
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("When does the kiln open?");
+    key(input(), "Enter");
+    await flush();
+    const check = sheet()!.querySelector('[data-testid="ask-answer-check"]')!;
+    expect(check.textContent).toContain("no cited line backs them");
+    expect(check.textContent).toContain("It costs a lot. (no source)");
+    expect(check.textContent).toContain("Ilka runs it. (doesn't match its source)");
+    expect(check.textContent).not.toContain("The kiln opens Monday.");
+    expect(check.textContent).toContain("1 kept-local meeting not searched");
+  });
+
+  it("shows no check under a fully sourced answer", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue({
+      ...reply("The kiln opens Monday."),
+      sentences: [{ text: "The kiln opens Monday.", citations: ["s1"], status: "sourced" }],
+    });
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("When does the kiln open?");
+    key(input(), "Enter");
+    await flush();
+    expect(sheet()!.querySelector('[data-testid="ask-answer-check"]')).toBeNull();
+  });
+
   it("shows a human error naming the provider it went to, and retries", async () => {
     const ask = vi
       .spyOn(api, "askMeeting")
       .mockRejectedValueOnce(
         'this note is set to "Keep local", so it isn\'t sent to anthropic. Switch the AI provider to Ollama (runs on this device) in Settings, or turn off Keep local for this note',
       )
-      .mockResolvedValueOnce("It's in the transcript.");
+      .mockResolvedValueOnce(reply("It's in the transcript."));
     render(<Harness noteId="n1" />);
     await openSheet();
     type("What did legal ask for?");
@@ -314,7 +363,7 @@ describe("Ask composer and sheet", () => {
     const ask = vi
       .spyOn(api, "askMeeting")
       .mockRejectedValueOnce(CONSENT_REFUSED)
-      .mockResolvedValueOnce("Answer after consent.");
+      .mockResolvedValueOnce(reply("Answer after consent."));
     render(<Harness noteId="n1" />);
     await openSheet();
     type("Status?");
@@ -340,14 +389,14 @@ describe("Ask composer and sheet", () => {
   });
 
   it("drops a reply that lands after you switch notes", async () => {
-    let resolve!: (s: string) => void;
+    let resolve!: (r: AskReply) => void;
     vi.spyOn(api, "askMeeting").mockReturnValue(new Promise((r) => (resolve = r)));
     const { rerender } = render(<Harness noteId="n1" />);
     await openSheet();
     type("Summary?");
     key(input(), "Enter");
     rerender(<Harness noteId="n2" />);
-    await act(async () => resolve("Answer for n1"));
+    await act(async () => resolve(reply("Answer for n1")));
     await flush();
     expect(host!.textContent).not.toContain("Answer for n1");
     expect(input().value).toBe("");

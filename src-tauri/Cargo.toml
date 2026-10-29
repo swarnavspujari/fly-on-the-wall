@@ -26,6 +26,7 @@ fly-calendar.workspace = true
 fly-capture-screen.workspace = true
 fly-storage.workspace = true
 fly-secrets.workspace = true
+fly-ask.workspace = true
 fly-mcp-client.workspace = true
 async-trait.workspace = true
 serde.workspace = true
@@ -73,5 +74,23 @@ windows = { version = "0.62", features = ["Win32_System_Threading"] }
 libc = "0.2"
 
 [dev-dependencies]
+# the contention bench's marker tone; not in the shipped app
+fly-audio = { workspace = true, features = ["testtone"] }
 tempfile = "3"
 async-trait.workspace = true
+
+# tests/ask_live.rs (ignored) runs the Ask harness on the evals' fixture
+# corpus and records replays with their RecordingProvider. Behind a feature
+# that's off by default, so neither the app nor its CI test build links the
+# evals (an evals API change can't break them):
+#   cargo test -p fly-app --features ask-live --test ask_live -- --ignored --nocapture
+[features]
+ask-live = ["dep:fly-evals"]
+
+[dependencies.fly-evals]
+path = "../evals/runner"
+optional = true
+
+[[test]]
+name = "ask_live"
+required-features = ["ask-live"]

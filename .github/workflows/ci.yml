@@ -251,6 +251,13 @@ jobs:
         if: ${{ !cancelled() && steps.stub.outcome == 'success' }}
         run: cargo test --workspace --locked
 
+      # The live Ask test (src-tauri/tests/ask_live.rs) sits behind the
+      # ask-live feature, so nothing above builds it: compile it here (one
+      # OS is enough) so an evals or harness API change can't leave it broken.
+      - name: Compile the live Ask test
+        if: ${{ !cancelled() && steps.stub.outcome == 'success' && runner.os == 'Linux' }}
+        run: cargo check -p fly-app --features ask-live --tests --locked
+
   # Known-vulnerability gate for both dependency trees, when a manifest or
   # lockfile changes and weekly (new advisories land on unchanged trees).
   # npm audit reads the lockfiles alone (no install, no dependency code runs);

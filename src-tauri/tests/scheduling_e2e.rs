@@ -31,6 +31,7 @@ impl fly_audio::CaptureSession for StubSession {
             mixed_path: None,
             playback_path: None,
             duration_ms: 0,
+            health: Default::default(),
         })
     }
     fn state(&self) -> fly_audio::CaptureState {

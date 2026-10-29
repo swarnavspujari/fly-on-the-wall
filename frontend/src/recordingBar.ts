@@ -30,15 +30,27 @@ export interface CaptureWarning {
   privacyPane: boolean;
 }
 
-/** Map one backend warning sentence onto a chip. Every warning the backend
- *  sends today is about the system-audio (others) channel. */
+/** Map one backend warning sentence onto a chip. Most are about the
+ *  system-audio (others) channel; lost audio, a device change and a disk
+ *  that won't take the audio name their side with "microphone" or not
+ *  (`lost_audio_warning`, `device_lost_warning`, `write_failed_warning`,
+ *  crates/fly-audio/src/cpal_backend.rs — each pinned there by a test). */
 export function classifyWarning(text: string): CaptureWarning {
   const t = text.toLowerCase();
   const privacyPane = text.includes(MACOS_PRIVACY_PANE);
   let side: CaptureSide = "others";
   let label = "Check audio";
   if (privacyPane || t.includes("recording only silence")) label = "Blocked by macOS";
-  else if (t.includes("couldn't start")) label = "Not recorded";
+  else if (t.includes("changed or disconnected")) {
+    label = "Device changed";
+    if (t.includes("microphone")) side = "you";
+  } else if (t.includes("couldn't be saved")) {
+    label = "Not saving";
+    if (t.includes("microphone")) side = "you";
+  } else if (t.includes("was lost")) {
+    label = "Audio lost";
+    if (t.includes("microphone")) side = "you";
+  } else if (t.includes("couldn't start")) label = "Not recorded";
   else if (t.includes("volume is at 0%")) label = "Volume at 0%";
   else if (t.includes("muted")) label = "Output muted";
   else if (t.includes("microphone") && !t.includes("only your microphone")) {
@@ -73,4 +85,18 @@ export function healthChips(warnings: readonly string[], paused: boolean): Healt
     const more = mine.length > 1 ? ` +${mine.length - 1}` : "";
     return { side, tone: "warn", label: `${name} · ${mine[0].label}${more}`, warnings: mine };
   });
+}
+
+/** The warning popover's heading. Lost audio (gaps, the rest recorded) reads
+ *  milder than a side that may be missing from the recording entirely. */
+export function chipHeading(chip: Pick<HealthChip, "side" | "warnings">): string {
+  const onlyGaps = chip.warnings.length > 0 && chip.warnings.every((w) => w.label === "Audio lost");
+  if (chip.side === "you") {
+    return onlyGaps
+      ? "Part of your microphone audio was lost"
+      : "Your microphone may be missing from this recording";
+  }
+  return onlyGaps
+    ? "Part of the other participants’ audio was lost"
+    : "The other participants may be missing from this recording";
 }

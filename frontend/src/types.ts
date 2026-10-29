@@ -386,6 +386,73 @@ export interface LlmSettingsUpdate {
 export interface AskMessage {
   role: "user" | "assistant";
   content: string;
+  /** Assistant turns: the answering model ran on this device. Missing =
+   *  treated as on device (never sent to an off-device model). */
+  on_device?: boolean;
+  /** Assistant turns: the segment ids the answer cited. */
+  citations?: string[];
+}
+
+/** One answer sentence, as the Ask harness validated it. */
+export interface AskSentence {
+  text: string;
+  /** Segment ids it cites (only ids the model was shown). */
+  citations: string[];
+  /** sourced = every claim checked; unsourced = no valid citation;
+   *  flagged = a claim isn't in the cited lines (or an uncited claim). */
+  status: "sourced" | "unsourced" | "flagged";
+  flags?: { kind: string; detail?: string }[];
+}
+
+export interface AskSourceLine {
+  segment_id: string;
+  speaker: string;
+  start_ms: number;
+  end_ms: number;
+  snippet: string;
+}
+
+export interface AskSource {
+  meeting_id: string;
+  /** The note that holds the meeting. */
+  note_id: string;
+  meeting_title: string;
+  started_at: string | null;
+  lines: AskSourceLine[];
+  label: string;
+}
+
+/** A change the model proposed; nothing happens until the user approves it
+ *  (`insert_ask_answer` / `add_action_item`). */
+export interface AskProposal {
+  id: string;
+  tool: "insert_into_note" | "add_action_item";
+  gate: "review" | "blocked";
+  meeting_id: string;
+  note_id: string;
+  markdown?: string;
+  text?: string;
+  owner?: string;
+  segment_ids: string[];
+  expires_at: string;
+  executed: boolean;
+}
+
+/** `ask_meeting`'s answer. A model failure arrives as a rejected promise. */
+export interface AskReply {
+  status: "answered" | "not_found" | "unverified" | "refused";
+  /** The answer as plain Markdown (markers and links removed). */
+  text: string;
+  sentences: AskSentence[];
+  sources: AskSource[];
+  proposals: AskProposal[];
+  refusals: { tool: string | null; reason: string }[];
+  trace_lines: string[];
+  /** Where the answering model ran (store it on the assistant turn). */
+  on_device: boolean;
+  /** The id `insert_ask_answer` takes to insert this answer; null when no
+   *  sentence is sourced. */
+  insert_id: string | null;
 }
 
 export interface CalendarAttendee {
@@ -558,6 +625,20 @@ export interface DiskEncryption {
   state: "on" | "off" | "unknown";
   method: "BitLocker" | "FileVault" | null;
   volume: string | null;
+}
+
+/** An extracted (or user-added) meeting item. */
+export interface MeetingItem {
+  id: string;
+  meeting_id: string;
+  kind: "decision" | "action_item" | "question" | "commitment" | "figure";
+  text: string;
+  owner: string | null;
+  status: string | null;
+  speaker_key: string | null;
+  segment_ids: string[];
+  created_at: string;
+  extracted_by: string;
 }
 
 /* ---- connectors (beta): MCP servers Ask and Enhance can call ---- */

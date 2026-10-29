@@ -22,7 +22,7 @@ name: Evals
 # re-hashed):
 #   * no rust-toolchain file and no .cargo/config anywhere (checked before
 #     any cargo command: a toolchain file can point cargo at any binary);
-#   * every package in fly-evals' dependency graph is one of its five path
+#   * every package in fly-evals' dependency graph is one of its six path
 #     crates at the expected path, or comes from crates.io;
 #   * production code doesn't reference the eval files (a tripwire, not a
 #     proof: an answer key read at run time would game every metric);
@@ -164,6 +164,7 @@ jobs:
               "fly-storage": "crates/fly-storage",
               "fly-context": "crates/fly-context",
               "fly-llm": "crates/fly-llm",
+              "fly-ask": "crates/fly-ask",
           }
           crates_io = "registry+https://github.com/rust-lang/crates.io-index"
           pk = {p["id"]: p for p in m["packages"]}

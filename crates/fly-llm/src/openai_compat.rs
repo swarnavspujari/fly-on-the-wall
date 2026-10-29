@@ -212,12 +212,14 @@ impl LLMProvider for OpenAiCompatProvider {
     async fn converse(&self, req: ConverseRequest) -> Result<ChatResponse> {
         if self.is_ollama() {
             validate_ollama(&req)?;
-            let resp = self.ollama_send(tool_client(), &req, false).await?;
+            let (resp, fallback) = self.ollama_send(tool_client(), &req, false).await?;
             let text = resp
                 .text()
                 .await
                 .map_err(|e| LlmError::Network(e.to_string()))?;
-            return parse_native_response(&text);
+            let mut r = parse_native_response(&text)?;
+            r.usage.context_fallback |= fallback;
+            return Ok(r);
         }
         let body = openai_body(&self.model, &req, false, &self.capabilities());
         let text = self.openai_post(tool_client(), &body).await?;
@@ -227,8 +229,24 @@ impl LLMProvider for OpenAiCompatProvider {
     async fn chat_stream(&self, req: ConverseRequest) -> Result<ChatStream> {
         if self.is_ollama() {
             validate_ollama(&req)?;
-            let resp = self.ollama_send(tool_client(), &req, true).await?;
-            return Ok(decode_body(resp.bytes_stream(), OllamaNdjson::default()));
+            let (resp, fallback) = self.ollama_send(tool_client(), &req, true).await?;
+            let stream = decode_body(resp.bytes_stream(), OllamaNdjson::default());
+            if !fallback {
+                return Ok(stream);
+            }
+            // Say so on the final event, where the usage travels.
+            return Ok(Box::pin(futures_util::StreamExt::map(stream, |ev| {
+                ev.map(|ev| match ev {
+                    StreamEvent::Done {
+                        stop_reason,
+                        mut usage,
+                    } => {
+                        usage.context_fallback = true;
+                        StreamEvent::Done { stop_reason, usage }
+                    }
+                    other => other,
+                })
+            })));
         }
         let mut body = openai_body(&self.model, &req, true, &self.capabilities());
         if self.provider_id == "openai" {
@@ -292,7 +310,7 @@ impl OpenAiCompatProvider {
 
     /// Ollama native `POST {root}/api/chat` for the legacy text path.
     async fn chat_ollama_native(&self, req: &ChatRequest) -> Result<String> {
-        let resp = self
+        let (resp, _) = self
             .ollama_send(&reqwest::Client::new(), &ConverseRequest::from(req), false)
             .await?;
         let text = resp
@@ -307,13 +325,15 @@ impl OpenAiCompatProvider {
     /// 400 mentioning thinking support), and once without `num_ctx` when a
     /// raised context crashes the model runner (some models 500 on
     /// constrained hardware — gemma4:e4b at num_ctx 8192 on 4 GB VRAM kills
-    /// llama-server outright).
+    /// llama-server outright). The flag says the second retry happened: the
+    /// reply came from a smaller context than the prompt was sized for
+    /// (`Usage::context_fallback`).
     async fn ollama_send(
         &self,
         client: &reqwest::Client,
         req: &ConverseRequest,
         stream: bool,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<(reqwest::Response, bool)> {
         let root = self.ollama_root();
         let mut think = ollama_think(req);
         let mut num_ctx = Some(estimate_num_ctx_for(req));
@@ -329,7 +349,7 @@ impl OpenAiCompatProvider {
                 })?;
             let status = resp.status();
             if status.is_success() {
-                return Ok(resp);
+                return Ok((resp, num_ctx.is_none()));
             }
             let text = resp
                 .text()
@@ -880,6 +900,7 @@ fn openai_usage(v: &Value) -> Usage {
         output_tokens: u("/usage/completion_tokens"),
         cache_read_tokens: u("/usage/prompt_tokens_details/cached_tokens"),
         cache_write_tokens: None,
+        context_fallback: false,
     }
 }
 
