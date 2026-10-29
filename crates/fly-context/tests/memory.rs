@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use fly_context::{
-    call, decompose, fan_out, render, tool_defs, Briefing, Context, FanoutBudget, GetBriefingArgs,
-    MatchedBy, MemoryPrefetch, OpenItemsArgs, OpenPerWorker, Readers, SearchPassagesArgs,
-    Visibility, WhatsChangedArgs,
+    call, decompose, fan_out, render, tool_defs, Briefing, Context, ContextError, FanoutBudget,
+    GetBriefingArgs, MatchedBy, MemoryPrefetch, OpenItemsArgs, OpenPerWorker, Readers,
+    SearchPassagesArgs, Visibility, WhatsChangedArgs,
 };
 use fly_core::{Attendee, ItemKind, MeetingItem, Speaker, Transcript, TranscriptSegment};
 use fly_storage::Storage;
@@ -1105,27 +1105,61 @@ fn a_failed_keep_local_lookup_fails_closed_on_every_memory_path() {
         .unwrap();
     let shared = f.shared();
     let local = f.local();
+    // the failure is reported as what it is: a Keep-local check
+    fn check<T: std::fmt::Debug>(what: &str, r: fly_context::Result<T>) {
+        match r {
+            Err(ContextError::KeepLocalCheck(_)) => {}
+            other => panic!("{what}: expected KeepLocalCheck, got {other:?}"),
+        }
+    }
 
-    assert!(shared
-        .get_briefing(&briefing_args("launch weekly"))
-        .is_err());
-    assert!(shared.get_briefing(&briefing_args("Dana")).is_err());
-    assert!(shared.open_items(&OpenItemsArgs::default()).is_err());
-    assert!(shared
-        .whats_changed(&WhatsChangedArgs {
+    check(
+        "briefing",
+        shared.get_briefing(&briefing_args("launch weekly")),
+    );
+    check("person", shared.get_briefing(&briefing_args("Dana")));
+    check("open", shared.open_items(&OpenItemsArgs::default()));
+    check(
+        "changed",
+        shared.whats_changed(&WhatsChangedArgs {
             series: "launch weekly".into(),
-            since: None
-        })
-        .is_err());
-    assert!(shared
-        .memory_prefetch("What did Dana commit to?", &MemoryPrefetch::default())
-        .is_err());
+            since: None,
+        }),
+    );
+    check(
+        "prefetch",
+        shared.memory_prefetch("What did Dana commit to?", &MemoryPrefetch::default()),
+    );
+    use fly_context::memory::mcp;
+    check(
+        "mcp get_context",
+        mcp::get_context(&shared, "launch weekly", None),
+    );
+    check(
+        "mcp whats_changed",
+        mcp::whats_changed(
+            &shared,
+            "launch weekly",
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        ),
+    );
+    check("mcp open_items", mcp::open_items(&shared, "all"));
+    check(
+        "search_passages",
+        shared.search_passages(
+            &SearchPassagesArgs {
+                query: "launch".into(),
+                ..Default::default()
+            },
+            None,
+        ),
+    );
     for (name, args) in [
         ("get_briefing", json!({"query": "launch weekly"})),
         ("open_items", json!({})),
         ("whats_changed", json!({"series": "launch weekly"})),
     ] {
-        assert!(call(&shared, name, &args, None).is_err(), "{name}");
+        check(name, call(&shared, name, &args, None));
     }
     let readers = OpenPerWorker::new(f.dir.path());
     let q = vec!["launch".to_string()];
@@ -1466,4 +1500,338 @@ fn fan_out_never_returns_keep_local_passages_when_shared() {
     .unwrap();
     assert!(render::fanout(&local).contains("SECRET"));
     let _ = (&f.w1, &f.w3, &f.retro);
+}
+
+// ---------------------------------------------------------------------------
+// Scope, robustness, rendering (fix-check)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_ask_scope_applies_before_every_cap() {
+    let f = fixture();
+    let ctx = f.shared();
+    let w1 = vec![f.w1.clone()];
+    // The project spans the retro and the weekly; scoped to w1, the caps
+    // (2 facts) apply to w1's facts, not to the newer retro's.
+    let b = ctx
+        .memory_prefetch(
+            "Where are we on the launch?",
+            &MemoryPrefetch {
+                meetings: Some(w1.clone()),
+                max_facts: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.series, vec!["launch weekly"]);
+    assert_eq!(b.facts.len(), 2);
+    assert!(
+        b.facts.iter().all(|x| x.meeting_id == f.w1),
+        "{:?}",
+        b.facts
+    );
+    assert_eq!(b.facts_omitted, 2, "in-scope facts only");
+    assert!(b.meetings.iter().all(|m| m.meeting_id == f.w1));
+
+    // tools: briefing, open items (limit 1), what changed
+    let tb = ctx
+        .get_briefing_in(&briefing_args("launch weekly"), Some(&w1))
+        .unwrap();
+    assert!(tb.facts.iter().all(|x| x.meeting_id == f.w1));
+    let o = ctx
+        .open_items_in(
+            &OpenItemsArgs {
+                limit: Some(1),
+                ..Default::default()
+            },
+            Some(&w1),
+        )
+        .unwrap();
+    let texts: Vec<&str> = o.facts.iter().map(|x| x.text.as_str()).collect();
+    assert_eq!(texts, vec!["Send the launch deck"]);
+    let wc = ctx
+        .whats_changed_in(
+            &WhatsChangedArgs {
+                series: "launch weekly".into(),
+                since: None,
+            },
+            Some(&w1),
+        )
+        .unwrap();
+    assert!(!wc.facts.is_empty() && wc.facts.iter().all(|x| x.meeting_id == f.w1));
+
+    // a large scope (filtered from the newest meetings, not read by id)
+    let mut big: Vec<String> = (0..600).map(|i| format!("no-such-{i}")).collect();
+    big.push(f.w2.clone());
+    let b = ctx
+        .get_briefing_in(&briefing_args("launch weekly"), Some(&big))
+        .unwrap();
+    let ids: Vec<&str> = b.meetings.iter().map(|m| m.meeting_id.as_str()).collect();
+    assert_eq!(ids, vec![f.w2.as_str()]);
+
+    // a scope naming hidden meetings can't reveal them
+    let hidden = vec![f.legal.clone(), f.zed.clone()];
+    assert!(ctx
+        .memory_prefetch(
+            "What changed in the launch weekly?",
+            &MemoryPrefetch {
+                meetings: Some(hidden.clone()),
+                ..Default::default()
+            }
+        )
+        .unwrap()
+        .is_none());
+    let b = ctx
+        .get_briefing_in(&briefing_args("launch weekly"), Some(&hidden))
+        .unwrap();
+    f.assert_briefing_clean("hidden scope", &b);
+}
+
+#[test]
+fn retain_meetings_recounts_what_was_omitted() {
+    let f = fixture();
+    let mut b = f
+        .shared()
+        .get_briefing(&GetBriefingArgs {
+            query: "launch weekly".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    // cut to 2 facts by hand through the public prefetch cap instead
+    let mut capped = f
+        .shared()
+        .memory_prefetch(
+            "Where are we on the launch?",
+            &MemoryPrefetch {
+                max_facts: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert!(capped.facts_omitted > 0);
+    capped.retain_meetings(|m| m == f.retro);
+    // the retro's own facts were the newest, so nothing of it was omitted
+    assert_eq!(capped.facts_omitted, 0);
+    b.retain_meetings(|_| true);
+    assert_eq!(b.facts_omitted, 0);
+}
+
+#[test]
+fn a_series_cut_by_the_meeting_cap_is_not_named() {
+    let f = fixture();
+    let b = f
+        .shared()
+        .memory_prefetch(
+            "Where are we on the launch?",
+            &MemoryPrefetch {
+                max_meetings: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.series, vec!["launch retro"]);
+    assert!(!render::briefing(&b).contains("launch weekly"));
+}
+
+#[test]
+fn one_unreadable_transcript_does_not_fail_the_series() {
+    let f = fixture();
+    rusqlite::Connection::open(f.dir.path().join("flyonthewall.db"))
+        .unwrap()
+        .execute(
+            "UPDATE transcripts SET json = '{\"speakers\": 1}' WHERE meeting_id = ?1",
+            [&f.w1],
+        )
+        .unwrap();
+    let b = f
+        .shared()
+        .get_briefing(&briefing_args("launch weekly"))
+        .unwrap();
+    assert_eq!(b.meetings.len(), 3);
+    let w1 = b.meetings.iter().find(|m| m.meeting_id == f.w1).unwrap();
+    assert!(!w1.has_transcript);
+    // w1's facts are still there, but can't be quoted or cited
+    assert!(b.facts.iter().any(|x| x.meeting_id == f.w1));
+    assert!(b.evidence.iter().all(|e| e.meeting_id != f.w1));
+    assert!(b.evidence.iter().any(|e| e.meeting_id == f.w2));
+    let mcp = fly_context::memory::mcp::get_context(&f.shared(), "launch weekly", None).unwrap();
+    assert_eq!(mcp.meetings.len(), 3);
+}
+
+#[test]
+fn a_person_filter_runs_before_the_item_cap() {
+    let f = fixture();
+    let (big, _) = meeting(&f.storage, "Big sync", None, 22, &[]);
+    let mut items: Vec<MeetingItem> = (0..600)
+        .map(|i| {
+            item(
+                &big,
+                ItemKind::ActionItem,
+                &format!("chore {i}"),
+                Some("Sam"),
+                Some("open"),
+                None,
+                &[],
+            )
+        })
+        .collect();
+    items[550] = item(
+        &big,
+        ItemKind::Commitment,
+        "Dana's late promise",
+        Some("Dana"),
+        None,
+        None,
+        &[],
+    );
+    f.storage.replace_meeting_items(&big, &items).unwrap();
+    let b = f
+        .shared()
+        .get_briefing(&GetBriefingArgs {
+            query: "big sync".into(),
+            person: Some("Dana".into()),
+            since: None,
+        })
+        .unwrap();
+    let texts: Vec<&str> = b.facts.iter().map(|x| x.text.as_str()).collect();
+    assert_eq!(texts, vec!["Dana's late promise"]);
+}
+
+#[test]
+fn rendered_text_and_shown_evidence_match_exactly() {
+    let f = fixture();
+    let long = format!("Pricing {}and that is final.", "really ".repeat(80));
+    transcript(
+        &f.storage,
+        &f.budget,
+        "c",
+        &[
+            ("spk_1", "Travel spend is frozen until the next quarter."),
+            ("mic", "Hotels too."),
+            ("spk_0", long.as_str()),
+        ],
+    );
+    f.storage
+        .replace_meeting_items(
+            &f.budget,
+            &[
+                item(
+                    &f.budget,
+                    ItemKind::Decision,
+                    "Freeze travel and hotels",
+                    Some("Sam"),
+                    Some("seg:x [seg:c1]"),
+                    Some("spk_1"),
+                    &["c0", "c1", "c2", "gone"],
+                ),
+                item(
+                    &f.budget,
+                    ItemKind::Figure,
+                    "Pricing is final",
+                    None,
+                    None,
+                    Some("spk_0"),
+                    &["c2"],
+                ),
+            ],
+        )
+        .unwrap();
+    let b = f
+        .shared()
+        .get_briefing(&briefing_args("budget review"))
+        .unwrap();
+    let r = render::briefing_rendered(&b, usize::MAX);
+    // markers only for the two quoted segments of the first fact, and c2
+    // for the second
+    let markers: Vec<&str> = r
+        .text
+        .split("[seg:")
+        .skip(1)
+        .map(|x| x.split(']').next().unwrap())
+        .collect();
+    let mut want = vec!["c0", "c1", "c2"];
+    let mut got = markers.clone();
+    got.sort();
+    got.dedup();
+    want.sort();
+    assert_eq!(got, want, "{}", r.text);
+    let mut shown: Vec<&str> = r.shown.iter().map(|c| c.segment.id.as_str()).collect();
+    shown.sort();
+    assert_eq!(shown, want);
+    // a clipped quote's evidence is exactly its visible part
+    let c2 = r.shown.iter().find(|c| c.segment.id == "c2").unwrap();
+    assert!(c2.segment.text.len() < long.len());
+    assert!(long.starts_with(&c2.segment.text));
+    assert!(
+        r.text.contains(&format!("{} …\"", c2.segment.text)),
+        "{}",
+        r.text
+    );
+    // only known statuses are printed
+    assert!(!r.text.contains("seg:x"), "{}", r.text);
+    assert!(!r.text.contains("[seg-c1]"), "{}", r.text);
+    // open items render the same way
+    let o = render::open_items_rendered(
+        &f.shared().open_items(&OpenItemsArgs::default()).unwrap(),
+        usize::MAX,
+    );
+    for c in &o.shown {
+        assert!(o.text.contains(&format!("[seg:{}]", c.segment.id)));
+    }
+}
+
+#[test]
+fn the_fan_out_budget_is_capped_and_an_empty_budget_searches_nothing() {
+    let f = fixture();
+    let readers = OpenPerWorker::new(data_dir(&f));
+    let qs = queries(&[
+        "launch",
+        "pricing",
+        "travel",
+        "postmortem",
+        "venue",
+        "deck",
+        "beta",
+    ]);
+    let base = SearchPassagesArgs::default();
+    let greedy = FanoutBudget {
+        max_searches: 99,
+        per_search_limit: 99,
+        max_passages: 999,
+        per_meeting: 99,
+        max_chars: usize::MAX,
+        max_parallel: 99,
+    };
+    let out = fan_out(
+        &readers,
+        Visibility::ShareableOnly,
+        &qs,
+        &base,
+        &[],
+        &greedy,
+    )
+    .unwrap();
+    assert_eq!(out.searches_run, 5);
+    assert_eq!(out.skipped_queries, 2);
+    assert!(out.passages.len() <= FanoutBudget::TIER_C.max_passages);
+
+    let none = fan_out(
+        &readers,
+        Visibility::ShareableOnly,
+        &qs,
+        &base,
+        &[],
+        &FanoutBudget {
+            max_searches: 0,
+            ..FanoutBudget::TIER_C
+        },
+    )
+    .unwrap();
+    assert_eq!(none.searches_run, 0);
+    let text = render::fanout(&none);
+    assert!(text.starts_with("Nothing was searched"), "{text}");
+    assert!(!text.contains("No matching"), "{text}");
 }

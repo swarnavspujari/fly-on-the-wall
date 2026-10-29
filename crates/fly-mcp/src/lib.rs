@@ -293,7 +293,7 @@ impl Server {
         let base = SearchFilter {
             folder_id: arg_str(args, "folder_id"),
             since: arg_time(args, "since")?,
-            until: arg_time(args, "until")?,
+            until: arg_until(args)?,
             limit,
             offset: 0,
             // Keep-local rows are excluded inside SQL: they never fill a page,
@@ -617,7 +617,7 @@ impl Server {
             .and_then(|c| c.split_once('|'))
             .map(|(ts, id)| (ts.to_string(), id.to_string()));
         let folder_id = arg_str(args, "folder_id");
-        let (since, until) = (arg_time(args, "since")?, arg_time(args, "until")?);
+        let (since, until) = (arg_time(args, "since")?, arg_until(args)?);
         // Keep-local notes are excluded inside SQL, so they never fill a page
         // and the cursor (the last row returned) is always a shareable note.
         let notes = self
@@ -788,6 +788,8 @@ impl Server {
             arg_time(args, key)?;
             Ok(arg_str(args, key))
         };
+        // (fly-context reads a bare `until` date as the end of that day,
+        // like arg_until)
         // Fields added to the args later keep their defaults.
         #[allow(clippy::needless_update)]
         let search = SearchPassagesArgs {
@@ -884,13 +886,12 @@ fn keep_local_lookup_error(e: StorageError) -> String {
     format!("couldn't check Keep local settings, so nothing was returned: {e}")
 }
 
-/// A fly-context error as tool text. A storage error may be a failed
-/// Keep-local lookup, so it says nothing was returned (fail closed).
+/// A fly-context error as tool text.
 fn context_error(e: fly_context::ContextError) -> String {
-    match e {
-        fly_context::ContextError::Storage(e) => keep_local_lookup_error(e),
-        other => other.to_string(),
-    }
+    // A failed Keep-local lookup has its own variant and message
+    // ("couldn't check Keep local settings, so nothing was returned");
+    // other storage errors say what they are.
+    e.to_string()
 }
 
 /// Longest speaker label `set_speaker_label` accepts, in characters.
@@ -1009,6 +1010,21 @@ fn arg_time(args: &Value, key: &str) -> Result<Option<DateTime<Utc>>, String> {
     ))
 }
 
+/// The `until` argument: RFC 3339, or a bare YYYY-MM-DD meaning through the
+/// end of that day (UTC), the same as `search_passages` (fly-context).
+fn arg_until(args: &Value) -> Result<Option<DateTime<Utc>>, String> {
+    let Some(raw) = args.get("until").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+        return Ok(Some(DateTime::from_naive_utc_and_offset(
+            d.and_hms_milli_opt(23, 59, 59, 999).unwrap(),
+            Utc,
+        )));
+    }
+    arg_time(args, "until")
+}
+
 fn error_response(id: Value, code: i32, message: &str, data: Option<Value>) -> String {
     let mut error = json!({"code": code, "message": message});
     if let Some(data) = data {
@@ -1029,7 +1045,8 @@ fn modernize(mut result: Value) -> Value {
 }
 
 fn tools_list() -> Value {
-    let time_desc = "RFC 3339 or YYYY-MM-DD";
+    let time_desc = "RFC 3339, or YYYY-MM-DD (from the start of that day, UTC)";
+    let until_desc = "RFC 3339, or YYYY-MM-DD (through the end of that day, UTC)";
     json!({ "tools": [
         {
             "name": "get_context",
@@ -1097,7 +1114,7 @@ fn tools_list() -> Value {
                     "query": { "type": "string", "description": "Search terms" },
                     "folder_id": { "type": "string" },
                     "since": { "type": "string", "description": time_desc },
-                    "until": { "type": "string", "description": time_desc },
+                    "until": { "type": "string", "description": until_desc },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                     "cursor": { "type": "string", "description": "From a previous page's footer" }
                 },
@@ -1114,7 +1131,7 @@ fn tools_list() -> Value {
                     "meeting_ids": { "type": "array", "items": { "type": "string" }, "maxItems": 50, "description": "Only search these meetings" },
                     "folder_id": { "type": "string" },
                     "since": { "type": "string", "description": time_desc },
-                    "until": { "type": "string", "description": time_desc },
+                    "until": { "type": "string", "description": until_desc },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Passages to return (default 8)" }
                 },
                 "required": ["query"]
@@ -1176,7 +1193,7 @@ fn tools_list() -> Value {
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                     "folder_id": { "type": "string" },
                     "since": { "type": "string", "description": time_desc },
-                    "until": { "type": "string", "description": time_desc },
+                    "until": { "type": "string", "description": until_desc },
                     "cursor": { "type": "string", "description": "From a previous page's footer" }
                 }
             }
@@ -1676,6 +1693,103 @@ mod tests {
             json!({"query": "a".repeat(MAX_QUERY_CHARS + 1)}),
         ] {
             tool_error(&server, "search_passages", bad);
+        }
+    }
+
+    /// Break the Keep-local lookup itself: the context layer and passage
+    /// search refuse, and say why, instead of answering unfiltered.
+    #[test]
+    fn context_layer_and_passages_fail_closed_when_keep_local_cant_be_checked() {
+        let f = server_with_keep_local();
+        rusqlite::Connection::open(f._dir.path().join("flyonthewall.db"))
+            .unwrap()
+            .execute_batch("ALTER TABLE folders RENAME COLUMN keep_local TO keep_local_broken")
+            .unwrap();
+        for (tool, args) in [
+            ("get_context", json!({"query": "acme renewal"})),
+            (
+                "whats_changed",
+                json!({"series": "acme renewal", "since": "2020-01-01"}),
+            ),
+            ("open_items", json!({})),
+            ("open_items", json!({"scope": "acme renewal"})),
+            ("search_passages", json!({"query": "renewal"})),
+        ] {
+            let err = tool_error(&f.server, tool, args);
+            assert!(
+                err.starts_with("couldn't check Keep local settings, so nothing was returned"),
+                "{tool}: {err}"
+            );
+            assert_no_leak(&f, &err);
+        }
+    }
+
+    /// One transcript that no longer parses: its meeting reads as having no
+    /// transcript (as before the move), the series still answers.
+    #[test]
+    fn one_unreadable_transcript_does_not_fail_get_context() {
+        let (d, server, m0, m1) = server_with_series();
+        rusqlite::Connection::open(d.path().join("flyonthewall.db"))
+            .unwrap()
+            .execute(
+                "UPDATE transcripts SET json = '{\"speakers\": 1}' WHERE meeting_id = ?1",
+                [&m0],
+            )
+            .unwrap();
+        let text = tool_text(&server, "get_context", json!({"query": "acme renewal"}));
+        assert!(text.contains("2 meeting(s)"), "{text}");
+        assert!(
+            text.contains(&format!("(meeting: {m0}, no transcript")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("(meeting: {m1}, transcript ✓")),
+            "{text}"
+        );
+        tool_text(&server, "open_items", json!({}));
+    }
+
+    /// A bare `until` date includes that whole day on every tool that takes
+    /// one.
+    #[test]
+    fn until_includes_the_whole_day_everywhere() {
+        let (_d, server, note_id, meeting_id) = server_with_data();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let yesterday = (Utc::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        for (tool, args, want) in [
+            (
+                "search_notes",
+                json!({"query": "roadmap", "until": today}),
+                note_id.clone(),
+            ),
+            ("list_recent", json!({"until": today}), note_id.clone()),
+            (
+                "search_passages",
+                json!({"query": "roadmap", "until": today}),
+                meeting_id.clone(),
+            ),
+        ] {
+            let text = tool_text(&server, tool, args);
+            assert!(text.contains(&want), "{tool} until today: {text}");
+        }
+        for (tool, args) in [
+            (
+                "search_notes",
+                json!({"query": "roadmap", "until": yesterday}),
+            ),
+            ("list_recent", json!({"until": yesterday})),
+            (
+                "search_passages",
+                json!({"query": "roadmap", "until": yesterday}),
+            ),
+        ] {
+            let text = tool_text(&server, tool, args);
+            assert!(
+                !text.contains(&note_id) && !text.contains(&meeting_id),
+                "{tool}: {text}"
+            );
         }
     }
 

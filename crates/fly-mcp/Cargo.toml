@@ -22,4 +22,5 @@ dirs.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile = "3" 

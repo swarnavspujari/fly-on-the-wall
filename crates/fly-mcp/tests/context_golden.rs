@@ -289,7 +289,26 @@ Participants: dana@example.com, sam@example.com, You, Dana
         "get_context",
         json!({"query": "launch weekly", "since": "2026-09-05"}),
     );
-    let want_since = "# Context: launch weekly
+    assert_eq!(since, format!("{WANT_SINCE}{FOOTER}"));
+
+    // full-text fallback: no title says "travel", a transcript does
+    let fallback = tool(&g, "get_context", json!({"query": "travel"}));
+    let want_fallback = "# Context: budget review
+1 meeting(s), 2026-09-10 → 2026-09-10
+Participants: You, Dana
+
+## Timeline
+- 2026-09-10 — Budget review (meeting: <budget>, transcript ✓, 1 extracted item(s))
+
+## Action items
+- Freeze travel spend (owner: You · status: open · said by: You · 2026-09-10 · meeting: <budget> · segments: c1)
+";
+    assert_eq!(fallback, format!("{want_fallback}{FOOTER}"));
+    misses_are_pinned(&g);
+}
+
+/// `launch weekly` from 2026-09-05 (or 09-08): the two newest meetings.
+const WANT_SINCE: &str = "# Context: launch weekly
 2 meeting(s), 2026-09-08 → 2026-09-15
 Participants: dana@example.com, sam@example.com, You, Dana
 
@@ -309,24 +328,10 @@ Participants: dana@example.com, sam@example.com, You, Dana
 ## Key figures
 - Three pricing tiers (2026-09-08 · meeting: <w2>)
 ";
-    assert_eq!(since, format!("{want_since}{FOOTER}"));
 
-    // full-text fallback: no title says "travel", a transcript does
-    let fallback = tool(&g, "get_context", json!({"query": "travel"}));
-    let want_fallback = "# Context: budget review
-1 meeting(s), 2026-09-10 → 2026-09-10
-Participants: You, Dana
-
-## Timeline
-- 2026-09-10 — Budget review (meeting: <budget>, transcript ✓, 1 extracted item(s))
-
-## Action items
-- Freeze travel spend (owner: You · status: open · said by: You · 2026-09-10 · meeting: <budget> · segments: c1)
-";
-    assert_eq!(fallback, format!("{want_fallback}{FOOTER}"));
-
+fn misses_are_pinned(g: &Golden) {
     let miss = tool(
-        &g,
+        g,
         "get_context",
         json!({"query": "zebra", "since": "2026-01-02"}),
     );
@@ -335,7 +340,7 @@ Participants: You, Dana
         "No meetings matched \"zebra\" since 2026-01-02. Try search_notes for a broader text search."
     );
     // a query only the keep-local meeting matches reads like a miss
-    let hidden = tool(&g, "get_context", json!({"query": "secretword"}));
+    let hidden = tool(g, "get_context", json!({"query": "secretword"}));
     assert_eq!(
         hidden.replace("secretword", "Q"),
         miss.replace("zebra", "Q").replace(" since 2026-01-02", "")
@@ -350,11 +355,8 @@ fn whats_changed_text_is_pinned() {
         "whats_changed",
         json!({"series": "launch weekly", "since": "2026-09-08"}),
     );
-    assert!(
-        text.starts_with("# Context: launch weekly\n2 meeting(s), 2026-09-08 → 2026-09-15\n"),
-        "{text}"
-    );
-    assert!(!text.contains("<w1>"), "{text}");
+    // the same briefing get_context gives for that window, byte for byte
+    assert_eq!(text, format!("{WANT_SINCE}{FOOTER}"));
     let miss = tool(
         &g,
         "whats_changed",

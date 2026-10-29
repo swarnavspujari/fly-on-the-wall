@@ -189,7 +189,8 @@ impl Storage {
             let placeholders = vec!["?"; chunk.len()].join(",");
             let mut stmt = self.conn.prepare(&format!(
                 "SELECT meeting_id,
-                        CASE WHEN json_valid(json) THEN json_extract(json, '$.speakers') END
+                        CASE WHEN json_valid(json) AND json_type(json, '$.speakers') = 'array'
+                             THEN json_extract(json, '$.speakers') END
                    FROM transcripts WHERE meeting_id IN ({placeholders})"
             ))?;
             let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
@@ -504,7 +505,21 @@ mod tests {
                 [&b.id],
             )
             .unwrap();
-        let ids = vec![a.id.clone(), b.id.clone(), "no-such-meeting".to_string()];
+        // valid JSON of the wrong shape too
+        let c = s.create_meeting("Budget mtg", &note.id, &[]).unwrap();
+        s.save_transcript(&sample_transcript(&c.id)).unwrap();
+        s.conn
+            .execute(
+                "UPDATE transcripts SET json = '{\"speakers\": 1}' WHERE meeting_id = ?1",
+                [&c.id],
+            )
+            .unwrap();
+        let ids = vec![
+            a.id.clone(),
+            b.id.clone(),
+            c.id.clone(),
+            "no-such-meeting".to_string(),
+        ];
         let got = s.transcript_speakers(&ids).unwrap();
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[&a.id][0].label, "Dana");
