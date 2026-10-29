@@ -253,10 +253,16 @@ fn add_prompt(c: &ServerConfig, turning_on: bool) -> ConsentPrompt {
     }
 }
 
-fn edit_prompt(c: &ServerConfig) -> ConsentPrompt {
+fn edit_prompt(c: &ServerConfig, moved: bool) -> ConsentPrompt {
     let mut p = add_prompt(c, false);
     p.title = format!("Save changes to {}?", q(&c.name, 60));
     p.allow = "Save changes".into();
+    if moved {
+        p.message.push_str(
+            "\n\nBecause it now points somewhere new, its saved sign-in, keys and tool \
+             permissions are cleared, and every tool starts again as Needs approval.",
+        );
+    }
     p
 }
 
@@ -936,7 +942,8 @@ pub async fn update_connector(
     input: ConnectorInput,
 ) -> CmdResult<SaveResult> {
     let cfg = st.hub.check_config(input.config).map_err(err_str)?;
-    if !ask(&st, &app, &edit_prompt(&cfg)).await {
+    let moved = st.hub.edit_moves(&id, &cfg).map_err(err_str)?;
+    if !ask(&st, &app, &edit_prompt(&cfg, moved)).await {
         return Ok(SaveResult {
             saved: false,
             connector: Some(view_of(&st.hub, &id)?),

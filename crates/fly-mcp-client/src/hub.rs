@@ -436,9 +436,21 @@ impl ConnectorHub {
         Ok(id)
     }
 
+    /// Whether saving `config` would point connector `id` somewhere new
+    /// (see [`ServerConfig::moves_from`]); the dialog says what that clears.
+    pub fn edit_moves(&self, id: &str, config: &ServerConfig) -> Result<bool, HubError> {
+        let reg = self.registry();
+        let old = reg.server(id).ok_or(HubError::NotFound)?;
+        Ok(config.clone().normalized().moves_from(&old.config))
+    }
+
     /// Replace a connector's configuration after the user approved the new
-    /// one in a native dialog. Tool permissions are kept; the next listing
-    /// catches any tool that changed.
+    /// one in a native dialog. A change of name, headers or settings keeps
+    /// tool permissions and stored secrets. A move to another address,
+    /// program, transport or kind of sign-in is treated like a new connector:
+    /// every stored secret and token is deleted (fresh values from the form
+    /// are stored), and its tools start over on Needs approval at the next
+    /// listing.
     pub async fn update_approved(
         &self,
         id: &str,
@@ -451,56 +463,57 @@ impl ConnectorHub {
             .server(id)
             .cloned()
             .ok_or(HubError::NotFound)?;
-        if old.config.name != config.name
-            && self
-                .registry()
-                .servers
-                .iter()
-                .any(|s| s.id != id && s.config.name.eq_ignore_ascii_case(&config.name))
+        if self
+            .registry()
+            .servers
+            .iter()
+            .any(|s| s.id != id && s.config.name.eq_ignore_ascii_case(&config.name))
         {
             return Err(HubError::Invalid(
                 "A connector with that name already exists.".into(),
             ));
         }
-        // Names that are new to the configuration need a value now.
-        let old_names = old.config.secret_names();
-        for name in config.secret_names() {
-            if !old_names.contains(&name) && secrets.values.get(&name).is_none_or(|v| v.is_empty())
-            {
-                return Err(HubError::Invalid(format!("Enter a value for {name}.")));
+        let moved = config.moves_from(&old.config);
+        if moved {
+            // Nothing stored carries over, so every secret needs a value now.
+            Self::check_secrets(&config, secrets, false)?;
+        } else {
+            let old_names = old.config.secret_names();
+            for name in config.secret_names() {
+                if !old_names.contains(&name)
+                    && secrets.values.get(&name).is_none_or(|v| v.is_empty())
+                {
+                    return Err(HubError::Invalid(format!("Enter a value for {name}.")));
+                }
             }
         }
-        if matches!(config.auth, AuthConfig::ApiKey)
-            && !matches!(old.config.auth, AuthConfig::ApiKey)
-            && secrets.api_key.as_deref().is_none_or(str::is_empty)
-        {
-            return Err(HubError::Invalid("Enter the API key or token.".into()));
-        }
-        let auth_changed = old.config.auth != config.auth
-            || std::mem::discriminant(&old.config.transport)
-                != std::mem::discriminant(&config.transport)
-            || old.config.destination() != config.destination();
         self.update(|reg| {
             let e = reg.server_mut(id).ok_or(HubError::NotFound)?;
             e.approved_hash = Some(config.hash());
             e.approved_at = Some(now());
             e.config = config.clone();
             e.last_problem = None;
+            if moved {
+                e.tools.clear();
+                e.baseline_done = false;
+                e.last_sync = None;
+            }
             Ok(())
         })?;
-        // Drop secrets the new configuration no longer names.
-        let kept = self
-            .registry()
-            .server(id)
-            .map(secret_keys_for)
-            .unwrap_or_default();
+        // Delete what no longer applies: everything after a move, otherwise
+        // the secrets the new configuration no longer names.
+        let kept = if moved {
+            Vec::new()
+        } else {
+            self.registry()
+                .server(id)
+                .map(secret_keys_for)
+                .unwrap_or_default()
+        };
         for key in secret_keys_for(&old) {
             if !kept.contains(&key) {
                 let _ = self.secrets.delete(&key);
             }
-        }
-        if auth_changed {
-            let _ = KeychainCredentials::new(self.secrets.clone(), id).clear_tokens();
         }
         self.store_secrets(id, secrets)?;
         self.drop_connection(id).await;

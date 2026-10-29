@@ -334,6 +334,24 @@ impl ServerConfig {
         }
     }
 
+    /// True when `other` points somewhere else: another address, another
+    /// program line, another transport or another kind of sign-in. Stored
+    /// secrets, tokens and tool permissions must not carry over to it.
+    pub fn moves_from(&self, other: &ServerConfig) -> bool {
+        let identity = |c: &ServerConfig| {
+            (
+                match &c.transport {
+                    TransportConfig::Http { url, .. } => format!("http {url}"),
+                    TransportConfig::Stdio { .. } => {
+                        format!("stdio {}", c.will_run().unwrap_or_default())
+                    }
+                },
+                std::mem::discriminant(&c.auth),
+            )
+        };
+        identity(self) != identity(other)
+    }
+
     pub fn is_local(&self) -> bool {
         matches!(self.transport, TransportConfig::Stdio { .. })
     }
@@ -571,6 +589,36 @@ mod tests {
             slug_for("A very long connector name here"),
             "a_very_long_conn"
         );
+    }
+
+    #[test]
+    fn a_new_address_program_or_sign_in_is_a_move() {
+        let a = http("https://mcp.example.com/mcp");
+        let mut renamed = a.clone();
+        renamed.name = "Docs 2".into();
+        assert!(!renamed.moves_from(&a));
+        assert!(http("https://mcp.example.com/other").moves_from(&a));
+        let mut keyed = a.clone();
+        keyed.auth = AuthConfig::ApiKey;
+        assert!(keyed.moves_from(&a));
+        let l = local(vec![]);
+        let mut other_pkg = l.clone();
+        other_pkg.transport = TransportConfig::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "@example/other-server".into()],
+            env: vec![],
+        };
+        assert!(other_pkg.moves_from(&l), "same runner, different package");
+        let mut with_setting = l.clone();
+        with_setting.transport = TransportConfig::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "@example/server".into()],
+            env: vec![EnvConfig {
+                name: "REGION".into(),
+                value: Some("eu".into()),
+            }],
+        };
+        assert!(!with_setting.moves_from(&l));
     }
 
     #[test]

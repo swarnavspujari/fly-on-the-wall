@@ -845,7 +845,7 @@ async fn editing_a_connector_re_approves_it_and_drops_old_secrets() {
     let mut edited = config();
     edited.transport = TransportConfig::Stdio {
         command: "acme-crm-mcp".into(),
-        args: vec!["--region".into(), "eu".into()],
+        args: vec![],
         env: vec![EnvConfig {
             name: "ACME_KEY".into(),
             value: None,
@@ -884,5 +884,53 @@ async fn editing_a_connector_re_approves_it_and_drops_old_secrets() {
             .unwrap()
             .as_deref(),
         Some("k3y")
+    );
+}
+
+#[tokio::test]
+async fn pointing_a_connector_somewhere_new_starts_it_over() {
+    let s = setup().await;
+    s.set("search_contacts", Permission::AlwaysAllow);
+    s.secrets
+        .set(&format!("connector.{}.access", s.id), "{}")
+        .unwrap();
+    let mut moved = config();
+    moved.transport = TransportConfig::Stdio {
+        command: "other-crm-mcp".into(),
+        args: vec![],
+        env: vec![EnvConfig {
+            name: "ACME_TOKEN".into(),
+            value: None,
+        }],
+    };
+    assert!(s.hub.edit_moves(&s.id, &moved).unwrap());
+    // Nothing carries over, so the secret must be entered again.
+    assert!(s
+        .hub
+        .update_approved(&s.id, moved.clone(), &NewSecrets::default())
+        .await
+        .is_err());
+    let fresh = NewSecrets {
+        values: [("ACME_TOKEN".to_string(), "new-t0ken".to_string())].into(),
+        ..Default::default()
+    };
+    s.hub.update_approved(&s.id, moved, &fresh).await.unwrap();
+    let reg = s.hub.registry();
+    let entry = reg.server(&s.id).unwrap();
+    assert!(
+        entry.tools.is_empty() && !entry.baseline_done,
+        "permissions start over"
+    );
+    assert!(s
+        .secrets
+        .get(&format!("connector.{}.access", s.id))
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        s.secrets
+            .get(&format!("connector.{}.env.ACME_TOKEN", s.id))
+            .unwrap()
+            .as_deref(),
+        Some("new-t0ken")
     );
 }
