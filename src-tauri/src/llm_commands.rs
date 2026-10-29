@@ -1241,6 +1241,17 @@ pub struct AskReply {
     pub insert_id: Option<String>,
 }
 
+/// Connector tools for one Ask turn (fly-llm `ExternalTools`). None until
+/// `connectors::turn_for_ask` lands (PR #113); it's built here then, and
+/// the harness already follows the contract (offered only on tool tiers and
+/// non-Keep-local scopes, the turn read without Keep-local content, no
+/// proposals once sealed).
+fn connectors_for_ask(
+    _state: &AppState,
+) -> Option<Box<dyn fly_llm::external_tools::ExternalTools>> {
+    None
+}
+
 /// An answer worth inserting: answered, with a sourced sentence. Its
 /// Markdown and the lines its sourced sentences cite.
 fn insertable(a: &fly_ask::AskAnswer) -> Option<(String, Vec<String>)> {
@@ -1361,6 +1372,7 @@ pub async fn ask_meeting(
             );
         }
     };
+    let external = connectors_for_ask(&state);
     let answer = fly_ask::ask(
         fly_ask::AskEnv {
             store: &state.storage,
@@ -1371,6 +1383,7 @@ pub async fn ask_meeting(
             embedder: Some(&embedder),
             events: ask_id.as_ref().map(|_| &sink as fly_ask::EventSink<'_>),
             cancel: None,
+            external: external.as_deref(),
         },
         fly_ask::AskInput {
             question: &question,

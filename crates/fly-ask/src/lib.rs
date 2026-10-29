@@ -37,6 +37,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use fly_context::Visibility;
+use fly_llm::external_tools::ExternalTools;
 use fly_llm::tool_loop::{run_tool_loop_async, LoopEnd, ToolCallRecord};
 use fly_llm::{
     ContentBlock, ConverseRequest, LLMProvider, LlmError, Message, StopReason, ThinkingMode,
@@ -133,6 +134,11 @@ pub struct AskEnv<'a, S, E> {
     pub embedder: Option<&'a E>,
     pub events: Option<EventSink<'a>>,
     pub cancel: Option<&'a AtomicBool>,
+    /// Tools from outside the harness (connectors), per turn. Offered only
+    /// on tiers that call tools and when the explicit scope holds no
+    /// Keep-local note; the whole turn then reads Keep-local content
+    /// excluded (the fly-llm `ExternalTools` contract).
+    pub external: Option<&'a dyn ExternalTools>,
 }
 
 /// The question.
@@ -345,6 +351,7 @@ impl Run<'_> {
             AnswerStatus::NotFound => prompt::NOT_FOUND_REPLY.to_string(),
             AnswerStatus::Refused => match self.log.scope_refusal {
                 Some(scope::ScopeRefusal::KeepLocal) => "This is marked Keep local, so it isn't sent to a model that runs off this computer.".into(),
+                Some(scope::ScopeRefusal::Unchecked) => "Couldn't check which meetings are kept local, so nothing was sent to the model. Try again in a moment.".into(),
                 _ => "There's nothing to search here.".into(),
             },
             AnswerStatus::Cancelled | AnswerStatus::ModelFailed => String::new(),
@@ -472,7 +479,18 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     let started = Instant::now();
     let tier = env.tier;
     let budget = tier.budget_with(env.limits.unwrap_or(tier.limits()));
-    let vis = if env.on_device {
+    // Connectors: only on tool tiers, only when the explicit scope holds
+    // no Keep-local note (a failed lookup counts as Keep local). When they
+    // are offered, the whole turn reads with Keep-local content excluded,
+    // as for an off-device model.
+    let external = env
+        .external
+        .filter(|x| tier.uses_tools() && !x.specs().is_empty())
+        .filter(|_| {
+            !env.store
+                .with(|s| scope::explicit_keep_local(s, &input.scope))
+        });
+    let vis = if env.on_device && external.is_none() {
         Visibility::All
     } else {
         Visibility::ShareableOnly
@@ -595,6 +613,12 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     run.log.timings.prefetch_ms = t.elapsed().as_millis() as u64;
     let pf = match pf {
         Ok(p) => p,
+        // fly-context couldn't read the Keep-local sets, so it returned
+        // nothing: a refusal (fail closed), not a storage failure.
+        Err(fly_context::ContextError::KeepLocalCheck(_)) => {
+            run.log.scope_refusal = Some(scope::ScopeRefusal::Unchecked);
+            return run.done(Outcome::bare(AnswerStatus::Refused, None));
+        }
         Err(_) => {
             return run.done(Outcome::bare(
                 AnswerStatus::ModelFailed,
@@ -659,7 +683,11 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     let mut messages = vec![Message::system(
         profile.apply_preamble(prompt::system(tier)),
     )];
-    messages.extend(history_messages(input.history, env.on_device));
+    // With connectors offered, an earlier on-device turn stays out too.
+    messages.extend(history_messages(
+        input.history,
+        env.on_device && external.is_none(),
+    ));
     messages.push(Message::user(prompt::user(
         &pf.context,
         &[],
@@ -668,7 +696,13 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     let req = ConverseRequest {
         messages,
         tools: if uses_tools {
-            agent::tool_specs(&env.provider.capabilities())
+            let mut t = agent::tool_specs(&env.provider.capabilities());
+            if let Some(x) = external {
+                // Never one that shadows the harness's own tools.
+                let own: Vec<String> = t.iter().map(|s| s.name.clone()).collect();
+                t.extend(x.specs().into_iter().filter(|s| !own.contains(&s.name)));
+            }
+            t
         } else {
             vec![]
         },
@@ -696,7 +730,8 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
         budget.observation_chars,
         input.now,
         pf.evidence.clone(),
-    );
+    )
+    .with_external(external);
 
     let mut first = synthesize(&metered, &req, budget, &state).await;
     // One bounded retry of a transient provider failure.

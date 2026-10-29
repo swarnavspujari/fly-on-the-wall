@@ -65,6 +65,8 @@ pub enum ToolName {
     WhatsChanged,
     InsertIntoNote,
     AddActionItem,
+    /// A connector (ExternalTools) tool.
+    Connector,
     Unknown,
 }
 
@@ -82,6 +84,9 @@ impl ToolName {
             "whats_changed" => Self::WhatsChanged,
             "insert_into_note" => Self::InsertIntoNote,
             "add_action_item" => Self::AddActionItem,
+            // A connector tool (`mcp_<server>__<tool>`): the kind, never the
+            // name (it's the user's server and tool).
+            n if n.starts_with("mcp_") => Self::Connector,
             _ => Self::Unknown,
         }
     }

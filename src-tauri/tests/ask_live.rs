@@ -209,6 +209,7 @@ async fn ask_live() {
                     embedder: Some(&Embedder),
                     events: None,
                     cancel: None,
+                    external: None,
                 },
                 fly_ask::AskInput {
                     question: &s.question,

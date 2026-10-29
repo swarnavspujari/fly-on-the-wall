@@ -218,7 +218,7 @@ fn fx() -> Fx {
     ))
     .unwrap();
 
-    let (osprey, kestrel_note) = meeting(&s, "1:1 planning", None, 4, &["Priya Anand"]);
+    let (osprey, osprey_note) = meeting(&s, "1:1 planning", None, 4, &["Priya Anand"]);
     s.save_transcript(&transcript(
         &osprey,
         "k",
@@ -228,7 +228,7 @@ fn fx() -> Fx {
         )],
     ))
     .unwrap();
-    s.set_note_keep_local(&kestrel_note, true).unwrap();
+    s.set_note_keep_local(&osprey_note, true).unwrap();
 
     let pending = s.pending_embedding_chunks(MODEL, 10_000).unwrap();
     let rows: Vec<(i64, Vec<f32>)> = pending
@@ -269,6 +269,7 @@ async fn run(
             embedder: Some(&Bow),
             events: None,
             cancel: None,
+            external: None,
         },
         AskInput {
             question: q,
@@ -580,6 +581,7 @@ async fn run_gemma(f: &Fx, m: &Model, embed: fn(&str) -> Vec<f32>, q: &str) -> f
             embedder: Some(&Gemma(embed)),
             events: None,
             cancel: None,
+            external: None,
         },
         AskInput {
             question: q,
@@ -931,6 +933,7 @@ async fn links_and_images_never_render() {
             embedder: Some(&Bow),
             events: Some(&sink),
             cancel: None,
+            external: None,
         },
         AskInput {
             question: "When is the open house?",
@@ -989,6 +992,7 @@ async fn frames_never_show_markers_and_the_last_one_is_the_answer() {
             embedder: Some(&Bow),
             events: Some(&sink),
             cancel: None,
+            external: None,
         },
         AskInput {
             question: "What budget did Priya ask for?",
@@ -1045,4 +1049,161 @@ async fn an_items_source_lines_are_shown_so_citing_it_is_valid() {
     );
     assert_eq!(a.status, AnswerStatus::Answered, "{a:?}");
     assert_eq!(a.sentences[0].status, SentenceStatus::Sourced);
+}
+
+/// A connector stand-in: one search tool whose reply seals the turn.
+#[derive(Default)]
+struct Connector {
+    sealed: std::sync::atomic::AtomicBool,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl fly_llm::external_tools::ExternalTools for Connector {
+    fn specs(&self) -> Vec<fly_llm::ToolSpec> {
+        vec![fly_llm::ToolSpec {
+            name: "mcp_docs__search".into(),
+            description: "[Docs connector] Search pages".into(),
+            input_schema: json!({"type": "object"}),
+            strict: false,
+        }]
+    }
+    fn owns(&self, name: &str) -> bool {
+        name == "mcp_docs__search"
+    }
+    async fn call(&self, _name: &str, _args: Value) -> Result<String, String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.calls.fetch_add(1, SeqCst);
+        self.sealed.store(true, SeqCst);
+        Ok(
+            "<connector_result>The studio wiki has a page about the lobby sign.</connector_result>"
+                .into(),
+        )
+    }
+    fn mark_keep_local(&self) {}
+    fn sealed(&self) -> bool {
+        self.sealed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+async fn run_ext(
+    f: &Fx,
+    m: &Model,
+    on_device: bool,
+    scope: AskScope,
+    q: &str,
+    ext: &Connector,
+) -> fly_ask::AskAnswer {
+    ask(
+        AskEnv {
+            store: &f.s,
+            provider: m,
+            on_device,
+            tier: Tier::C,
+            limits: None,
+            embedder: Some(&Bow),
+            events: None,
+            cancel: None,
+            external: Some(ext),
+        },
+        AskInput {
+            question: q,
+            history: &[],
+            scope,
+            now: now(),
+        },
+    )
+    .await
+}
+
+fn offered(reqs: &[ConverseRequest], name: &str) -> bool {
+    reqs.iter().any(|r| r.tools.iter().any(|t| t.name == name))
+}
+
+#[tokio::test]
+async fn after_a_connector_reply_nothing_more_is_proposed_or_called() {
+    let f = fx();
+    let ext = Connector::default();
+    let m = Model::new(
+        false,
+        vec![
+            ChatResponse::tool_call("t1", "mcp_docs__search", json!({"q": "lobby sign"})),
+            ChatResponse::tool_call(
+                "t2",
+                "add_action_item",
+                json!({"text": "Ewan repaints the lobby sign by Friday", "owner": "Ewan Doyle", "segment_ids": ["a03"]}),
+            ),
+            ChatResponse::tool_call("t3", "mcp_docs__search", json!({"q": "again"})),
+            ChatResponse::text_reply("Ewan will repaint the lobby sign by Friday [seg:a03]."),
+        ],
+    );
+    let a = run_ext(
+        &f,
+        &m,
+        false,
+        AskScope::Meeting(f.launch.clone()),
+        "Who is repainting the lobby sign?",
+        &ext,
+    )
+    .await;
+    assert!(offered(&m.requests(), "mcp_docs__search"));
+    assert!(a.proposals.is_empty(), "sealed: no proposal");
+    assert!(a
+        .refusals
+        .iter()
+        .any(|r| r.reason == fly_ask::proposals::RefusalReason::Sealed));
+    assert_eq!(
+        ext.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no second connector call"
+    );
+}
+
+#[tokio::test]
+async fn connectors_are_not_offered_on_a_keep_local_scope() {
+    let f = fx();
+    let ext = Connector::default();
+    let m = Model::new(
+        true,
+        vec![ChatResponse::text_reply(
+            "It's the retention plan [seg:k01].",
+        )],
+    );
+    run_ext(
+        &f,
+        &m,
+        true,
+        AskScope::Meeting(f.osprey.clone()),
+        "What is Project Osprey?",
+        &ext,
+    )
+    .await;
+    let reqs = m.requests();
+    assert!(!reqs.is_empty());
+    assert!(!offered(&reqs, "mcp_docs__search"));
+}
+
+#[tokio::test]
+async fn with_connectors_offered_the_turn_reads_without_keep_local_content() {
+    let f = fx();
+    let ext = Connector::default();
+    let m = Model::new(
+        true,
+        vec![ChatResponse::text_reply("Not found in your meetings.")],
+    );
+    run_ext(
+        &f,
+        &m,
+        true,
+        AskScope::All,
+        "What is Project Osprey for the studio budget team?",
+        &ext,
+    )
+    .await;
+    let reqs = m.requests();
+    assert!(offered(&reqs, "mcp_docs__search"));
+    assert!(
+        !sent_text(&reqs).contains("CANARY-OSPREY"),
+        "even on this device"
+    );
 }

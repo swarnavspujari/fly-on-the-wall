@@ -100,6 +100,21 @@ pub enum ScopeRefusal {
     Unchecked,
 }
 
+/// Whether the question's explicit scope (a note, a meeting, a folder)
+/// holds Keep-local content. Everything and a person aren't explicit. A
+/// failed lookup counts as Keep local.
+pub fn explicit_keep_local(s: &Storage, scope: &AskScope) -> bool {
+    match scope {
+        AskScope::All | AskScope::Person(_) => false,
+        AskScope::Note(id) => s.note_keep_local(id),
+        AskScope::Meeting(id) => s.meeting_keep_local(id),
+        AskScope::Folder(_) => match resolve(s, scope, Visibility::All) {
+            Ok(r) => r.meetings.iter().any(|m| s.meeting_keep_local(&m.id)),
+            Err(_) => true,
+        },
+    }
+}
+
 struct Hidden {
     meetings: HashSet<String>,
     notes: HashSet<String>,

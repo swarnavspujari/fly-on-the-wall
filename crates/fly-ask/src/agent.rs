@@ -71,6 +71,8 @@ pub struct ToolState<'a, S, E> {
     pub refusals: Mutex<Vec<ProposalRefusal>>,
     /// The model ran a search itself (no deterministic re-query needed).
     pub searched: AtomicBool,
+    /// Connector tools for this turn, if offered.
+    pub external: Option<&'a dyn fly_llm::external_tools::ExternalTools>,
 }
 
 fn args<T: DeserializeOwned>(tool: &str, v: &Value) -> Result<T, String> {
@@ -127,7 +129,7 @@ fn meeting_segments(s: &Storage, meeting_id: &str) -> HashMap<String, SegmentVie
         .collect()
 }
 
-impl<S: StoreAccess, E: QueryEmbedder> ToolState<'_, S, E> {
+impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
     pub fn new<'a>(
         store: &'a S,
         resolved: &'a Resolved,
@@ -148,7 +150,23 @@ impl<S: StoreAccess, E: QueryEmbedder> ToolState<'_, S, E> {
             proposals: Mutex::new(Vec::new()),
             refusals: Mutex::new(Vec::new()),
             searched: AtomicBool::new(false),
+            external: None,
         }
+    }
+
+    /// Offer this turn's connector tools too.
+    pub fn with_external(
+        mut self,
+        external: Option<&'t dyn fly_llm::external_tools::ExternalTools>,
+    ) -> Self {
+        self.external = external;
+        self
+    }
+
+    /// An outside service's words are in this turn: no more proposals or
+    /// connector calls (the `ExternalTools` contract).
+    fn sealed(&self) -> bool {
+        self.external.is_some_and(|x| x.sealed())
     }
 
     fn ctx_scope_ids(&self, asked: Option<Vec<String>>) -> Option<Vec<String>> {
@@ -213,8 +231,26 @@ impl<S: StoreAccess, E: QueryEmbedder> ToolState<'_, S, E> {
         );
         // (The tool loop answers calls to tools that weren't offered
         // without executing anything.)
-        if proposals::ProposalTool::parse(&name).is_some() {
+        if let Some(t) = proposals::ProposalTool::parse(&name) {
+            if self.sealed() {
+                let refusal = proposals::ProposalRefusal {
+                    tool: Some(t),
+                    reason: proposals::RefusalReason::Sealed,
+                };
+                let msg = proposals::ack(&Err(refusal.clone()));
+                self.refusals
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(refusal);
+                return msg;
+            }
             return self.propose(&name, &input);
+        }
+        if let Some(x) = self.external.filter(|x| x.owns(&name)) {
+            if x.sealed() {
+                return Err(proposals::RefusalReason::Sealed.message().into());
+            }
+            return x.call(&name, input).await;
         }
         if name == fly_context::tools::SEARCH_PASSAGES {
             let mut a: SearchPassagesArgs = args(&name, &input)?;

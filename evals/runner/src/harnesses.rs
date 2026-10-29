@@ -87,6 +87,7 @@ impl AskHarness for FlyAsk {
                 embedder: Some(&Embedder(req.embedder)),
                 events: Some(&sink),
                 cancel: None,
+                external: None,
             },
             fly_ask::AskInput {
                 question: req.question,
