@@ -658,3 +658,44 @@ describe("App: editing a meeting's date", () => {
     ).toBe(true);
   });
 });
+
+describe("App: the video job changed the open note's attachments", () => {
+  it("refreshes them in place, never the note's text", async () => {
+    await boot();
+    await click(rowFor("Acme — renewal review"));
+    await settle(100);
+    const base = (await realInvoke("get_note", { id: "n1" })) as {
+      attachments: unknown[];
+      created_at: string;
+    };
+    override = (cmd, args) =>
+      cmd === "get_note" && args.id === "n1"
+        ? Promise.resolve({
+            ...base,
+            scratchpad: "a stale server copy",
+            attachments: [
+              ...base.attachments,
+              {
+                id: "a9",
+                file_name: "Board call.m4a",
+                rel_path: "recordings/2026-01-05 Design review/Board call.m4a",
+                mime: "audio/mp4",
+                added_at: base.created_at,
+              },
+            ],
+          })
+        : undefined;
+    // another note's change: nothing happens here
+    await act(async () => {
+      w().fotwMockEmit!("note:attachments", { note_id: "n2" });
+    });
+    await settle(50);
+    expect(host!.textContent).not.toContain("Board call.m4a");
+    await act(async () => {
+      w().fotwMockEmit!("note:attachments", { note_id: "n1" });
+    });
+    await settle(50);
+    expect(host!.textContent).toContain("Board call.m4a");
+    expect(host!.textContent).not.toContain("a stale server copy");
+  });
+});

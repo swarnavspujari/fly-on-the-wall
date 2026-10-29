@@ -450,9 +450,25 @@ export default function App() {
       }
     });
     const unModel = listen<ModelProgress>("model:progress", (e) => setModelProgress(e.payload));
+    // The video job turned an imported video of this note into its audio:
+    // refresh the open note's attachments only (never its text, which the
+    // user may be typing in).
+    const unAttachments = listen<{ note_id: string }>("note:attachments", (e) => {
+      const id = e.payload.note_id;
+      if (openNoteIdRef.current !== id) return;
+      api
+        .getNote(id)
+        .then((fresh) =>
+          setOpenNote((cur) =>
+            cur && cur.id === fresh.id ? { ...cur, attachments: fresh.attachments } : cur,
+          ),
+        )
+        .catch(console.error);
+    });
     return () => {
       void unPipeline.then((f) => f());
       void unModel.then((f) => f());
+      void unAttachments.then((f) => f());
     };
   }, []);
 

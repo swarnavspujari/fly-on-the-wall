@@ -68,6 +68,7 @@ The React entry point, the `App` orchestrator that owns almost all cross-feature
 |---|---|---|---|
 | `library:upgrade` | listens, `LibraryGate.tsx` (registered before `library_status` is called; dropped on unmount) | `{phase, done, total}` (`LibraryStatus`, `types.ts`) | `src-tauri/src/startup.rs:64-67` (background open only) |
 | `pipeline:progress` | listens, `frontend/src/App.tsx:373-449` | `{meeting_id, stage, detail, done, error}` | `src-tauri/src/scheduler.rs:457-466` (`stage_emitter`), `src-tauri/src/pipeline.rs:103-131`; terminal `"done"`/`"error"` `scheduler.rs:494-502`, `"cancelled"` `scheduler.rs:369-377`, `"waiting"` `scheduler.rs:472-490`, `"polishing"` `scheduler.rs:390` |
+| `note:attachments` | listens, `frontend/src/App.tsx` | `{note_id}` | `video_store.rs` (an imported video became its audio): the open note's attachments are refreshed, never its text |
 | `model:progress` | listens, `frontend/src/App.tsx:450` | `{id, downloaded, total, stage, error}` (`src-tauri/src/models.rs:389-395`) | `asr_commands.rs:118,412`, `scheduler.rs:162`, `ollama.rs:303`, `embeddings.rs:136`, `import_commands.rs:277`, `screen_commands.rs:95,182`, `live.rs:105` |
 | `fotw:llm-settings-changed` (window) | emits, `frontend/src/api.ts:9-11` | none | `CloudConsent.tsx:141` listens. **`App.tsx` does not**, so the sidebar privacy pill goes stale (see [ui-home](ui-home.md)). |
 | `keydown` Ctrl/Cmd+K (window) | listens, `App.tsx:325-334` | — | opens Settings |

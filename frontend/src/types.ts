@@ -114,6 +114,30 @@ export interface CompressStatus {
   last_error: string | null;
 }
 
+/** The opt-in video job (storage:videos event). */
+export type VideoJobKind = "audio_only" | "shrink_screen";
+export interface VideoJobStatus {
+  kind: VideoJobKind | null;
+  state: "idle" | "working" | "paused" | "done" | "stopped";
+  paused_for: "recording" | "transcribing" | "ai" | null;
+  files_total: number;
+  files_done: number;
+  /** Left as they were (no audio, already compact, a check failed). */
+  files_skipped: number;
+  /** Freed by this run. */
+  bytes_saved: number;
+  last_error: string | null;
+  /** What happens to imported videos once transcribed. */
+  import_policy: "keep" | "audio_only";
+}
+
+/** estimate_screen_shrink: from a 30 s sample of the largest recording. */
+export interface ShrinkEstimate {
+  files: number;
+  bytes: number;
+  bytes_after: number;
+}
+
 /** Settings › Storage: media in the data folder, by kind. */
 export interface StorageReport {
   audio_bytes: number;
@@ -125,6 +149,7 @@ export interface StorageReport {
   screen_recording_files: number;
   other_attachment_bytes: number;
   compress: CompressStatus;
+  videos: VideoJobStatus;
 }
 
 /** One participant besides the user. Calendar-seeded attendees start with

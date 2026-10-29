@@ -41,9 +41,12 @@ pub const RETENTION_CHOICES: &[u32] = &[7, 30, 90, 365];
 
 /// File extensions treated as recording media for retention. Everything else
 /// in a meeting folder (transcript.md/json, note.json, the manifest) stays.
+/// What retention and "Delete all my data" treat as audio/video. Every
+/// container the app itself writes must be here (the video job's audio-only
+/// files included: `.mka` for codecs no other container holds).
 const MEDIA_EXTENSIONS: &[&str] = &[
     "wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "wma", "webm", "mp4", "m4v", "mkv",
-    "mov", "avi", "wmv", "3gp", "aiff", "aif", "caf",
+    "mka", "mov", "avi", "wmv", "3gp", "aiff", "aif", "caf",
 ];
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -138,7 +141,8 @@ pub struct EraseOutcome {
     pub checkpointed: bool,
 }
 
-fn is_media_file(path: &Path) -> bool {
+/// Whether retention counts `path` as a media file (by extension).
+pub fn is_media_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| MEDIA_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
