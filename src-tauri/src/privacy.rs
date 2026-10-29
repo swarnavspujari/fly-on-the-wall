@@ -477,11 +477,6 @@ impl Drop for ImportGuard {
     }
 }
 
-/// Whether a media import is copying/converting files right now.
-pub(crate) fn imports_in_flight() -> bool {
-    IMPORTS_IN_FLIGHT.load(Ordering::SeqCst) > 0
-}
-
 /// Why the app is too busy to delete everything, if it is.
 fn busy_reason(state: &AppState) -> Option<&'static str> {
     if crate::scheduler::recording_active(state) {

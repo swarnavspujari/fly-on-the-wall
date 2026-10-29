@@ -96,7 +96,7 @@ export interface PlaybackSource {
 /** The background "Compress recordings" job (storage:compress event). */
 export interface CompressStatus {
   state: "waiting" | "working" | "paused" | "done" | "stopped" | "";
-  paused_for: "recording" | "transcribing" | "importing" | null;
+  paused_for: "recording" | "transcribing" | "ai" | null;
   meetings_total: number;
   meetings_done: number;
   /** Of the finished ones, this pass: left for a later pass (in use, just

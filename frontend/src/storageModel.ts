@@ -11,7 +11,7 @@ export const COMPRESS_EVENT = "storage:compress";
 const PAUSED_FOR: Record<string, string> = {
   recording: "you record",
   transcribing: "a transcript is being made",
-  importing: "files are imported",
+  ai: "the AI is working",
 };
 
 /** Progress through this pass, 0–99 while working (never claims 100%). */

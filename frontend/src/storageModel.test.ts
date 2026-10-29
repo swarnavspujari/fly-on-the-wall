@@ -38,8 +38,8 @@ describe("compressLine", () => {
     expect(compressLine(status({ state: "paused", paused_for: "transcribing" }))).toMatch(
       /while a transcript is being made/,
     );
-    expect(compressLine(status({ state: "paused", paused_for: "importing" }))).toMatch(
-      /while files are imported/,
+    expect(compressLine(status({ state: "paused", paused_for: "ai" }))).toBe(
+      "Compression is paused while the AI is working.",
     );
   });
 
