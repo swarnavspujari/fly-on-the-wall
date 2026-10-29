@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use fly_app_lib::audio_store::{
-    compress_meeting, is_storage_v2, needs_work, MeetingCtx, MeetingError, MeetingOutcome,
+    compress_meeting, is_storage_v2, needs_work, needs_work_skipping, MeetingCtx, MeetingError,
+    MeetingOutcome,
 };
 use fly_audio::derive::DerivedKind;
 use fly_audio::mix;
@@ -43,6 +44,8 @@ struct Meeting {
     data_dir: PathBuf,
     storage: Mutex<Storage>,
     id: String,
+    /// Free disk space the job sees (`None`: unknown, never blocks).
+    free_space: &'static dyn Fn(&Path) -> Option<u64>,
 }
 
 impl Meeting {
@@ -80,6 +83,8 @@ impl Meeting {
             may_commit,
             storage: &self.storage,
             on_file_done: &mut done,
+            skip_leftover: &|_| false,
+            free_space: self.free_space,
         };
         compress_meeting(&mut ctx, &self.id)
     }
@@ -167,6 +172,7 @@ fn setup_scaled(layout: Layout, scale: f32) -> Meeting {
         data_dir,
         storage: Mutex::new(storage),
         id: meeting.id,
+        free_space: &|_| None,
     }
 }
 
@@ -474,11 +480,24 @@ fn wavs_left_after_a_commit_are_deleted_only_once_re_proven() {
     odd[last] ^= 1;
     std::fs::write(m.file("recording.system.wav"), &odd).unwrap();
     assert!(needs_work(&m.data_dir, &m.rec()).0);
-    m.compress().unwrap();
+    let out = m.compress().unwrap();
     assert!(!m.file("recording.mic.wav").exists());
     assert!(!m.file("recording.mixed.wav").exists());
     assert!(!m.file("recording.playback.wav").exists());
     assert_eq!(std::fs::read(m.file("recording.system.wav")).unwrap(), odd);
+    // ... said why, and isn't decoded again every pass while unchanged.
+    assert_eq!(out.unproven, vec![m.file("recording.system.wav")]);
+    assert!(
+        out.kept.iter().any(|k| k.contains("doesn't match")),
+        "{:?}",
+        out.kept
+    );
+    let known = out.unproven.clone();
+    let skip = |p: &Path| known.iter().any(|k| k == p);
+    assert_eq!(
+        needs_work_skipping(&m.data_dir, &m.rec(), &skip),
+        (false, 0, 1)
+    );
 }
 
 #[test]
@@ -642,6 +661,8 @@ fn kill_child_entry() {
         may_commit: &|_| Ok(()),
         storage: &storage,
         on_file_done: &mut done,
+        skip_leftover: &|_| false,
+        free_space: &|_| None,
     };
     let _ = compress_meeting(&mut ctx, &id);
     std::fs::write(data_dir.join("child-finished.txt"), calls.to_string()).unwrap();
@@ -759,4 +780,96 @@ fn killed_at_any_moment_loses_nothing() {
         stages.contains("flac written, not committed"),
         "stages reached: {stages:?}"
     );
+}
+
+/// A media import keeps its mixed track as FLAC (not storage v2): its WAV
+/// left behind by a crash after the commit is still found and re-proven.
+#[test]
+fn an_imports_leftover_wav_is_cleaned_up_too() {
+    let m = setup(Layout::Import);
+    let wav = std::fs::read(m.file("recording.mixed.wav")).unwrap();
+    m.compress().unwrap();
+    assert!(!is_storage_v2(&m.rec()));
+    std::fs::write(m.file("recording.mixed.wav"), &wav).unwrap();
+    assert!(needs_work(&m.data_dir, &m.rec()).0);
+    let out = m.compress().unwrap();
+    assert!(!m.file("recording.mixed.wav").exists());
+    assert_eq!(out.wav_bytes_removed, wav.len() as u64);
+    assert!(!needs_work(&m.data_dir, &m.rec()).0);
+}
+
+/// The meeting's audio was deleted while the job worked, and the sweep
+/// missed a FLAC the job had just put in place: nothing is committed and
+/// that FLAC goes too, so no copy outlives the deletion.
+#[test]
+fn audio_deleted_mid_run_leaves_no_flac_behind() {
+    let m = setup(Layout::TwoChannel);
+    let before = m.rec();
+    let mut files_done = 0;
+    let mut on_file_done = |_: u64| {
+        files_done += 1;
+        if files_done == 1 {
+            m.storage
+                .lock()
+                .unwrap()
+                .delete_meeting_audio(&m.id)
+                .unwrap();
+            // the file the sweep's directory listing missed
+            mix::write_wav_mono_16(&m.file("recording.mic.flac"), &[0.0; 16], 16_000).unwrap();
+        }
+    };
+    let mut go = || true;
+    let mut ctx = MeetingCtx {
+        data_dir: &m.data_dir,
+        checkpoint: &mut go,
+        may_commit: &|_| Ok(()),
+        storage: &m.storage,
+        on_file_done: &mut on_file_done,
+        skip_leftover: &|_| false,
+        free_space: &|_| None,
+    };
+    let err = compress_meeting(&mut ctx, &m.id).unwrap_err();
+    assert!(matches!(err, MeetingError::Gone(_)), "{err:?}");
+    assert!(!m.file("recording.mic.flac").exists());
+    assert_eq!(m.rec(), before, "nothing committed");
+}
+
+#[test]
+fn a_full_disk_fails_before_encoding_and_keeps_the_originals() {
+    let mut m = setup(Layout::TwoChannel);
+    m.free_space = &|_| Some(4096);
+    let before = m.rec();
+    match m.compress().unwrap_err() {
+        MeetingError::Failed(e) => assert!(e.contains("free disk space"), "{e}"),
+        e => panic!("{e:?}"),
+    }
+    assert_eq!(m.rec(), before);
+    assert!(m.file("recording.mic.wav").exists());
+    assert!(!names(&m.folder()).iter().any(|n| n.ends_with(".flac")));
+    m.free_space = &|_| Some(u64::MAX);
+    m.compress().unwrap();
+    assert!(is_storage_v2(&m.rec()));
+}
+
+/// A recording path pointing outside its own folder (a copied-in manifest,
+/// another meeting's folder) is never converted, replaced or deleted.
+#[test]
+fn a_recording_path_outside_its_folder_leaves_the_meeting_alone() {
+    let m = setup(Layout::TwoChannel);
+    let other = m.data_dir.join("recordings").join("Another meeting");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::copy(
+        m.file("recording.playback.wav"),
+        other.join("recording.playback.wav"),
+    )
+    .unwrap();
+    let mut rec = m.rec();
+    rec.playback_path = Some("recordings/Another meeting/recording.playback.wav".into());
+    m.storage.lock().unwrap().end_meeting(&m.id, &rec).unwrap();
+    assert_eq!(needs_work(&m.data_dir, &rec), (false, 0, 1));
+    assert!(matches!(m.compress(), Err(MeetingError::Failed(_))));
+    assert_eq!(m.rec(), rec);
+    assert!(other.join("recording.playback.wav").exists());
+    assert!(m.file("recording.mic.wav").exists());
+    assert!(!m.file("recording.mic.flac").exists());
 }

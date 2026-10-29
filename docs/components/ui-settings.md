@@ -10,7 +10,7 @@ The full-window Settings overlay: seven sections (Recording, Transcripts, Ask an
 - `frontend/src/components/SettingsModal.tsx` — the overlay (2,328 lines: every section, the LLM / Ollama / calendar / template / MCP / update state).
 - `frontend/src/settingsModel.ts` — pure helpers: sections and search, scroll-spy, the ASR draft ⇄ payload, data tiles, provider labels, MCP snippet parsing.
 - `frontend/src/components/PrivacySection.tsx` — disk-encryption notice, audio retention, "Delete all my data".
-- `frontend/src/components/StorageRows.tsx` + `frontend/src/storageModel.ts` — the Recordings row (size + background compression status, `storage:compress`) and the two opt-in video rows (Imported videos: Keep video / Audio only; Screen recordings: Shrink…, with progress and Stop from `storage:videos`).
+- `frontend/src/components/StorageRows.tsx` + `frontend/src/storageModel.ts` — the Recordings row (size + background compression status, `storage:compress`) and the two opt-in video rows (Imported videos: Keep video / Audio only; Screen recordings: Shrink…, with progress and Stop from `storage:videos`). When a compression pass ends the Recordings row says how many meetings were in use (compressed later) and how many failed, with the reason (e.g. not enough free disk space); it says "every recording" only when none did.
 - `frontend/src/privacy.ts` — pure privacy helpers and constants (shared with the editor's Keep-local chip and the restart screen).
 - Used here, owned elsewhere: `RemindNoticeRow.tsx` (`ui-recording-bar` key), `RestartRequired.tsx` (`ui-app-shell`), `CloudConsent.tsx` / `confirm.tsx` ([ui-confirm-consent](ui-confirm-consent.md)).
 

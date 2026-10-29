@@ -160,7 +160,7 @@ A GPU tier failure pins that model to CPU for later meetings. A cloud failure ne
 - **Unfixable failures fail once.** Missing files, deleted audio, 4xx, missing engine and failed download are parked on the first attempt; everything else retries up to 3 times, 10 s apart (`scheduler.rs:24-29`, `:77-82`, `:129-149`).
 - **Re-diarize changes only speaker keys and labels.** Segment ids, text and boundaries are unchanged, and the cleaned variant's text is untouched (`pipeline.rs:724-730`, `:865-888`). Test: ignored `rediarize_e2e`.
 - **Readers are format-blind.** Never call `read_wav_mono` on a stored recording; use `read_audio_mono` (a source may be FLAC), and keep the single-track input order mixed → mic → system with the mixdown regenerated for storage-v2 recordings.
-- **A finished transcript wakes recording compression** (`state.audio_store.nudge()` after `emit_final`), which yields while any `pipeline_stage` entry exists.
+- **A finished transcript wakes recording compression** (`state.audio_store.nudge()` after `emit_final`), which yields while any `pipeline_stage` entry exists. Re-diarize claims its `pipeline_stage` entry (`starting`) in the same lock as its duplicate check, before it reads the recording.
 - **Intermediates live in machine-local scratch keyed by meeting id.** They are kept after a failure so the retry resumes (`pipeline.rs:462-475`, `:701-710`).
 
 ## Tests

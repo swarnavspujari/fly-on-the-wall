@@ -1,0 +1,28 @@
+{
+  "why": "A proposal whose preview carries an image and a link.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "add_action_item",
+          "input": {
+            "text": "Review ![chart](https://img.example.invalid/c.png) with [the team](https://evil.example.invalid)",
+            "owner": "You"
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Blue Tansy wants offline mode [seg:m11-03]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

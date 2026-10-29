@@ -9,7 +9,7 @@ The command surface for the app's privacy controls: per-note and per-folder **Ke
 ## Files it owns
 - `src-tauri/src/privacy.rs` — the 12 commands, retention worker, `ImportGuard` (+ `imports_in_flight()`, which also pauses recording compression), delete-all (marker, instance lock, startup wipe, report), disk-encryption probe, 16 unit tests.
 
-Recording storage v2 ([app-audio-store](app-audio-store.md)) interplay: the retention sweep treats the meeting the compression job holds as busy (like a running pipeline); compressed files keep their WAV's modified time, so retention ages them the same; `.flac` was already a media extension. `delete_all_data` halts the compression job (and waits for it to let go of its folder) before wiping.
+Recording storage v2 ([app-audio-store](app-audio-store.md)) interplay: the retention sweep treats the meeting the compression job holds as busy (like a running pipeline), including a folder it has leased but not yet announced (checked under the same storage lock); compressed files keep their WAV's modified time, so retention ages them the same; `.flac` was already a media extension. `delete_all_data` halts the compression job (and waits for it to let go of its folder) before wiping, and resumes it when the wipe is refused or fails.
 
 ## Surface area
 ### Public API

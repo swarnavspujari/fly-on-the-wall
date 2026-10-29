@@ -1,0 +1,14 @@
+{
+  "why": "Cites a real segment from another meeting that an m08-scoped search can't have retrieved.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "We decided to run a weekly on-call rotation [seg:m09-10]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

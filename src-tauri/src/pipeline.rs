@@ -773,12 +773,15 @@ pub async fn re_diarize_with(
     on_model: models::ProgressSink<'_>,
     meeting_id: &str,
 ) -> Result<ReDiarizeOutcome, String> {
-    // shares the per-meeting guard with the full pipeline
+    // Shares the per-meeting guard with the full pipeline. Claimed in the
+    // same lock as the check, before the recording is read, so background
+    // work (compression, retention) sees the meeting as busy from here on.
     {
-        let stages = state.pipeline_stage.lock().unwrap();
+        let mut stages = state.pipeline_stage.lock().unwrap();
         if stages.contains_key(meeting_id) {
             return Err("a pipeline is already running for this meeting".into());
         }
+        stages.insert(meeting_id.to_string(), "starting".into());
     }
     let result = re_diarize_inner(state, on_stage, on_model, meeting_id).await;
     state.pipeline_stage.lock().unwrap().remove(meeting_id);

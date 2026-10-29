@@ -40,10 +40,22 @@ describe("Settings › Storage rows", () => {
       </ConfirmProvider>,
     );
     expect(el.textContent).toContain("Recordings");
-    expect(el.textContent).toContain("Compressing recordings without losing anything: 53%.");
-    expect(el.querySelector('[data-testid="storage-audio"]')!.textContent).toBe("16 GB");
-    expect(el.textContent).toContain("6 videos, 14 GB.");
-    expect(el.textContent).toContain("11 recordings, 5.6 GB.");
+    expect(el.textContent).toContain("Compressing recordings without losing anything: 43%.");
+    expect(el.querySelector('[data-testid="storage-audio"]')!.textContent).toBe("5.9 GB");
+    expect(el.textContent).toContain("2 videos, 3.0 GB.");
+    expect(el.textContent).toContain("4 recordings, 1.5 GB.");
+  });
+
+  it("after a pass, says what failed and why, and what waits for later", async () => {
+    localStorage.setItem("fotwMockCompressFailed", "1");
+    const el = await mount(
+      <ConfirmProvider>
+        <StorageRows />
+      </ConfirmProvider>,
+    );
+    expect(el.textContent).toContain(
+      "Recordings are stored losslessly as FLAC. 5.2 GB freed. 1 meeting was in use and will be compressed later. 1 meeting couldn’t be compressed and is kept as recorded (not enough free disk space",
+    );
   });
 
   it("renders nothing until the report arrives", async () => {
@@ -100,7 +112,7 @@ describe("Settings › video choices", () => {
     act(() => button(el, "Shrink…").click());
     for (let i = 0; i < 3; i++) await act(async () => {});
     expect(est).toHaveBeenCalledTimes(1);
-    expect(confirmTitle()).toBe("Shrink 11 screen recordings?");
+    expect(confirmTitle()).toBe("Shrink 4 screen recordings?");
     act(() => confirmChoice(true).click());
     for (let i = 0; i < 3; i++) await act(async () => {});
     expect(start).toHaveBeenCalledWith("shrink_screen");
@@ -110,7 +122,7 @@ describe("Settings › video choices", () => {
     localStorage.setItem("fotwMockVideoJob", "working");
     const cancel = vi.spyOn(api, "cancelVideoJob");
     const el = await rows();
-    expect(el.textContent).toContain("Shrinking screen recordings: 5 of 11 recordings.");
+    expect(el.textContent).toContain("Shrinking screen recordings: 2 of 4 recordings.");
     act(() => button(el, "Stop").click());
     expect(cancel).toHaveBeenCalledTimes(1);
   });
@@ -131,7 +143,7 @@ describe("one-time compressed notice", () => {
     const dismiss = vi.spyOn(api, "dismissCompressNotice");
     const el = await mount(<NoticeProbe />);
     const b = el.querySelector("button")!;
-    expect(Number(b.dataset.saved)).toBeGreaterThan(20 * 1024 ** 3);
+    expect(Number(b.dataset.saved)).toBeGreaterThan(5 * 1024 ** 3);
     act(() => b.click());
     expect(b.dataset.saved).toBe("none");
     expect(dismiss).toHaveBeenCalledTimes(1);

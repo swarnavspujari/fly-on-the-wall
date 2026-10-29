@@ -28,10 +28,19 @@
 //! 4. delete the old WAVs. A WAV left behind by a crash after step 3 is
 //!    deleted on a later pass, again only after re-verifying it.
 //!
+//! Only files directly inside the meeting's own folder are ever touched; a
+//! meeting with any recording path elsewhere is left as it is. If the
+//! meeting or its audio was deleted while the job worked, the FLACs it made
+//! are removed again instead of committed.
+//!
 //! The job yields while anything else needs the machine (a recording, a
 //! transcription, re-diarize or polish, a media import; see `busy_reason`):
 //! it abandons the step in flight (temp file deleted, WAVs untouched),
 //! waits, and takes the meeting again, reusing FLACs it already verified.
+//!
+//! Lock order: `storage`, then `pipeline_stage` or this module's own
+//! locks. Never take `recording` or `screen` while holding `storage`:
+//! starting a recording holds `recording` and then takes `storage`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -125,6 +134,11 @@ pub struct CompressStatus {
     /// of them are finished.
     pub meetings_total: usize,
     pub meetings_done: usize,
+    /// Of the finished ones: left for a later pass (in use, just played,
+    /// its audio deleted meanwhile), and failed (originals kept; the latest
+    /// reason is `last_error`). This pass only.
+    pub meetings_skipped: usize,
+    pub meetings_failed: usize,
     /// WAV bytes this pass will process, and how many it has.
     pub bytes_total: u64,
     pub bytes_done: u64,
@@ -152,6 +166,18 @@ pub struct StoreState {
     recent_playback: Mutex<HashMap<String, Instant>>,
     /// One playback regeneration at a time.
     playback_lock: tokio::sync::Mutex<()>,
+    /// Leftover WAVs that didn't match what's stored, with the size and
+    /// modified time they had: not decoded again every pass until they
+    /// change (in memory; a restart tries each once more).
+    unproven: Mutex<HashMap<PathBuf, FileStamp>>,
+}
+
+/// Size and modified time: whether a file changed since it was last looked at.
+type FileStamp = (u64, Option<std::time::SystemTime>);
+
+fn stamp(p: &Path) -> Option<FileStamp> {
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.len(), m.modified().ok()))
 }
 
 impl StoreState {
@@ -189,6 +215,18 @@ impl StoreState {
             .get(id)
             .is_some_and(|t| t.elapsed() < PLAYBACK_GRACE)
     }
+
+    /// A leftover already found not to match, and unchanged since.
+    fn known_unproven(&self, p: &Path) -> bool {
+        let known = self.unproven.lock().unwrap().get(p).copied();
+        known.is_some() && known == stamp(p)
+    }
+
+    fn mark_unproven(&self, p: &Path) {
+        if let Some(s) = stamp(p) {
+            self.unproven.lock().unwrap().insert(p.to_path_buf(), s);
+        }
+    }
 }
 
 /// Stop compressing `meeting_id` and wait (up to `timeout`) until the job
@@ -206,7 +244,9 @@ pub fn stop_meeting(state: &AppState, meeting_id: &str, timeout: Duration) -> bo
     true
 }
 
-/// Stop the job for the rest of this run and wait until it's idle.
+/// Stop the job and wait until it's idle. It stays stopped until
+/// [`resume`] ("Delete all my data" halts it first and resumes it if the
+/// wipe is refused or fails; after a wipe the app restarts).
 pub fn halt(state: &AppState, timeout: Duration) -> bool {
     let store = &state.audio_store;
     store.halted.store(true, Ordering::SeqCst);
@@ -219,6 +259,12 @@ pub fn halt(state: &AppState, timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     true
+}
+
+/// Undo [`halt`]: the job picks up again with a fresh pass.
+pub fn resume(state: &AppState) {
+    state.audio_store.halted.store(false, Ordering::SeqCst);
+    state.audio_store.nudge();
 }
 
 /// Why the job should pause, if it should. The one place the yield rule
@@ -339,6 +385,9 @@ pub struct MeetingOutcome {
     pub kept: Vec<String>,
     /// Bytes of WAV processed (for progress).
     pub wav_bytes_seen: u64,
+    /// Leftover WAVs that didn't match what's stored (kept; see
+    /// `MeetingCtx::skip_leftover`).
+    pub unproven: Vec<PathBuf>,
 }
 
 impl MeetingOutcome {
@@ -354,6 +403,9 @@ pub enum MeetingError {
     Busy(String),
     /// Asked to stop (cancel, halt). Nothing was deleted.
     Stopped,
+    /// The meeting, its recording or its audio was deleted while the job
+    /// worked: the FLACs it made were removed again, nothing committed.
+    Gone(String),
     Failed(String),
 }
 
@@ -362,6 +414,7 @@ impl std::fmt::Display for MeetingError {
         match self {
             MeetingError::Busy(why) => write!(f, "busy: {why}"),
             MeetingError::Stopped => write!(f, "stopped"),
+            MeetingError::Gone(why) => write!(f, "gone: {why}"),
             MeetingError::Failed(why) => write!(f, "{why}"),
         }
     }
@@ -382,6 +435,52 @@ fn fsync_dir(_dir: &Path) {
     }
 }
 
+/// Room kept free on the disk on top of what an encode needs.
+const FREE_SPACE_MARGIN: u64 = 256 * 1024 * 1024;
+
+fn under_mount(path: &Path, mount: &Path) -> bool {
+    if cfg!(windows) {
+        // drive letters and folder names compare without case there
+        let (p, m) = (
+            path.to_string_lossy().to_lowercase(),
+            mount.to_string_lossy().to_lowercase(),
+        );
+        p.starts_with(&m)
+    } else {
+        path.starts_with(mount)
+    }
+}
+
+/// Free bytes on the disk holding `path` (the longest matching mount
+/// point). `None` when it can't be told; the job then doesn't wait for it.
+pub fn free_space(path: &Path) -> Option<u64> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|d| under_mount(path, d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.available_space())
+}
+
+/// `Failed` (shown in Settings, originals kept) when the disk holding `dir`
+/// can't take `need` more bytes plus a margin.
+fn ensure_room(
+    dir: &Path,
+    need: u64,
+    free_space: &dyn Fn(&Path) -> Option<u64>,
+) -> Result<(), MeetingError> {
+    let want = need.saturating_add(FREE_SPACE_MARGIN);
+    match free_space(dir) {
+        Some(free) if free < want => Err(failed(format!(
+            "not enough free disk space to compress recordings ({} MB free, about {} MB needed)",
+            free / 1_000_000,
+            want / 1_000_000
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Encode `wav` → verified `final_flac` (via the temp name). An existing
 /// `final_flac` (an interrupted earlier run renamed it but never committed)
 /// is reused only if it verifies against the WAV; otherwise it's rebuilt.
@@ -389,6 +488,7 @@ fn convert_one(
     wav: &Path,
     final_flac: &Path,
     checkpoint: &mut dyn FnMut() -> bool,
+    free_space: &dyn Fn(&Path) -> Option<u64>,
 ) -> Result<u64, MeetingError> {
     let stop = |e: fly_audio::flac::FlacError| match e {
         fly_audio::flac::FlacError::Interrupted => MeetingError::Stopped,
@@ -404,6 +504,9 @@ fn convert_one(
             }
         }
     }
+    // A FLAC of 16-bit audio is never meaningfully bigger than its WAV.
+    let need = std::fs::metadata(wav).map(|m| m.len()).unwrap_or(0);
+    ensure_room(final_flac.parent().unwrap_or(final_flac), need, free_space)?;
     let temp = temp_for(final_flac);
     let result = (|| {
         fly_audio::flac::encode_pcm16_wav_to_flac(wav, &temp, checkpoint).map_err(stop)?;
@@ -436,28 +539,86 @@ fn convert_one(
 pub struct MeetingCtx<'a> {
     pub data_dir: &'a Path,
     pub checkpoint: &'a mut dyn FnMut() -> bool,
-    /// `Err(reason)` when the meeting may not be committed right now.
+    /// `Err(reason)` when the meeting may not be committed right now. Runs
+    /// with the storage lock held: it must not take `recording`/`screen`.
     pub may_commit: &'a dyn Fn(&fly_storage::Storage) -> Result<(), String>,
     pub storage: &'a Mutex<fly_storage::Storage>,
     pub on_file_done: &'a mut dyn FnMut(u64),
+    /// Leftover WAVs not to decode again (found not to match before).
+    pub skip_leftover: &'a dyn Fn(&Path) -> bool,
+    /// Free bytes on the disk holding a path ([`free_space`]).
+    pub free_space: &'a dyn Fn(&Path) -> Option<u64>,
 }
 
-/// The meeting's folder (contained in `recordings/`).
-fn meeting_dir(data_dir: &Path, rec: &RecordingRef) -> Option<PathBuf> {
+/// The meeting's folder, data-dir relative and absolute (contained in
+/// `recordings/`).
+fn meeting_folder(data_dir: &Path, rec: &RecordingRef) -> Option<(String, PathBuf)> {
     let rel = fly_storage::recording_dir_rel(rec)?;
-    fly_storage::contained_recordings_dir(data_dir, &rel)
+    let dir = fly_storage::contained_recordings_dir(data_dir, &rel)?;
+    Some((rel, dir))
+}
+
+/// Every path in `rec` names a file directly inside the folder `rel`.
+fn all_in_folder(data_dir: &Path, rel: &str, rec: &RecordingRef) -> bool {
+    ROLES
+        .iter()
+        .filter_map(|r| r.path(rec).as_deref())
+        .all(|p| fly_storage::recording_file_in_folder(data_dir, rel, p).is_some())
+}
+
+/// The WAV capture wrote for `role`, still in the folder though `rec` no
+/// longer references it, when there's something to prove it against: the
+/// role's FLAC twin (a converted source, or an import's mixed track), or,
+/// for a derived role of a storage-v2 recording, the sources it
+/// regenerates from.
+fn leftover_candidate(
+    data_dir: &Path,
+    dir: &Path,
+    rec: &RecordingRef,
+    role: Role,
+) -> Option<PathBuf> {
+    let twin = dir.join(role.wav_name());
+    if !twin.exists() {
+        return None;
+    }
+    let referenced = ROLES.iter().any(|r| {
+        r.path(rec)
+            .as_deref()
+            .is_some_and(|p| data_dir.join(p) == twin)
+    });
+    if referenced {
+        return None;
+    }
+    match role.path(rec).as_deref() {
+        Some(p) if data_dir.join(p) == dir.join(flac_twin(role.wav_name())) => Some(twin),
+        None if role.derived().is_some() && is_storage_v2(rec) => Some(twin),
+        _ => None,
+    }
 }
 
 /// Does this meeting have anything to compress or clean up? Returns
 /// `(work, wav_bytes_to_process, wavs_that_stay_wav)`. Cheap: reads
 /// directory entries and WAV headers only.
 pub fn needs_work(data_dir: &Path, rec: &RecordingRef) -> (bool, u64, usize) {
-    let Some(dir) = meeting_dir(data_dir, rec) else {
+    needs_work_skipping(data_dir, rec, &|_| false)
+}
+
+/// [`needs_work`], not counting leftovers `skip_leftover` names as work.
+pub fn needs_work_skipping(
+    data_dir: &Path,
+    rec: &RecordingRef,
+    skip_leftover: &dyn Fn(&Path) -> bool,
+) -> (bool, u64, usize) {
+    let Some((rel, dir)) = meeting_folder(data_dir, rec) else {
         return (false, 0, 0);
     };
     // A newer build owns this folder's manifest: leave the folder alone.
     if fly_storage::manifest_is_newer(&dir) {
         return (false, 0, 0);
+    }
+    // A recording path outside its folder: the meeting stays as it is.
+    if !all_in_folder(data_dir, &rel, rec) {
+        return (false, 0, 1);
     }
     let (mut bytes, mut kept, mut work) = (0, 0, false);
     let mut seen: HashSet<&str> = HashSet::new();
@@ -476,8 +637,13 @@ pub fn needs_work(data_dir: &Path, rec: &RecordingRef) -> (bool, u64, usize) {
             } else {
                 kept += 1;
             }
-        } else if dir.join(role.wav_name()).exists() && is_storage_v2(rec) {
-            work = true; // a WAV left behind after an earlier commit
+        } else if let Some(twin) = leftover_candidate(data_dir, &dir, rec, role) {
+            // a WAV left behind after an earlier commit
+            if skip_leftover(&twin) {
+                kept += 1;
+            } else {
+                work = true;
+            }
         }
     }
     (work, bytes, kept)
@@ -490,11 +656,12 @@ pub fn compress_meeting(
 ) -> Result<MeetingOutcome, MeetingError> {
     // FLACs this run put in place but never committed. A stop or a refused
     // commit keeps them (the next pass re-verifies and reuses them); a hard
-    // failure before the commit removes them, so no unreferenced copy of
-    // the audio lingers. Once the commit starts they may be referenced.
+    // failure, or the meeting or its audio being deleted meanwhile, removes
+    // them, so no unreferenced copy of the audio lingers. Once the commit
+    // starts they may be referenced.
     let mut uncommitted: Vec<PathBuf> = Vec::new();
     let result = compress_meeting_inner(ctx, meeting_id, &mut uncommitted);
-    if matches!(result, Err(MeetingError::Failed(_))) {
+    if matches!(result, Err(MeetingError::Failed(_) | MeetingError::Gone(_))) {
         for f in uncommitted {
             let _ = std::fs::remove_file(f);
         }
@@ -516,8 +683,13 @@ fn compress_meeting_inner(
             .ok_or_else(|| MeetingError::Busy("no recording".into()))?
     };
     let data_dir = ctx.data_dir;
-    let dir = meeting_dir(data_dir, &planned)
+    let (rel, dir) = meeting_folder(data_dir, &planned)
         .ok_or_else(|| failed("recording folder isn't inside recordings/"))?;
+    if !all_in_folder(data_dir, &rel, &planned) {
+        return Err(failed(
+            "a recording file is outside its meeting folder; left as it is",
+        ));
+    }
     if !dir.is_dir() {
         return Err(MeetingError::Busy("recording folder is missing".into()));
     }
@@ -527,8 +699,11 @@ fn compress_meeting_inner(
         ));
     }
     let mut out = MeetingOutcome::default();
+    // Only ever a file directly inside this meeting's folder.
     let abs = |p: &Option<String>| -> Option<PathBuf> {
-        p.as_ref().map(|r| data_dir.join(r)).filter(|p| p.exists())
+        p.as_deref()
+            .and_then(|r| fly_storage::recording_file_in_folder(data_dir, &rel, r))
+            .filter(|p| p.exists())
     };
 
     // Strays from a run that died mid-encode.
@@ -539,8 +714,18 @@ fn compress_meeting_inner(
         }
     }
 
+    // Room for the sources' FLACs (an earlier run's FLAC is already there).
+    let need: u64 = [Role::Mic, Role::System]
+        .into_iter()
+        .filter_map(|role| role.path(&planned).clone())
+        .filter(|rel| has_ext(rel, "wav"))
+        .filter(|rel| !data_dir.join(flac_twin(rel)).exists())
+        .filter_map(|rel| abs(&Some(rel)))
+        .filter_map(|wav| std::fs::metadata(wav).ok().map(|m| m.len()))
+        .sum();
+    ensure_room(&dir, need, ctx.free_space)?;
+
     let mut next = planned.clone();
-    // (old WAV, proof it may go)
     let mut to_delete: Vec<PathBuf> = Vec::new();
 
     // 1. Sources → FLAC.
@@ -560,7 +745,12 @@ fn compress_meeting_inner(
             continue;
         }
         let flac_rel = flac_twin(&rel);
-        let flac_bytes = convert_one(&wav, &data_dir.join(&flac_rel), ctx.checkpoint)?;
+        let flac_bytes = convert_one(
+            &wav,
+            &data_dir.join(&flac_rel),
+            ctx.checkpoint,
+            ctx.free_space,
+        )?;
         uncommitted.push(data_dir.join(&flac_rel));
         out.flac_bytes_added += flac_bytes;
         out.wav_bytes_removed += size;
@@ -623,7 +813,12 @@ fn compress_meeting_inner(
             continue;
         }
         let flac_rel = flac_twin(&rel);
-        let flac_bytes = convert_one(&wav, &data_dir.join(&flac_rel), ctx.checkpoint)?;
+        let flac_bytes = convert_one(
+            &wav,
+            &data_dir.join(&flac_rel),
+            ctx.checkpoint,
+            ctx.free_space,
+        )?;
         uncommitted.push(data_dir.join(&flac_rel));
         out.flac_bytes_added += flac_bytes;
         out.wav_bytes_removed += size;
@@ -633,51 +828,78 @@ fn compress_meeting_inner(
         to_delete.push(wav);
     }
 
-    // Leftover WAVs from a crash between an earlier commit and its deletes:
-    // re-prove each before it goes.
+    // Leftover WAVs from a crash between an earlier commit and its deletes
+    // (any layout, imports included): re-prove each before it goes. One
+    // that doesn't match stays, and isn't decoded again until it changes.
     let mut leftovers: Vec<PathBuf> = Vec::new();
-    if is_storage_v2(&next) {
-        for role in ROLES {
-            let twin = dir.join(role.wav_name());
-            if !twin.exists() || to_delete.contains(&twin) {
-                continue;
-            }
-            // Still referenced (kept as WAV) → not a leftover.
-            if ROLES
-                .iter()
-                .any(|r| abs(r.path(&next)).as_deref() == Some(twin.as_path()))
-            {
-                continue;
-            }
-            let proven = match (role.derived(), abs(role.path(&next))) {
-                (_, Some(flac)) if has_ext(&flac.to_string_lossy(), "flac") => {
-                    fly_audio::flac::verify_flac_matches_wav(&flac, &twin, ctx.checkpoint).is_ok()
-                }
-                (Some(kind), None) => fly_audio::derive::matches_stored(
+    for role in ROLES {
+        let Some(twin) = leftover_candidate(data_dir, &dir, &next, role) else {
+            continue;
+        };
+        if to_delete.contains(&twin) {
+            continue;
+        }
+        let unmatched = format!(
+            "{}: left over from an earlier run and doesn't match the stored copy; kept",
+            role.wav_name()
+        );
+        if (ctx.skip_leftover)(&twin) {
+            out.kept.push(unmatched);
+            continue;
+        }
+        let proven = match role.path(&next) {
+            // its FLAC twin (a missing one proves nothing: the WAV stays)
+            Some(_) => abs(role.path(&next)).is_some_and(|flac| {
+                fly_audio::flac::verify_flac_matches_wav(&flac, &twin, ctx.checkpoint).is_ok()
+            }),
+            // a dropped derived file: what the sources regenerate
+            None => role.derived().is_some_and(|kind| {
+                fly_audio::derive::matches_stored(
                     kind,
                     mic_now.as_deref(),
                     sys_now.as_deref(),
                     &twin,
                     ctx.checkpoint,
                 )
-                .unwrap_or(false),
-                _ => false,
-            };
-            if !(ctx.checkpoint)() {
-                return Err(MeetingError::Stopped);
-            }
-            if proven {
-                leftovers.push(twin);
-            }
+                .unwrap_or(false)
+            }),
+        };
+        if !(ctx.checkpoint)() {
+            return Err(MeetingError::Stopped);
+        }
+        if proven {
+            leftovers.push(twin);
+        } else {
+            tracing::info!(file = %role.wav_name(), "compress: a leftover WAV doesn't match what's stored; kept");
+            out.kept.push(unmatched);
+            out.unproven.push(twin);
         }
     }
 
     // 3. Commit (nothing to commit when only leftovers were found).
     {
         let storage = ctx.storage.lock().unwrap();
+        let gone = |why: &str| MeetingError::Gone(why.to_string());
+        let current = match storage.get_meeting(meeting_id) {
+            Ok(m) => m.recording,
+            Err(fly_storage::StorageError::NotFound(_)) => {
+                return Err(gone("the meeting was deleted"))
+            }
+            Err(e) => return Err(failed(e)),
+        };
+        let Some(current) = current else {
+            return Err(gone("the recording was removed"));
+        };
+        if storage
+            .get_meeting_privacy(meeting_id)
+            .map_err(failed)?
+            .audio_deleted_at
+            .is_some()
+        {
+            return Err(gone("its audio was deleted"));
+        }
         (ctx.may_commit)(&storage).map_err(MeetingError::Busy)?;
-        let current = storage.get_meeting(meeting_id).map_err(failed)?.recording;
-        if current.as_ref() != Some(&planned) {
+        if current != planned {
             return Err(MeetingError::Busy("the recording changed".into()));
         }
         // From here the manifest may reference the new files.
@@ -720,7 +942,9 @@ fn ctx_stopped(e: &fly_audio::AudioError) -> bool {
 // The background job
 // ---------------------------------------------------------------------------
 
-/// Lower this thread's CPU and I/O priority (Windows background mode).
+/// Lower this thread's CPU (and, where the OS ties them, I/O) priority:
+/// Windows background mode, macOS's background QoS class, a high nice
+/// value on Linux (per thread there). Best effort. The video job uses it too.
 pub(crate) fn enter_background_priority() {
     #[cfg(windows)]
     unsafe {
@@ -728,6 +952,15 @@ pub(crate) fn enter_background_priority() {
             GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
         };
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let _ = libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        // who = 0 is the calling thread: Linux keeps nice values per thread.
+        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 19);
     }
 }
 
@@ -760,12 +993,17 @@ pub fn spawn(app: tauri::AppHandle) {
             let state = app.state::<AppState>();
             state.audio_store.sleep(START_DELAY);
             loop {
+                // Halted ("Delete all my data"): idle until resumed.
                 if state.audio_store.halted.load(Ordering::SeqCst) {
                     emit(&app, &state.audio_store, |s| s.state = "stopped".into());
-                    return;
+                    while state.audio_store.halted.load(Ordering::SeqCst) {
+                        state.audio_store.sleep(IDLE_RECHECK);
+                    }
                 }
                 run_pass(&app, &state);
-                state.audio_store.sleep(IDLE_RECHECK);
+                if !state.audio_store.halted.load(Ordering::SeqCst) {
+                    state.audio_store.sleep(IDLE_RECHECK);
+                }
             }
         });
     if let Err(e) = spawned {
@@ -794,7 +1032,8 @@ fn run_pass(app: &tauri::AppHandle, state: &AppState) {
             .ok()
             .and_then(|m| m.recording);
         if let Some(rec) = rec {
-            let (work, bytes, kept) = needs_work(&state.data_dir, &rec);
+            let (work, bytes, kept) =
+                needs_work_skipping(&state.data_dir, &rec, &|p| store.known_unproven(p));
             kept_files += kept;
             if work {
                 plan.push((id, bytes));
@@ -807,6 +1046,9 @@ fn run_pass(app: &tauri::AppHandle, state: &AppState) {
         s.paused_for = None;
         s.meetings_total = plan.len();
         s.meetings_done = 0;
+        s.meetings_skipped = 0;
+        s.meetings_failed = 0;
+        s.last_error = None;
         s.bytes_total = plan.iter().map(|(_, b)| b).sum();
         s.bytes_done = 0;
         s.kept_files = kept_files;
@@ -825,6 +1067,9 @@ fn run_pass(app: &tauri::AppHandle, state: &AppState) {
         match result {
             Ok(Some(o)) => {
                 pass_saved += o.saved();
+                for p in &o.unproven {
+                    store.mark_unproven(p);
+                }
                 let total = {
                     let storage = state.storage.lock().unwrap();
                     let prev: u64 = storage
@@ -853,15 +1098,27 @@ fn run_pass(app: &tauri::AppHandle, state: &AppState) {
             Ok(None) => emit(app, store, |s| s.meetings_done += 1),
             Err(MeetingError::Busy(why)) => {
                 tracing::info!(why, "compress: meeting skipped for now");
+                emit(app, store, |s| {
+                    s.meetings_done += 1;
+                    s.meetings_skipped += 1;
+                });
+            }
+            // deleted meanwhile: nothing left to compress later
+            Err(MeetingError::Gone(why)) => {
+                tracing::info!(why, "compress: meeting gone; its new FLACs were removed");
                 emit(app, store, |s| s.meetings_done += 1);
             }
             Err(MeetingError::Stopped) => {
-                emit(app, store, |s| s.meetings_done += 1);
+                emit(app, store, |s| {
+                    s.meetings_done += 1;
+                    s.meetings_skipped += 1;
+                });
             }
             Err(MeetingError::Failed(e)) => {
                 tracing::warn!(error = %e, "compress: meeting failed (originals kept)");
                 emit(app, store, |s| {
                     s.meetings_done += 1;
+                    s.meetings_failed += 1;
                     s.last_error = Some(e.clone());
                 });
             }
@@ -903,6 +1160,21 @@ fn compress_one_now(
     if !wait_until_idle(app, state, id) {
         return Err(MeetingError::Stopped);
     }
+    // Before the storage lock (lock order: see the module docs). A
+    // recording always gets a new meeting, so one being recorded is never
+    // in the plan (its `ended_at` is unset); this is belt and braces, and a
+    // recording that starts later changes nothing the commit relies on.
+    if state
+        .recording
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|r| r.meeting_id == id)
+    {
+        return Err(MeetingError::Busy("being recorded".into()));
+    }
+    // Runs with the storage lock held (before the lease and at the commit):
+    // never `recording` or `screen` in here.
     let blocked = |storage: &fly_storage::Storage| -> Result<(), String> {
         if store.cancelled(id) {
             return Err("cancelled".into());
@@ -912,15 +1184,6 @@ fn compress_one_now(
         }
         if state.pipeline_stage.lock().unwrap().contains_key(id) {
             return Err("transcription running".into());
-        }
-        if state
-            .recording
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|r| r.meeting_id == id)
-        {
-            return Err("being recorded".into());
         }
         if storage
             .transcription_job(id)
@@ -973,6 +1236,8 @@ fn compress_one_now(
         may_commit: &blocked,
         storage: &state.storage,
         on_file_done: &mut on_file_done,
+        skip_leftover: &|p| store.known_unproven(p),
+        free_space: &free_space,
     };
     compress_meeting(&mut ctx, id).map(Some)
 }
@@ -1318,6 +1583,40 @@ pub fn dismiss_compress_notice(state: tauri::State<'_, AppState>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Delete all my data" halts the job; a refused or failed wipe resumes
+    /// it instead of leaving it stopped until the next launch.
+    #[test]
+    fn a_halted_job_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        assert!(halt(&state, Duration::from_secs(1)));
+        assert!(state.audio_store.cancelled("any"));
+        resume(&state);
+        assert!(!state.audio_store.cancelled("any"));
+        assert!(
+            *state.audio_store.wake.0.lock().unwrap(),
+            "woken for a pass"
+        );
+    }
+
+    #[test]
+    fn free_space_is_known_for_the_temp_dir_and_blocks_only_when_short() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(free_space(dir.path()).is_some_and(|b| b > 0));
+        let none = |_: &Path| None;
+        let short = |_: &Path| Some(FREE_SPACE_MARGIN);
+        assert!(
+            ensure_room(dir.path(), u64::MAX, &none).is_ok(),
+            "unknown never blocks"
+        );
+        assert!(ensure_room(dir.path(), 1, &short).is_err());
+        assert!(ensure_room(dir.path(), 0, &short).is_ok());
+    }
 
     #[test]
     fn the_player_never_gets_a_flac() {

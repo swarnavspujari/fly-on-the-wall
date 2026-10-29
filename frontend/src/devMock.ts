@@ -895,10 +895,12 @@ let mockRetentionDays: number | null = null;
 // Recording storage v2 (audio_store.rs). fotwMockCompress = working |
 // paused | done (default) picks the job state Settings › Storage shows;
 // fotwMockCompressNotice = "1" shows the one-time notice; fotwMockCompressed
-// = "1" makes the player need a Play-time rebuild (prepare_playback).
+// = "1" makes the player need a Play-time rebuild (prepare_playback);
+// fotwMockCompressFailed = "1" ends the pass with one failed and one
+// skipped meeting. Sizes are made up.
 let mockCompressNoticeDismissed = false;
 // Opt-in video job (video_store.rs). fotwMockVideoJob = working | paused |
-// done shows a run of that state.
+// done shows a run of that state. Sizes are made up.
 let mockImportPolicy: "keep" | "audio_only" = "keep";
 let mockVideoKind: "audio_only" | "shrink_screen" | null = null;
 function mockVideoStatus() {
@@ -908,10 +910,10 @@ function mockVideoStatus() {
     kind: state === "idle" ? mockVideoKind : (mockVideoKind ?? "shrink_screen"),
     state,
     paused_for: state === "paused" ? "recording" : null,
-    files_total: state === "idle" ? 0 : 11,
-    files_done: state === "done" ? 11 : state === "idle" ? 0 : 4,
+    files_total: state === "idle" ? 0 : 4,
+    files_done: state === "done" ? 4 : state === "idle" ? 0 : 1,
     files_skipped: state === "done" ? 1 : 0,
-    bytes_saved: state === "idle" ? 0 : state === "done" ? 3.9 * 1024 ** 3 : 1.4 * 1024 ** 3,
+    bytes_saved: state === "idle" ? 0 : state === "done" ? 0.9 * 1024 ** 3 : 0.3 * 1024 ** 3,
     last_error: null,
     import_policy: mockImportPolicy,
   };
@@ -920,25 +922,31 @@ const GB = 1024 * 1024 * 1024;
 function mockStorageReport() {
   const state = mockFlag("fotwMockCompress") ?? "done";
   const working = state === "working" || state === "paused";
+  const failed = mockFlag("fotwMockCompressFailed") === "1";
   return {
-    audio_bytes: working ? 15.8 * GB : 3.6 * GB,
-    wav_bytes: working ? 12.4 * GB : 0,
-    imported_video_bytes: 14.1 * GB,
-    imported_video_files: 6,
-    screen_recording_bytes: 5.6 * GB,
-    screen_recording_files: 11,
-    other_attachment_bytes: 0.12 * GB,
+    audio_bytes: working ? 5.9 * GB : 2.8 * GB,
+    wav_bytes: working ? 4.5 * GB : 0,
+    imported_video_bytes: 3 * GB,
+    imported_video_files: 2,
+    screen_recording_bytes: 1.5 * GB,
+    screen_recording_files: 4,
+    other_attachment_bytes: 0.05 * GB,
     compress: {
       state,
       paused_for: state === "paused" ? "recording" : null,
-      meetings_total: working ? 25 : 25,
-      meetings_done: working ? 11 : 25,
-      bytes_total: 26.4 * GB,
-      bytes_done: working ? 14 * GB : 26.4 * GB,
-      saved_bytes: working ? 10.6 * GB : 23.1 * GB,
+      meetings_total: 12,
+      meetings_done: working ? 5 : 12,
+      meetings_skipped: failed && !working ? 1 : 0,
+      meetings_failed: failed && !working ? 1 : 0,
+      bytes_total: 8 * GB,
+      bytes_done: working ? 3.5 * GB : 8 * GB,
+      saved_bytes: working ? 2 * GB : 5.2 * GB,
       kept_files: 0,
       notice_pending: mockFlag("fotwMockCompressNotice") === "1" && !mockCompressNoticeDismissed,
-      last_error: null,
+      last_error:
+        failed && !working
+          ? "not enough free disk space to compress recordings (120 MB free, about 380 MB needed)"
+          : null,
     },
     videos: mockVideoStatus(),
   };
@@ -1233,7 +1241,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       if (mockImportPolicy === "audio_only") mockVideoKind = "audio_only";
       return mockVideoStatus();
     case "estimate_screen_shrink":
-      return { files: 11, bytes: 5.6 * 1024 ** 3, bytes_after: 1.7 * 1024 ** 3 };
+      return { files: 4, bytes: 1.5 * 1024 ** 3, bytes_after: 0.5 * 1024 ** 3 };
     case "get_transcript":
       // staged import: no transcript until the mock pipeline finishes
       if (args.meetingId === IMPORT_MEETING_ID && !mockImportDone) return null;

@@ -1346,6 +1346,7 @@ dependencies = [
  "fly-storage",
  "futures-util",
  "hex",
+ "libc",
  "reqwest",
  "rfd",
  "serde",
@@ -1489,6 +1490,28 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "fly-evals"
+version = "2.4.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fly-context",
+ "fly-core",
+ "fly-llm",
+ "fly-storage",
+ "futures-util",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]

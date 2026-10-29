@@ -1,0 +1,14 @@
+{
+  "why": "Answers a follow-up that leans on the previous turn.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "They keep their current price for twelve months, then move to the new tiers [seg:m07-16]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

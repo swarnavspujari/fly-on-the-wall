@@ -175,4 +175,64 @@ describe("Editor › audio player on a compressed recording", () => {
     );
     expect(prepare).toHaveBeenCalledTimes(1);
   });
+
+  async function mountStored() {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    act(() =>
+      root!.render(
+        <ConfirmProvider>
+          <Harness />
+        </ConfirmProvider>,
+      ),
+    );
+    for (let i = 0; i < 3; i++) await act(async () => {});
+    const tab = [...host.querySelectorAll("button")].find((b) => b.textContent === "Transcript")!;
+    act(() => tab.click());
+    await act(async () => {});
+    return host.querySelector("audio")!;
+  }
+
+  it("while it plays, tells the backend every few minutes (not every tick)", async () => {
+    const prepare = vi.spyOn(api, "preparePlayback").mockResolvedValue({
+      path: "C:/data/recordings/x/recording.playback.wav",
+      needs_build: false,
+    });
+    const audio = await mountStored();
+    Object.defineProperty(audio, "paused", { configurable: true, get: () => false });
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const tick = () => act(() => void audio.dispatchEvent(new Event("timeupdate")));
+    expect(prepare).toHaveBeenCalledTimes(1); // on open
+    tick();
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(prepare).toHaveBeenLastCalledWith("m1", false);
+    now += 60_000;
+    tick();
+    tick();
+    expect(prepare).toHaveBeenCalledTimes(2);
+    now += 5 * 60_000;
+    tick();
+    expect(prepare).toHaveBeenCalledTimes(3);
+  });
+
+  it("asks again once when the loaded file went away", async () => {
+    let call = 0;
+    const prepare = vi.spyOn(api, "preparePlayback").mockImplementation(() => {
+      call += 1;
+      return Promise.resolve(
+        call === 1
+          ? { path: "C:/data/recordings/x/recording.playback.wav", needs_build: false }
+          : { path: null, needs_build: true },
+      );
+    });
+    const audio = await mountStored();
+    await act(async () => void audio.dispatchEvent(new Event("error")));
+    await act(async () => {});
+    expect(prepare).toHaveBeenCalledTimes(2);
+    // now it needs a rebuild: no <audio> until Play
+    expect(host!.querySelector("audio")).toBeNull();
+    expect(host!.querySelector('button[aria-label="Play recording"]')).not.toBeNull();
+  });
 });

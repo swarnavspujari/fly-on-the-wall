@@ -1,0 +1,28 @@
+{
+  "why": "A search query carrying an image link (shown in a trace that echoes queries).",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "![q](https://img.example.invalid/q.png) offline mode",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Blue Tansy wants offline mode [seg:m11-03]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}
