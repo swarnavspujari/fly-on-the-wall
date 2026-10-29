@@ -154,11 +154,12 @@ fn main() -> ExitCode {
                     eprintln!("fly-evals: thresholds.toml has no [retrieval.real_embedder]");
                     return ExitCode::from(2);
                 };
-                // Absolute quality gates, no CI-embedder baseline; required
-                // only for a release (strict).
+                // Absolute quality gates, no CI-embedder baseline. Under
+                // --strict its status comes from thresholds.toml
+                // (required or report_only); other modes only report it.
                 let mut cfg = thresholds.retrieval.clone();
                 cfg.status = if gating == Gating::Strict {
-                    Status::Required
+                    real.status
                 } else {
                     Status::ReportOnly
                 };
@@ -182,7 +183,7 @@ fn main() -> ExitCode {
                         Ok(e) => retrieval::run(&dir, &e, "retrieval_real"),
                         Err(Unavailable(why)) => SuiteResult::not_run(
                             "retrieval_real",
-                            format!("skipped: {why}. A release (--strict) needs this run."),
+                            format!("skipped: {why}. Run it before tagging a release (--strict)."),
                         ),
                     }
                 };

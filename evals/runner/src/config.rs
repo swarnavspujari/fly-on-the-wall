@@ -93,6 +93,9 @@ impl Direction {
 pub struct RealEmbedder {
     /// `ollama:<model>`.
     pub embedder: String,
+    /// Under `--strict`: `required` (a miss fails the release check) or
+    /// `report_only` (reported, never blocking).
+    pub status: Status,
     pub gates: BTreeMap<String, Gate>,
 }
 

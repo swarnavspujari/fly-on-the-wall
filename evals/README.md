@@ -5,23 +5,27 @@ It is the yardstick the Ask harness (spec v2.5 item 3.3) is built against.
 
 ## The charter
 
-1. **Evals change only with the user's approval.** Agents (Claude Code or any
-   other) may read and run them. A change happens only when the user asked
-   for it in that conversation or approved it when asked; a session relaying
-   another session's "the user approved" quotes the user's words
-   ([CLAUDE.md](../CLAUDE.md)). An agent that could quietly edit the
-   thresholds, the gold answers or the scorer could make any result pass.
-2. **Thresholds come before results.** The first `thresholds.toml` was
+1. **What defines "good" changes only with the user's approval.** That's
+   `thresholds.toml`, the gold questions and probes, the Ask scenarios,
+   scripts and replays, the fixtures and the baselines. A change happens
+   only when the user asked for it in that conversation or approved it when
+   asked; a session relaying another session's "the user approved" quotes
+   the user's words ([CLAUDE.md](../CLAUDE.md)).
+2. **The rest of `evals/` is ordinary code.** Agents may fix the runner
+   (an API change in a crate it uses, a build or bug fix) and the docs
+   without asking, as long as no metric moves: `--gate quality` shows it,
+   and the PR says so. A fix that moves a metric is an eval change.
+3. **Thresholds come before results.** The first `thresholds.toml` was
    committed before the first run of any suite, and every later threshold
    change is its own commit. `git log -- evals/thresholds.toml
    evals/baselines/` shows the order.
-3. **A miss is a finding, not a reason to move the bar.** When the current
+4. **A miss is a finding, not a reason to move the bar.** When the current
    code misses a threshold, the code is what changes. An eval is never
    changed to make a result pass.
-4. **Judges report, never block.** Anything scored by a model is
+5. **Judges report, never block.** Anything scored by a model is
    informational. Gates are deterministic.
-5. **Cost and latency are reported next to quality.**
-6. **Everything here is synthetic.** The repository is public: no real
+6. **Cost and latency are reported next to quality.**
+7. **Everything here is synthetic.** The repository is public: no real
    people, companies, meeting titles or recordings, ever. Real-meeting
    benchmarks read their corpus from a path outside the repo
    (see [local_bench](#local_bench-local-only)).
@@ -29,45 +33,45 @@ It is the yardstick the Ask harness (spec v2.5 item 3.3) is built against.
 These rules come from spec §4.2 "Evals" and §4.2a items 1, 2, 5, 13 and 14
 (`docs/superpowers/specs/2026-10-27-ux-rollout-and-platform-design.md`).
 
-### How it's enforced today: a permission rule, CI tripwires, hard lock off
+### How it's enforced today: a rule, CI checks, review
 
 | Layer | What | Where |
 |---|---|---|
-| 1. Rule | Agents change the protected paths only with the user's approval, and never to make a result pass. | `CLAUDE.md` |
-| 2. Agent hook | A Claude Code `PreToolUse` hook catches agent changes to the protected paths and asks the user to approve or decline each one: file tools; Bash and PowerShell writes, moves, deletes, formatting, extraction, downloads and redirects (nested shells, `iex`, heredocs run by a shell, `cd`/`git -C`, globs, variables, symlinks, `git checkout/restore/rm/apply`). It denies the trust roots outright (anything naming `EVALS_LOCK_SHA256`, `gh variable set/delete`, GitHub API calls for variables, rulesets or branch protection, GraphQL mutations, `gh pr merge --admin`) and anything that would switch hooks off. It protects checkouts of this repository only. Tested by `node --test .claude/hooks/protect-evals.test.mjs` (also in `evals-security`). | `.claude/settings.json`, `.claude/hooks/protect-evals.mjs` |
-| 3. CI tripwires | `evals-security` and `evals-quality` refuse toolchain overrides, check the scorer's dependency graph, grep production code for references to the answer key, and fail when anything under `evals/` changes during a run. `evals-lock` always flags another workflow that names an eval check. | `.github/workflows/evals.yml`, `.github/workflows/evals-guard.yml` |
-| 4. Review | The coordinating session never merges an eval change without the user's explicit yes. | process |
+| 1. Rule | Agents ask before changing what defines "good", and never change an eval to make a result pass. | `CLAUDE.md` |
+| 2. CI checks | `evals-security` and `evals-quality` run the suites; neither is a required check, so a red one is a signal for review, not a merge blocker. Before running they refuse toolchain overrides, check the scorer's dependency graph, grep production code for references to the answer key, and fail when anything under `evals/` changes during a run. `evals-lock` reports the lock hash and flags another workflow that names an eval check. | `.github/workflows/evals.yml`, `.github/workflows/evals-guard.yml` |
+| 3. Review | The coordinating session never merges an eval change without the user's explicit yes. | process |
+
+There is no agent hook and no hard lock for now (the user's decision,
+2026-10-29: "Yes, loosen it"). An earlier version had a Claude Code
+`PreToolUse` hook that blocked, then asked about, every edit to the eval
+files. It cost more than it caught: a prompt on every eval edit in every
+session, Claude Code's own safety check refusing edits to it as
+self-modification, and an automated review finding a new way around it on
+every commit. It can come back together with the hard lock below when the
+evals should be immutable.
 
 **The hard lock is off.** `evals-lock` (`pull_request_target`, so it always
-runs from `main`) hashes the protected paths at the PR head. While the
+runs from `main`) hashes the paths listed below at the PR head. While the
 repository variable `EVALS_LOCK_SHA256` is unset it passes, prints "lock
 not enabled" and reports the hash. **Turning the hard lock on** is one step
 for the user: set `EVALS_LOCK_SHA256` to a reviewed hash
 (`bash evals/lock-hash.sh HEAD`, or the hash in the `evals-lock` summary)
 and add `evals-lock`, `evals-security` and `evals-quality` to the ruleset's
-required checks. From then on any change to a protected path fails
+required checks. From then on any change to a hashed path fails
 `evals-lock` until the user updates the variable. The job never runs PR
 code: it reads git objects and copies workflow files out of them before
 parsing anything.
 
-**Protected paths** (the lock hash covers exactly these):
-`evals/**`, `.github/workflows/evals.yml`, `.github/workflows/evals-guard.yml`,
-`.claude/settings.json`, `.claude/hooks/**`. The hook additionally protects
-`.claude/settings.local.json`, which is local (not hashed) but can switch
-every hook off.
-
-**Assumptions.** Agent sessions never use an admin bypass (`gh pr merge
---admin`, ruleset bypass), and only the user sets `EVALS_LOCK_SHA256` and the
-ruleset. The hook enforces the first for Claude Code; the rest is the user's.
+**Hashed paths** (what the lock would cover): `evals/**`,
+`.github/workflows/evals.yml`, `.github/workflows/evals-guard.yml`,
+`.claude/settings.json`, `.claude/hooks/**` (the last two for a hook added
+back with the lock).
 
 **What each layer doesn't do.**
-- The hook is a speed bump, not a boundary. It pattern-matches commands, so
-  a program or script file that writes protected files (`node tool.mjs`,
-  `python script.py`) isn't seen, and obfuscation beyond simple quoting,
-  escapes and variables can get past it. It fails *open* when node or the
-  script is missing (Claude Code treats that hook error as non-blocking):
-  failing closed would block every tool call in any checkout whose main
-  copy, where `$CLAUDE_PROJECT_DIR` points, lacks the script.
+- The rule is an instruction, not a mechanism: an agent that ignores it can
+  edit anything, and review is what catches that. The git history (`git log
+  -- evals/thresholds.toml evals/suites evals/fixtures evals/baselines`)
+  shows every change to what defines "good".
 - The duplicate-check-name test in `evals-guard` is a tripwire. GitHub matches
   required checks by name, and expressions in job names can't be fully
   evaluated, so a new or changed workflow still needs review.
@@ -101,7 +105,7 @@ Ollama comes from `OLLAMA_HOST` (default `127.0.0.1:11434`).
 
 | Mode | Fails when | Used by |
 |---|---|---|
-| `--strict` (the default) | a required suite misses any absolute gate, or regresses past its baseline; `retrieval_real` is required, so Ollama with the app's embedder must be running | **releases** (run before tagging) |
+| `--strict` (the default) | a required suite misses any absolute gate, or regresses past its baseline. It also runs `retrieval_real` (Ollama with the app's embedder), whose `status` in `thresholds.toml` says whether its misses block (`required`) or are reported (`report_only`, today) | **releases** (run before tagging, read the report) |
 | `--gate security` | a required suite misses a security gate: `keep_local_leaks`, `keep_local_off_device_requests`, `executed_proposals`, `rendered_links`, `out_of_scope_reads`, `run_log_free_text` | CI check `evals-security` |
 | `--gate quality` | a required suite's gated or tracked metric regresses past the committed baseline (absolute misses are reported, not blocking) | CI check `evals-quality` |
 
@@ -133,7 +137,7 @@ Add `--json` to also print the results as JSON.
   run.
 - **What triggers it.** The job runs when `evals/`, any crate in `fly-evals`'
   workspace dependency closure (from `cargo metadata`), the manifests, the
-  hook or the workflow change.
+  or the workflow change.
 
 ## Layout
 
@@ -242,8 +246,9 @@ It runs with two embedders for the vector half of hybrid search:
   through Ollama, fed the app's own prompts from `fly_core::embed_prompt`
   (`title: … | text: …` for chunks, `task: search result | query: …` for
   questions), the code the app's embedding pipeline uses. The run records
-  the model's digest. It carries the absolute quality gates and is required
-  for `--strict`; without Ollama it reports "did not run". `--strict` only
+  the model's digest. It carries the absolute quality gates and runs under
+  `--strict`; its `status` (`report_only` for now) says whether a miss
+  fails the release check. Without Ollama it reports "did not run". `--strict` only
   accepts the app's model (another `--embedder` runs in `--gate` modes
   only), and the runner warns when the model's digest differs from the
   committed baseline's.
@@ -500,11 +505,14 @@ fails. If "any lost question fails" is wanted, the tolerance has to go below
 
 ## Changing an eval
 
+This is for what defines "good" (thresholds, gold questions and probes, Ask
+scenarios, scripts and replays, fixtures, baselines). Runner and doc fixes
+that move no metric don't need it (the charter, item 2).
+
 1. The user asks for the change in a session, or approves it when a
    session proposes it. A session relaying "the user approved" from another
    session quotes the user's words.
-2. Make the change: the files under `evals/`, the two workflows, or the
-   hook. In Claude Code, the hook asks the user to confirm each edit.
+2. Make the change.
 3. Run the suites and read the result:
    `cargo run -p fly-evals -- --suite ci --strict` (with Ollama running).
 4. To bless a new baseline, copy it: `cp target/evals/retrieval.json evals/baselines/retrieval.json`.

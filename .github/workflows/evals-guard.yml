@@ -1,7 +1,7 @@
 name: Evals lock
 
 # The CI half of the eval lock (evals/README.md, "How it's enforced").
-# Eval changes need the user's approval (CLAUDE.md). The hard lock is
+# Changes to what defines "good" need the user's approval (CLAUDE.md). The hard lock is
 # optional: it's on once the user sets EVALS_LOCK_SHA256 (and requires this
 # check); until then this job passes and only reports the hash.
 #
@@ -221,7 +221,7 @@ jobs:
               echo '```'
             fi
             echo
-            echo "Eval changes need the user's approval (CLAUDE.md; evals/README.md, \"Changing an eval\"). With the hard lock on, the user accepts this version by setting the repository variable \`EVALS_LOCK_SHA256\` to the hash above (Settings → Secrets and variables → Actions → Variables) and re-running this job."
+            echo "Changes to what defines \"good\" need the user's approval (CLAUDE.md; evals/README.md, \"Changing an eval\"). With the hard lock on, the user accepts this version by setting the repository variable \`EVALS_LOCK_SHA256\` to the hash above (Settings → Secrets and variables → Actions → Variables) and re-running this job."
           } >>"$GITHUB_STEP_SUMMARY"
 
           if [ -n "$impostors" ]; then
@@ -237,7 +237,7 @@ jobs:
               # from the PR: % is escaped and newlines become spaces, so
               # they stay one annotation's text.
               files=$(printf '%s' "$changed" | sed 's/%/%25/g' | tr '\n\r' '  ')
-              echo "::warning title=Eval files changed::This PR changes protected eval files; that needs the user's approval (CLAUDE.md): $files"
+              echo "::warning title=Eval files changed::This PR changes eval files; thresholds, gold questions, scenarios, fixtures and baselines need the user's approval (CLAUDE.md): $files"
             fi
             {
               echo
