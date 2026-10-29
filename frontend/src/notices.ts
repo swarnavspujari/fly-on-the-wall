@@ -16,6 +16,8 @@ export const NOTICE_PRIORITY = {
   consentSkips: 1.5,
   recoveredKeptLocal: 1.2,
   update: 1,
+  /** One-time "recordings compressed": good news, never urgent. */
+  compressed: 0.5,
 } as const;
 
 export interface NoticeCopy {

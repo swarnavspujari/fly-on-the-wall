@@ -1139,6 +1139,45 @@ const mockPrivacy: Record<
   { keep_local: boolean; participants_notified: boolean; audio_deleted_at: string | null }
 > = {};
 let mockRetentionDays: number | null = null;
+// Recording storage v2 (audio_store.rs). fotwMockCompress = working |
+// paused | done (default) picks the job state Settings › Storage shows;
+// fotwMockCompressNotice = "1" shows the one-time notice; fotwMockCompressed
+// = "1" makes the player need a Play-time rebuild (prepare_playback);
+// fotwMockCompressFailed = "1" ends the pass with one failed and one
+// skipped meeting. Sizes are made up.
+let mockCompressNoticeDismissed = false;
+const GB = 1024 * 1024 * 1024;
+function mockStorageReport() {
+  const state = mockFlag("fotwMockCompress") ?? "done";
+  const working = state === "working" || state === "paused";
+  const failed = mockFlag("fotwMockCompressFailed") === "1";
+  return {
+    audio_bytes: working ? 5.9 * GB : 2.8 * GB,
+    wav_bytes: working ? 4.5 * GB : 0,
+    imported_video_bytes: 3 * GB,
+    imported_video_files: 2,
+    screen_recording_bytes: 1.5 * GB,
+    screen_recording_files: 4,
+    other_attachment_bytes: 0.05 * GB,
+    compress: {
+      state,
+      paused_for: state === "paused" ? "recording" : null,
+      meetings_total: 12,
+      meetings_done: working ? 5 : 12,
+      meetings_skipped: failed && !working ? 1 : 0,
+      meetings_failed: failed && !working ? 1 : 0,
+      bytes_total: 8 * GB,
+      bytes_done: working ? 3.5 * GB : 8 * GB,
+      saved_bytes: working ? 2 * GB : 5.2 * GB,
+      kept_files: 0,
+      notice_pending: mockFlag("fotwMockCompressNotice") === "1" && !mockCompressNoticeDismissed,
+      last_error:
+        failed && !working
+          ? "not enough free disk space to compress recordings (120 MB free, about 380 MB needed)"
+          : null,
+    },
+  };
+}
 let mockBackfillPending = 3;
 function meetingPrivacy(meetingId: string) {
   const p = (mockPrivacy[meetingId] ??= {
@@ -2340,6 +2379,15 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return m ? [m] : [];
     }
     case "live_status":
+      return null;
+    case "prepare_playback":
+      if (mockFlag("fotwMockCompressed") === "1" && !args.build)
+        return { path: null, needs_build: true };
+      return { path: "/mock/recording.playback.wav", needs_build: false };
+    case "storage_report":
+      return mockStorageReport();
+    case "dismiss_compress_notice":
+      mockCompressNoticeDismissed = true;
       return null;
     case "get_transcript":
       // staged import: no transcript until the mock pipeline finishes
