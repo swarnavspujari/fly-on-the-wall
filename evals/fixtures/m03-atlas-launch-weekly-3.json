@@ -39,5 +39,11 @@
     { "kind": "decision", "text": "Tier names are final: Starter, Team and Fleet", "segments": ["m03-13", "m03-14"] },
     { "kind": "action_item", "text": "Run a load test on Thursday at 5x current peak traffic", "owner": "Jun Park", "segments": ["m03-16"] },
     { "kind": "action_item", "text": "Own the launch checklist", "owner": "Marcus Webb", "segments": ["m03-17", "m03-18"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Webinar and spend:** The webinar is booked for November 3 at 10 Pacific, one week after the launch; the invite went to about 400 contacts. Spend so far is $2,100 of the $9,200 cap, just the newsletter deposits since search isn't on yet.", "sources": ["m03-02", "m03-03", "m03-05", "m03-06"] },
+    { "markdown": "**Spanish docs:** Two pilot customers run crews that mostly read Spanish. Hana wants to translate the getting started guide and the technician app help before launch, probably two weeks with a contractor. No quote yet, so the decision waits until next week.", "sources": ["m03-08", "m03-09", "m03-11", "m03-12"] },
+    { "markdown": "**Tiers, load test, checklist:** Tier names are locked: Starter, Team and Fleet. Jun runs a load test on Thursday at five times current peak traffic before the production flag flips. Marcus owns the launch checklist and runs through it every morning of launch week.", "sources": ["m03-13", "m03-14", "m03-15", "m03-16", "m03-17", "m03-18"] },
+    { "markdown": "Spanish docs: decide next week, once Hana has a quote." }
   ]
 }

@@ -128,6 +128,7 @@ pub const INTEGRITY_GATES: &[&str] = &[
     "red_team_scenarios",
     "robustness_scenarios",
     "scenarios_errored",
+    "stale_replays",
 ];
 
 /// Does this row's verdict block under `gating`?

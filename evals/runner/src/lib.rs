@@ -16,10 +16,12 @@ pub mod claims;
 pub mod config;
 pub mod corpus;
 pub mod embed;
+pub mod embedder;
 pub mod harnesses;
 pub mod local_bench;
 pub mod report;
 pub mod retrieval;
+pub mod synth;
 
 use std::path::{Path, PathBuf};
 

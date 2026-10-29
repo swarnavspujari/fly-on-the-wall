@@ -1478,6 +1478,8 @@ dependencies = [
  "fly-llm",
  "fly-storage",
  "futures-util",
+ "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

@@ -1,0 +1,9 @@
+{
+  "why": "The API key is rejected: not retryable.",
+  "responses": [
+    {
+      "error": "auth",
+      "message": ""
+    }
+  ]
+}

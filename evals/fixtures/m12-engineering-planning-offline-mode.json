@@ -37,5 +37,16 @@
     { "kind": "action_item", "text": "Bring conflict-handling options next week, based on real edit logs", "owner": "Hana Kobayashi", "segments": ["m12-12"] },
     { "kind": "decision", "text": "SMS reminders are not planned this quarter", "segments": ["m12-14"] },
     { "kind": "action_item", "text": "Set up a twelve-phone device lab for offline testing by the end of the month", "owner": "Odette Nwosu", "segments": ["m12-15", "m12-16"] }
-  ]
+  ],
+  "enhanced": [
+    { "markdown": "**Plan:** Jun estimates six weeks for an offline beta with two engineers; the hard part is the local store on the phone and syncing it safely. Hana, who built the current sync layer, leads offline mode, with the beta targeted for February so Blue Tansy's January pilot can start on it soon after.", "sources": ["m12-03", "m12-04", "m12-06", "m12-07", "m12-08"] },
+    { "markdown": "**Open question: sync conflicts.** Last write wins is simple, but Jun warns it will lose data eventually; the alternative is a manual merge screen. Not decided: Hana brings options next week, after looking at real edit patterns in the logs.", "sources": ["m12-09", "m12-10", "m12-11", "m12-12"] },
+    { "markdown": "**Scope and testing:** SMS reminders are not planned this quarter and go on the roadmap for later. Odette sets up a twelve-phone device lab, a mix of older Android and iPhone models, by the end of the month.", "sources": ["m12-14", "m12-15", "m12-16"] }
+  ],
+  "cleaned": {
+    "m12-08": "Great: Hana leads offline mode. Let's aim for a beta in February, so their January pilot can start on it soon after.",
+    "m12-10": "We can do last-write-wins, which is simple, or show a manual merge screen.",
+    "m12-11": "Last-write-wins will eventually lose data. I'd rather not decide today without looking at real edit patterns.",
+    "m12-14": "Not this quarter. Offline mode comes first; SMS goes on the roadmap for later."
+  }
 }

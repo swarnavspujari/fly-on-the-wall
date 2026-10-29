@@ -129,5 +129,11 @@
     { "kind": "action_item", "text": "Write the API versioning proposal by Friday, October 9", "owner": "Jun Park", "segments": ["m13-077"] },
     { "kind": "action_item", "text": "Email the fourteen customers still using the export endpoint by October 15, with the March date", "owner": "Marcus Webb", "segments": ["m13-086"] },
     { "kind": "figure", "text": "Cold start on the reference Android phone is 6.8 seconds today", "segments": ["m13-039"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Calendar integration: Larkspan, not Orchardly.** Hana's spike found Orchardly's partner API is read-only, with write access only vaguely promised for next year, while Larkspan has full write access, webhooks for every change and a working sandbox. Larkspan's users are dispatch teams with crews, our buyers. Revisit Orchardly once it ships write access; Marcus lets Orchardly down gently, and Teodor builds the Larkspan integration.", "sources": ["m13-059", "m13-060", "m13-062", "m13-064", "m13-066", "m13-068", "m13-069", "m13-075"] },
+    { "markdown": "**Speed and dashboard:** Cold start on the reference Android phone is 6.8 seconds today. The target is under 4 seconds; under 3 stays a stretch goal, not a commitment. Hana will also get the job list rendering under one second. Dashboard v1 is four charts (jobs completed, first time fix, travel time and the utilization inputs), with a beta on November 20 and one engineer.", "sources": ["m13-039", "m13-051", "m13-055", "m13-093", "m13-094"] },
+    { "markdown": "**Platform and priorities:** The Q4 order is speed, then the Larkspan integration, then the dashboard, with platform work around them. Jun writes the API versioning proposal (dated versions sent in a header) by Friday, October 9. The legacy job export endpoint sunsets on March 31 instead of December 31; Marcus emails the fourteen customers still calling it by October 15, with the March date.", "sources": ["m13-072", "m13-077", "m13-080", "m13-084", "m13-086", "m13-098"] },
+    { "markdown": "Roadmap doc: spell out why Larkspan over Orchardly for sales (read-only API, wrong audience)." }
   ]
 }

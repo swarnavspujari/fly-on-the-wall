@@ -33,5 +33,9 @@
     { "kind": "action_item", "text": "Send the offer to Nadia by Friday", "owner": "Rosa Lindqvist", "segments": ["m06-13"] },
     { "kind": "action_item", "text": "Keep Tomasz Wojcik warm for the integrations role", "segments": ["m06-11"] },
     { "kind": "commitment", "text": "Target start date November 9", "segments": ["m06-14"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Decision:** Make the support lead offer to Nadia Ferreira. Felix rated her escalation exercise the best they've seen, and you noted her questions about the on-call setup. The only concern is that she's coming from a much bigger company and will need to get used to fewer tools.", "sources": ["m06-03", "m06-05", "m06-07", "m06-10"] },
+    { "markdown": "**Offer details:** The approved band is $110,000 to $125,000 and Rosa opens at $118,000, sending the offer by Friday. Target start date is November 9. Keep Tomasz Wojcik warm for the integrations role next year.", "sources": ["m06-11", "m06-12", "m06-13", "m06-14"] }
   ]
 }

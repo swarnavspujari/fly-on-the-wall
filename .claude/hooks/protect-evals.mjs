@@ -1,18 +1,21 @@
 #!/usr/bin/env node
-// Claude Code PreToolUse hook: AI agents may read and run the system evals,
-// never change them (evals/README.md, "The charter").
+// Claude Code PreToolUse hook for the eval permission rule (CLAUDE.md,
+// evals/README.md "The charter"): agents change the system evals only with
+// the user's approval.
 //
-// Denies, with a reason Claude sees:
+// Asks the user (permissionDecision "ask": they approve or decline each
+// call), with a reason saying it's an eval change:
 //   * Edit / Write / MultiEdit / NotebookEdit on a protected path;
 //   * Bash / PowerShell commands that write, move, delete, format, extract,
 //     download or redirect into a protected path (or delete a folder that
-//     holds one), or check one out / restore / remove / patch it with git;
+//     holds one), or check one out / restore / remove / patch it with git.
+// Denies outright, with a reason Claude sees:
 //   * the trust roots: anything naming EVALS_LOCK_SHA256, `gh variable`
 //     changes, GitHub API calls for variables, rulesets or branch
-//     protection, and `gh pr merge --admin` (agents never use an admin
-//     bypass; only the user sets the lock variable);
+//     protection, GraphQL mutations, and `gh pr merge --admin` (agents
+//     never use an admin bypass; only the user sets the lock variable);
 //   * anything that would switch hooks off (`disableAllHooks`, escaped or
-//     not, or any write to .claude/settings.local.json).
+//     not, in any file or command).
 // Reads (cat, ls, grep, git diff/log, cargo run -p fly-evals, ...) pass, and
 // text inside quoted strings or heredoc bodies is data, not a command
 // (unless a shell or interpreter runs it).
@@ -22,14 +25,16 @@
 // .github/workflows/evals.yml, .github/workflows/evals-guard.yml,
 // .claude/settings.json, .claude/settings.local.json, .claude/hooks/**.
 //
-// This is a guardrail, not a security boundary: the command check is a
-// pattern match, and a program can write files the hook never sees. The
-// boundary is the evals-lock CI check (.github/workflows/evals-guard.yml).
-// It also fails open: if node or this script is missing, Claude Code treats
-// the hook error as non-blocking and the call proceeds. Failing closed would
+// A speed bump, not a boundary: the command check is a pattern match, and a
+// program can write files the hook never sees. The rule itself is in
+// CLAUDE.md; the CI tripwires and, once the user turns it on, the evals-lock
+// check (.github/workflows/evals-guard.yml) back it.
+// It fails open: if node or this script is missing, Claude Code treats the
+// hook error as non-blocking and the call proceeds. Failing closed would
 // block every tool call in any checkout whose main copy (where
 // $CLAUDE_PROJECT_DIR points) lacks the script, e.g. before this merges or
-// in a stale main checkout; the CI lock catches what slips through.
+// in a stale main checkout. When it can't parse a call that looks like it
+// touches the evals, it asks the user.
 // Node built-ins only; works with Git Bash and PowerShell on Windows and on
 // macOS / Linux.
 
@@ -50,14 +55,21 @@ export const PROTECTED_FILES = [
 ];
 const SIGNATURE = "evals/runner/Cargo.toml";
 
-const REASON =
-  "Blocked by the eval lock: %WHAT%. Protected: evals/**, .github/workflows/evals.yml, " +
-  ".github/workflows/evals-guard.yml, .claude/settings.json, .claude/settings.local.json, " +
-  ".claude/hooks/**, and the lock variable, rulesets and admin merges. AI agents may read and " +
-  'run the evals but never change them; only the user does, outside Claude Code (evals/README.md, ' +
-  '"Changing an eval"). If the change is needed, stop and ask the user.';
+const ASK_REASON =
+  "Eval change: %WHAT%. This changes the system evals (evals/**, the two eval workflows, " +
+  ".claude/settings*.json or .claude/hooks/**). Approve only if you asked for this eval change; " +
+  "an eval is never changed to make a result pass (CLAUDE.md, evals/README.md).";
+const DENY_REASON =
+  "Blocked: %WHAT%. Agents never touch the eval trust roots (the lock variable, repository " +
+  "variables, rulesets, branch protection, admin merges) or switch hooks off; only the user " +
+  "does that, outside Claude Code. Stop and tell the user what you need.";
 
-const reason = (what) => REASON.replace("%WHAT%", what);
+/** A protected-path change: the user approves or declines it. */
+const ask = (what) => ({ decision: "ask", reason: ASK_REASON.replace("%WHAT%", what) });
+/** A trust-root command or a hook switch: always denied. */
+const deny = (what) => ({ decision: "deny", reason: DENY_REASON.replace("%WHAT%", what) });
+/** A commandViolation result that is denied rather than asked. */
+const hard = (why) => ({ hard: true, why });
 const fold = (s) => (CASE_INSENSITIVE ? s.toLowerCase() : s);
 const norm = (rel) =>
   rel
@@ -639,12 +651,13 @@ function decoded(text) {
 }
 const disablesHooks = (text) => /disableallhooks/i.test(decoded(text).replace(/[\\"'+\s]/g, ""));
 
-/** Why a command must be denied, or null. */
+/** Why a command changes the evals (a string: ask the user), or touches a
+ * trust root or switches hooks off ({ hard, why }: deny), or null. */
 export function commandViolation(command, ctx = {}, depth = 0) {
   if (typeof command !== "string" || depth > 5) return null;
-  if (disablesHooks(command)) return "switching hooks off (disableAllHooks)";
+  if (disablesHooks(command)) return hard("switching hooks off (disableAllHooks)");
   const trust = trustRootViolation(decoded(command));
-  if (trust) return trust;
+  if (trust) return hard(trust);
 
   let vctx = {
     ...ctx,
@@ -954,46 +967,53 @@ export function commandViolation(command, ctx = {}, depth = 0) {
 
 // --- the hook ---------------------------------------------------------------
 
-/** The decision for one PreToolUse payload: null (allow) or a deny reason. */
+/** The decision for one PreToolUse payload: null (allow), or
+ * `{ decision: "ask" | "deny", reason }`. Changes to a protected path ask
+ * the user; the trust roots and switching hooks off are denied outright. */
 export function decide(input, env = process.env) {
   const tool = input?.tool_name ?? "";
   const ti = input?.tool_input ?? {};
   const ctx = { cwd: input?.cwd, projectDir: env.CLAUDE_PROJECT_DIR };
-  if (disablesHooks(JSON.stringify(ti))) return reason("switching hooks off (disableAllHooks)");
+  if (disablesHooks(JSON.stringify(ti))) return deny("switching hooks off (disableAllHooks)");
   if (["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(tool)) {
     const target = protectedTarget(ti.file_path ?? ti.notebook_path, ctx);
-    return target ? reason(`${target} is protected`) : null;
+    return target ? ask(`${target} is protected`) : null;
   }
   if (tool === "Bash" || tool === "PowerShell") {
     const why = commandViolation(ti.command, ctx);
-    return why ? reason(why) : null;
+    if (!why) return null;
+    return typeof why === "object" ? deny(why.why) : ask(why);
   }
   return null;
+}
+
+function emit(decision, why) {
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: decision,
+        permissionDecisionReason: why,
+      },
+    }) + "\n",
+  );
 }
 
 function main() {
   let raw = "";
   try {
     raw = readFileSync(0, "utf8");
-    const why = decide(JSON.parse(raw));
-    if (why) {
-      process.stdout.write(
-        JSON.stringify({
-          hookSpecificOutput: {
-            hookEventName: "PreToolUse",
-            permissionDecision: "deny",
-            permissionDecisionReason: why,
-          },
-        }) + "\n",
-      );
-    }
+    const verdict = decide(JSON.parse(raw));
+    if (verdict) emit(verdict.decision, verdict.reason);
     process.exit(0);
   } catch (e) {
-    // Fail closed only when the call could touch the evals; otherwise don't
-    // stand in the way of unrelated work.
+    // Couldn't check it: when the call could touch the evals, the user
+    // decides; otherwise don't stand in the way of unrelated work.
     if (/evals|\.claude|disableAllHooks|EVALS_LOCK|variable|ruleset/i.test(raw)) {
-      process.stderr.write(`eval lock: couldn't check this call (${e?.message ?? e}); blocked to be safe.\n`);
-      process.exit(2);
+      emit(
+        "ask",
+        `The eval hook couldn't check this call (${e?.message ?? e}); it may change the system evals. Approve only if you asked for that.`,
+      );
     }
     process.exit(0);
   }

@@ -41,5 +41,10 @@
     { "kind": "decision", "text": "Landing page offers demo requests only, no free trial button", "segments": ["m01-16"] },
     { "kind": "action_item", "text": "Remove the trial flow from the landing page", "owner": "Marcus Webb", "segments": ["m01-17"] },
     { "kind": "question", "text": "Should we run a launch webinar?", "segments": ["m01-18", "m01-19"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Budget and date:** Ines asked for $8,400 for the first month of paid launch spend, mostly search ads and two newsletter sponsorships; approved unless finance pushes back. Launch target is Tuesday, October 20, which gives Jun four full sprints.", "sources": ["m01-02", "m01-05", "m01-06", "m01-08"] },
+    { "markdown": "**Landing page and API:** Demo requests only at launch, no free trial button; Marcus pulls the trial flow out of the page. Jun proposed a scheduler API rate limit of 200 requests per minute per customer (the big fleets peak around 90 a minute, and it can be raised per account).", "sources": ["m01-13", "m01-15", "m01-16", "m01-17"] },
+    { "markdown": "**Next steps:** Ines drafts the press release by next Wednesday. Whether to run a launch webinar is undecided and goes on next week's list.", "sources": ["m01-10", "m01-18", "m01-19"] }
   ]
 }

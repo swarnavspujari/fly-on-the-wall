@@ -1,0 +1,52 @@
+{
+  "id": "m29",
+  "title": "Doorstep launch budget",
+  "started_at": "2026-10-06T17:00:00Z",
+  "folder": "Marketing",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Ines Carvalho", "email": "ines@quillmark.example" },
+    { "name": "Greta Holm", "email": "greta@quillmark.example" },
+    { "name": "Marcus Webb", "email": "marcus@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Ines Carvalho", "spk_1": "Greta Holm", "spk_2": "Marcus Webb" },
+  "scratchpad": "Doorstep: Ines asks 4,500 first month, approved\nSEPARATE line from Atlas, monthly report\nvideo + 2 trade newsletters + customer story, no podcast\nno dates yet",
+  "segments": [
+    ["m29-01", "mic", "0:05", "Short one today. Ines wants to talk about money for marketing the add-ons, Doorstep in particular, before the Atlas noise takes over everyone's calendar."],
+    ["m29-02", "spk_0", "0:21", "Right. Doorstep is the one homeowners actually see, so it's the one worth marketing. Stockroom sells itself on sales calls."],
+    ["m29-03", "spk_0", "0:35", "I'm asking for four thousand five hundred dollars for the first month of Doorstep launch spend."],
+    ["m29-04", "spk_1", "0:46", "Is that on top of the Atlas money, or carved out of it?"],
+    ["m29-05", "spk_0", "0:57", "On top. The Atlas cap stays exactly where it is, and I'm not touching it. This would be a separate line in next quarter's plan."],
+    ["m29-06", "spk_1", "1:13", "Then I want it as its own line with its own report. I don't want the two budgets blurring together in anyone's head."],
+    ["m29-07", "spk_0", "1:28", "Fine with me. I'd rather keep them apart anyway, so we can tell which one worked."],
+    ["m29-08", "spk_2", "1:38", "What's the money for, specifically?"],
+    ["m29-09", "spk_0", "1:43", "Three things. A short video of a homeowner getting the tracking link, an ad in two trade newsletters, and a customer story with one of our plumbing customers."],
+    ["m29-10", "spk_2", "1:58", "No podcast this time?"],
+    ["m29-11", "spk_0", "2:04", "No. The podcast audience is dispatch managers, and they'll have just heard all about Atlas. For Doorstep I want to reach the business owners instead."],
+    ["m29-12", "spk_1", "2:19", "What's the biggest item?"],
+    ["m29-13", "spk_0", "2:25", "The video, at about half. The newsletters are most of the rest, and the customer story is mostly our own time."],
+    ["m29-14", "spk_1", "2:38", "And the newsletters? Which ones, and do we know anything about who actually reads them?"],
+    ["m29-15", "spk_0", "2:47", "Two trade newsletters for plumbing and heating businesses. Both publish their readership, and most readers own or run a small shop."],
+    ["m29-16", "spk_2", "3:02", "Which customer for the story? It needs to be someone whose customers would actually notice the tracking link."],
+    ["m29-17", "spk_0", "3:15", "Ferrybank Plumbing. Their owner already sends homeowners a text with a photo of the technician, by hand, every single morning."],
+    ["m29-18", "spk_2", "3:27", "That's perfect. Doorstep does exactly what he's doing by hand, so the story writes itself."],
+    ["m29-19", "spk_1", "3:38", "Okay. I can approve four thousand five hundred for the first month, as a separate line, with a monthly spend report."],
+    ["m29-20", "mic", "3:52", "Good. Marcus, is there anything you need from Ines for the product page?"],
+    ["m29-21", "spk_2", "4:00", "Just the video, once it exists. I'd like it on the Doorstep page instead of a static screenshot."],
+    ["m29-22", "spk_0", "4:13", "I'll own all three pieces. Marcus gets the video first."],
+    ["m29-23", "mic", "4:22", "And measurement? How do we know if it worked?"],
+    ["m29-24", "spk_0", "4:32", "Doorstep Pay sign-ups in the first month, and how many accounts switch the tracking link on."],
+    ["m29-25", "spk_1", "4:45", "Keep it to those two. I don't want a dashboard of twenty vanity numbers that nobody reads."],
+    ["m29-26", "spk_2", "4:56", "Can the video be short enough to use in the app as well? A thirty second version would work on the Doorstep settings screen."],
+    ["m29-27", "spk_0", "5:12", "I'll ask for two cuts, a full one for the page and a thirty second one for the app. It barely changes the cost."],
+    ["m29-28", "spk_1", "5:25", "If the two cuts push the video over half the money, tell me before you sign anything with the agency."],
+    ["m29-29", "mic", "5:38", "One thing we're not doing today is picking dates for any of this. Ines, plan the pieces now, and we'll schedule them closer to the time."],
+    ["m29-30", "spk_0", "5:53", "Works for me. I'd rather not commit to dates while Atlas is still taking up everyone's week."],
+    ["m29-31", "mic", "6:05", "Great. Thanks, both of you."]
+  ],
+  "items": [
+    { "kind": "decision", "text": "Doorstep launch spend approved at $4,500 for the first month, as a separate line from the Atlas budget, with a monthly spend report", "segments": ["m29-03", "m29-05", "m29-19"] },
+    { "kind": "action_item", "text": "Produce the Doorstep video, two trade newsletter ads and the Ferrybank Plumbing customer story", "owner": "Ines Carvalho", "segments": ["m29-09", "m29-22"] }
+  ]
+}

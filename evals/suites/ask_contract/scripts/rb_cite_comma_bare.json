@@ -1,0 +1,14 @@
+{
+  "why": "One seg: prefix for a list of ids.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "It's dropped at launch; the demo request stays [seg:m07-09, m07-10]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

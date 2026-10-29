@@ -40,5 +40,10 @@
     { "kind": "action_item", "text": "Update the pricing page countdown and banner to October 27 by Friday", "owner": "Marcus Webb", "segments": ["m02-12"] },
     { "kind": "decision", "text": "Run a webinar the week after launch, owned by Ines", "segments": ["m02-15"] },
     { "kind": "action_item", "text": "Find a webinar date and send invites", "owner": "Ines Carvalho", "segments": ["m02-16"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Budget:** A podcast sponsorship takes the first month from $8,400 to $9,200. Greta accepted $9,200 as the ceiling with weekly spend reporting; Ines sends her the report every Monday.", "sources": ["m02-03", "m02-04", "m02-06", "m02-07", "m02-08"] },
+    { "markdown": "**Launch date:** The security review on the scheduler API won't finish until the 22nd, so the launch moves one week to October 27. Marcus updates the pricing page countdown and the announcement banner by Friday.", "sources": ["m02-09", "m02-10", "m02-12"] },
+    { "markdown": "**Webinar and staging:** Yes to a webinar the week after launch, owned by Ines, who will find a date and send invites. Tier names get settled in Tuesday's pricing review. The rate limit is running behind a feature flag in staging and stays on through launch.", "sources": ["m02-13", "m02-15", "m02-16", "m02-17", "m02-18"] }
   ]
 }

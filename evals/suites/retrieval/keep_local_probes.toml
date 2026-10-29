@@ -96,3 +96,58 @@ args = { query = "retention bonus", meeting_ids = ["{meeting:m10}"] }
 [[tool]]
 name = "search_passages"
 args = { query = "Brightpath Kestrel bonus", folder_id = "{folder:People}", limit = 20 }
+
+# The meeting that is Keep local only through a parent folder flag
+# (m17, in People/Reviews/2026; People/Reviews is flagged).
+[[search]]
+query = "Tallowmere simulator"
+
+[[search]]
+query = "equity refresh and promotion packet"
+
+[[search]]
+query = "Anouk raise"
+
+[[search]]
+query = "raise"
+folder = "People/Reviews"
+
+[[search]]
+query = "raise"
+folder = "People/Reviews/2026"
+
+[[search]]
+query = "Anouk"
+meetings = ["m17"]
+
+[[tool]]
+name = "read_segments"
+args = { meeting_id = "{meeting:m17}", around_segment_id = "m17-08", before = 20, after = 20 }
+
+[[tool]]
+name = "read_segments"
+args = { meeting_id = "{meeting:m17}", around_segment_id = "m17-08", prefer_polished = true }
+
+[[tool]]
+name = "get_event"
+args = { meeting_id = "{meeting:m17}" }
+
+[[tool]]
+name = "get_note"
+args = { meeting_id = "{meeting:m17}" }
+
+[[tool]]
+name = "get_note"
+args = { note_id = "{note:m17}", kind = "both" }
+
+[[tool]]
+name = "get_items"
+args = { meeting_ids = ["{meeting:m17}"] }
+
+[[tool]]
+name = "list_meetings"
+args = { title_contains = "Anouk" }
+
+[[tool]]
+name = "list_meetings"
+args = { folder_id = "{folder:People/Reviews/2026}" }

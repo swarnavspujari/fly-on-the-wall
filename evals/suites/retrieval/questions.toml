@@ -16,8 +16,10 @@
 #               meeting (answerable under Visibility::All only)
 #
 # [[unanswerable]]
-#   id, question, why (what the corpus does and doesn't say), and optional
-#   visibility = "shareable" when only the shareable view must find nothing.
+#   id, question, why (what the corpus does and doesn't say), kind
+#   ("off_corpus": the topic never comes up; "near_miss": the topic does,
+#   the asked-for fact doesn't), and optional visibility = "shareable" when
+#   only the shareable view must find nothing.
 
 # --- launch series: numbers that change week to week ----------------------
 
@@ -421,57 +423,68 @@ keep_local = true
 
 [[unanswerable]]
 id = "u01"
+kind = "off_corpus"
 question = "What did we decide about the Berlin office lease?"
 why = "No office or lease is discussed anywhere."
 
 [[unanswerable]]
 id = "u02"
+kind = "near_miss"
 question = "What's the budget for the Q1 team offsite?"
 why = "Budgets are discussed (launch ads, salary band) but never an offsite."
 
 [[unanswerable]]
 id = "u03"
+kind = "near_miss"
 question = "What price did Routewise quote Harrowgate?"
 why = "Colm says Routewise quoted lower, but no amount is ever given."
 
 [[unanswerable]]
 id = "u04"
+kind = "near_miss"
 question = "Which contractor is doing the Spanish translation?"
 why = "Hana has no quote yet and no contractor is named."
 
 [[unanswerable]]
 id = "u05"
+kind = "near_miss"
 question = "What did the board decide at Friday's meeting?"
 why = "Only the board prep is recorded, not the board meeting."
 
 [[unanswerable]]
 id = "u06"
+kind = "near_miss"
 question = "How many technician seats does Blue Tansy have?"
 why = "Seats are only mentioned for Harrowgate (sixty)."
 
 [[unanswerable]]
 id = "u07"
+kind = "near_miss"
 question = "What were the results of Jun's load test?"
 why = "The load test is planned for Thursday; no result is ever reported."
 
 [[unanswerable]]
 id = "u08"
+kind = "near_miss"
 question = "Did we agree on a discount for the Blue Tansy pilot?"
 why = "Discounts are discussed only for Harrowgate."
 
 [[unanswerable]]
 id = "u09"
+kind = "near_miss"
 question = "What was our churn rate in Q3?"
 why = "Growth, ARR and net revenue retention are given; churn never is."
 
 [[unanswerable]]
 id = "u10"
+kind = "near_miss"
 question = "What is Project Kestrel?"
 why = "Discussed only in the keep-local 1:1, so a shareable view must find nothing."
 visibility = "shareable"
 
 [[unanswerable]]
 id = "u11"
+kind = "off_corpus"
 question = "Who replaced Ines as marketing lead?"
 why = "Nobody replaces Ines; it's never discussed."
 
@@ -513,6 +526,7 @@ category = ["names", "action_items", "near_duplicate"]
 
 [[unanswerable]]
 id = "u13"
+kind = "near_miss"
 question = "How much is the Larkspan partnership going to cost us?"
 why = "Larkspan is picked as the calendar partner, but no fees, revenue share or other commercial terms are discussed anywhere."
 
@@ -552,6 +566,7 @@ category = ["names", "action_items", "near_duplicate"]
 
 [[unanswerable]]
 id = "u14"
+kind = "near_miss"
 question = "What was our customer satisfaction score in September?"
 why = "The September support review covers volume, response times, categories, macros, escalation, staffing and the helpdesk move, but no satisfaction or CSAT score is given anywhere."
 
@@ -591,6 +606,7 @@ category = ["names", "action_items", "dates"]
 
 [[unanswerable]]
 id = "u15"
+kind = "near_miss"
 question = "How much would a dedicated single-tenant instance for Calder Water cost?"
 why = "Elena floats a dedicated instance and it is then dropped in favour of a residency addendum; no cost is ever mentioned."
 
@@ -628,5 +644,406 @@ category = ["dates", "action_items", "near_duplicate"]
 
 [[unanswerable]]
 id = "u16"
+kind = "near_miss"
 question = "How much does the licence for the new icon set cost?"
 why = "Marlpit is chosen and its licence is described as one-off and perpetual, with finance happy with the terms, but no price is ever given."
+
+# --- long meetings: packaging workshop (m19) -------------------------------
+# Prices, tier availability and limits are all revised mid-meeting; the
+# final values sit deep inside, after the superseded ones.
+
+[[answerable]]
+id = "q19a"
+question = "How much are we charging for Stockroom?"
+must_cite = [["m19-100", "m19-128"]]
+evidence = ["a hundred and forty nine dollars", "each additional location"]
+answer = "A hundred and forty nine dollars per account per month, including one stock location, plus twenty five dollars a month for each additional location, on Team and Fleet only."
+category = ["numbers", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q19b"
+question = "Do Starter customers get the Doorstep tracking link?"
+must_cite = ["m19-107"]
+evidence = ["every tier, Starter included"]
+answer = "Yes. The Doorstep tracking link is included in every tier, Starter included; Doorstep Pay, the online invoice payments, stays an add-on at forty nine dollars a month per account."
+category = ["decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q19c"
+question = "How much photo storage does each technician get?"
+must_cite = [["m19-087", "m19-129"]]
+evidence = ["twenty five gigabytes per technician", "pooled"]
+answer = "Twenty five gigabytes per technician, pooled across the whole account, up from the ten gigabytes first proposed; extra storage is eight dollars a month for each additional hundred gigabytes."
+category = ["numbers", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q19d"
+question = "Who argued against pricing Stockroom per technician?"
+must_cite = ["m19-013", "m19-014"]
+evidence = ["doesn't scale with people", "flat fee per account"]
+answer = "Greta. She said inventory doesn't scale with people, so she wanted a flat fee per account instead."
+category = ["names", "attribution"]
+
+[[answerable]]
+id = "q19e"
+question = "Who is writing the add-on one-pager for sales, and when is it due?"
+must_cite = ["m19-121"]
+evidence = ["one-pager for sales", "ninth of October"]
+answer = "Elena, by Friday the ninth of October."
+category = ["names", "action_items", "dates", "near_duplicate"]
+
+[[answerable]]
+id = "q19f"
+question = "Are we offering a discounted bundle of the add-ons?"
+must_cite = ["m19-111"]
+evidence = ["no bundle for now", "attach rates"]
+answer = "No, not for now. Greta wants a quarter of real attach rates first, and a bundle can be discussed again then."
+category = ["decisions"]
+
+[[answerable]]
+id = "q19g"
+question = "When do the add-ons go on sale?"
+scope = { folder = "Product/Packaging" }
+must_cite = [["m19-116", "m19-129"]]
+evidence = ["fifth of January"]
+answer = "On Tuesday the fifth of January."
+category = ["scoped", "dates"]
+
+[[answerable]]
+id = "q19h"
+question = "What did Jun get wrong about photo storage usage?"
+must_cite = ["m19-078"]
+evidence = ["per quarter, not per year", "twelve gigabytes a year"]
+answer = "He read the wrong column: the three gigabytes was per quarter, not per year, so the median technician actually stores about twelve gigabytes a year."
+category = ["numbers", "attribution", "near_duplicate"]
+
+# --- long meetings: data platform migration plan (m20) ---------------------
+
+[[answerable]]
+id = "q20a"
+question = "Which warehouse did we pick for the data platform migration?"
+must_cite = ["m20-093"]
+evidence = ["Fernhollow, not Quarrystone"]
+answer = "Fernhollow, not Quarrystone: Quarrystone keeps backups outside the US and only has row-level access on its enterprise plan."
+category = ["names", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q20b"
+question = "When are we cutting over to the new data warehouse?"
+must_cite = ["m20-034"]
+evidence = ["eleventh of January"]
+answer = "Monday the eleventh of January, after year-end close, instead of the thirtieth of November."
+category = ["dates", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q20c"
+question = "How much will Fernhollow cost us a year?"
+must_cite = ["m20-097"]
+evidence = ["forty three thousand dollars a year"]
+answer = "Forty three thousand dollars a year on a two-year commitment, instead of the fifty two thousand list price."
+category = ["numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q20d"
+question = "Who objected to cutting over at the end of November?"
+must_cite = ["m20-028"]
+evidence = ["year-end close"]
+answer = "Greta: year-end close runs through December and every close report reads from Brindle, so she wouldn't switch in the middle of it."
+category = ["names", "attribution", "dates"]
+
+[[answerable]]
+id = "q20e"
+question = "How many years of job history are we moving to the new warehouse?"
+must_cite = ["m20-055"]
+evidence = ["three years goes into the new warehouse"]
+answer = "Three years; anything older goes to archive files in cold storage."
+category = ["numbers", "decisions"]
+
+[[answerable]]
+id = "q20f"
+question = "How often will the dispatcher dashboard data refresh after the migration?"
+must_cite = ["m20-067"]
+evidence = ["every fifteen minutes"]
+answer = "Every fifteen minutes for the dashboard tables; the finance tables stay nightly."
+category = ["numbers", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q20g"
+question = "Who is rebuilding the finance reports, and by when?"
+scope = { meeting = "m20" }
+must_cite = ["m20-123"]
+evidence = ["twelve finance reports", "eighteenth of December"]
+answer = "Greta is rebuilding the twelve finance reports herself, by Friday the eighteenth of December."
+category = ["scoped", "names", "action_items"]
+
+[[answerable]]
+id = "q20h"
+question = "When does Brindle get switched off?"
+must_cite = ["m20-107"]
+evidence = ["twenty ninth of January"]
+answer = "Friday the twenty ninth of January, ahead of the renewal on the fifteenth of February."
+category = ["dates", "names"]
+
+# --- long meetings: partner channel review (m21) ---------------------------
+
+[[answerable]]
+id = "q21a"
+question = "How many deals did partners bring in last quarter?"
+must_cite = ["m21-032"]
+evidence = ["nineteen deals"]
+answer = "Nineteen, worth a hundred and sixty eight thousand dollars; Dagny first reported twenty three, but four were also logged as direct deals."
+category = ["numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q21b"
+question = "What referral fee did we agree for partners?"
+must_cite = ["m21-056"]
+evidence = ["twelve percent of first-year contract value"]
+answer = "Twelve percent of first-year contract value, paid once the customer has paid its first invoice, for deals registered from the first of January."
+category = ["numbers", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q21c"
+question = "What margin is Northgable getting as a reseller?"
+must_cite = ["m21-085"]
+evidence = ["twenty percent reseller margin", "five deals a year"]
+answer = "Twenty percent, with a minimum of five deals a year, not the thirty they asked for."
+category = ["numbers", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q21d"
+question = "Who pushed back on raising the referral fee to fifteen percent?"
+must_cite = ["m21-045"]
+evidence = ["push back on fifteen percent"]
+answer = "Sam: partner deals already cost more to close, because we still do the demo, the security questions and the onboarding."
+category = ["names", "attribution"]
+
+[[answerable]]
+id = "q21e"
+question = "How big is the partner co-marketing fund for Q4?"
+must_cite = ["m21-117"]
+evidence = ["ten thousand dollars", "branch open days"]
+answer = "Ten thousand dollars, not the eighteen thousand Ilse asked for; six thousand goes to Tillerman's branch open days and four thousand to the Northgable breakfasts."
+category = ["numbers", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q21f"
+question = "Who is sending Northgable the new contract, and when?"
+scope = { folder = "Partners" }
+must_cite = ["m21-096"]
+evidence = ["twenty-second of October"]
+answer = "Dagny, by Thursday the twenty-second of October."
+category = ["scoped", "names", "action_items", "dates"]
+
+[[answerable]]
+id = "q21g"
+question = "Which partner brought in the most deals in Q3?"
+must_cite = ["m21-035"]
+evidence = ["eleven of the nineteen"]
+answer = "Tillerman Supply, with eleven of the nineteen deals."
+category = ["names", "numbers"]
+
+[[answerable]]
+id = "q21h"
+question = "What partner tiers are we going with?"
+must_cite = ["m21-069"]
+evidence = ["two tracks: Referral and Reseller"]
+answer = "Two tracks, Referral and Reseller, instead of the Bronze, Silver and Gold tiers Dagny proposed."
+category = ["names", "decisions", "near_duplicate"]
+
+# --- distractors (m22-m29): hard negatives with answers of their own --------
+# Look-alike topics and entities (an earlier pricing brainstorm, Harrowmoor
+# not Harrowgate, a failover drill not an outage, another product's launch
+# budget). None answers an earlier gold question.
+
+[[answerable]]
+id = "qd01"
+question = "Which tier names did Marcus suggest in last year's pricing brainstorm?"
+must_cite = ["m22-16"]
+evidence = ["Crew, Depot and Network"]
+answer = "Crew, Depot and Network, though no names were chosen in that meeting."
+category = ["names", "distractor"]
+
+[[answerable]]
+id = "qd02"
+question = "Who wanted to charge per completed job?"
+must_cite = ["m22-05"]
+evidence = ["per completed job"]
+answer = "Greta, as a wild option in last year's pricing brainstorm; nothing was decided."
+category = ["names", "attribution", "distractor"]
+
+[[answerable]]
+id = "qd03"
+question = "When do Harrowmoor's technicians go live?"
+must_cite = ["m23-21"]
+evidence = ["second of November"]
+answer = "On Monday the second of November."
+category = ["dates", "distractor"]
+
+[[answerable]]
+id = "qd04"
+question = "How many technician seats did Harrowmoor Logistics sign for?"
+must_cite = ["m23-03"]
+evidence = ["thirty five technician seats"]
+answer = "Thirty five, on a one year agreement."
+category = ["numbers", "distractor"]
+
+[[answerable]]
+id = "qd05"
+question = "How long did the database replica take to take over in the failover drill?"
+must_cite = ["m24-05"]
+evidence = ["ninety seconds"]
+answer = "Ninety seconds from the primary stopping to the replica accepting writes."
+category = ["numbers", "distractor"]
+
+[[answerable]]
+id = "qd06"
+question = "What's the fix for the scheduler workers holding on to the old database address?"
+must_cite = ["m24-18"]
+evidence = ["thirty seconds"]
+answer = "Teodor is cutting the caching from five minutes to thirty seconds and making the workers retry the new primary straight away, by the fifteenth of October."
+category = ["names", "action_items", "distractor"]
+
+[[answerable]]
+id = "qd07"
+question = "When Blue Tansy first rolled out Quillmark, which region went live first?"
+must_cite = ["m25-16"]
+evidence = ["coast region goes live", "tenth of November"]
+answer = "The coast region, on Monday the tenth of November; the valley followed in January and the uplands last."
+category = ["dates", "distractor"]
+
+[[answerable]]
+id = "qd08"
+question = "What patient data does Blue Tansy keep out of Quillmark?"
+must_cite = ["m25-08"]
+evidence = ["no diagnoses and no clinical notes"]
+answer = "No diagnoses and no clinical notes; only addresses and visit times go into Quillmark."
+category = ["decisions", "distractor"]
+
+[[answerable]]
+id = "qd09"
+question = "How does Fieldsparrow handle offline edit conflicts?"
+must_cite = ["m26-10"]
+evidence = ["last write wins, silently"]
+answer = "It doesn't show conflicts at all: last write wins, silently, so whoever syncs last overwrites the other person's changes."
+category = ["names", "distractor", "near_duplicate"]
+
+[[answerable]]
+id = "qd10"
+question = "Which competitor makes technicians choose between versions after an offline conflict?"
+must_cite = ["m26-07"]
+evidence = ["merge screen"]
+answer = "Brackenrow, with a merge screen that puts both versions side by side, field by field."
+category = ["names", "distractor"]
+
+[[answerable]]
+id = "qd11"
+question = "What does Tidepost cost per agent?"
+must_cite = ["m27-21"]
+evidence = ["sixty five dollars per agent per month"]
+answer = "Sixty five dollars per agent per month, on the plan with escalation rules and the help center."
+category = ["numbers", "distractor"]
+
+[[answerable]]
+id = "qd12"
+question = "When does Merrow Vale want their security questionnaire back?"
+must_cite = ["m28-25"]
+evidence = ["end of November"]
+answer = "By the end of November, because their insurer renews in January."
+category = ["dates", "distractor"]
+
+[[answerable]]
+id = "qd13"
+question = "How much did Ines ask for to market Doorstep?"
+must_cite = ["m29-03"]
+evidence = ["four thousand five hundred dollars"]
+answer = "Four thousand five hundred dollars for the first month of Doorstep launch spend."
+category = ["numbers", "distractor", "near_duplicate"]
+
+[[answerable]]
+id = "qd14"
+question = "Is the Doorstep marketing money coming out of the Atlas launch budget?"
+must_cite = ["m29-05", "m29-19"]
+evidence = ["on top", "separate line"]
+answer = "No. It's on top of the Atlas money, as a separate line with its own monthly spend report."
+category = ["decisions", "distractor", "near_duplicate"]
+
+# --- not discussed (second corpus) ----------------------------------------
+
+[[unanswerable]]
+id = "u17"
+kind = "near_miss"
+question = "How much does Fernhollow charge to help with the migration itself?"
+why = "Fernhollow's yearly price (list and on a two-year commitment) is discussed; no migration services or setup fee ever is."
+
+[[unanswerable]]
+id = "u18"
+kind = "near_miss"
+question = "What discount did Harrowmoor Logistics get?"
+why = "Harrowmoor's kickoff covers seats, depots, training and go-live; no price or discount is mentioned (discounts are discussed only for Harrowgate)."
+
+[[unanswerable]]
+id = "u19"
+kind = "near_miss"
+question = "What attach rate did Greta's model predict for Stockroom?"
+why = "Greta will update the revenue model with attach rate assumptions; no result is ever reported."
+
+[[unanswerable]]
+id = "u20"
+kind = "near_miss"
+question = "How much revenue did Northgable bring in last quarter?"
+why = "Partner totals and Tillerman's deal count are given; nothing is broken out for Northgable on its own."
+
+[[unanswerable]]
+id = "u21"
+kind = "near_miss"
+question = "When is the production failover drill?"
+why = "A production drill is planned, but deliberately left without a date until the runbook and caching fix are done."
+
+[[unanswerable]]
+id = "u22"
+kind = "off_corpus"
+question = "What's our parental leave policy?"
+why = "Parental leave never comes up."
+
+[[unanswerable]]
+id = "u23"
+kind = "off_corpus"
+question = "Which law firm handles our trademark filings?"
+why = "No trademarks or outside law firm are discussed anywhere."
+
+[[unanswerable]]
+id = "u24"
+kind = "near_miss"
+question = "How many clinics does Blue Tansy have in its coast region?"
+why = "The coast region goes live first in the Blue Tansy kickoff, but no clinic (or seat) counts are given."
+
+[[unanswerable]]
+id = "u25"
+kind = "near_miss"
+question = "How much does Brackenrow charge per technician?"
+why = "Brackenrow's offline behaviour and home screen are compared, and offline is said to come on every plan, but no price is ever given."
+
+[[unanswerable]]
+id = "u26"
+kind = "off_corpus"
+question = "When is the company holiday party?"
+why = "No party or social event is discussed."
+
+# --- Keep local through a parent folder flag (m17, People/Reviews) --------
+
+[[answerable]]
+id = "q48"
+question = "What raise did I put Anouk forward for?"
+must_cite = ["m17-08"]
+evidence = ["nine percent raise"]
+answer = "A nine percent raise, starting the first of January."
+category = ["keep_local", "numbers"]
+keep_local = true
+
+[[unanswerable]]
+id = "u27"
+kind = "near_miss"
+question = "What raise is Anouk getting?"
+why = "Discussed only in m17, which is Keep local through its parent folder flag (People/Reviews), so a shareable view must find nothing; pay elsewhere is only m06's support lead band."
+visibility = "shareable"

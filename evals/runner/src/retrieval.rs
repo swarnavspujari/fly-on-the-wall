@@ -6,13 +6,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::{bail, ensure, Context as _, Result};
+use anyhow::{ensure, Context as _, Result};
 use fly_context::{call, Context, QueryVector, SearchPassagesArgs, Visibility};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::corpus::{Corpus, Db};
-use crate::embed;
+use crate::embedder::Embedder;
 use crate::report::SuiteResult;
 
 pub const K: usize = 8;
@@ -77,6 +77,25 @@ pub struct Unanswerable {
     /// "shareable": only the shareable view must find nothing.
     #[serde(default)]
     pub visibility: Option<String>,
+    /// Off-corpus (the topic never comes up) or near-miss (the topic does,
+    /// the asked-for fact doesn't): reported separately.
+    pub kind: UnanswerableKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnanswerableKind {
+    OffCorpus,
+    NearMiss,
+}
+
+impl UnanswerableKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UnanswerableKind::OffCorpus => "off_corpus",
+            UnanswerableKind::NearMiss => "near_miss",
+        }
+    }
 }
 
 impl Unanswerable {
@@ -259,14 +278,22 @@ pub struct LeakNeedles {
 }
 
 impl LeakNeedles {
+    /// Needles given directly (scanner tests).
+    pub fn of(needles: Vec<String>) -> Self {
+        Self {
+            needles: needles.into_iter().map(|n| n.to_lowercase()).collect(),
+        }
+    }
+
     pub fn new(corpus: &Corpus, db: &Db) -> Self {
         let mut needles = corpus.canaries();
         for m in corpus.keep_local_meetings() {
+            needles.push(m.title.to_lowercase());
             needles.push(db.meeting_ids[&m.id].to_lowercase());
             needles.push(db.note_ids[&m.id].to_lowercase());
             for (id, ..) in &m.segments {
-                needles.push(format!("\"{}\"", id.to_lowercase()));
-                needles.push(format!("[seg:{}]", id.to_lowercase()));
+                // Database segment ids are UUIDs: unique anywhere in text.
+                needles.push(db.seg_ids[id].to_lowercase());
             }
         }
         Self { needles }
@@ -294,22 +321,30 @@ impl LeakNeedles {
     }
 }
 
-struct Scored {
-    recall: f64,
-    rr: f64,
-    covered: bool,
-    rank: Option<usize>,
+pub struct Scored {
+    pub recall: f64,
+    pub rr: f64,
+    pub covered: bool,
+    pub rank: Option<usize>,
 }
 
 /// Gating score: only transcript segments count (note passages, which carry
 /// no segment ids, never satisfy a must-cite requirement but still take one
 /// of the 8 slots; crowding citable passages out is a real miss).
-fn score(q: &Answerable, passages: &[fly_context::Passage]) -> Scored {
+/// Database segment id → fixture segment id.
+pub type IdMap<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// A passage's segments as fixture ids.
+pub fn passage_segments(ids: IdMap<'_>, p: &fly_context::Passage) -> BTreeSet<String> {
+    p.segments.iter().filter_map(|s| ids(&s.id)).collect()
+}
+
+pub fn score(ids: IdMap<'_>, q: &Answerable, passages: &[fly_context::Passage]) -> Scored {
     let top = &passages[..passages.len().min(K)];
     let mut all = BTreeSet::new();
     let mut rank = None;
     for (i, p) in top.iter().enumerate() {
-        let segs: BTreeSet<String> = p.segments.iter().map(|s| s.id.clone()).collect();
+        let segs = passage_segments(ids, p);
         if rank.is_none() && q.must_cite.iter().any(|r| r.met_by(&segs)) {
             rank = Some(i + 1);
         }
@@ -329,6 +364,7 @@ fn score(q: &Answerable, passages: &[fly_context::Passage]) -> Scored {
 /// notes are evidence an answer could use, though not citable lines).
 /// `req_meetings[i]`: database ids of the meetings requirement `i` lives in.
 fn score_evidence(
+    ids: IdMap<'_>,
     q: &Answerable,
     passages: &[fly_context::Passage],
     req_meetings: &[BTreeSet<String>],
@@ -337,7 +373,7 @@ fn score_evidence(
     let mut met_reqs = vec![false; q.must_cite.len()];
     let mut rank = None;
     for (i, p) in top.iter().enumerate() {
-        let segs: BTreeSet<String> = p.segments.iter().map(|s| s.id.clone()).collect();
+        let segs = passage_segments(ids, p);
         let note_meeting = (p.source == fly_context::PassageSource::Note)
             .then_some(p.meeting_id.as_ref())
             .flatten();
@@ -366,20 +402,53 @@ fn mean(v: &[f64]) -> f64 {
     }
 }
 
-pub fn run(evals_dir: &Path, embedder: &str) -> SuiteResult {
-    match run_inner(evals_dir, embedder) {
+/// The retrieval suite under `emb`, reported as suite `name`
+/// (`retrieval` for the CI embedder, `retrieval_real` for the app's).
+pub fn run(evals_dir: &Path, emb: &Embedder, name: &str) -> SuiteResult {
+    match run_inner(evals_dir, emb, name) {
         Ok(r) => r,
-        Err(e) => SuiteResult::failed("retrieval", e),
+        Err(e) => SuiteResult::failed(name, e),
     }
 }
 
-fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
-    if embedder != embed::MODEL {
-        bail!(
-            "unknown embedder {embedder:?} (this runner provides {})",
-            embed::MODEL
-        );
+/// Area under the ROC curve: the chance a random answerable question's
+/// top-1 cosine beats a random unanswerable one's (ties count half).
+fn auroc(pos: &[f64], neg: &[f64]) -> f64 {
+    if pos.is_empty() || neg.is_empty() {
+        return 0.0;
     }
+    let mut wins = 0.0;
+    for p in pos {
+        for n in neg {
+            wins += if p > n {
+                1.0
+            } else if p == n {
+                0.5
+            } else {
+                0.0
+            };
+        }
+    }
+    wins / (pos.len() * neg.len()) as f64
+}
+
+/// The best cosine any chunk scores for `q` (the score floor's input; the
+/// fused passage score is rank-only and can't serve as one).
+fn top1_cosine(db: &Db, emb: &Embedder, q: &str, shareable_only: bool) -> Result<f64> {
+    let v = emb.query(q)?;
+    let filter = fly_storage::SearchFilter {
+        folder_id: None,
+        since: None,
+        until: None,
+        limit: 1,
+        offset: 0,
+        exclude_keep_local: shareable_only,
+    };
+    let hits = db.storage.vector_search(&v, emb.model(), &filter, 1)?;
+    Ok(hits.first().map_or(0.0, |h| h.score as f64))
+}
+
+fn run_inner(evals_dir: &Path, emb: &Embedder, name: &str) -> Result<SuiteResult> {
     let corpus = Corpus::load(&evals_dir.join("fixtures"))?;
     let suite = evals_dir.join("suites").join("retrieval");
     let gold = GoldSet::load(&suite.join("questions.toml"))?;
@@ -388,21 +457,25 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         suite.join("keep_local_probes.toml"),
     )?)
     .context("parse keep_local_probes.toml")?;
-    let db = Db::build(&corpus, true)?;
+    let db = Db::build(&corpus, false)?;
+    let indexed = emb.index(&db.storage)?;
+    let ids: IdMap<'_> = &|s| db.fixture_seg(s).map(str::to_string);
     let all = Context::new(&db.storage, Visibility::All);
     let shareable = Context::new(&db.storage, Visibility::ShareableOnly);
 
-    let mut res = SuiteResult::new("retrieval");
+    let mut res = SuiteResult::new(name);
     let (mut recalls, mut rrs, mut covered) = (Vec::new(), Vec::new(), Vec::new());
     let (mut kw_recalls, mut kw_rrs) = (Vec::new(), Vec::new());
+    let (mut kw_unscoped, mut fts_empty) = (Vec::new(), Vec::new());
+    let mut answerable_top1 = Vec::new();
     let (mut ev_recalls, mut ev_rrs) = (Vec::new(), Vec::new());
     let mut by_category: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut rows = Vec::new();
     for q in &gold.answerable {
-        let qv_vec = embed::embed(&q.question);
+        let qv_vec = emb.query(&q.question)?;
         let qv = QueryVector {
             vector: &qv_vec,
-            model: embed::MODEL,
+            model: emb.model(),
         };
         let args = scoped_args(&db, &q.question, q.scope.as_ref(), K);
         let hybrid = all
@@ -411,8 +484,8 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         let keyword = all
             .search_passages(&args, None)
             .with_context(|| format!("{}: keyword search", q.id))?;
-        let s = score(q, &hybrid.passages);
-        let kw = score(q, &keyword.passages);
+        let s = score(ids, q, &hybrid.passages);
+        let kw = score(ids, q, &keyword.passages);
         let req_meetings: Vec<BTreeSet<String>> = q
             .must_cite
             .iter()
@@ -424,7 +497,7 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
                     .collect()
             })
             .collect();
-        let ev = score_evidence(q, &hybrid.passages, &req_meetings);
+        let ev = score_evidence(ids, q, &hybrid.passages, &req_meetings);
         ev_recalls.push(ev.recall);
         ev_rrs.push(ev.rr);
         recalls.push(s.recall);
@@ -432,6 +505,16 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         covered.push(if s.covered { 1.0 } else { 0.0 });
         kw_recalls.push(kw.recall);
         kw_rrs.push(kw.rr);
+        if q.scope.is_none() {
+            kw_unscoped.push(kw.recall);
+            fts_empty.push(if keyword.passages.is_empty() {
+                1.0
+            } else {
+                0.0
+            });
+        }
+        let top1 = top1_cosine(&db, emb, &q.question, false)?;
+        answerable_top1.push(top1);
         for c in &q.category {
             by_category.entry(c.clone()).or_default().push(s.recall);
         }
@@ -441,27 +524,38 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
             "rank": s.rank,
             "covered": s.covered,
             "keyword_only_rank": kw.rank,
+            "top1_cosine": top1,
             "evidence_rank": ev.rank,
             "passages": hybrid.passages.len(),
         }));
     }
+    // Unanswerables: how well a top-1 cosine floor would separate them
+    // from answerable questions (spec §4.2a #1), per kind.
     let mut unanswerable_rows = Vec::new();
-    let mut unanswerable_with_passages = 0usize;
+    let mut by_kind: BTreeMap<UnanswerableKind, Vec<f64>> = BTreeMap::new();
     for u in &gold.unanswerable {
-        let ctx = if u.shareable_only() { &shareable } else { &all };
-        let v = embed::embed(&u.question);
-        let r = ctx.search_passages(
-            &scoped_args(&db, &u.question, None, K),
-            Some(QueryVector {
-                vector: &v,
-                model: embed::MODEL,
-            }),
-        )?;
-        if !r.passages.is_empty() {
-            unanswerable_with_passages += 1;
-        }
-        unanswerable_rows.push(json!({ "id": u.id, "passages": r.passages.len() }));
+        let top1 = top1_cosine(&db, emb, &u.question, u.shareable_only())?;
+        by_kind.entry(u.kind).or_default().push(top1);
+        unanswerable_rows.push(json!({ "id": u.id, "kind": u.kind.as_str(), "top1_cosine": top1 }));
     }
+    let all_unanswerable: Vec<f64> = by_kind.values().flatten().copied().collect();
+    let sweep: Vec<Value> = (2..=14)
+        .map(|i| {
+            let floor = i as f64 * 0.05;
+            let kept = answerable_top1.iter().filter(|c| **c >= floor).count();
+            let blocked = |v: &[f64]| v.iter().filter(|c| **c < floor).count();
+            let mut row = json!({
+                "floor": (floor * 100.0).round() / 100.0,
+                "answerable_kept": kept,
+                "answerable": answerable_top1.len(),
+            });
+            for (k, v) in &by_kind {
+                row[format!("{}_blocked", k.as_str())] = json!(blocked(v));
+                row[k.as_str()] = json!(v.len());
+            }
+            row
+        })
+        .collect();
 
     // Keep-local sweep (spec §4.2a #13).
     let needles = LeakNeedles::new(&corpus, &db);
@@ -485,10 +579,10 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         )
         .collect();
     for (id, question, scope) in questions {
-        let v = embed::embed(question);
+        let v = emb.query(question)?;
         let qv = QueryVector {
             vector: &v,
-            model: embed::MODEL,
+            model: emb.model(),
         };
         for (label, vector) in [("hybrid", Some(qv)), ("keyword", None)] {
             // Wide limit: a leak anywhere in the candidate list counts.
@@ -515,11 +609,11 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         }
         args.since = p.since.clone();
         args.until = p.until.clone();
-        let v = embed::embed(&p.query);
+        let v = emb.query(&p.query)?;
         for vector in [
             Some(QueryVector {
                 vector: &v,
-                model: embed::MODEL,
+                model: emb.model(),
             }),
             None,
         ] {
@@ -532,10 +626,10 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
     }
     for (i, p) in probes.tool.iter().enumerate() {
         let args = db.substitute(&serde_json::to_value(&p.args)?)?;
-        let v = embed::embed(args.get("query").and_then(Value::as_str).unwrap_or(""));
+        let v = emb.query(args.get("query").and_then(Value::as_str).unwrap_or("x"))?;
         let qv = (p.name == "search_passages").then_some(QueryVector {
             vector: &v,
-            model: embed::MODEL,
+            model: emb.model(),
         });
         let out = match call(&shareable, &p.name, &args, qv) {
             Ok(o) => format!("{}\n{}", o.json, o.text),
@@ -584,10 +678,24 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         .insert("evidence_recall_at_8".into(), mean(&ev_recalls));
     res.metrics
         .insert("evidence_mrr_at_8".into(), mean(&ev_rrs));
+    // Report-only: the keyword channel on unscoped questions (where the
+    // FTS candidates come from) and how often it finds nothing at all.
     res.metrics.insert(
-        "unanswerable_returning_passages".into(),
-        unanswerable_with_passages as f64,
+        "keyword_only_recall_at_8_unscoped".into(),
+        mean(&kw_unscoped),
     );
+    res.metrics
+        .insert("fts_empty_rate".into(), mean(&fts_empty));
+    res.metrics.insert(
+        "cosine_floor_auroc".into(),
+        auroc(&answerable_top1, &all_unanswerable),
+    );
+    for (k, v) in &by_kind {
+        res.metrics.insert(
+            format!("cosine_floor_auroc_{}", k.as_str()),
+            auroc(&answerable_top1, v),
+        );
+    }
     res.info.insert(
         "recall_by_category".into(),
         json!(by_category
@@ -601,13 +709,20 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
     res.info.insert("questions".into(), json!(rows));
     res.info
         .insert("unanswerable".into(), json!(unanswerable_rows));
+    res.info.insert("cosine_floor_sweep".into(), json!(sweep));
     res.info.insert(
         "keep_local_sweep".into(),
         json!({ "checks": checks, "leaks": leaks, "probes_reaching_keep_local_under_all": reachable }),
     );
     res.info.insert(
         "config".into(),
-        json!({ "k": K, "embedder": embedder, "meetings": corpus.meetings.len(), "segments": corpus.segments().count() }),
+        json!({
+            "k": K,
+            "embedder": emb.describe(),
+            "chunks_embedded": indexed,
+            "meetings": corpus.meetings.len(),
+            "segments": corpus.segments().count(),
+        }),
     );
     Ok(res)
 }
@@ -662,6 +777,7 @@ mod tests {
             "#,
         )
         .unwrap();
+        let same: IdMap<'_> = &|s| Some(s.to_string());
         let passage = |ids: &[&str]| fly_context::Passage {
             source: fly_context::PassageSource::Transcript,
             meeting_id: None,
@@ -685,14 +801,18 @@ mod tests {
             score: 0.0,
             matched_by: vec![],
         };
-        let s = score(&q, &[passage(&["z"]), passage(&["c"]), passage(&["a"])]);
+        let s = score(
+            same,
+            &q,
+            &[passage(&["z"]), passage(&["c"]), passage(&["a"])],
+        );
         assert_eq!((s.recall, s.rank, s.covered), (1.0, Some(2), true));
         assert_eq!(s.rr, 0.5);
-        let s = score(&q, &[passage(&["a"])]);
+        let s = score(same, &q, &[passage(&["a"])]);
         assert_eq!((s.recall, s.rank, s.covered), (0.5, Some(1), false));
         let mut many: Vec<_> = (0..K).map(|_| passage(&["z"])).collect();
         many.push(passage(&["a"]));
-        let s = score(&q, &many);
+        let s = score(same, &q, &many);
         assert_eq!((s.recall, s.rank), (0.0, None), "only the top 8 count");
 
         // Evidence score: a note passage of a must-cite meeting is a hit;
@@ -704,9 +824,9 @@ mod tests {
             ["M".to_string()].into_iter().collect::<BTreeSet<_>>(),
             BTreeSet::new(),
         ];
-        let gate = score(&q, &[note.clone(), passage(&["b"])]);
+        let gate = score(same, &q, &[note.clone(), passage(&["b"])]);
         assert_eq!((gate.recall, gate.rank), (0.5, Some(2)));
-        let ev = score_evidence(&q, &[note, passage(&["b"])], &reqs);
+        let ev = score_evidence(same, &q, &[note, passage(&["b"])], &reqs);
         assert_eq!((ev.recall, ev.rank, ev.covered), (1.0, Some(1), true));
     }
 }

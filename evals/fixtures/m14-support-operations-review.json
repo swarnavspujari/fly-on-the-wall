@@ -125,5 +125,10 @@
     { "kind": "action_item", "text": "Write the urgent definition into the escalation doc and send it to Jun's team by Monday", "owner": "Felix Brandt", "segments": ["m14-088", "m14-089"] },
     { "kind": "action_item", "text": "Publish the weekend rotation schedule by Friday the 9th", "owner": "Felix Brandt", "segments": ["m14-091", "m14-098"] },
     { "kind": "action_item", "text": "Own the Tidepost cutover checklist, including a rollback plan", "owner": "Lotte Brink", "segments": ["m14-100"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Volume and response times:** September was 1,080 tickets once merged duplicates and spam are removed (first reported as 1,210), against about 920 for a clean August, so growth is closer to 17%. Median first response was 4.2 hours across all hours and 2.6 hours in business hours only.", "sources": ["m14-004", "m14-008", "m14-063", "m14-071", "m14-073", "m14-075"] },
+    { "markdown": "**Decisions:** The Q4 target is a 90-minute median first response in business hours, reported weekly. Urgent means a customer can't dispatch jobs, technicians can't log in at all, or invoices are failing for every customer; urgent tickets escalate to engineering after two hours without a fix, and everything else stays at three days. Tidepost goes live on Monday, November 16, with Burrowdesk read-only for a week after.", "sources": ["m14-050", "m14-051", "m14-067", "m14-068", "m14-083", "m14-084"] },
+    { "markdown": "**Owners:** Callum archives every macro unused for 90 days and rewrites the top twenty by Friday, October 23. Felix sends the urgent definition to Jun's team by Monday and publishes the weekend rotation (starting Saturday, October 17) by Friday the 9th. Lotte owns the cutover checklist, including a rollback plan, and fixes the deck.", "sources": ["m14-058", "m14-077", "m14-089", "m14-091", "m14-098", "m14-100"] }
   ]
 }

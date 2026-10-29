@@ -126,5 +126,11 @@
     { "kind": "action_item", "text": "Set up a test audit-log feed to Calder's SIEM endpoint by Friday October 23", "owner": "Odette Nwosu", "segments": ["m15-071"] },
     { "kind": "action_item", "text": "Have counsel draft the residency addendum alongside the data processing addendum", "owner": "Elena Duarte", "segments": ["m15-088"] },
     { "kind": "question", "text": "Can location history be shortened to thirty days? Beatrix is checking with the union", "segments": ["m15-022", "m15-023", "m15-101"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Incident notification:** An initial notice within 48 hours of confirming an incident, then the list of affected customer records as soon as it's available. The 72 hours first quoted came from an old template of the master agreement.", "sources": ["m15-039", "m15-079", "m15-080", "m15-083"] },
+    { "markdown": "**Residency and pen test:** No dedicated instance: Calder stays on the shared environment with a residency addendum keeping production data and backups in the US, drafted by counsel alongside the data processing addendum. This year's pen test was by Larkspire Assurance, finished in May; Ormsby Kade did the test two years ago. The executive summary is shared under NDA.", "sources": ["m15-047", "m15-073", "m15-087", "m15-088"] },
+    { "markdown": "**Next steps:** Elena sends Beatrix the revised questionnaire, copying Graham, by Wednesday, October 14. Odette sets up a test audit-log feed to Calder's endpoint by Friday, October 23, and sends the Larkspire summary once the NDA is countersigned. Beatrix checks thirty-day location history with the union rep. Commission audit fieldwork now starts on December 8.", "sources": ["m15-071", "m15-075", "m15-094", "m15-096", "m15-097", "m15-101"] },
+    { "markdown": "Notification window is 48h from confirmation, not 72 (that was the old template)." }
   ]
 }

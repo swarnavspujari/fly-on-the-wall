@@ -28,5 +28,18 @@
   "items": [
     { "kind": "action_item", "text": "Propose a $15,000 retention bonus for Felix to Sam; answer Felix by Friday", "owner": "You", "segments": ["m10-07", "m10-12"] },
     { "kind": "question", "text": "Kestrel: split support into two regional teams, with Felix leading both", "segments": ["m10-09", "m10-10"] }
-  ]
+  ],
+  "enhanced": [
+    { "markdown": "**Brightpath offer:** Felix has an offer from Brightpath to run their support team, a step up in title. To stay, he wants a clearer path to a director role and some recognition for this year.", "sources": ["m10-03", "m10-05"] },
+    { "markdown": "**Retention bonus:** You can't promise a title today, but you'll propose a retention bonus of $15,000, paid in two halves. You take it to Sam this week and come back to Felix by Friday.", "sources": ["m10-06", "m10-07", "m10-12"] },
+    { "markdown": "**Kestrel:** Support would split into two regional teams, and if it goes ahead Felix would lead both regions, which he said is exactly the role he wants. Kestrel stays confidential until November.", "sources": ["m10-09", "m10-10", "m10-11"] },
+    { "markdown": "Don't mention Kestrel outside this 1:1 before November." }
+  ],
+  "cleaned": {
+    "m10-02": "Sure, I've been thinking about it a lot.",
+    "m10-03": "Brightpath offered me a role running their support team, a step up in title.",
+    "m10-05": "A clearer path to a director role, and some recognition for this year.",
+    "m10-07": "I'll propose a retention bonus of fifteen thousand, paid in two halves.",
+    "m10-09": "That's where Kestrel comes in: we're planning to split support into two regional teams."
+  }
 }

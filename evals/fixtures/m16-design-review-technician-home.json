@@ -121,5 +121,10 @@
     { "kind": "action_item", "text": "Run the staged rollout: internal crews Wednesday October 14, ten percent of technicians October 21, everyone November 11 if the crash rate holds", "owner": "Marcus Webb", "segments": ["m16-083", "m16-085"] },
     { "kind": "action_item", "text": "Finalise the designs with the new icons and dark mode screens by Friday", "owner": "Wren Castellano", "segments": ["m16-088"] },
     { "kind": "action_item", "text": "Book a screen reader check before the ten percent stage", "owner": "Marcus Webb", "segments": ["m16-090"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Home screen:** It opens on the list with the next job pinned at the top; the map moves to its own tab, one tap away, and the pinned card gets a static map thumbnail. In round two (14 technicians on their own phones), 13 of 14 found their next job unaided on the list against 8 of 14 on the map, with a median of about 9 seconds versus 22.", "sources": ["m16-044", "m16-047", "m16-048", "m16-057", "m16-059"] },
+    { "markdown": "**Navigation, icons, dark mode:** Four labelled bottom tabs: Today, Map, Messages and More. The technician app standardises on Marlpit icons instead of Pennyroyal. Dark mode ships in this release, following the system setting with an override under More; map tiles are excluded for now.", "sources": ["m16-026", "m16-027", "m16-068", "m16-073", "m16-075"] },
+    { "markdown": "**Rollout:** Internal crews on Wednesday, October 14; 10% of technicians on October 21; everyone on November 11 if the crash rate is no worse than the current home screen over the full week. Wren finalises the designs by Friday, and Marcus books a screen reader check before the 10% stage.", "sources": ["m16-083", "m16-085", "m16-088", "m16-090"] }
   ]
 }
