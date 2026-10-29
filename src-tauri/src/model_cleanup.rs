@@ -1515,6 +1515,7 @@ mod tests {
         let root = "models/diarize/sherpa-onnx-pyannote-segmentation-3-0";
         std::fs::write(d.join(root).join("LICENSE"), b"x").unwrap();
         let probe = d.join(root).join("model.onnx");
+        assert!(probe.is_file());
 
         #[cfg(windows)]
         {
@@ -1533,7 +1534,7 @@ mod tests {
         }
 
         assert_eq!(remove_contained(d, root).unwrap(), 11);
-        assert!(!d.join(root).exists());
+        assert!(!probe.exists() && !d.join(root).exists());
         let left: Vec<_> = std::fs::read_dir(d.join("models/diarize"))
             .unwrap()
             .flatten()
