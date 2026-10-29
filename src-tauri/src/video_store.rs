@@ -84,8 +84,28 @@ pub struct VideoState {
     status: Mutex<VideoJobStatus>,
     running: AtomicBool,
     cancel: AtomicBool,
+    /// The file in flight, and what deleted notes took out of this run.
+    /// One lock, so a note delete and the job's pick of its next file can't
+    /// miss each other ([`VideoState::claim`], [`VideoState::exclude`]).
+    current: Mutex<InFlight>,
+}
+
+#[derive(Default)]
+struct InFlight {
     /// The file in flight (and its meeting, for imported videos).
-    current: Mutex<Option<Candidate>>,
+    file: Option<Candidate>,
+    /// Meetings and attachment folders of notes deleted during this run.
+    gone_meetings: std::collections::HashSet<String>,
+    gone_dirs: Vec<PathBuf>,
+}
+
+impl InFlight {
+    fn excluded(&self, c: &Candidate) -> bool {
+        c.meeting_id
+            .as_ref()
+            .is_some_and(|m| self.gone_meetings.contains(m))
+            || self.gone_dirs.iter().any(|d| c.path.starts_with(d))
+    }
 }
 
 impl VideoState {
@@ -106,8 +126,33 @@ impl VideoState {
         self.current
             .lock()
             .unwrap()
+            .file
             .as_ref()
             .and_then(|c| c.meeting_id.clone())
+    }
+
+    /// Take `c` as the file in flight, unless a deleted note took it out of
+    /// this run.
+    fn claim(&self, c: &Candidate) -> bool {
+        let mut f = self.current.lock().unwrap();
+        if f.excluded(c) {
+            return false;
+        }
+        f.file = Some(c.clone());
+        true
+    }
+
+    fn release(&self) {
+        self.current.lock().unwrap().file = None;
+    }
+
+    /// Take a deleted note's files (its meetings' folders, its attachments
+    /// folder) out of this run. `true` when one of them is in flight.
+    fn exclude(&self, meeting_ids: &[String], attachments_dir: PathBuf) -> bool {
+        let mut f = self.current.lock().unwrap();
+        f.gone_meetings.extend(meeting_ids.iter().cloned());
+        f.gone_dirs.push(attachments_dir);
+        f.file.as_ref().is_some_and(|c| f.excluded(c))
     }
 }
 
@@ -122,19 +167,12 @@ pub fn status_for(state: &AppState) -> VideoJobStatus {
 /// (an imported video in one of `meeting_ids`' folders, or a screen
 /// recording in its attachments), stop the job and wait for it to let go.
 pub fn stop_for_note(state: &AppState, note_id: &str, meeting_ids: &[String], timeout: Duration) {
-    let hit = state
-        .video_store
-        .current
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|c| {
-            c.meeting_id
-                .as_ref()
-                .is_some_and(|m| meeting_ids.contains(m))
-                || c.path
-                    .starts_with(state.data_dir.join("attachments").join(note_id))
-        });
+    // From here the job never picks one of the note's files up; if one is
+    // already in flight, stop the job and wait.
+    let hit = state.video_store.exclude(
+        meeting_ids,
+        state.data_dir.join("attachments").join(note_id),
+    );
     if hit && !halt(state, timeout) {
         tracing::warn!(note_id, "video job didn't stop before the note was deleted");
     }
@@ -796,6 +834,7 @@ async fn start<R: tauri::Runtime>(
         }
     };
     vs.cancel.store(false, Ordering::SeqCst);
+    *vs.current.lock().unwrap() = InFlight::default();
     let policy = import_policy(state);
     emit(app, |s| {
         *s = VideoJobStatus {
@@ -865,12 +904,16 @@ fn run_job<R: tauri::Runtime>(app: &tauri::AppHandle<R>, kind: VideoJobKind, too
                 break;
             }
             let keep_going = || !vs.cancel.load(Ordering::SeqCst) && busy(&state).is_none();
-            *vs.current.lock().unwrap() = Some(c.clone());
+            if !vs.claim(&c) {
+                // its note was deleted during this run: nothing to do
+                emit(app, |s| s.files_done += 1);
+                break;
+            }
             let result = match kind {
                 VideoJobKind::AudioOnly => audio_only_one(&state, tools, &c, &keep_going),
                 VideoJobKind::ShrinkScreen => shrink_screen(tools, &c.path, threads, &keep_going),
             };
-            *vs.current.lock().unwrap() = None;
+            vs.release();
             match result {
                 Err(VideoError::Stopped) if !vs.cancel.load(Ordering::SeqCst) => continue,
                 Err(VideoError::Stopped) => break,
@@ -1087,6 +1130,38 @@ pub async fn estimate_screen_shrink(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note deleted mid-run: a file of it in flight is reported (the
+    /// delete then stops the job), and none of its files is picked up after.
+    #[test]
+    fn a_deleted_notes_files_are_never_picked_up_after_the_delete() {
+        let vs = VideoState::default();
+        let screen = |note: &str| Candidate {
+            path: PathBuf::from(format!("data/attachments/{note}/screen-1.mp4")),
+            meeting_id: None,
+            bytes: 1,
+        };
+        let imported = Candidate {
+            path: PathBuf::from("data/recordings/2026-01-05 Design review/call.mp4"),
+            meeting_id: Some("m1".into()),
+            bytes: 1,
+        };
+        assert!(vs.claim(&screen("n1")));
+        assert!(
+            vs.exclude(&[], PathBuf::from("data/attachments/n1")),
+            "in flight"
+        );
+        vs.release();
+        assert!(!vs.claim(&screen("n1")), "excluded after the delete");
+        assert!(vs.claim(&screen("n2")));
+        assert!(
+            !vs.exclude(&["m1".into()], PathBuf::from("data/attachments/n3")),
+            "nothing of that note in flight"
+        );
+        vs.release();
+        assert!(!vs.claim(&imported), "its meeting went with the note");
+        assert_eq!(vs.current_meeting(), None);
+    }
 
     #[test]
     fn probe_json_is_read() {
