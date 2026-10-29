@@ -36,5 +36,9 @@
     { "kind": "commitment", "text": "Blue Tansy would pilot offline mode in 40 clinics starting in January", "segments": ["m11-08", "m11-09"] },
     { "kind": "decision", "text": "Offline mode is the top priority for Q1", "segments": ["m11-14"] },
     { "kind": "action_item", "text": "Send the pilot agreement draft by next Friday", "owner": "Elena Duarte", "segments": ["m11-15"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Blue Tansy's asks:** Offline mode is the big one. Technicians at their rural clinics lose signal on site, usually for a few hours at most, and today they write on paper and type it in later. The second ask is SMS reminders for patients the day before a visit.", "sources": ["m11-02", "m11-03", "m11-04", "m11-06"] },
+    { "markdown": "**Pilot:** If offline mode lands, Blue Tansy would pilot it in 40 clinics starting in January, after their year-end freeze. You confirmed offline mode is the top priority for Q1. Elena sends the pilot agreement draft by next Friday.", "sources": ["m11-08", "m11-09", "m11-14", "m11-15"] }
   ]
 }

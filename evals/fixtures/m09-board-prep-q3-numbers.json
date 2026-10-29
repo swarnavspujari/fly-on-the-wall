@@ -35,5 +35,10 @@
     { "kind": "decision", "text": "Present a Q4 plan of six hires: four engineering, two support", "segments": ["m09-10", "m09-11"] },
     { "kind": "action_item", "text": "Finalize the board deck by Thursday morning", "owner": "Greta Holm", "segments": ["m09-13"] },
     { "kind": "action_item", "text": "Prepare one slide on the Atlas launch", "owner": "You", "segments": ["m09-14", "m09-15"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Q3 numbers:** About 11% growth over the quarter, ARR of $3.2M at the end of September, and net revenue retention of 108%, mostly from seat expansion.", "sources": ["m09-02", "m09-03", "m09-05"] },
+    { "markdown": "**Runway and hiring:** 22 months at current burn without the Q4 hires, 19 months with all six. The board gets a Q4 plan of six hires: four in engineering and two in support.", "sources": ["m09-07", "m09-10", "m09-11", "m09-12"] },
+    { "markdown": "**Prep for Friday's board meeting:** Greta finalizes the deck by Thursday morning. You prepare one Atlas launch slide: launch date, pricing and the first customers on the webinar list.", "sources": ["m09-01", "m09-13", "m09-14", "m09-15"] }
   ]
 }

@@ -33,5 +33,16 @@
     { "kind": "question", "text": "Harrowgate asks for a 15% discount on a one-year renewal", "segments": ["m04-06", "m04-08", "m04-09"] },
     { "kind": "commitment", "text": "Renewal must be approved by Harrowgate's CFO before the end of October", "segments": ["m04-12"] },
     { "kind": "action_item", "text": "Prepare one-year and two-year renewal options and present them in three weeks", "owner": "Elena Duarte", "segments": ["m04-14"] }
-  ]
+  ],
+  "enhanced": [
+    { "markdown": "**Current contract:** Harrowgate pays $42,000 a year for 60 technician seats. Colm raised the August double booking at the north depot; you explained it was the sync delay between dispatch and the technician app, fixed in the September release.", "sources": ["m04-03", "m04-04", "m04-05"] },
+    { "markdown": "**Harrowgate's ask:** 15% off to renew at the same scope on a one-year term; Routewise quoted lower and their CFO has seen that quote. A longer term is possible for price certainty and the route optimization module. Whatever is agreed needs their CFO's approval before the end of October.", "sources": ["m04-06", "m04-07", "m04-08", "m04-09", "m04-11", "m04-12"] },
+    { "markdown": "**Next step:** Elena puts together one-year and two-year options and walks Colm through them in three weeks; Colm wants the agenda ahead of time.", "sources": ["m04-14", "m04-15"] }
+  ],
+  "cleaned": {
+    "m04-02": "Happy to. I'll be direct: the renewal is coming up, and finance is asking questions.",
+    "m04-04": "Right, and the double booking problem at the north depot cost us real money in August.",
+    "m04-09": "One year, though we might do longer if the number works.",
+    "m04-14": "I'll put together two options, one-year and two-year, and we'll walk you through them in three weeks."
+  }
 }

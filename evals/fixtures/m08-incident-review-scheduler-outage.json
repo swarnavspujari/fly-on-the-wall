@@ -40,5 +40,17 @@
     { "kind": "action_item", "text": "Write the status page post and send it for review", "owner": "Hana Kobayashi", "segments": ["m08-15"] },
     { "kind": "action_item", "text": "Put the on-call schedule in the team calendar", "owner": "Jun Park", "segments": ["m08-18"] },
     { "kind": "action_item", "text": "Tell Elena that Harrowgate was affected by the outage", "owner": "You", "segments": ["m08-09"] }
-  ]
+  ],
+  "enhanced": [
+    { "markdown": "**What happened:** The scheduler stopped dispatching jobs on September 30 at 2:14 pm and was down for 47 minutes, restored at 3:01. Cause: an expired TLS certificate on the job queue, so the workers couldn't connect. About 300 jobs were delayed and none were lost.", "sources": ["m08-02", "m08-03", "m08-05", "m08-06"] },
+    { "markdown": "**Impact:** Harrowgate opened a ticket and two smaller accounts emailed support. Harrowgate is mid-renewal, so you'll mention it to Elena.", "sources": ["m08-08", "m08-09"] },
+    { "markdown": "**Actions:** Odette sets up certificate expiry alerts 30 days ahead. Jun moves every certificate to automated renewal by October 16 and puts the on-call schedule in the team calendar. Hana writes the status page post and sends it to you for review. A weekly on-call rotation starts next Monday.", "sources": ["m08-11", "m08-13", "m08-15", "m08-17", "m08-18"] }
+  ],
+  "cleaned": {
+    "m08-01": "Let's review Wednesday's outage. Odette, walk us through the timeline.",
+    "m08-05": "An expired TLS certificate on the job queue: the workers couldn't connect, so nothing got picked up.",
+    "m08-12": "Alerts are good, but renewal should be automatic. Nobody should renew a certificate by hand.",
+    "m08-16": "Thanks. The other problem is that nobody was clearly on call.",
+    "m08-17": "From now on, we run a weekly on-call rotation starting next Monday."
+  }
 }
