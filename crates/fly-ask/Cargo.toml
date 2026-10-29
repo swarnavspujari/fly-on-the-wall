@@ -1,0 +1,31 @@
+[package]
+name = "fly-ask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The Ask harness (spec §4.2 / §4.2a, v2.5 PR 3.3): scope, self-query
+# router, deterministic prefetch, capability tiers, synthesis, citation and
+# claim validation, "not found", proposals and the run log.
+#
+# Path dependencies stay limited to fly-core, fly-storage, fly-context and
+# fly-llm, so the system evals (evals/) can link this crate: their
+# dependency-graph check allows only those path crates plus crates.io.
+# Never constructs an LLM provider or reads a secret: the app's
+# `build_provider` hands one in.
+[dependencies]
+fly-core.workspace = true
+fly-storage.workspace = true
+fly-context = { path = "../fly-context" }
+fly-llm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

@@ -1329,6 +1329,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fly-ask"
+version = "2.4.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fly-context",
+ "fly-core",
+ "fly-llm",
+ "fly-storage",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fly-asr"
 version = "2.4.0"
 dependencies = [

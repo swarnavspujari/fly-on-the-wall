@@ -10,6 +10,7 @@ members = [
     "crates/fly-capture-screen",
     "crates/fly-storage",
     "crates/fly-context",
+    "crates/fly-ask",
     "crates/fly-mcp",
     "crates/fly-secrets",
     "src-tauri",
