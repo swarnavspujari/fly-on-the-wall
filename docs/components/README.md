@@ -19,7 +19,7 @@ Three layers:
 | Layer | Where | Components |
 |---|---|---|
 | **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 10 `ui-*` docs |
-| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 105 Tauri commands) | 15 `app-*` docs |
+| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 107 Tauri commands) | 15 `app-*` docs |
 | **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 11 `fly-*` docs |
 
 ## Index

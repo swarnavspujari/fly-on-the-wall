@@ -1102,6 +1102,7 @@ export default function App() {
         onDismissAppError={() => setError(null)}
         pipelineFailures={shownFailures}
         engine={engine}
+        onOpenNote={(noteId) => void openNoteById(noteId)}
         onOpenFailedNote={(f) => {
           if (!f.noteId) return;
           setDrawerOpen(false);

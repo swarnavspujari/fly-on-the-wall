@@ -14,7 +14,7 @@ The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) 
 - `crates/fly-storage/src/scratch.rs` — per-meeting scratch outside the data dir; startup sweep.
 - `crates/fly-storage/src/naming.rs` — `<YYYY-MM-DD> <title>` disk names, sanitizing, dedup.
 - `crates/fly-storage/src/notes.rs` — note CRUD, FTS row, markdown mirror, `note.json`, list views.
-- `crates/fly-storage/src/folders.rs` — folder tree, folder-path names for manifests.
+- `crates/fly-storage/src/folders.rs` — folder tree, folder-path names and Keep local flags for manifests.
 - `crates/fly-storage/src/meetings.rs` — meeting rows, meeting folders, renames, `purge_meeting`, `contained_recordings_dir`.
 - `crates/fly-storage/src/transcripts.rs` — raw + polished transcripts, mirrors (md/json/vtt), speaker undo snapshot.
 - `crates/fly-storage/src/search.rs` — FTS5 search, query sanitizing, `SearchFilter`.
@@ -26,7 +26,7 @@ The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) 
 - `crates/fly-storage/src/settings.rs` — key/value settings table.
 - `crates/fly-storage/src/templates.rs` — Enhance templates + built-in seeds.
 - `crates/fly-storage/src/privacy.rs` — Keep local, participants notified, retention, `erase_all_content`.
-- `crates/fly-storage/src/recovery.rs` — manifest v2, `note.json`, self-heal, portability backfill.
+- `crates/fly-storage/src/recovery.rs` — manifest v3, `note.json`, self-heal, portability backfill.
 - `crates/fly-storage/tests/storage_safety.rs`, `crates/fly-storage/tests/migration_v2.rs` — integration tests.
 
 ## Surface area
@@ -41,10 +41,10 @@ The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) 
 | Search | `search`, `search_filtered`, `search_split`, `SearchFilter`, `SearchHit`, `SearchHitKind`; `hybrid::fuse`; `embeddings::{chunk_transcript, chunk_note, encode_vector}`, `pending_embedding_chunks`, `embedding_backlog`, `store_chunk_embeddings`, `backfill_embedding_chunks`, `vector_search`, `PendingChunk`, `VectorHit` |
 | Items | `replace_meeting_items`, `get_meeting_items`, `has_meeting_items`, `query_items` + `ItemFilter`, `mark_extracted`, `meetings_missing_items` |
 | Jobs | `enqueue_transcription`, `next_transcription_job`, `transcription_job`, `queued_transcription_ids`, `mark_transcription_running` / `_done` / `_failed`, `requeue_transcription`, `delete_transcription_job`, `reset_running_transcriptions`, `TranscriptionJob`, `JOB_QUEUED/RUNNING/DONE/FAILED` |
-| Attachments | `add_attachment`, `add_attachment_in_place`, `remove_attachment`, `attachment_abs_path` |
+| Attachments | `add_attachment`, `add_attachment_in_place`, `remove_attachment`, `attachment_abs_path`, `note_attachments_dir` (the contained `attachments/<note_id>/`, or `None`) |
 | Settings / templates | `get_setting`, `set_setting`, `delete_setting`, `delete_settings_with_prefix`; `list_templates`, `get_template`, `upsert_template`, `delete_template`, `seed_builtin_templates` |
 | Privacy | `get_meeting_privacy` + `MeetingPrivacy`, `meeting_keep_local`, `note_keep_local` (both fail closed), `set_note_keep_local`, `set_folder_keep_local`, `local_only_folders`, `keep_local_folder_ids` / `_note_ids` / `_meeting_ids`, `pending_embedding_chunks_shareable`, `embedding_backlog_shareable`, `set_participants_notified`, `audio_retention_days`, `set_audio_retention_days`, `retention_candidates`, `meetings_with_audio`, `delete_meeting_audio` + `AudioPurge`, `erase_all_content` + `EraseOutcome`, `AUDIO_RETENTION_SETTING`, `RETENTION_CHOICES` |
-| Recovery / portability | `self_heal_recordings` + `HealReport`, `stash_recording_manifest`, `RecordingManifest`, `PortableNote`, `write_recording_manifest`, `write_note_mirror` (not re-exported at root), `MANIFEST_VERSION` (2), `RECORDING_MANIFEST`, `NOTE_MIRROR` |
+| Recovery / portability | `self_heal_recordings` + `HealReport`, `stash_recording_manifest`, `RecordingManifest`, `PortableNote`, `write_recording_manifest`, `write_note_mirror` (not re-exported at root), `MANIFEST_VERSION` (3), `NOTE_MIRROR_VERSION` (2, `note.json` versions on its own), `RECORDING_MANIFEST`, `NOTE_MIRROR`; `RecordingManifest::recorded_keep_local`; `HealReport::kept_local_unconfirmed` (resurrected meetings set to Keep local because the manifest didn't say) |
 | Paths / files | `rename_with_retry`; `safe_path::{is_plain_name, contained}`; `naming::{sanitize_title, disk_label, strip_date_prefix, unique_path}`; `scratch::{scratch_root, meeting_scratch_dir, prepare_meeting_scratch, SCRATCH_DIR, LIVE_TMP_DIR}`, `Storage::scratch_dir` |
 
 `pub(crate)` only (not callable from the app): `sweep_stale_scratch` (runs inside `self_heal_recordings`, `recovery.rs:192`), `remove_all_scratch`, `checkpoint_after_delete`, `refresh_recording_manifest`.
@@ -71,7 +71,7 @@ The `settings` table is a generic key/value store (`settings.rs:8-43`); keys are
 
 | Table | Columns | Read / write |
 |---|---|---|
-| `folders` | `id` TEXT PK, `name` TEXT, `parent_id` TEXT → `folders(id)` ON DELETE CASCADE, `created_at` TEXT, `keep_local` INTEGER 0/1 | R/W `folders.rs`, `privacy.rs`; created by heal (`folders.rs:147`) |
+| `folders` | `id` TEXT PK, `name` TEXT, `parent_id` TEXT → `folders(id)` ON DELETE CASCADE, `created_at` TEXT, `keep_local` INTEGER 0/1 | R/W `folders.rs`, `privacy.rs`; created by heal with the manifest's per-folder Keep local (`folders.rs` `ensure_folder_path`) |
 | `notes` | `id` TEXT PK, `title`, `folder_id` → `folders(id)` ON DELETE SET NULL, `meeting_id`, `scratchpad`, `blocks_json` (default `[]`), `attachments_json` (default `[]`), `created_at`, `updated_at`, `disk_path` (data-dir-relative mirror) | R/W `notes.rs`, `attachments.rs`, `recovery.rs`, `migrations.rs` |
 | `meetings` | `id` TEXT PK, `title`, `note_id`, `attendees_json`, `attendees_confirmed` 0/1, `started_at`, `ended_at`, `recording_json` (relative paths; the source of truth for the folder), `keep_local` 0/1, `participants_notified` 0/1, `audio_deleted_at` | R/W `meetings.rs`, `privacy.rs`, `recovery.rs`, `migrations.rs` |
 | `transcripts` | `meeting_id` TEXT PK, `json` (raw), `cleaned_json` (polished, never overwrites raw), `speaker_undo_json` (one-level re-diarize undo) | R/W `transcripts.rs` |
@@ -94,11 +94,11 @@ Under `<data_dir>` (`%APPDATA%\FlyOnTheWall` on Windows):
 | `notes/`, `transcripts/`, `attachments/`, `recordings/` | created on every `open` (`lib.rs:192-194`) | |
 | `notes/<date> <title>[ (n)].md` | `notes.rs:329` (atomic) | Path stored in `notes.disk_path`; renamed on title edit; removed on delete. |
 | `notes/_unlinked/` | v2 migration only (`migrations.rs:237`) | Mirrors with no row; never deleted. |
-| `attachments/<note_id>/<file>[ (n)]` | `attachments.rs:11-50` | Copies; folder removed on note delete (`notes.rs:277`). |
+| `attachments/<note_id>/<file>[ (n)]` | `attachments.rs:11-50` | Copies; folder removed on note delete. Every path goes through `note_attachments_dir` / `safe_path::contained`. |
 | `recordings/<date> <title>[ (n)]/` | `allocate_meeting_dir` (`meetings.rs:272`) | Renamed on title/date edit unless a transcription is running (`meetings.rs:285-361`); removed by `purge_meeting`. Media files inside are written by the app (recording, import). |
 | `…/transcript.md`, `.json`, `.vtt` | `transcripts.rs:286-289` (atomic) | Fallback for meetings without a folder: `transcripts/<meeting_id>.{md,json,vtt}` (`transcripts.rs:299-319`). |
 | `…/transcript.cleaned.md`, `.json`, `.vtt` | `transcripts.rs:108-111` (atomic) | Removed by `clear_cleaned_transcript`. |
-| `…/recording.manifest.json` | `recovery.rs:129`, `680-718`, `meetings.rs:190` (atomic) | Manifest v2: ids, `ended_at`, recording paths, title, `started_at`, attendees, confirmed flag, folder path names. **No keep-local field.** |
+| `…/recording.manifest.json` | `recovery.rs:129`, `680-718`, `meetings.rs:190` (atomic) | Manifest v3: ids, `ended_at`, recording paths, title, `started_at`, attendees, confirmed flag, folder path names, `keep_local` (the meeting's own flag) and `folder_keep_local` (one per folder name). Rewritten when Keep local changes. |
 | `…/note.json` | `recovery.rs:122`, `notes.rs:331-343` (atomic) | Scratchpad + blocks with provenance. |
 | `…/.<name>.<pid><n>.tmp` | `atomic.rs:156-168` | Transient; removed on failure. A process killed between `sync_all` and rename leaves one behind (nothing sweeps them). |
 | `recordings/_unlinked/<name>/` | v2 migration (`migrations.rs:197`) | Self-heal moves folders with a manifest back out (`recovery.rs:614`). |
@@ -124,16 +124,18 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 ## Invariants
 - Recursive deletes of meeting folders stay inside `recordings/<folder>`: `contained_recordings_dir` on `purge_meeting` (`meetings.rs:124`), `delete_meeting_audio` (`privacy.rs:538`), retention age check (`privacy.rs:505`), scratch sweep (`scratch.rs:305`). THREAT_MODEL T3/T7.
 - Manifest recording paths are never trusted: self-heal rebases every path onto the scanned folder (file name only) and rejects non-plain names before moving anything (`recovery.rs:439-460`, `592-635`). THREAT_MODEL T7 follow-up.
-- Ids read from manifests / `note.json` must be validated as plain ids before any path use. THREAT_MODEL T7.
-- Every path built from stored or manifest data must pass a containment check before a write or delete. THREAT_MODEL T3/T7.
+- Ids read from manifests are validated with `safe_path::is_safe_id` (1-64 lowercase ASCII letters, digits, `-`, `_`, and a plain name, so no reserved device names) before anything is read, moved or written; a bad id rejects the whole folder. Lowercase only, so two ids never name one folder on a case-insensitive file system; the app's own ids are lowercase UUIDs. Paths are built only from ids that pass it (`note_attachments_dir`; the scratch dir and legacy transcript name hash anything else). THREAT_MODEL T7.
+- Every path built from stored or manifest data must pass a containment check before a write, rename or delete: attachments via `note_attachments_dir`, note mirrors under `notes/`, meeting folders, transcript and `note.json` mirrors via `contained_recordings_dir`; the legacy `transcripts/<id>` fallback uses the scratch id mapping. THREAT_MODEL T3/T7.
 - Attachment paths from IPC must be `attachments/…` or `recordings/…` with plain components (`attachments.rs:70-79`, `safe_path.rs:40-58`). THREAT_MODEL T3.
 - Deletes are transactions, `secure_delete=ON`, and a WAL `TRUNCATE` checkpoint follows (`lib.rs:202`, `notes.rs:267-276`, `meetings.rs:107-120`, `notes.rs:475-479`). THREAT_MODEL T11.
 - Mirrors are replaced atomically (temp in the same folder, `sync_all`, rename, Unix dir fsync); a lock that never clears falls back to an in-place (non-atomic) write so the mirror doesn't go stale (`atomic.rs:66-120`). `atomic.rs` module docs.
 - A fresh (table-less) database never runs the v2 orphan sweep, so a lost index never mass-parks folders (`lib.rs:390`, `402-404`). DECISIONS.md "Storage naming & startup latency"; 2026-07-13 incident.
-- Backfill never overwrites a mirror that may be newer: manifests only gain missing fields; `note.json` is replaced only when its `updated_at` is older; unreadable/foreign/future files are left alone (`recovery.rs:331-414`).
+- Backfill never overwrites a mirror that may be newer: manifests only gain missing fields, except Keep local, where `true` from the file or the database wins (fail closed); `note.json` is replaced only when its `updated_at` is older; unreadable/foreign/future files are left alone (`recovery.rs:331-414`).
 - `open_existing` (MCP) never creates, migrates, repairs or seeds, and refuses any schema that isn't exactly v2 with every expected column (`lib.rs:231-335`). Spec §2 item 5 (MCP holds no keys; reads the app's DB).
 - Keep local fails closed: unknown meeting or lookup error answers `true` (`privacy.rs:209-241`). Bulk readers filter inside SQL before `LIMIT` via `KEEP_LOCAL_CTE` (`privacy.rs:90-102`; used in `search.rs:84-92`, `notes.rs:144-151`, `items.rs:89-100`, `privacy.rs:306-337`). **Not** applied in `vector_search` (`embeddings.rs:391-418` ignores `SearchFilter.exclude_keep_local`), `list_meetings` (`items.rs:180`) or `search()` / `search_filtered` without the flag. Spec §2 item 1 (enforcement in the app), THREAT_MODEL T10.
 - A re-recording into a keep-local note inherits the flag (`meetings.rs:73`, `privacy.rs:266-275`).
+- Keep local survives self-heal and a copied folder: heal recreates the meeting with the manifest's own flag, flags folders it creates, and sets the meeting's own flag when the manifest says it was kept local but the folder it lands in isn't (a folder reused by name). A manifest without the flags (v1/v2, or stashed with the database down) heals as kept local. Attaching to an existing row can only add the flag. `set_note_keep_local` / `set_folder_keep_local` rewrite the affected manifests. Meetings kept local only because the manifest didn't say are listed in `HealReport::kept_local_unconfirmed`; the app asks the user to review them ([app-privacy](app-privacy.md)).
+- A v2 build (v2.4) leaves a v3 manifest alone in its backfill, but its live edits and heal rebase rewrite it as v2 without the Keep local fields; heal then keeps the meeting local. Running an older build after v2.5 can only make a recovered meeting more local.
 - Calendar-seeded attendees start unconfirmed; only the editor's save sets `attendees_confirmed` (`meetings.rs:42-91`). Spec §2 item 7.
 - Raw transcript `json` is never overwritten by polish; a new transcription must clear the cleaned variant (`transcripts.rs:96-129`).
 - Retention deletes media only (extension allow-list, plain files, symlinks not followed), keeps transcripts/notes/manifest, stamps `audio_deleted_at` only when nothing failed, and requires both `ended_at` and file mtimes past the cutoff (`privacy.rs:44-47`, `479-582`).
@@ -152,8 +154,7 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 
 **Known gaps:**
 - `vector_search` ignores `exclude_keep_local` and no test pins either behavior; any future AI caller leaks keep-local chunks (T10). PR #92 fixes it.
-- Keep local doesn't survive database loss or a copied folder: the manifest has no keep-local field and heal inserts `meetings` with the default 0 (`recovery.rs:59-81`, `540-553`); folders recreated by name start unflagged (`folders.rs:147-166`). No test.
-- Path-containment tests cover deletes, the portability backfill and manifest rebasing, but not every write path or every id taken from a manifest (THREAT_MODEL T7).
+- Containment tests cover deletes, attachments, the portability backfill, manifest rebasing and manifest ids (`recovery.rs` `manifest_with_unsafe_ids_is_rejected`, `unsafe_note_ids_never_reach_outside_the_app_folders`). The fuzz corpus of hostile names isn't run through every path-taking API yet.
 - No test pins `secure_delete`, `foreign_keys` or `journal_mode` pragmas, or that deleted text is gone from the file (T11).
 - Migration tests use hand-written SQL fixtures, not a file made by an older build; the "rerun after a mid-migration crash" promise (`migrations.rs:2-4`) is untested.
 - Atomic-write tests simulate a failing write through a seam; a kill between `sync_all` and rename (leftover `.tmp`) isn't covered.

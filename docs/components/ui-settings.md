@@ -39,7 +39,7 @@ The full-window Settings overlay: seven sections (Recording, Transcripts, Ask an
 | Ask and Enhance | Test | consent → `set_llm_settings` (with a typed key) → `test_llm_connection` | `useCloudConsent` | `:779-800`, `:1694` |
 | Ask and Enhance | API key Save / Update | consent → `set_llm_settings` with `api_key` (keychain) | `useCloudConsent` | `:701-740`, `:1707-1727` |
 | Ask and Enhance | Claude model | consent → `set_llm_settings{provider: "anthropic", model}` | `useCloudConsent` | `:746-777`, `:1754-1761` |
-| Ask and Enhance › More | Model name, Base URL, Save | consent → `set_llm_settings` | `useCloudConsent` (local providers pass without asking) | `:1572-1604` |
+| Ask and Enhance › More | Model name, Base URL, Save | consent → `set_llm_settings`. While the Base URL points a saved key at another server (`serverChangeNeedsKey`) and no key is typed, a hint asks for the key again; the backend refuses the save without it. A save or Test that moves a cloud provider to another server (`serverChanged`) asks for consent again right away (the backend cleared it; the dialog names the server); a decline leaves it saved but unused | `useCloudConsent` (local providers pass without asking) | `:1572-1620` |
 | Ask and Enhance | Local model Install / Download / swap offer | `download_model("ollama-bin")`, `ollama_pull` | none | `:593-640`, `:1794`, `:1806`, `:1841` |
 | Ask and Enhance | Delete a local model (list or swap offer) | `ollama_delete` | in-app confirm, danger tone | `:642-660`, `:1639`, `:1865` |
 | Ask and Enhance | Note templates Save / Delete | `save_template` / `delete_template` | **no confirm on Delete**; no error handling | `:802-812`, `:1954`, `:1992` |

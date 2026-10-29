@@ -47,6 +47,8 @@
      fotwMockConsentSkips = "1"    → the backend skipped m1's cleanup and
                                      action items for missing consent (the
                                      notice with "Review and allow")
+     fotwMockRecoveredKeptLocal = "1" → self-heal restored m1 and set it to
+                                     Keep local (the review notice)
      fotwMockAskError = keep_local | consent | no_key | auth | ollama_missing |
                         ollama_down | model_missing | offline | timeout |
                         rate_limit | server | other → ask_meeting fails with
@@ -64,6 +66,12 @@
    ============================================================ */
 
 import { WHISPER_ENGINE_ID } from "./types";
+import {
+  customServerHost,
+  providerVendor,
+  serverChanged,
+  serverChangeNeedsKey,
+} from "./settingsModel";
 
 const nowIso = () => new Date().toISOString();
 const ago = (mins: number) => new Date(Date.now() - mins * 60_000).toISOString();
@@ -986,10 +994,11 @@ function mockConsentRefusal(): string | null {
 
 /* ---- cloud consent ---- */
 // The backend's own dialog words (llm_commands.rs cloud_consent_prompt).
-function mockConsentPrompt(provider: string, atLaunch: boolean) {
+function mockConsentPrompt(provider: string, atLaunch: boolean, host: string | null = null) {
   const vendor = MOCK_VENDORS[provider] ?? provider;
+  const who = host ? `the server at ${host} (your custom ${vendor} endpoint)` : vendor;
   const disclosure =
-    `Your notes and full meeting transcripts will be sent to ${vendor} for processing ` +
+    `Your notes and full meeting transcripts will be sent to ${who} for processing ` +
     `whenever you run Enhance or Ask, and automatically for transcript cleanup and ` +
     `action items after each transcription. Their data-retention terms apply (see their ` +
     `privacy / data-usage policy).\n\n` +
@@ -1014,7 +1023,11 @@ function mockRequestCloudConsent(provider: string, atLaunch: boolean): boolean {
   if (!info) throw `unknown provider '${provider}'`;
   const key = `consent.cloud_llm.${provider}`;
   if (info.is_local || mockUiSettings[key] === "true") return true;
-  const { title, message } = mockConsentPrompt(provider, atLaunch);
+  const { title, message } = mockConsentPrompt(
+    provider,
+    atLaunch,
+    customServerHost(provider, info.base_url),
+  );
   // eslint-disable-next-line no-restricted-properties -- see above: browser-only stand-in
   if (!window.confirm(`${title}\n\n${message}`)) return false;
   mockUiSettings[key] = "true";
@@ -1026,6 +1039,15 @@ function mockRequestCloudConsent(provider: string, atLaunch: boolean): boolean {
 // consent. fotwMockConsentSkips = "1" starts with m1 skipped, so the notice
 // shows; retry_consent_skipped replays the "polishing" → done events.
 let mockConsentSkips: string[] = mockFlag("fotwMockConsentSkips") === "1" ? ["m1"] : [];
+
+/* ---- recovered meetings kept local ---- */
+// fotwMockRecoveredKeptLocal = "1": self-heal restored n1's meeting and set it
+// to Keep local because its privacy setting couldn't be confirmed, so the
+// review notice shows (privacy.rs recovered_kept_local).
+let mockRecoveredKeptLocal: { meeting_id: string; note_id: string; title: string }[] =
+  mockFlag("fotwMockRecoveredKeptLocal") === "1"
+    ? [{ meeting_id: "m1", note_id: "n1", title: noteMeta[0].title }]
+    : [];
 function mockRetryConsentSkipped(): number {
   const ids = mockConsentSkips;
   mockConsentSkips = [];
@@ -1259,9 +1281,23 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         base_url: string | null;
         api_key: string | null;
       };
-      llmSettings.provider = u.provider;
       const info = llmSettings.providers.find((p) => p.id === u.provider);
+      // Same rule as llm_commands.rs apply_llm_settings: a saved key never
+      // follows the Base URL to another server unless it's entered again.
+      if (
+        info &&
+        u.api_key == null &&
+        serverChangeNeedsKey(u.provider, info.has_key, info.base_url, u.base_url ?? "")
+      ) {
+        throw `To use a different server for ${providerVendor(u.provider)}, enter the API key again. Nothing was changed.`;
+      }
+      llmSettings.provider = u.provider;
       if (info) {
+        if (serverChanged(u.provider, info.base_url, u.base_url ?? "")) {
+          // the old key and consent never carry over to the new server
+          info.has_key = false;
+          delete mockUiSettings[`consent.cloud_llm.${u.provider}`];
+        }
         info.model = u.model;
         info.base_url = u.base_url;
         if (u.api_key != null) info.has_key = u.api_key !== "";
@@ -1331,6 +1367,13 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       const refused = mockConsentRefusal();
       if (refused) throw refused;
       return `Connected to ${llmSettings.provider}. It answered in 0.8 s.`;
+    }
+    case "recovered_kept_local":
+      return mockRecoveredKeptLocal.map((m) => ({ ...m }));
+    case "dismiss_recovered_kept_local": {
+      const id = args.meetingId as string | null;
+      mockRecoveredKeptLocal = id ? mockRecoveredKeptLocal.filter((m) => m.meeting_id !== id) : [];
+      return mockRecoveredKeptLocal.map((m) => ({ ...m }));
     }
     case "consent_skipped_meetings":
       return [...mockConsentSkips];

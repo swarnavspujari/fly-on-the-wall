@@ -14,6 +14,7 @@ export const NOTICE_PRIORITY = {
   systemAudio: 3,
   pipeline: 2,
   consentSkips: 1.5,
+  recoveredKeptLocal: 1.2,
   update: 1,
 } as const;
 

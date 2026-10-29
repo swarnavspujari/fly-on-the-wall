@@ -48,6 +48,11 @@ pub struct AppState {
     /// the app's notice offers to run them once the user allows the provider
     /// (`llm_commands::retry_consent_skipped`).
     pub consent_skipped: Mutex<std::collections::BTreeSet<String>>,
+    /// Meetings self-heal restored this launch and set to Keep local because
+    /// their manifest didn't record the setting. In memory only: the app's
+    /// notice asks the user to review them
+    /// (`privacy::recovered_kept_local`).
+    pub recovered_kept_local: Mutex<Vec<String>>,
     /// Held while the native cloud-consent dialog is open, so requests show
     /// one dialog at a time, with each provider's recent declines so a
     /// request loop can't keep one up (`llm_commands::request_cloud_consent`).
@@ -94,6 +99,7 @@ impl AppState {
             ollama: Mutex::new(None),
             live_status: Mutex::new(None),
             consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
+            recovered_kept_local: Mutex::new(Vec::new()),
             consent_prompt: tokio::sync::Mutex::new(Default::default()),
             embed_notify: tokio::sync::Notify::new(),
         })
