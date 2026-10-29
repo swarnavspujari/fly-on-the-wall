@@ -1,8 +1,9 @@
-import { CircleAlert, Sparkles } from "lucide-react";
+import { CircleAlert, Lock, Sparkles } from "lucide-react";
 import { NOTICE_PRIORITY, appErrorCopy, consentSkipsCopy, updateNoticeVisible } from "../notices";
 import type { PipelineFailure } from "../pipelineFailures";
 import { pipelineFailureCopy, selectPipelineNotice } from "../pipelineNotice";
 import type { Updater } from "../updater";
+import { recoveredKeptLocalCopy, useRecoveredKeptLocal } from "./useRecoveredKeptLocal";
 import { useConsentSkips } from "./CloudConsent";
 import SystemAudioNotice from "./SystemAudioNotice";
 import UpdateBanner from "./UpdateBanner";
@@ -24,11 +25,15 @@ interface Props {
   /** Transcription-engine readiness; null until the first settings fetch. */
   engine: { installed: boolean; managed: boolean } | null;
   onOpenFailedNote: (failure: PipelineFailure) => void;
+  /** Open a note (to review a recovered meeting's Keep local). */
+  onOpenNote: (noteId: string) => void;
   /** Re-run transcription for a failure (only offered for a first
    *  transcription: a re-run could have been a re-analysis). */
   onRetryFailure: (failure: PipelineFailure) => void;
   onDismissPipelineFailure: (meetingId: string) => void;
   onOpenEngineSettings: () => void;
+  /** Settings › Ask and Enhance, at the API key field. */
+  onOpenLlmKeySettings: () => void;
   updater: Updater;
 }
 
@@ -50,13 +55,16 @@ export default function AppNotices({
   pipelineFailures,
   engine,
   onOpenFailedNote,
+  onOpenNote,
   onRetryFailure,
   onDismissPipelineFailure,
   onOpenEngineSettings,
+  onOpenLlmKeySettings,
   updater,
 }: Props) {
   const notices: StackedNotice[] = [];
   const skips = useConsentSkips();
+  const recovered = useRecoveredKeptLocal();
 
   if (systemAudioBlocked && !recordingActive) {
     notices.push({
@@ -164,7 +172,7 @@ export default function AppNotices({
   // Cleanup and action items the backend skipped for missing cloud consent:
   // ask for it here, then run them. Not urgent, so it waits out a recording.
   if (skips.count > 0 && !recordingActive) {
-    const copy = consentSkipsCopy(skips.count, skips.vendor);
+    const copy = consentSkipsCopy(skips.count, skips.vendor, skips.keyVendor);
     notices.push({
       id: "consent-skips",
       priority: NOTICE_PRIORITY.consentSkips,
@@ -179,11 +187,44 @@ export default function AppNotices({
                 variant="primary"
                 size="sm"
                 disabled={skips.busy}
-                onClick={() => void skips.run()}
+                onClick={() => (skips.keyVendor ? onOpenLlmKeySettings() : void skips.run())}
               >
                 {copy.action}
               </Button>
               <Button variant="ghost" size="sm" onClick={skips.dismiss}>
+                Dismiss
+              </Button>
+            </>
+          }
+        >
+          {copy.cause}
+        </Notice>
+      ),
+    });
+  }
+
+  // Meetings self-heal kept local because their setting couldn't be
+  // confirmed: review them one by one. Waits out a recording.
+  if (recovered.meetings.length > 0 && !recordingActive) {
+    const copy = recoveredKeptLocalCopy(recovered.meetings.map((m) => m.title));
+    notices.push({
+      id: "recovered-kept-local",
+      priority: NOTICE_PRIORITY.recoveredKeptLocal,
+      node: (
+        <Notice
+          tone="primary"
+          icon={<Lock size={18} strokeWidth={1.75} />}
+          title={copy.title}
+          actions={
+            <>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => void recovered.reviewNext().then((m) => m && onOpenNote(m.note_id))}
+              >
+                {copy.action}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={recovered.dismiss}>
                 Dismiss
               </Button>
             </>

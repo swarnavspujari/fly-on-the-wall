@@ -11,6 +11,9 @@ path = "src/main.rs"
 [dependencies]
 fly-core.workspace = true
 fly-storage.workspace = true
+# Shared read-only meeting context (memory, passages): fly-core +
+# fly-storage only, no LLM, key or network crate.
+fly-context = { path = "../fly-context" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -19,4 +22,5 @@ dirs.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile = "3" 

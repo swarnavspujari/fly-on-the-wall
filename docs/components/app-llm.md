@@ -40,7 +40,7 @@ Extraction (`extraction.rs`): `build_extraction_prompt` (78-112), `extraction_it
 5. `keep_local` from the scope (605-609): `NoMeetingData` → false; `Note(id)` → `Storage::note_keep_local` (any meeting of the note flagged, or its folder chain); `Meeting(id)` → `Storage::meeting_keep_local` (meeting flag or folder chain; an unknown meeting or a lookup error answers **true**, `crates/fly-storage/src/privacy.rs:209-241`).
 6. `on_device` = local kind AND (no base URL OR a loopback base URL) (612).
 7. `check_cloud_policy` (613, body 541-566): keep-local and not on-device → keep-local refusal; then local → OK; then not consented → consent refusal.
-8. Drop the storage lock (614). Only now read the API key from the keychain (616-622); missing → "no API key stored for {provider} — add one in Settings".
+8. Drop the storage lock (614). Only now read the API key from the keychain (616-622); missing → `missing_key_error`: "No API key for {Vendor} yet. Add one in Settings › Ask and Enhance."
 9. Construct the provider (624-652). Anthropic always uses its fixed host (stored base URL ignored). Unknown ids fall through to the Ollama arm (649).
 
 No network call happens inside `build_provider`. But each caller runs `ensure_provider_ready` first. For `ollama` that probes `GET <root>/api/version`, possibly a **remote** root from `llm.ollama.base_url`, and may spawn `ollama serve` (`ollama.rs:79-132`). It sends no meeting content.
@@ -60,7 +60,7 @@ No network call happens inside `build_provider`. But each caller runs `ensure_pr
 |---|---|---|
 | consent (`llm_commands.rs:435`, `559-563`) | `"{Vendor} isn't allowed to receive your meeting content yet, so nothing was sent. …"` | `askModel.ts:62` (shows "Review and allow"); `is_consent_refusal` (`llm_commands.rs:438`) decides background consent-skips; Enhance and backfill show it verbatim |
 | keep-local (`llm_commands.rs:514-519`) | `this note is set to "Keep local", so it isn't sent to {provider}. …` | `askModel.ts:56` (lower-cased `keep local`) |
-| no key (`llm_commands.rs:621`) | `no API key stored for {provider} — add one in Settings` | `askModel.ts:69` |
+| no key (`missing_key_error`, mark `MISSING_KEY_MARK`) | `No API key for {Vendor} yet. Add one in Settings › Ask and Enhance.` | `askModel.ts:69` ("no api key"); `is_missing_key` → `record_consent_skip`, so the background pass is offered again once a key is added; Enhance shows it as is |
 | Ollama (`ollama.rs:85-93,131`) | `Ollama isn't reachable at …`, `Ollama isn't installed …`, `… isn't answering yet …` | `askModel.ts:80,97-99` |
 
 devMock copies these strings by hand (`frontend/src/devMock.ts:931-950`).
@@ -91,7 +91,7 @@ devMock copies these strings by hand (`frontend/src/devMock.ts:931-950`).
 | `backfill_meeting_items` | — | `Result<BackfillResult{processed, extracted, failed, first_error}, String>` | `ui-settings` (`SettingsModal.tsx:566`), via `api.backfillMeetingItems` |
 | `pending_backfill_count` | — | `Result<usize, String>` | `ui-settings` (`SettingsModal.tsx:384,585`), via `api.pendingBackfillCount` |
 
-devMock mirrors all of these except `polish_transcript` and `extract_meeting_items`, which fall to `default: return null` (`devMock.ts:1507`). Drift: mock `enhance_note` checks consent only, not keep-local (`devMock.ts:1120-1124`). Mock `backfill_meeting_items` ignores keep-local (`devMock.ts:1413-1419`). Mock Ask applies keep-local only to cloud providers, never to a remote Ollama (`devMock.ts:966-970`).
+devMock mirrors all of these except `polish_transcript` and `extract_meeting_items`, which fall to `default: return null` (`devMock.ts:1507`). Drift: mock `enhance_note` checks consent and the key, not keep-local (`devMock.ts:1120-1124`). Mock `backfill_meeting_items` ignores keep-local (`devMock.ts:1413-1419`). Mock Ask applies keep-local only to cloud providers, never to a remote Ollama (`devMock.ts:966-970`).
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |

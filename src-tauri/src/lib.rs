@@ -23,7 +23,7 @@ pub mod scheduler;
 mod screen_commands;
 pub mod state;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 pub fn run() {
     // Resolve (and legacy-migrate) the data dir BEFORE file logging exists:
@@ -152,13 +152,26 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let _ = tauri::async_runtime::spawn_blocking(move || {
                         let state = handle.state::<state::AppState>();
-                        let storage = state.storage.lock().unwrap();
-                        match storage.self_heal_recordings() {
-                            Ok(r) if !r.is_empty() => tracing::info!(
-                                attached = r.attached.len(),
-                                resurrected = r.resurrected.len(),
-                                "recording self-heal repaired meetings"
-                            ),
+                        let healed = state.storage.lock().unwrap().self_heal_recordings();
+                        match healed {
+                            Ok(r) if !r.is_empty() => {
+                                tracing::info!(
+                                    attached = r.attached.len(),
+                                    resurrected = r.resurrected.len(),
+                                    kept_local_unconfirmed = r.kept_local_unconfirmed.len(),
+                                    "recording self-heal repaired meetings"
+                                );
+                                // Kept local only because the manifest didn't
+                                // say: ask the user to review them.
+                                if !r.kept_local_unconfirmed.is_empty() {
+                                    let entries = privacy::note_recovered_kept_local(
+                                        &state,
+                                        &r.kept_local_unconfirmed,
+                                    );
+                                    let _ =
+                                        handle.emit(privacy::RECOVERED_KEPT_LOCAL_EVENT, entries);
+                                }
+                            }
                             Ok(_) => {}
                             Err(e) => {
                                 tracing::warn!(error = %e, "recording self-heal failed")
@@ -287,6 +300,8 @@ pub fn run() {
             privacy::dismiss_wipe_report,
             privacy::delete_all_data,
             privacy::disk_encryption_status,
+            privacy::recovered_kept_local,
+            privacy::dismiss_recovered_kept_local,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fly on the Wall")

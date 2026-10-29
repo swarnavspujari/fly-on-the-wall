@@ -28,7 +28,8 @@ const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "mov", "webm"];
 const GAP_MS: u64 = 1000;
 
 fn manifest_key(meeting_id: &str) -> String {
-    format!("import.staged.{meeting_id}")
+    // fly-storage keeps a meeting folder's name while this key exists.
+    format!("{}{meeting_id}", fly_storage::IMPORT_STAGED_PREFIX)
 }
 
 #[derive(Clone, Serialize, Deserialize)]

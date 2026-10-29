@@ -42,8 +42,20 @@ pub const NOTE_MIRROR: &str = "note.json";
 /// Manifest schema version written by this build. v1 carried only the
 /// recording re-attachment core; v2 added the portability payload (title,
 /// started_at, attendees, folder path) so a copied folder restores the whole
-/// meeting on another machine.
-pub const MANIFEST_VERSION: u32 = 2;
+/// meeting on another machine; v3 added Keep local (the meeting's own flag
+/// and each folder's on its path).
+///
+/// A v2 build's startup backfill leaves a v3 file alone, but its live edits
+/// (title, folder, attendees, date) and its heal rebase rewrite the manifest
+/// as v2 without the Keep local fields. Heal treats a manifest without them
+/// as kept local, so running an older build after this one can only make a
+/// recovered meeting more local, never less.
+pub const MANIFEST_VERSION: u32 = 3;
+
+/// `note.json` schema version written by this build. Unchanged since v2 (it
+/// has its own version so a manifest-only change doesn't make older builds
+/// treat the note mirror as a future format).
+pub const NOTE_MIRROR_VERSION: u32 = 2;
 
 fn manifest_v1() -> u32 {
     1
@@ -78,12 +90,33 @@ pub struct RecordingManifest {
     /// unfiled or unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_path: Option<Vec<String>>,
+    /// The meeting's own "Keep local" flag. Absent = not recorded (a v1/v2
+    /// manifest, or one stashed while the database was unreadable): heal
+    /// then keeps the meeting local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_local: Option<bool>,
+    /// "Keep local" for each folder in `folder_path`, same order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_keep_local: Option<Vec<bool>>,
 }
 
 impl RecordingManifest {
     /// The data-dir-relative folder the manifest's paths live in.
     fn dir_rel(&self) -> Option<String> {
         crate::meetings::recording_dir_rel(&self.recording)
+    }
+
+    /// Whether the meeting was kept local where this manifest was written:
+    /// its own flag, or any folder on its path. `None` when the manifest
+    /// doesn't say (no flag, or a folder path without its flags).
+    pub fn recorded_keep_local(&self) -> Option<bool> {
+        let own = self.keep_local?;
+        let from_folders = match (&self.folder_path, &self.folder_keep_local) {
+            (None, _) => false,
+            (Some(names), Some(flags)) if flags.len() == names.len() => flags.iter().any(|f| *f),
+            (Some(_), _) => return None,
+        };
+        Some(own || from_folders)
     }
 }
 
@@ -106,7 +139,7 @@ pub struct PortableNote {
 impl PortableNote {
     pub fn from_note(note: &Note) -> Self {
         Self {
-            version: MANIFEST_VERSION,
+            version: NOTE_MIRROR_VERSION,
             note_id: note.id.clone(),
             title: note.title.clone(),
             scratchpad: note.scratchpad.clone(),
@@ -145,6 +178,10 @@ pub struct HealReport {
     /// (re)written by the backfill pass. Not a repair — excluded from
     /// [`is_empty`](Self::is_empty).
     pub refreshed: Vec<String>,
+    /// Resurrected meetings set to Keep local because their manifest didn't
+    /// record the setting (fail closed). The app asks the user to review
+    /// them. A subset of `resurrected`.
+    pub kept_local_unconfirmed: Vec<String>,
 }
 
 impl HealReport {
@@ -179,7 +216,12 @@ impl Storage {
         for (dir, parked) in dirs {
             match self.heal_one(&dir, parked) {
                 Ok(Some(Healed::Attached(id))) => report.attached.push(id),
-                Ok(Some(Healed::Resurrected(id))) => report.resurrected.push(id),
+                Ok(Some(Healed::Resurrected { id, unconfirmed })) => {
+                    if unconfirmed {
+                        report.kept_local_unconfirmed.push(id.clone());
+                    }
+                    report.resurrected.push(id);
+                }
                 Ok(None) => {}
                 Err(e) => {
                     // No folder path: folder names are meeting titles (log hygiene).
@@ -297,14 +339,33 @@ impl Storage {
             attendees: Some(meeting.attendees.clone()),
             attendees_confirmed: Some(meeting.attendees_confirmed),
             folder_path: None,
+            keep_local: self
+                .get_meeting_privacy(&meeting.id)
+                .ok()
+                .map(|p| p.keep_local),
+            folder_keep_local: None,
         };
         if let Ok(note) = self.get_note(&meeting.note_id) {
             manifest.title = Some(note.title);
-            manifest.folder_path = note
-                .folder_id
-                .and_then(|fid| self.folder_path_names(&fid).ok());
+            self.fill_folder_path(&mut manifest, note.folder_id.as_deref());
         }
         Some(manifest)
+    }
+
+    /// Put the note's folder path, with each folder's Keep local flag, into
+    /// `manifest`. When the note is filed but its path can't be read, Keep
+    /// local is left unrecorded too, so heal keeps the meeting local.
+    fn fill_folder_path(&self, manifest: &mut RecordingManifest, folder_id: Option<&str>) {
+        let Some(folder_id) = folder_id else {
+            return;
+        };
+        let Ok(entries) = self.folder_path_entries(folder_id) else {
+            manifest.keep_local = None;
+            return;
+        };
+        let (names, flags) = entries.into_iter().unzip();
+        manifest.folder_path = Some(names);
+        manifest.folder_keep_local = Some(flags);
     }
 }
 
@@ -334,7 +395,8 @@ fn read_mirror<T: serde::de::DeserializeOwned>(path: &Path) -> OnDisk<T> {
 /// - otherwise fill in only what the file lacks (`None` portability fields —
 ///   v1 manifests and ones stashed while the database was unreadable) and
 ///   stamp the current version. Every value already in the file wins, even
-///   when the database disagrees: it may be the newer side.
+///   when the database disagrees: it may be the newer side. Keep local is
+///   the exception: `true` from either side wins (fail closed).
 ///
 /// Returns the manifest to write, or `None` to leave the file as it is.
 fn backfill_manifest(
@@ -363,13 +425,32 @@ fn backfill_manifest(
         );
         return None;
     }
+    // Keep local is the one exception to "the file wins": true wins from
+    // either side, so a refresh that never reached the file can't leave a
+    // stale "not kept local" behind for heal to restore.
+    let keep_local = match (cur.keep_local, from_db.keep_local) {
+        (Some(file), Some(db)) => Some(file || db),
+        (file, db) => file.or(db),
+    };
+    // Folder flags only make sense next to the path they were read with.
+    let folder_path = cur.folder_path.clone().or(from_db.folder_path.clone());
+    let same_path = folder_path == from_db.folder_path;
+    let folder_keep_local = match (cur.folder_keep_local.clone(), from_db.folder_keep_local) {
+        (Some(file), Some(db)) if same_path && file.len() == db.len() => {
+            Some(file.iter().zip(&db).map(|(f, d)| *f || *d).collect())
+        }
+        (Some(file), _) => Some(file),
+        (None, db) => db.filter(|_| same_path),
+    };
     let next = RecordingManifest {
         version: MANIFEST_VERSION,
         title: cur.title.clone().or(from_db.title),
         started_at: cur.started_at.or(from_db.started_at),
         attendees: cur.attendees.clone().or(from_db.attendees),
         attendees_confirmed: cur.attendees_confirmed.or(from_db.attendees_confirmed),
-        folder_path: cur.folder_path.clone().or(from_db.folder_path),
+        folder_path,
+        keep_local,
+        folder_keep_local,
         ..cur.clone()
     };
     (next != cur).then_some(next)
@@ -402,7 +483,7 @@ fn backfill_note_mirror(
         }
         OnDisk::Parsed(cur) => cur,
     };
-    if cur.version > MANIFEST_VERSION || cur.note_id != from_db.note_id {
+    if cur.version > NOTE_MIRROR_VERSION || cur.note_id != from_db.note_id {
         tracing::warn!(
             note_id = from_db.note_id,
             on_disk_version = cur.version,
@@ -470,13 +551,28 @@ fn rebase_recording(data_dir: &Path, rec: &RecordingRef, folder_rel: &str) -> Re
 
 enum Healed {
     Attached(String),
-    Resurrected(String),
+    /// `unconfirmed`: Keep local was set because the manifest didn't say.
+    Resurrected {
+        id: String,
+        unconfirmed: bool,
+    },
 }
 
 impl Storage {
     fn heal_one(&self, dir: &Path, parked: bool) -> Result<Option<Healed>> {
         let manifest: RecordingManifest =
             serde_json::from_str(&std::fs::read_to_string(dir.join(RECORDING_MANIFEST))?)?;
+        // The ids become row ids, and paths are built from row ids
+        // (`attachments/<note_id>/`, the scratch dir). A copied-in manifest
+        // is untrusted: anything but a plain id rejects the whole folder,
+        // before anything is read, moved or written.
+        if !crate::safe_path::is_safe_id(&manifest.meeting_id)
+            || !crate::safe_path::is_safe_id(&manifest.note_id)
+        {
+            return Err(crate::StorageError::Invalid(
+                "recording manifest ids are not plain ids".into(),
+            ));
+        }
 
         // Meeting already whole → nothing to do (and nothing written).
         let existing = self.get_meeting(&manifest.meeting_id).ok();
@@ -498,6 +594,10 @@ impl Storage {
 
         if existing.is_some() {
             self.attach(&manifest)?;
+            // The row knows its own flag; a manifest can only add Keep local.
+            if manifest.recorded_keep_local() == Some(true) {
+                self.ensure_meeting_kept_local(&manifest.meeting_id)?;
+            }
             return Ok(Some(Healed::Attached(manifest.meeting_id)));
         }
 
@@ -523,8 +623,10 @@ impl Storage {
             manifest.ended_at
                 - chrono::Duration::milliseconds(manifest.recording.duration_ms as i64)
         });
+        // Folders created here get their Keep local flag back; an existing
+        // folder reused by name keeps its own.
         let folder_id = match manifest.folder_path.as_deref() {
-            Some(names) => self.ensure_folder_path(names)?,
+            Some(names) => self.ensure_folder_path(names, manifest.folder_keep_local.as_deref())?,
             None => None,
         };
         let dir_abs = manifest
@@ -546,9 +648,13 @@ impl Storage {
                 portable.as_ref(),
             )?;
         }
+        // Keep local fails closed: a manifest that doesn't record it (older
+        // build, or stashed with the database down) recreates the meeting
+        // as kept local; the user can turn it off.
+        let own_keep_local = manifest.keep_local.unwrap_or(true);
         self.conn.execute(
-            "INSERT INTO meetings (id, title, note_id, attendees_json, attendees_confirmed, started_at, ended_at, recording_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO meetings (id, title, note_id, attendees_json, attendees_confirmed, started_at, ended_at, recording_json, keep_local)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
                 &manifest.meeting_id,
                 &title,
@@ -558,12 +664,21 @@ impl Storage {
                 started_at.to_rfc3339(),
                 manifest.ended_at.to_rfc3339(),
                 serde_json::to_string(&manifest.recording)?,
+                own_keep_local as i64,
             ),
         )?;
         self.conn.execute(
             "UPDATE notes SET meeting_id = ?1 WHERE id = ?2",
             (&manifest.meeting_id, &manifest.note_id),
         )?;
+        // An existing note kept local through its other meetings stays so.
+        self.inherit_keep_local(&manifest.meeting_id, &manifest.note_id)?;
+        // Kept local through a folder there, but the folder here (reused by
+        // name, or the note's own) isn't: the meeting carries the flag.
+        let unconfirmed = manifest.recorded_keep_local().is_none();
+        if manifest.recorded_keep_local().unwrap_or(true) {
+            self.ensure_meeting_kept_local(&manifest.meeting_id)?;
+        }
         // Rebuild what's derived (FTS, markdown mirror, note.json) now that
         // the note is whole again.
         if let Ok(note) = self.get_note(&manifest.note_id) {
@@ -579,7 +694,22 @@ impl Storage {
                 }
             }
         }
-        Ok(Some(Healed::Resurrected(manifest.meeting_id)))
+        Ok(Some(Healed::Resurrected {
+            id: manifest.meeting_id,
+            unconfirmed,
+        }))
+    }
+
+    /// Set the meeting's own Keep local flag unless it is already kept
+    /// local (by its flag or its note's folder).
+    fn ensure_meeting_kept_local(&self, meeting_id: &str) -> Result<()> {
+        if !self.meeting_keep_local(meeting_id) {
+            self.conn.execute(
+                "UPDATE meetings SET keep_local = 1 WHERE id = ?1",
+                [meeting_id],
+            )?;
+        }
+        Ok(())
     }
 
     /// Attach the manifest's recording to its existing meeting row.
@@ -706,8 +836,14 @@ impl Storage {
             attendees: None,
             attendees_confirmed: None,
             folder_path: None,
+            keep_local: None,
+            folder_keep_local: None,
         };
-        let dir = self.data_dir.join(rel);
+        let Some(dir) = crate::contained_recordings_dir(&self.data_dir, &rel) else {
+            return Err(crate::StorageError::Invalid(
+                "recording folder is not under recordings/".into(),
+            ));
+        };
         if let Ok(meeting) = self.get_meeting(meeting_id) {
             manifest.title = Some(meeting.title);
             manifest.started_at = Some(meeting.started_at);
@@ -716,10 +852,13 @@ impl Storage {
         }
         if let Ok(note) = self.get_note(note_id) {
             manifest.title = Some(note.title.clone());
-            manifest.folder_path = note
-                .folder_id
-                .as_deref()
-                .and_then(|fid| self.folder_path_names(fid).ok());
+            // Recorded only when the note (and so its folder) is readable;
+            // otherwise heal keeps the meeting local.
+            manifest.keep_local = self
+                .get_meeting_privacy(meeting_id)
+                .ok()
+                .map(|p| p.keep_local);
+            self.fill_folder_path(&mut manifest, note.folder_id.as_deref());
             let _ = write_note_mirror(&dir, &PortableNote::from_note(&note));
         }
         write_recording_manifest(&dir, &manifest)?;
@@ -775,6 +914,8 @@ mod tests {
             attendees: None,
             attendees_confirmed: None,
             folder_path: None,
+            keep_local: None,
+            folder_keep_local: None,
         };
         write_recording_manifest(&dir, &manifest).unwrap();
         let transcript = Transcript {
@@ -1029,6 +1170,11 @@ mod tests {
         assert_eq!(n.folder_id, None);
         assert_eq!(n.scratchpad, "");
         assert!(n.blocks.is_empty());
+        // A manifest that doesn't record Keep local can't prove the meeting
+        // was cloud-eligible: it comes back kept local.
+        assert!(s.meeting_keep_local("m-legacy"));
+        assert!(s.note_keep_local("n-legacy"));
+        assert_eq!(report.kept_local_unconfirmed, vec!["m-legacy".to_string()]);
     }
 
     fn hostile_manifest(meeting_id: &str, mixed: &str) -> RecordingManifest {
@@ -1049,6 +1195,8 @@ mod tests {
             attendees: None,
             attendees_confirmed: None,
             folder_path: None,
+            keep_local: Some(false),
+            folder_keep_local: None,
         }
     }
 
@@ -1212,5 +1360,379 @@ mod tests {
 
         let again = s.self_heal_recordings().unwrap();
         assert!(again.refreshed.is_empty(), "backfill must be idempotent");
+    }
+
+    /// A copied-in manifest whose note or meeting id isn't a plain id is
+    /// rejected outright: no rows, nothing moved, nothing outside touched.
+    #[test]
+    fn manifest_with_unsafe_ids_is_rejected() {
+        let (tmp, s) = test_storage();
+        let outside = tempfile::tempdir().unwrap();
+        let canary = outside.path().join("canary");
+        std::fs::create_dir_all(&canary).unwrap();
+        std::fs::write(canary.join("keep.txt"), b"x").unwrap();
+        let abs = canary.to_string_lossy().into_owned();
+        let bad_ids = [
+            "..",
+            "../canary",
+            "../../../canary",
+            r"..\..\canary",
+            abs.as_str(),
+            r"\\server\share",
+            "a/b",
+            "",
+            "n.1",
+        ];
+        let mut parked = Vec::new();
+        for (i, bad) in bad_ids.iter().enumerate() {
+            for (j, field) in ["note_id", "meeting_id"].iter().enumerate() {
+                let folder = format!("2026-07-2{j} Copied {i}");
+                let under = if i % 2 == 0 {
+                    "recordings"
+                } else {
+                    "recordings/_unlinked"
+                };
+                let dir = make_folder(tmp.path(), under, &folder);
+                let mut m = hostile_manifest(
+                    &format!("m-{i}-{j}"),
+                    &format!("recordings/{folder}/recording.mixed.wav"),
+                );
+                match *field {
+                    "note_id" => m.note_id = (*bad).to_string(),
+                    _ => m.meeting_id = (*bad).to_string(),
+                }
+                write_recording_manifest(&dir, &m).unwrap();
+                if under.ends_with("_unlinked") {
+                    parked.push(dir);
+                }
+            }
+        }
+
+        let report = s.self_heal_recordings().unwrap();
+        assert!(report.is_empty(), "{report:?}");
+        let rows = |table: &str| -> i64 {
+            s.conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(rows("notes"), 0);
+        assert_eq!(rows("meetings"), 0);
+        for dir in parked {
+            assert!(dir.is_dir(), "a rejected parked folder stays parked");
+        }
+        assert!(canary.join("keep.txt").is_file());
+    }
+
+    /// Whatever a stored note id holds, deletes and attachment writes stay
+    /// inside the app's own folders.
+    #[test]
+    fn unsafe_note_ids_never_reach_outside_the_app_folders() {
+        let (tmp, s) = test_storage();
+        let outside = tempfile::tempdir().unwrap();
+        let canary_out = outside.path().join("canary");
+        std::fs::create_dir_all(&canary_out).unwrap();
+        std::fs::write(canary_out.join("keep.txt"), b"x").unwrap();
+        let canary_in = tmp.path().join("canary");
+        std::fs::create_dir_all(&canary_in).unwrap();
+        std::fs::write(canary_in.join("keep.txt"), b"x").unwrap();
+        let src = outside.path().join("report.pdf");
+        std::fs::write(&src, b"%PDF").unwrap();
+        let abs = canary_out.to_string_lossy().into_owned();
+
+        for id in ["..", "../canary", r"..\canary", abs.as_str()] {
+            s.insert_recovered_note(id, "Old heal", None, Utc::now(), None)
+                .unwrap();
+            assert!(s.note_attachments_dir(id).is_none(), "{id:?}");
+            assert!(s.add_attachment(id, &src).is_err(), "{id:?}");
+            assert!(s
+                .add_attachment_in_place(id, "attachments/x/y.mp4")
+                .is_err());
+            s.delete_note(id).unwrap();
+            assert!(canary_out.join("keep.txt").is_file(), "{id:?}");
+            assert!(canary_in.join("keep.txt").is_file(), "{id:?}");
+            assert!(tmp.path().join("recordings").is_dir(), "{id:?}");
+            assert!(tmp.path().join(crate::Storage::DB_FILE).is_file(), "{id:?}");
+        }
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 2);
+    }
+
+    /// One recorded meeting in `folder`: folder on disk, stashed manifest,
+    /// recording attached.
+    fn recorded(s: &crate::Storage, title: &str, folder: Option<&str>) -> (String, String) {
+        let note = s.create_note(title, folder).unwrap();
+        let meeting = s.create_meeting(title, &note.id, &[]).unwrap();
+        let dir = s.allocate_meeting_dir(title, meeting.started_at).unwrap();
+        std::fs::write(dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        let rec = RecordingRef {
+            mic_path: None,
+            system_path: None,
+            mixed_path: Some(format!(
+                "recordings/{}/recording.mixed.wav",
+                dir.file_name().unwrap().to_string_lossy()
+            )),
+            playback_path: None,
+            duration_ms: 1_000,
+        };
+        s.stash_recording_manifest(&meeting.id, &note.id, &rec)
+            .unwrap();
+        s.end_meeting(&meeting.id, &rec).unwrap();
+        (note.id, meeting.id)
+    }
+
+    /// A fresh store holding a copy of `from`'s `recordings/`, after
+    /// `prepare` ran on its (empty) database.
+    fn copy_to_fresh_store(
+        from: &Path,
+        prepare: impl FnOnce(&crate::Storage),
+    ) -> (tempfile::TempDir, crate::Storage) {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = crate::Storage::open(tmp.path()).unwrap();
+        prepare(&s);
+        copy_dir(&from.join("recordings"), &tmp.path().join("recordings"));
+        (tmp, s)
+    }
+
+    /// Keep local travels with a copied folder: set on the note, or on a
+    /// folder above it (turned on after the recording, so the manifest was
+    /// rewritten), it is still set after healing into a fresh store. A
+    /// meeting that wasn't kept local stays cloud-eligible.
+    #[test]
+    fn keep_local_survives_heal_into_a_fresh_store() {
+        let (tmp_a, a) = test_storage();
+        let clients = a.create_folder("Clients", None).unwrap();
+        let acme = a.create_folder("Acme", Some(&clients.id)).unwrap();
+        let (n_folder, m_folder) = recorded(&a, "Acme sync", Some(&acme.id));
+        let (n_own, m_own) = recorded(&a, "Private 1-1", None);
+        let (n_open, m_open) = recorded(&a, "All hands", None);
+        a.set_folder_keep_local(&clients.id, true).unwrap();
+        a.set_note_keep_local(&n_own, true).unwrap();
+
+        // a store where the folders don't exist yet: recreated, flagged
+        let (_tmp_b, b) = copy_to_fresh_store(tmp_a.path(), |_| {});
+        let report = b.self_heal_recordings().unwrap();
+        assert_eq!(report.resurrected.len(), 3);
+        assert!(report.kept_local_unconfirmed.is_empty(), "{report:?}");
+        assert!(b.meeting_keep_local(&m_folder) && b.note_keep_local(&n_folder));
+        assert!(b.meeting_keep_local(&m_own) && b.note_keep_local(&n_own));
+        assert!(!b.meeting_keep_local(&m_open) && !b.note_keep_local(&n_open));
+        let folders = b.list_folders().unwrap();
+        let clients_b = folders.iter().find(|f| f.name == "Clients").unwrap();
+        assert_eq!(b.local_only_folders().unwrap(), vec![clients_b.id.clone()]);
+        // carried by the recreated folder, not stamped on the meeting
+        assert!(!b.get_meeting_privacy(&m_folder).unwrap().keep_local);
+
+        // a store where "Clients" already exists, not kept local: the folder
+        // is reused as it is, and the meeting carries the flag itself
+        let (_tmp_c, c) = copy_to_fresh_store(tmp_a.path(), |c| {
+            c.create_folder("Clients", None).unwrap();
+        });
+        c.self_heal_recordings().unwrap();
+        assert!(c.local_only_folders().unwrap().is_empty());
+        assert!(c.meeting_keep_local(&m_folder) && c.note_keep_local(&n_folder));
+        assert!(c.get_meeting_privacy(&m_folder).unwrap().keep_local);
+        assert!(c.meeting_keep_local(&m_own));
+        assert!(!c.meeting_keep_local(&m_open));
+    }
+
+    /// A manifest that records the folder path but not the folder flags
+    /// (an older v2 file) can't prove the meeting was cloud-eligible.
+    #[test]
+    fn unrecorded_folder_flags_heal_kept_local() {
+        let (tmp, s) = test_storage();
+        let folder = "2026-07-13 Board prep";
+        let dir = make_folder(tmp.path(), "recordings", folder);
+        let mut m = hostile_manifest("m-v2", &format!("recordings/{folder}/recording.mixed.wav"));
+        m.version = 2;
+        m.folder_path = Some(vec!["Board".into()]);
+        m.keep_local = Some(false);
+        m.folder_keep_local = None;
+        write_recording_manifest(&dir, &m).unwrap();
+        s.self_heal_recordings().unwrap();
+        assert!(s.meeting_keep_local("m-v2"));
+    }
+
+    /// Toggling Keep local rewrites the manifests it affects, and the
+    /// startup backfill adds the flags to a manifest that lacks them.
+    #[test]
+    fn manifests_follow_keep_local_changes() {
+        let (tmp, s) = test_storage();
+        let team = s.create_folder("Team", None).unwrap();
+        let (note_id, meeting_id) = recorded(&s, "Weekly", Some(&team.id));
+        let dir = s
+            .get_meeting(&meeting_id)
+            .unwrap()
+            .recording
+            .as_ref()
+            .and_then(crate::meetings::recording_dir_rel)
+            .map(|r| tmp.path().join(r))
+            .unwrap();
+        let read = || -> RecordingManifest {
+            serde_json::from_str(&std::fs::read_to_string(dir.join(RECORDING_MANIFEST)).unwrap())
+                .unwrap()
+        };
+        assert_eq!(read().keep_local, Some(false));
+        assert_eq!(read().folder_keep_local, Some(vec![false]));
+        s.set_note_keep_local(&note_id, true).unwrap();
+        assert_eq!(read().keep_local, Some(true));
+        s.set_note_keep_local(&note_id, false).unwrap();
+        s.set_folder_keep_local(&team.id, true).unwrap();
+        assert_eq!(read().keep_local, Some(false));
+        assert_eq!(read().folder_keep_local, Some(vec![true]));
+        assert_eq!(read().recorded_keep_local(), Some(true));
+
+        // an older manifest without the flags gets them from the database
+        let mut old = read();
+        old.version = 2;
+        old.keep_local = None;
+        old.folder_keep_local = None;
+        write_recording_manifest(&dir, &old).unwrap();
+        let report = s.self_heal_recordings().unwrap();
+        assert_eq!(report.refreshed, vec![meeting_id]);
+        let back = read();
+        assert_eq!(back.version, MANIFEST_VERSION);
+        assert_eq!(back.keep_local, Some(false));
+        assert_eq!(back.folder_keep_local, Some(vec![true]));
+    }
+
+    /// Ids are lowercase only, so an id that differs from another only in
+    /// letter case never gets a folder of its own: on a file system that
+    /// ignores case it would be the other note's folder.
+    #[test]
+    fn ids_that_differ_only_in_case_never_share_a_folder() {
+        let (tmp, s) = test_storage();
+        let real = s.create_note("Real", None).unwrap();
+        let src = tmp.path().join("r.pdf");
+        std::fs::write(&src, b"x").unwrap();
+        s.add_attachment(&real.id, &src).unwrap();
+        let real_dir = s.note_attachments_dir(&real.id).unwrap();
+        assert!(real_dir.is_dir());
+
+        let upper = real.id.to_ascii_uppercase();
+        assert_ne!(upper, real.id);
+        assert!(!crate::safe_path::is_safe_id(&upper));
+        assert!(s.note_attachments_dir(&upper).is_none());
+        s.insert_recovered_note(&upper, "Other", None, Utc::now(), None)
+            .unwrap();
+        assert!(s.add_attachment(&upper, &src).is_err());
+        s.delete_note(&upper).unwrap();
+        assert!(real_dir.is_dir(), "the real note's attachments stay");
+        assert_eq!(std::fs::read_dir(&real_dir).unwrap().count(), 1);
+
+        // the scratch dir and the legacy transcript name keep them apart too
+        assert_ne!(
+            crate::scratch::meeting_scratch_dir(tmp.path(), &upper),
+            crate::scratch::meeting_scratch_dir(tmp.path(), &real.id)
+        );
+        assert_ne!(
+            crate::scratch::id_component(&upper),
+            crate::scratch::id_component(&real.id)
+        );
+    }
+
+    /// A manifest whose ids are upper case or a reserved device name is
+    /// rejected like any other unsafe id.
+    #[test]
+    fn manifest_ids_must_be_lowercase_plain_names() {
+        let (tmp, s) = test_storage();
+        let ids = ["M-ORIG", "N-Orig", "con", "nul", "com1"];
+        for (i, bad) in ids.iter().enumerate() {
+            let folder = format!("2026-07-1{i} Upper {i}");
+            let dir = make_folder(tmp.path(), "recordings", &folder);
+            let mut m = hostile_manifest(
+                &format!("m-ok-{i}"),
+                &format!("recordings/{folder}/recording.mixed.wav"),
+            );
+            if i % 2 == 0 {
+                m.meeting_id = (*bad).to_string();
+            } else {
+                m.note_id = (*bad).to_string();
+            }
+            write_recording_manifest(&dir, &m).unwrap();
+        }
+        let report = s.self_heal_recordings().unwrap();
+        assert!(report.is_empty(), "{report:?}");
+        let notes: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(notes, 0);
+    }
+
+    /// Keep local turned on while the manifest still says "not kept local"
+    /// (its refresh never landed): the startup backfill brings the file up
+    /// to date, so a copy of the folder heals kept local.
+    #[test]
+    fn keep_local_in_the_database_reaches_a_stale_manifest() {
+        let (tmp, s) = test_storage();
+        let team = s.create_folder("Team", None).unwrap();
+        let (note_id, meeting_id) = recorded(&s, "Weekly", Some(&team.id));
+        // flags changed behind the manifest's back
+        s.conn
+            .execute(
+                "UPDATE meetings SET keep_local = 1 WHERE note_id = ?1",
+                [&note_id],
+            )
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE folders SET keep_local = 1 WHERE id = ?1",
+                [&team.id],
+            )
+            .unwrap();
+        let report = s.self_heal_recordings().unwrap();
+        assert_eq!(report.refreshed, vec![meeting_id.clone()]);
+
+        let (_tmp_b, b) = copy_to_fresh_store(tmp.path(), |_| {});
+        b.self_heal_recordings().unwrap();
+        assert!(b.meeting_keep_local(&meeting_id));
+        assert!(b.get_meeting_privacy(&meeting_id).unwrap().keep_local);
+        assert_eq!(b.local_only_folders().unwrap().len(), 1);
+    }
+
+    /// Heal reports the meetings it kept local only because their manifest
+    /// didn't say, and not the ones whose manifest recorded it.
+    #[test]
+    fn heal_reports_meetings_kept_local_without_a_recorded_setting() {
+        let (tmp_a, a) = test_storage();
+        let (_, m_recorded) = recorded(&a, "Recorded", None);
+        let (n_local, m_local) = recorded(&a, "Local", None);
+        a.set_note_keep_local(&n_local, true).unwrap();
+        let (_tmp_b, b) = copy_to_fresh_store(tmp_a.path(), |_| {});
+        // one manifest from an older build: no Keep local fields
+        let dir = b.data_dir.join("recordings").join(
+            std::fs::read_dir(b.data_dir.join("recordings"))
+                .unwrap()
+                .flatten()
+                .find(|e| {
+                    std::fs::read_to_string(e.path().join(RECORDING_MANIFEST))
+                        .is_ok_and(|t| t.contains(&m_recorded))
+                })
+                .unwrap()
+                .file_name(),
+        );
+        let mut old: RecordingManifest =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(RECORDING_MANIFEST)).unwrap())
+                .unwrap();
+        old.version = 2;
+        old.keep_local = None;
+        old.folder_keep_local = None;
+        write_recording_manifest(&dir, &old).unwrap();
+
+        let report = b.self_heal_recordings().unwrap();
+        assert_eq!(report.resurrected.len(), 2);
+        assert_eq!(report.kept_local_unconfirmed, vec![m_recorded.clone()]);
+        assert!(b.meeting_keep_local(&m_recorded));
+        assert!(b.meeting_keep_local(&m_local));
+    }
+
+    /// `note.json` keeps its own version: a manifest-only schema change
+    /// doesn't make it look like a future format to an older build.
+    #[test]
+    fn note_mirror_version_is_independent_of_the_manifest() {
+        let (_tmp, s) = test_storage();
+        let note = s.create_note("n", None).unwrap();
+        assert_eq!(PortableNote::from_note(&note).version, NOTE_MIRROR_VERSION);
+        assert_eq!(NOTE_MIRROR_VERSION, 2);
+        assert_eq!(MANIFEST_VERSION, 3);
     }
 }
