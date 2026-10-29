@@ -6,13 +6,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::{bail, ensure, Context as _, Result};
+use anyhow::{ensure, Context as _, Result};
 use fly_context::{call, Context, QueryVector, SearchPassagesArgs, Visibility};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::corpus::{Corpus, Db};
-use crate::embed;
+use crate::embedder::Embedder;
 use crate::report::SuiteResult;
 
 pub const K: usize = 8;
@@ -395,20 +395,53 @@ fn mean(v: &[f64]) -> f64 {
     }
 }
 
-pub fn run(evals_dir: &Path, embedder: &str) -> SuiteResult {
-    match run_inner(evals_dir, embedder) {
+/// The retrieval suite under `emb`, reported as suite `name`
+/// (`retrieval` for the CI embedder, `retrieval_real` for the app's).
+pub fn run(evals_dir: &Path, emb: &Embedder, name: &str) -> SuiteResult {
+    match run_inner(evals_dir, emb, name) {
         Ok(r) => r,
-        Err(e) => SuiteResult::failed("retrieval", e),
+        Err(e) => SuiteResult::failed(name, e),
     }
 }
 
-fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
-    if embedder != embed::MODEL {
-        bail!(
-            "unknown embedder {embedder:?} (this runner provides {})",
-            embed::MODEL
-        );
+/// Area under the ROC curve: the chance a random answerable question's
+/// top-1 cosine beats a random unanswerable one's (ties count half).
+fn auroc(pos: &[f64], neg: &[f64]) -> f64 {
+    if pos.is_empty() || neg.is_empty() {
+        return 0.0;
     }
+    let mut wins = 0.0;
+    for p in pos {
+        for n in neg {
+            wins += if p > n {
+                1.0
+            } else if p == n {
+                0.5
+            } else {
+                0.0
+            };
+        }
+    }
+    wins / (pos.len() * neg.len()) as f64
+}
+
+/// The best cosine any chunk scores for `q` (the score floor's input; the
+/// fused passage score is rank-only and can't serve as one).
+fn top1_cosine(db: &Db, emb: &Embedder, q: &str, shareable_only: bool) -> Result<f64> {
+    let v = emb.query(q)?;
+    let filter = fly_storage::SearchFilter {
+        folder_id: None,
+        since: None,
+        until: None,
+        limit: 1,
+        offset: 0,
+        exclude_keep_local: shareable_only,
+    };
+    let hits = db.storage.vector_search(&v, emb.model(), &filter, 1)?;
+    Ok(hits.first().map_or(0.0, |h| h.score as f64))
+}
+
+fn run_inner(evals_dir: &Path, emb: &Embedder, name: &str) -> Result<SuiteResult> {
     let corpus = Corpus::load(&evals_dir.join("fixtures"))?;
     let suite = evals_dir.join("suites").join("retrieval");
     let gold = GoldSet::load(&suite.join("questions.toml"))?;
@@ -417,22 +450,25 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         suite.join("keep_local_probes.toml"),
     )?)
     .context("parse keep_local_probes.toml")?;
-    let db = Db::build(&corpus, true)?;
+    let db = Db::build(&corpus, false)?;
+    let indexed = emb.index(&db.storage)?;
     let ids: IdMap<'_> = &|s| db.fixture_seg(s).map(str::to_string);
     let all = Context::new(&db.storage, Visibility::All);
     let shareable = Context::new(&db.storage, Visibility::ShareableOnly);
 
-    let mut res = SuiteResult::new("retrieval");
+    let mut res = SuiteResult::new(name);
     let (mut recalls, mut rrs, mut covered) = (Vec::new(), Vec::new(), Vec::new());
     let (mut kw_recalls, mut kw_rrs) = (Vec::new(), Vec::new());
+    let (mut kw_unscoped, mut fts_empty) = (Vec::new(), Vec::new());
+    let mut answerable_top1 = Vec::new();
     let (mut ev_recalls, mut ev_rrs) = (Vec::new(), Vec::new());
     let mut by_category: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut rows = Vec::new();
     for q in &gold.answerable {
-        let qv_vec = embed::embed(&q.question);
+        let qv_vec = emb.query(&q.question)?;
         let qv = QueryVector {
             vector: &qv_vec,
-            model: embed::MODEL,
+            model: emb.model(),
         };
         let args = scoped_args(&db, &q.question, q.scope.as_ref(), K);
         let hybrid = all
@@ -462,6 +498,16 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         covered.push(if s.covered { 1.0 } else { 0.0 });
         kw_recalls.push(kw.recall);
         kw_rrs.push(kw.rr);
+        if q.scope.is_none() {
+            kw_unscoped.push(kw.recall);
+            fts_empty.push(if keyword.passages.is_empty() {
+                1.0
+            } else {
+                0.0
+            });
+        }
+        let top1 = top1_cosine(&db, emb, &q.question, false)?;
+        answerable_top1.push(top1);
         for c in &q.category {
             by_category.entry(c.clone()).or_default().push(s.recall);
         }
@@ -471,27 +517,38 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
             "rank": s.rank,
             "covered": s.covered,
             "keyword_only_rank": kw.rank,
+            "top1_cosine": top1,
             "evidence_rank": ev.rank,
             "passages": hybrid.passages.len(),
         }));
     }
+    // Unanswerables: how well a top-1 cosine floor would separate them
+    // from answerable questions (spec §4.2a #1), per kind.
     let mut unanswerable_rows = Vec::new();
-    let mut unanswerable_with_passages = 0usize;
+    let mut by_kind: BTreeMap<UnanswerableKind, Vec<f64>> = BTreeMap::new();
     for u in &gold.unanswerable {
-        let ctx = if u.shareable_only() { &shareable } else { &all };
-        let v = embed::embed(&u.question);
-        let r = ctx.search_passages(
-            &scoped_args(&db, &u.question, None, K),
-            Some(QueryVector {
-                vector: &v,
-                model: embed::MODEL,
-            }),
-        )?;
-        if !r.passages.is_empty() {
-            unanswerable_with_passages += 1;
-        }
-        unanswerable_rows.push(json!({ "id": u.id, "passages": r.passages.len() }));
+        let top1 = top1_cosine(&db, emb, &u.question, u.shareable_only())?;
+        by_kind.entry(u.kind).or_default().push(top1);
+        unanswerable_rows.push(json!({ "id": u.id, "kind": u.kind.as_str(), "top1_cosine": top1 }));
     }
+    let all_unanswerable: Vec<f64> = by_kind.values().flatten().copied().collect();
+    let sweep: Vec<Value> = (2..=14)
+        .map(|i| {
+            let floor = i as f64 * 0.05;
+            let kept = answerable_top1.iter().filter(|c| **c >= floor).count();
+            let blocked = |v: &[f64]| v.iter().filter(|c| **c < floor).count();
+            let mut row = json!({
+                "floor": (floor * 100.0).round() / 100.0,
+                "answerable_kept": kept,
+                "answerable": answerable_top1.len(),
+            });
+            for (k, v) in &by_kind {
+                row[format!("{}_blocked", k.as_str())] = json!(blocked(v));
+                row[k.as_str()] = json!(v.len());
+            }
+            row
+        })
+        .collect();
 
     // Keep-local sweep (spec §4.2a #13).
     let needles = LeakNeedles::new(&corpus, &db);
@@ -515,10 +572,10 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         )
         .collect();
     for (id, question, scope) in questions {
-        let v = embed::embed(question);
+        let v = emb.query(question)?;
         let qv = QueryVector {
             vector: &v,
-            model: embed::MODEL,
+            model: emb.model(),
         };
         for (label, vector) in [("hybrid", Some(qv)), ("keyword", None)] {
             // Wide limit: a leak anywhere in the candidate list counts.
@@ -545,11 +602,11 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         }
         args.since = p.since.clone();
         args.until = p.until.clone();
-        let v = embed::embed(&p.query);
+        let v = emb.query(&p.query)?;
         for vector in [
             Some(QueryVector {
                 vector: &v,
-                model: embed::MODEL,
+                model: emb.model(),
             }),
             None,
         ] {
@@ -562,10 +619,10 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
     }
     for (i, p) in probes.tool.iter().enumerate() {
         let args = db.substitute(&serde_json::to_value(&p.args)?)?;
-        let v = embed::embed(args.get("query").and_then(Value::as_str).unwrap_or(""));
+        let v = emb.query(args.get("query").and_then(Value::as_str).unwrap_or("x"))?;
         let qv = (p.name == "search_passages").then_some(QueryVector {
             vector: &v,
-            model: embed::MODEL,
+            model: emb.model(),
         });
         let out = match call(&shareable, &p.name, &args, qv) {
             Ok(o) => format!("{}\n{}", o.json, o.text),
@@ -614,10 +671,24 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         .insert("evidence_recall_at_8".into(), mean(&ev_recalls));
     res.metrics
         .insert("evidence_mrr_at_8".into(), mean(&ev_rrs));
+    // Report-only: the keyword channel on unscoped questions (where the
+    // FTS candidates come from) and how often it finds nothing at all.
     res.metrics.insert(
-        "unanswerable_returning_passages".into(),
-        unanswerable_with_passages as f64,
+        "keyword_only_recall_at_8_unscoped".into(),
+        mean(&kw_unscoped),
     );
+    res.metrics
+        .insert("fts_empty_rate".into(), mean(&fts_empty));
+    res.metrics.insert(
+        "cosine_floor_auroc".into(),
+        auroc(&answerable_top1, &all_unanswerable),
+    );
+    for (k, v) in &by_kind {
+        res.metrics.insert(
+            format!("cosine_floor_auroc_{}", k.as_str()),
+            auroc(&answerable_top1, v),
+        );
+    }
     res.info.insert(
         "recall_by_category".into(),
         json!(by_category
@@ -631,13 +702,20 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
     res.info.insert("questions".into(), json!(rows));
     res.info
         .insert("unanswerable".into(), json!(unanswerable_rows));
+    res.info.insert("cosine_floor_sweep".into(), json!(sweep));
     res.info.insert(
         "keep_local_sweep".into(),
         json!({ "checks": checks, "leaks": leaks, "probes_reaching_keep_local_under_all": reachable }),
     );
     res.info.insert(
         "config".into(),
-        json!({ "k": K, "embedder": embedder, "meetings": corpus.meetings.len(), "segments": corpus.segments().count() }),
+        json!({
+            "k": K,
+            "embedder": emb.describe(),
+            "chunks_embedded": indexed,
+            "meetings": corpus.meetings.len(),
+            "segments": corpus.segments().count(),
+        }),
     );
     Ok(res)
 }

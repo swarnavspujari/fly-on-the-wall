@@ -589,6 +589,14 @@ mod tests {
         assert!(c.count(ScenarioKind::RedTeam) >= 10);
         assert!(c.count(ScenarioKind::Robustness) >= 10);
         assert!(c.count(ScenarioKind::Guard) >= 1);
+        // The cost table is dated and prices the scripted cloud model.
+        assert!(c.prices.date.is_some());
+        assert_eq!(
+            c.prices
+                .cost(fly_llm::anthropic::ANTHROPIC_DEFAULT_MODEL, 1_000_000, 0)
+                .map(|x| x > 0.0),
+            Some(true)
+        );
         // Keep-local gold off device expects "not found".
         for id in ["auto-s-cloud-q46", "auto-s-remote_local-q46"] {
             let s = c

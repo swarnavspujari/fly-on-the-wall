@@ -130,6 +130,12 @@ impl Corpus {
                 serde_json::from_str(&text).with_context(|| format!("parse {}", p.display()))?;
             meetings.push(m);
         }
+        Self::from_meetings(meetings)
+    }
+
+    /// A corpus from meetings already in memory (the scale benchmark's
+    /// generated library), validated like the committed one.
+    pub fn from_meetings(mut meetings: Vec<MeetingFixture>) -> Result<Self> {
         meetings.sort_by(|a, b| a.id.cmp(&b.id));
         let mut segments = BTreeMap::new();
         for m in &meetings {
