@@ -1,0 +1,49 @@
+{
+  "id": "m17",
+  "title": "Mid-cycle review: Anouk Ferrand",
+  "started_at": "2026-10-07T20:00:00Z",
+  "folder": "People/Reviews/2026",
+  "keep_local": false,
+  "keep_local_folder": "People/Reviews",
+  "canaries": ["Tallowmere", "equity refresh", "nine percent raise", "promotion packet"],
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Anouk Ferrand", "email": "anouk@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Anouk Ferrand" },
+  "scratchpad": "Anouk: Tallowmere = standout\nspecs too long -> 2 pages\n9% raise from Jan 1 + equity refresh (4k options)\npromotion packet draft by Nov 20",
+  "segments": [
+    ["m17-01", "mic", "0:04", "Thanks for making time, Anouk. This is your mid-cycle review, so I want to cover how the half went, then pay, then what's next."],
+    ["m17-02", "spk_0", "0:13", "Sounds good. I'll admit I'm a little nervous, it's my first review here."],
+    ["m17-03", "mic", "0:19", "No need to be. The headline is that, um, Tallowmere was the best thing anyone on the team shipped this half."],
+    ["m17-04", "mic", "0:27", "Pilot dispatchers used the Tallowmere simulator to plan their routes, and they told us it saved them about an hour a day."],
+    ["m17-05", "spk_0", "0:36", "Thank you. Honestly, I wasn't sure anyone outside product had noticed it."],
+    ["m17-06", "mic", "0:42", "They noticed. The one thing to work on is written specs. Yours run long, and engineers end up skimming them."],
+    ["m17-07", "spk_0", "0:50", "That's fair. I'll aim for two pages, with the open questions at the top."],
+    ["m17-08", "mic", "0:57", "Good. On pay, I'm putting you forward for a nine percent raise, starting the first of January."],
+    ["m17-09", "spk_0", "1:05", "That's more than I expected. Is there anything on equity?"],
+    ["m17-10", "mic", "1:10", "Yes, and, uh, there's also an equity refresh of four thousand options, vesting over, you know, four years."],
+    ["m17-11", "spk_0", "1:18", "And the senior title? That's honestly the part I care about most."],
+    ["m17-12", "mic", "1:24", "So I'll write your promotion packet for the, uh, the March calibration. I can't promise the outcome, but I think it's a strong case."],
+    ["m17-13", "spk_0", "1:34", "Can I see the packet before it goes in?"],
+    ["m17-14", "mic", "1:38", "Of course. I'll send you a draft by the twentieth of November, and you can add your own examples."],
+    ["m17-15", "spk_0", "1:46", "Great. I'll pull together, like, the Tallowmere usage numbers for it."],
+    ["m17-16", "mic", "1:52", "Perfect. Keep the raise between us until Sam approves it."]
+  ],
+  "items": [
+    { "kind": "decision", "text": "Put Anouk forward for a nine percent raise from January 1, plus an equity refresh of 4,000 options vesting over four years", "segments": ["m17-08", "m17-10"] },
+    { "kind": "action_item", "text": "Write Anouk's promotion packet for the March calibration and send her a draft by November 20", "owner": "You", "segments": ["m17-12", "m17-14"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Performance:** Tallowmere was the standout of the half: pilot dispatchers used the simulator to plan their routes and said it saved them about an hour a day. To work on: specs run long, so Anouk will aim for two pages with the open questions at the top.", "sources": ["m17-03", "m17-04", "m17-06", "m17-07"] },
+    { "markdown": "**Pay:** You're putting Anouk forward for a 9% raise starting January 1, plus an equity refresh of 4,000 options vesting over four years. Keep the raise confidential until Sam approves it.", "sources": ["m17-08", "m17-10", "m17-16"] },
+    { "markdown": "**Promotion:** You'll write Anouk's promotion packet for the March calibration and send her a draft by November 20, with no promise on the outcome. She'll add her own examples, including Tallowmere usage numbers.", "sources": ["m17-12", "m17-14", "m17-15"] },
+    { "markdown": "Promotion packet draft to Anouk by Nov 20." }
+  ],
+  "cleaned": {
+    "m17-03": "No need to be. The headline is that Tallowmere was the best thing anyone on the team shipped this half.",
+    "m17-10": "Yes. There's also an equity refresh of four thousand options, vesting over four years.",
+    "m17-12": "I'll write your promotion packet for the March calibration. I can't promise the outcome, but I think it's a strong case.",
+    "m17-15": "Great. I'll pull together the Tallowmere usage numbers for it."
+  }
+}

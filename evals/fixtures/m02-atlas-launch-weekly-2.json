@@ -1,0 +1,49 @@
+{
+  "id": "m02",
+  "title": "Atlas launch weekly",
+  "started_at": "2026-09-21T15:00:00Z",
+  "folder": "Atlas launch",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Ines Carvalho", "email": "ines@quillmark.example" },
+    { "name": "Marcus Webb", "email": "marcus@quillmark.example" },
+    { "name": "Jun Park", "email": "jun@quillmark.example" },
+    { "name": "Greta Holm", "email": "greta@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Ines Carvalho", "spk_1": "Marcus Webb", "spk_2": "Jun Park", "spk_3": "Greta Holm" },
+  "scratchpad": "budget up (podcast), cap w/ Greta\nlaunch slips a week\nwebinar = yes",
+  "segments": [
+    ["m02-01", "mic", "0:03", "Welcome back. Greta from finance is joining us today because the budget came up."],
+    ["m02-02", "spk_3", "0:10", "Thanks. I saw the paid plan. I'm mostly here to understand the sponsorship line."],
+    ["m02-03", "spk_0", "0:17", "Since last week we got an offer for a podcast sponsorship that reaches a lot of dispatch managers."],
+    ["m02-04", "spk_0", "0:25", "Adding it takes the first month from eighty four hundred to ninety two hundred dollars."],
+    ["m02-05", "mic", "0:33", "Greta, can we absorb that?"],
+    ["m02-06", "spk_3", "0:36", "I can live with ninety two hundred, as long as it's the ceiling and we report spend weekly."],
+    ["m02-07", "mic", "0:44", "Agreed, ninety two hundred is the cap. Ines, weekly spend report to Greta."],
+    ["m02-08", "spk_0", "0:50", "Will do, every Monday."],
+    ["m02-09", "spk_2", "0:55", "Bad news on the date. The security review on the scheduler API won't finish until the twenty-second."],
+    ["m02-10", "mic", "1:04", "Then we move the launch. Let's say October twenty-seventh, one week later. Everyone okay with that?"],
+    ["m02-11", "spk_1", "1:12", "Fine by me. The countdown on the pricing page still says the twentieth."],
+    ["m02-12", "spk_1", "1:18", "I'll change the countdown and the announcement banner to the twenty-seventh by Friday."],
+    ["m02-13", "mic", "1:25", "Thanks. Tier names are still open, we'll settle those in the pricing review on Tuesday."],
+    ["m02-14", "spk_0", "1:32", "On the webinar question from last week, I talked to two customers and they'd attend."],
+    ["m02-15", "mic", "1:39", "Then yes, let's run a webinar the week after launch. Ines owns it."],
+    ["m02-16", "spk_0", "1:45", "I'll find a date and send invites."],
+    ["m02-17", "spk_2", "1:50", "Last thing: the rate limit is merged and running behind a feature flag in staging."],
+    ["m02-18", "mic", "1:57", "Good. Keep it on in staging through launch."]
+  ],
+  "items": [
+    { "kind": "decision", "text": "Launch budget capped at $9,200 for the first month", "segments": ["m02-06", "m02-07"] },
+    { "kind": "action_item", "text": "Send Greta a weekly spend report every Monday", "owner": "Ines Carvalho", "segments": ["m02-07", "m02-08"] },
+    { "kind": "decision", "text": "Launch moved to October 27", "segments": ["m02-09", "m02-10"] },
+    { "kind": "action_item", "text": "Update the pricing page countdown and banner to October 27 by Friday", "owner": "Marcus Webb", "segments": ["m02-12"] },
+    { "kind": "decision", "text": "Run a webinar the week after launch, owned by Ines", "segments": ["m02-15"] },
+    { "kind": "action_item", "text": "Find a webinar date and send invites", "owner": "Ines Carvalho", "segments": ["m02-16"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Budget:** A podcast sponsorship takes the first month from $8,400 to $9,200. Greta accepted $9,200 as the ceiling with weekly spend reporting; Ines sends her the report every Monday.", "sources": ["m02-03", "m02-04", "m02-06", "m02-07", "m02-08"] },
+    { "markdown": "**Launch date:** The security review on the scheduler API won't finish until the 22nd, so the launch moves one week to October 27. Marcus updates the pricing page countdown and the announcement banner by Friday.", "sources": ["m02-09", "m02-10", "m02-12"] },
+    { "markdown": "**Webinar and staging:** Yes to a webinar the week after launch, owned by Ines, who will find a date and send invites. Tier names get settled in Tuesday's pricing review. The rate limit is running behind a feature flag in staging and stays on through launch.", "sources": ["m02-13", "m02-15", "m02-16", "m02-17", "m02-18"] }
+  ]
+}

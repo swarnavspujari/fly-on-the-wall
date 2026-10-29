@@ -1,0 +1,48 @@
+{
+  "id": "m04",
+  "title": "Harrowgate Freight renewal call",
+  "started_at": "2026-09-16T17:00:00Z",
+  "folder": "Customers/Harrowgate",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Elena Duarte", "email": "elena@quillmark.example" },
+    { "name": "Colm Byrne", "email": "colm@harrowgate-freight.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Elena Duarte", "spk_1": "Colm Byrne" },
+  "scratchpad": "Colm wants 15% off, 1yr\ncompetitor quote in play\nCFO approval by end Oct",
+  "segments": [
+    ["m04-01", "spk_0", "0:05", "Thanks for making time, Colm. Maya from our product team is joining too."],
+    ["m04-02", "spk_1", "0:11", "Happy to. I'll be direct, the renewal is coming up and finance is asking questions."],
+    ["m04-03", "spk_0", "0:19", "Understood. Today you're at forty two thousand dollars a year for sixty technician seats."],
+    ["m04-04", "spk_1", "0:27", "Right. And the double booking problem at the north depot cost us real money in August."],
+    ["m04-05", "mic", "0:35", "That's the sync delay between dispatch and the technician app. We fixed it in the September release."],
+    ["m04-06", "spk_1", "0:43", "Good to hear. But to renew at the same scope, we'd want fifteen percent off."],
+    ["m04-07", "spk_1", "0:50", "Routewise quoted us lower, and my CFO has seen that quote."],
+    ["m04-08", "spk_0", "0:56", "I appreciate you telling us. Is that fifteen percent on a one-year term?"],
+    ["m04-09", "spk_1", "1:02", "One year. We might do longer if the number works."],
+    ["m04-10", "mic", "1:08", "What would make a longer term attractive for you?"],
+    ["m04-11", "spk_1", "1:12", "Price certainty, and the route optimization module you showed us in the spring."],
+    ["m04-12", "spk_1", "1:19", "Whatever we agree, I need it approved by our CFO before the end of October."],
+    ["m04-13", "spk_0", "1:26", "That works with our timeline."],
+    ["m04-14", "spk_0", "1:30", "I'll put together two options, one year and two year, and we'll walk you through them in three weeks."],
+    ["m04-15", "spk_1", "1:38", "Sounds good. Send the agenda ahead of time."]
+  ],
+  "items": [
+    { "kind": "figure", "text": "Current Harrowgate contract: $42,000 a year for 60 technician seats", "segments": ["m04-03"] },
+    { "kind": "question", "text": "Harrowgate asks for a 15% discount on a one-year renewal", "segments": ["m04-06", "m04-08", "m04-09"] },
+    { "kind": "commitment", "text": "Renewal must be approved by Harrowgate's CFO before the end of October", "segments": ["m04-12"] },
+    { "kind": "action_item", "text": "Prepare one-year and two-year renewal options and present them in three weeks", "owner": "Elena Duarte", "segments": ["m04-14"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Current contract:** Harrowgate pays $42,000 a year for 60 technician seats. Colm raised the August double booking at the north depot; you explained it was the sync delay between dispatch and the technician app, fixed in the September release.", "sources": ["m04-03", "m04-04", "m04-05"] },
+    { "markdown": "**Harrowgate's ask:** 15% off to renew at the same scope on a one-year term; Routewise quoted lower and their CFO has seen that quote. A longer term is possible for price certainty and the route optimization module. Whatever is agreed needs their CFO's approval before the end of October.", "sources": ["m04-06", "m04-07", "m04-08", "m04-09", "m04-11", "m04-12"] },
+    { "markdown": "**Next step:** Elena puts together one-year and two-year options and walks Colm through them in three weeks; Colm wants the agenda ahead of time.", "sources": ["m04-14", "m04-15"] }
+  ],
+  "cleaned": {
+    "m04-02": "Happy to. I'll be direct: the renewal is coming up, and finance is asking questions.",
+    "m04-04": "Right, and the double booking problem at the north depot cost us real money in August.",
+    "m04-09": "One year, though we might do longer if the number works.",
+    "m04-14": "I'll put together two options, one-year and two-year, and we'll walk you through them in three weeks."
+  }
+}

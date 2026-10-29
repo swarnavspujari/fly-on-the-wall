@@ -777,6 +777,18 @@ export default function App() {
     setNoteMeetings((list) => list.map((x) => (x.id === m.id ? m : x)));
     // a date edit reorders the list (sorted by meeting date)
     void refreshNotes();
+    // ...and can rename the meeting folder, which moves the files the note
+    // lists in place there (imported videos): take the note's new paths.
+    if (openNoteIdRef.current === m.note_id) {
+      api
+        .getNote(m.note_id)
+        .then((fresh) =>
+          setOpenNote((cur) =>
+            cur && cur.id === fresh.id ? { ...cur, attachments: fresh.attachments } : cur,
+          ),
+        )
+        .catch(() => {});
+    }
   };
 
   // Picker in the transcript view: show an earlier (or the latest) meeting of

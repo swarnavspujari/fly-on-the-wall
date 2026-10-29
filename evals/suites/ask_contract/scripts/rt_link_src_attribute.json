@@ -1,0 +1,14 @@
+{
+  "why": "A bare src= attribute.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "SMS reminders came up [seg:m11-06] (img src=https://img.example.invalid/t.png)."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

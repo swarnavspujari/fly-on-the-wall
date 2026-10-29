@@ -1,0 +1,50 @@
+{
+  "id": "m01",
+  "title": "Atlas launch weekly",
+  "started_at": "2026-09-14T15:00:00Z",
+  "folder": "Atlas launch",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Ines Carvalho", "email": "ines@quillmark.example" },
+    { "name": "Marcus Webb", "email": "marcus@quillmark.example" },
+    { "name": "Jun Park", "email": "jun@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Ines Carvalho", "spk_1": "Marcus Webb", "spk_2": "Jun Park" },
+  "scratchpad": "launch budget ok'd, date Oct 20\nines -> press release\nwebinar??",
+  "segments": [
+    ["m01-01", "mic", "0:04", "Okay, let's get going. This is the first Atlas launch weekly, so I want to leave with a budget, a date and owners."],
+    ["m01-02", "spk_0", "0:13", "Sounds good. I pulled together the paid plan over the weekend, mostly search ads and two newsletter sponsorships."],
+    ["m01-03", "mic", "0:22", "What does it come to?"],
+    ["m01-04", "spk_0", "0:25", "The sponsorships are the expensive part. Search is cheap at our volume, maybe a third of the total."],
+    ["m01-05", "spk_0", "0:33", "All in, I'm asking for eighty four hundred dollars for the first month of paid launch spend."],
+    ["m01-06", "mic", "0:41", "That's fine with me. Let's treat that as approved unless finance pushes back."],
+    ["m01-07", "spk_1", "0:47", "Do we have a date I can put on the pricing page countdown?"],
+    ["m01-08", "mic", "0:52", "Let's target October twentieth. It's a Tuesday, and it gives Jun four full sprints."],
+    ["m01-09", "spk_2", "1:01", "Four sprints is tight but doable if we freeze scope this week."],
+    ["m01-10", "spk_0", "1:08", "I'll draft the press release and have it in the shared folder by next Wednesday."],
+    ["m01-11", "mic", "1:15", "Great. Marcus, where are we on the pricing page?"],
+    ["m01-12", "spk_1", "1:19", "The layout is done. I'm waiting on final tier names, so it still says plan one, plan two."],
+    ["m01-13", "spk_2", "1:27", "One thing from engineering: the scheduler API needs a rate limit before we open it up. I'm proposing two hundred requests per minute per customer."],
+    ["m01-14", "mic", "1:38", "Is that enough for the big fleet customers?"],
+    ["m01-15", "spk_2", "1:42", "For now, yes. Their peak is around ninety a minute. We can raise it per account."],
+    ["m01-16", "mic", "1:49", "Okay. On the landing page, I don't want a free trial button. Demo request only for launch."],
+    ["m01-17", "spk_1", "1:56", "Got it, demo request only. I'll pull the trial flow out of the page."],
+    ["m01-18", "spk_0", "2:02", "Do we want a launch webinar? I'm not sure it's worth it for the first week."],
+    ["m01-19", "mic", "2:09", "Let's not decide today. Put it on next week's list."]
+  ],
+  "items": [
+    { "kind": "decision", "text": "Paid launch budget approved at $8,400 for the first month", "segments": ["m01-05", "m01-06"] },
+    { "kind": "decision", "text": "Target launch date: October 20", "segments": ["m01-08"] },
+    { "kind": "action_item", "text": "Draft the press release by next Wednesday", "owner": "Ines Carvalho", "segments": ["m01-10"] },
+    { "kind": "figure", "text": "Proposed scheduler API rate limit: 200 requests per minute per customer", "segments": ["m01-13"] },
+    { "kind": "decision", "text": "Landing page offers demo requests only, no free trial button", "segments": ["m01-16"] },
+    { "kind": "action_item", "text": "Remove the trial flow from the landing page", "owner": "Marcus Webb", "segments": ["m01-17"] },
+    { "kind": "question", "text": "Should we run a launch webinar?", "segments": ["m01-18", "m01-19"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Budget and date:** Ines asked for $8,400 for the first month of paid launch spend, mostly search ads and two newsletter sponsorships; approved unless finance pushes back. Launch target is Tuesday, October 20, which gives Jun four full sprints.", "sources": ["m01-02", "m01-05", "m01-06", "m01-08"] },
+    { "markdown": "**Landing page and API:** Demo requests only at launch, no free trial button; Marcus pulls the trial flow out of the page. Jun proposed a scheduler API rate limit of 200 requests per minute per customer (the big fleets peak around 90 a minute, and it can be raised per account).", "sources": ["m01-13", "m01-15", "m01-16", "m01-17"] },
+    { "markdown": "**Next steps:** Ines drafts the press release by next Wednesday. Whether to run a launch webinar is undecided and goes on next week's list.", "sources": ["m01-10", "m01-18", "m01-19"] }
+  ]
+}

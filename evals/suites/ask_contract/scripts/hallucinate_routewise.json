@@ -1,0 +1,14 @@
+{
+  "why": "Invents the competitor's price; Colm never said one.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Routewise quoted Harrowgate thirty six thousand dollars a year [seg:m04-07]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

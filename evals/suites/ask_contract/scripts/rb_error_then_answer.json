@@ -1,0 +1,18 @@
+{
+  "why": "The local server is briefly unavailable; one retry succeeds.",
+  "responses": [
+    {
+      "error": "unavailable",
+      "message": "Ollama isn't answering on this computer right now"
+    },
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Yes, Harrowgate opened a ticket [seg:m08-08]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}
