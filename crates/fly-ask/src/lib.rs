@@ -406,12 +406,13 @@ fn history_messages(history: &[Turn], on_device: bool) -> Vec<Message> {
 /// never reaches a model.
 fn without_kept_local_note(answer: &str) -> String {
     let mut out = answer.to_string();
-    while let Some(k) = out.to_lowercase().find("kept-local") {
+    // ASCII lowercasing keeps byte offsets: `k` indexes `out` itself.
+    while let Some(k) = out.to_ascii_lowercase().find("kept-local") {
         let open = out[..k].rfind('(');
         let close = out[k..].find(')').map(|j| k + j + 1);
         match (open, close) {
             (Some(o), Some(c)) => out.replace_range(o..c, ""),
-            // Not the note's shape: drop the whole sentence's word.
+            // Not the note's shape: drop the word itself.
             _ => out.replace_range(k..k + "kept-local".len(), ""),
         }
     }
@@ -994,4 +995,25 @@ fn requery<S: StoreAccess, E: QueryEmbedder>(
         .iter()
         .any(|id| !shown.contains(id))
         .then_some((pf.context, pf.evidence))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kept_local_notes_are_removed_byte_safely() {
+        assert_eq!(
+            without_kept_local_note(
+                "Not found in your meetings. (1 kept-local meeting was not searched.)"
+            ),
+            "Not found in your meetings."
+        );
+        // Multibyte text whose lowercase form is longer than itself.
+        let t = without_kept_local_note("İİ İstanbul — (2 Kept-Local meetings were not searched.)");
+        assert_eq!(t, "İİ İstanbul —");
+        let t = without_kept_local_note("İ a KEPT-LOCAL b (no close");
+        assert!(!t.to_ascii_lowercase().contains("kept-local"), "{t}");
+        assert_eq!(without_kept_local_note("Plain answer."), "Plain answer.");
+    }
 }
