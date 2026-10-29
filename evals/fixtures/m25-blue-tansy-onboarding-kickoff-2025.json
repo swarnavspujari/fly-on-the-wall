@@ -1,0 +1,52 @@
+{
+  "id": "m25",
+  "title": "Blue Tansy Clinics: onboarding kickoff",
+  "started_at": "2025-10-15T15:00:00Z",
+  "folder": "Customers/Blue Tansy",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Elena Duarte", "email": "elena@quillmark.example" },
+    { "name": "Ruth Calloway", "email": "ruth@bluetansy-clinics.example" },
+    { "name": "Imogen Hart", "email": "imogen@bluetansy-clinics.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Elena Duarte", "spk_1": "Ruth Calloway", "spk_2": "Imogen Hart" },
+  "scratchpad": "rollout: coast first (Mon Nov 10), valley Jan, uplands last\nno clinical data in Quillmark (DPA s.4)\nImogen: SSO test env by end Oct",
+  "segments": [
+    ["m25-01", "spk_0", "0:05", "Ruth, Imogen, welcome to Quillmark. This is the onboarding kickoff, so today we agree the order things happen in and who does what."],
+    ["m25-02", "spk_1", "0:19", "Thank you. We've been looking forward to this. Our visit scheduling is still mostly phone calls and a shared calendar that nobody trusts."],
+    ["m25-03", "spk_2", "0:34", "I'm on the IT side, so I'll be the one asking about logins, data and where everything is stored. Ruth runs operations."],
+    ["m25-04", "mic", "0:49", "Great. Ruth, can you describe how a home visit works today, end to end?"],
+    ["m25-05", "spk_1", "0:59", "A clinic books a home visit for a patient, usually a nurse or a respiratory technician going out with equipment. The regional office assigns someone and tells them by phone."],
+    ["m25-06", "spk_1", "1:17", "The technician confirms, drives out, does the visit, and writes up which equipment was dropped off or collected."],
+    ["m25-07", "mic", "1:30", "So for us, a visit is a job, the patient's home is the job address, and the equipment is what the technician records at the end."],
+    ["m25-08", "spk_2", "1:46", "That's the part I care about most. We'll send addresses and visit times, but no diagnoses and no clinical notes. Nothing medical goes into Quillmark."],
+    ["m25-09", "spk_0", "1:59", "That's how we'd want it too. Job notes are free text, so we'd suggest a line in the training telling technicians not to type clinical details there."],
+    ["m25-10", "spk_2", "2:15", "I'd like that in the data processing agreement as well, not only in the training."],
+    ["m25-11", "spk_0", "2:26", "It's already in the draft you have, in section four. Our counsel wrote it with healthcare customers in mind."],
+    ["m25-12", "spk_1", "2:40", "Now the rollout. We have three regions, and I don't want all of them changing at once."],
+    ["m25-13", "spk_1", "2:52", "My suggestion is the coast region first, because their regional office is the most organised. Then the valley, and the uplands last."],
+    ["m25-14", "mic", "3:06", "Why the uplands last?"],
+    ["m25-15", "spk_1", "3:13", "They're the furthest out, and their office manager retires at the end of the year. I'd rather the new manager starts with the new system than learns two in a row."],
+    ["m25-16", "spk_0", "3:31", "Then the coast region goes live on Monday the tenth of November. The valley follows in January, and the uplands go once their new manager has started."],
+    ["m25-17", "spk_2", "3:45", "Logins. Can we use our own accounts, or does everyone get a new password to forget?"],
+    ["m25-18", "spk_0", "3:58", "Single sign-on works with your identity provider, so nobody gets a new password. You'd connect it on your side, and we test it together."],
+    ["m25-19", "spk_2", "4:11", "Good. I'll set up the connection in our test environment first. I can have that ready by the end of October."],
+    ["m25-20", "spk_1", "4:25", "Training. My coordinators aren't technical people, and they've been burned by new systems before."],
+    ["m25-21", "spk_0", "4:37", "We'd train the coordinators in person at the coast office, for half a day, with their real visits loaded so it doesn't feel like a demo."],
+    ["m25-22", "spk_1", "4:52", "Real visits is the right call. They'll ignore anything that looks like sample data."],
+    ["m25-23", "mic", "5:04", "One question from me. Do your technicians share equipment between regions? It changes how we set up locations."],
+    ["m25-24", "spk_1", "5:16", "Rarely. Each region keeps its own equipment store. Things move between regions maybe once a month."],
+    ["m25-25", "mic", "5:29", "Then each region is its own location, and we keep the setup simple."],
+    ["m25-26", "spk_0", "5:39", "Next steps from our side. I'll send the import template and the training plan this week."],
+    ["m25-27", "spk_1", "5:51", "And I'm your contact for the rollout. Imogen handles anything to do with logins and data."],
+    ["m25-28", "spk_2", "6:04", "One last thing. Please send me the list of your sub-processors. Our privacy officer will ask for it before we go live."],
+    ["m25-29", "spk_0", "6:18", "I'll send it with the agreement. Thanks, both of you. This was a good start."]
+  ],
+  "items": [
+    { "kind": "decision", "text": "Rollout order: coast region live Monday, November 10; the valley in January; the uplands after their new office manager starts", "segments": ["m25-13", "m25-16"] },
+    { "kind": "commitment", "text": "No diagnoses or clinical notes go into Quillmark; only addresses and visit times", "segments": ["m25-08"] },
+    { "kind": "action_item", "text": "Set up the single sign-on connection in the test environment by the end of October", "owner": "Imogen Hart", "segments": ["m25-19"] },
+    { "kind": "action_item", "text": "Send the import template, training plan and sub-processor list", "owner": "Elena Duarte", "segments": ["m25-27"] }
+  ]
+}
