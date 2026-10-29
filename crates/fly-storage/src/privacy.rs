@@ -252,10 +252,13 @@ impl Storage {
     /// works per note — the note *is* the meeting in the UI). New meetings
     /// recorded into the note inherit it (see `create_meeting`).
     pub fn set_note_keep_local(&self, note_id: &str, keep_local: bool) -> Result<usize> {
-        Ok(self.conn.execute(
+        let n = self.conn.execute(
             "UPDATE meetings SET keep_local = ?1 WHERE note_id = ?2",
             (keep_local as i64, note_id),
-        )?)
+        )?;
+        // The manifests carry the flag, so a copied folder keeps it.
+        self.refresh_manifests_for_notes(&[note_id.to_string()]);
+        Ok(n)
     }
 
     pub fn set_participants_notified(&self, meeting_id: &str, notified: bool) -> Result<()> {
@@ -290,6 +293,8 @@ impl Storage {
         if n == 0 {
             return Err(StorageError::NotFound(format!("folder {folder_id}")));
         }
+        // Every manifest under this folder carries its path's flags.
+        self.refresh_manifests_for_notes(&self.recorded_notes_in_subtree(folder_id)?);
         Ok(())
     }
 

@@ -93,6 +93,9 @@ export interface ConsentSkips {
   /** Who needs the OK, or null when the saved provider doesn't (allowed
    *  meanwhile, or local now): then running them is all that's left. */
   vendor: string | null;
+  /** The saved cloud provider's vendor while it has no API key (the
+   *  backend skips the pass for that too), else null. */
+  keyVendor: string | null;
   busy: boolean;
   /** Ask for consent (if needed), then run the skipped cleanup and action
    *  items in the background. */
@@ -101,12 +104,14 @@ export interface ConsentSkips {
 }
 
 /** Background cleanup and action items the backend skipped for missing
- *  consent this session (`consent_skipped_meetings`, then each
- *  `llm:consent-skips` update). Dismissing hides the notice for the session. */
+ *  consent or a missing API key this session (`consent_skipped_meetings`,
+ *  then each `llm:consent-skips` update). Dismissing hides the notice for
+ *  the session. */
 export function useConsentSkips(): ConsentSkips {
   const ask = useCloudConsent();
   const [skipped, setSkipped] = useState<string[]>([]);
   const [vendor, setVendor] = useState<string | null>(null);
+  const [keyVendor, setKeyVendor] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -150,7 +155,11 @@ export function useConsentSkips(): ConsentSkips {
         const info = s.providers.find((p) => p.id === s.provider);
         const allowed =
           !!info?.is_local || (await api.getAppSetting(cloudConsentKey(s.provider))) === "true";
-        if (live) setVendor(allowed ? null : providerName(s.provider));
+        const keyMissing = !!info && !info.is_local && !info.has_key;
+        if (live) {
+          setVendor(allowed ? null : providerName(s.provider));
+          setKeyVendor(keyMissing ? providerName(s.provider) : null);
+        }
       } catch {
         /* keep the last answer */
       }
@@ -178,6 +187,7 @@ export function useConsentSkips(): ConsentSkips {
   return {
     count: dismissed ? 0 : skipped.length,
     vendor,
+    keyVendor,
     busy,
     run,
     dismiss: () => setDismissed(true),

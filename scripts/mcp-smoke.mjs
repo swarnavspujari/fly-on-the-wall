@@ -138,7 +138,7 @@ try {
   const names = (tools.result?.tools ?? []).map((t) => t.name);
   const expected = [
     "get_context", "whats_changed", "open_items", "query_items", "get_meeting_items",
-    "search_notes", "list_folders", "get_note", "get_transcript", "get_transcripts",
+    "search_notes", "search_passages", "list_folders", "get_note", "get_transcript", "get_transcripts",
     "get_meeting", "list_recent", "set_speaker_label",
   ];
   check(
@@ -204,6 +204,9 @@ try {
 
   const search = await toolText("search_notes", { query: "meeting", limit: 5 });
   check("search_notes", !search.isError);
+
+  const passages = await toolText("search_passages", { query: "meeting", limit: 3 });
+  check("search_passages", !passages.isError, passages.text.split("\n")[0]);
 
   const q = await toolText("query_items", { type: "action_item" });
   check("query_items", !q.isError, q.text.split("\n")[0]);

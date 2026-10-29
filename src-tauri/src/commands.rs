@@ -399,7 +399,7 @@ pub async fn export_note(
             format!("{}.md", safe.trim()),
             // The mirror lives at `disk_path` (`notes/<date> <title>.md`
             // since the v2 migration), never at the legacy uuid name.
-            storage.note_mirror_abs(&note_id),
+            storage.note_mirror_abs(&note_id).map_err(err_str)?,
         )
     };
     if !src.exists() {

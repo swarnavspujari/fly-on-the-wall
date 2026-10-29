@@ -305,6 +305,14 @@ export interface Template {
   built_in: boolean;
 }
 
+/** A meeting self-heal restored and set to Keep local because its privacy
+ *  setting couldn't be confirmed (privacy.rs RecoveredMeeting). */
+export interface RecoveredMeeting {
+  meeting_id: string;
+  note_id: string;
+  title: string;
+}
+
 export interface LlmProviderInfo {
   id: string;
   default_model: string;

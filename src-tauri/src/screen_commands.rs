@@ -80,13 +80,15 @@ pub async fn start_screen_recording(
         }
         t => t,
     };
-    // make sure the note exists before we spin anything up
-    state
-        .storage
-        .lock()
-        .unwrap()
-        .get_note(&note_id)
-        .map_err(|e| e.to_string())?;
+    // make sure the note exists (and has a contained attachments folder)
+    // before we spin anything up
+    let attachments_dir = {
+        let storage = state.storage.lock().unwrap();
+        storage.get_note(&note_id).map_err(|e| e.to_string())?;
+        storage
+            .note_attachments_dir(&note_id)
+            .ok_or("this note can't hold attachments")?
+    };
 
     let on_model = {
         let app = app.clone();
@@ -109,7 +111,7 @@ pub async fn start_screen_recording(
         chrono::Local::now().format("%Y%m%d-%H%M%S")
     );
     let rel_path = format!("attachments/{note_id}/{file_name}");
-    let out_path = state.data_dir.join(&rel_path);
+    let out_path = attachments_dir.join(&file_name);
 
     let recorder = build_recorder(ffmpeg);
     // start() deliberately watches for proof of life (doomed captures fail

@@ -101,6 +101,8 @@ The pipeline reads per-meeting/folder Keep local through `storage.get_meeting_pr
 
 In-memory state (`src-tauri/src/state.rs`): `pipeline_stage: HashMap<meeting_id, stage>` (the per-meeting guard and the late-joiner stage), `cancel_requests: HashSet`, `consent_skipped`, `jobs_notify`.
 
+A cancel request stays until it's honoured: `run_with` doesn't clear it, so an automatic retry can't lose it, and `tick` ends a run that fails for any reason while a cancel is pending as `Cancelled` (job removed, no retry). Only `scheduler::enqueue` creating a new job drops a stale request.
+
 ### Files and directories written
 | Path | Written by | Lifetime |
 |---|---|---|
@@ -109,7 +111,7 @@ In-memory state (`src-tauri/src/state.rs`): `pipeline_stage: HashMap<meeting_id,
 | `<scratch_root>/<meeting_id>/rediarize.16k.wav` | `pipeline.rs:839-856` | deleted right after diarization |
 | `%TEMP%/flyonthewall-{whisper,spill}-<uuid>.*` | fly-asr per batch | see [fly-asr](fly-asr.md) |
 | `<data_dir>/recordings/<meeting folder>/transcript.*` mirrors | `storage.save_transcript` ([fly-storage](fly-storage.md)) | permanent |
-| `recordings/_unlinked/<name>` renamed back to `recordings/<name>` | `restore_parked_recording` (`pipeline.rs:1323-1347`) | self-heal for a raced v2 migration |
+| `recordings/_unlinked/<name>` renamed back to `recordings/<name>` | `restore_parked_recording` | self-heal for a raced v2 migration; the target must be a plain `recordings/<folder>` (`contained_recordings_dir`), else nothing moves |
 
 | `<scratch_root>/<meeting_id>/mixdown.16k.wav` | `audio_store::regenerate_mixdown_for_asr` (single-track run of a compressed recording whose stored mixdown was dropped) | deleted with the other intermediates |
 

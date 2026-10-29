@@ -19,8 +19,8 @@
 pub mod context;
 
 use chrono::{DateTime, Utc};
+use fly_context::{Context, SearchPassagesArgs, Visibility};
 use fly_core::ItemKind;
-use std::collections::HashSet;
 
 use fly_storage::{ItemFilter, SearchFilter, Storage, StorageError};
 use serde_json::{json, Value};
@@ -40,7 +40,7 @@ const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 /// clients cache them for an hour (they contain no user data → public).
 const CACHE_TTL_MS: u64 = 3_600_000;
 
-const INSTRUCTIONS: &str = "Fly on the Wall: the user's local meeting notes, transcripts, and a structured context layer extracted from them.\n\nIntended workflow:\n1. START with get_context(query) for any question about a project, customer, or recurring meeting — it returns a deterministic briefing (participants, meeting timeline, decisions, action items, commitments, open questions, key figures) assembled from stored data. Every claim carries its meeting_id and transcript segment ids.\n2. For targeted facts use query_items (filter by type/owner/status/since), open_items (what's still open), or whats_changed (what's new in a series since a date).\n3. Drill into raw material only to VERIFY or quote: get_transcript / get_transcripts for diarized transcripts, get_note for the user's own notes, search_notes for full-text search.\n4. Speakers appear by label ('You', 'Dana', 'Speaker 1'). If the user tells you who a speaker is, persist it with set_speaker_label — the only write this server allows.\n\nProvenance rule: extracted items are machine-generated. When a claim matters, verify it against the cited segment ids in the transcript before presenting it as fact.";
+const INSTRUCTIONS: &str = "Fly on the Wall: the user's local meeting notes, transcripts, and a structured context layer extracted from them.\n\nIntended workflow:\n1. START with get_context(query) for any question about a project, customer, or recurring meeting — it returns a deterministic briefing (participants, meeting timeline, decisions, action items, commitments, open questions, key figures) assembled from stored data. Every claim carries its meeting_id and transcript segment ids.\n2. For targeted facts use query_items (filter by type/owner/status/since), open_items (what's still open), or whats_changed (what's new in a series since a date).\n3. Drill into raw material only to VERIFY or quote: search_passages for the transcript passages about a topic (each line carries its segment id), get_transcript / get_transcripts for diarized transcripts, get_note for the user's own notes, search_notes for full-text search.\n4. Speakers appear by label ('You', 'Dana', 'Speaker 1'). If the user tells you who a speaker is, persist it with set_speaker_label — the only write this server allows.\n\nProvenance rule: extracted items are machine-generated. When a claim matters, verify it against the cited segment ids in the transcript before presenting it as fact.";
 
 /// JSON-RPC error: code, message, optional `data`.
 type RpcError = (i32, String, Option<Value>);
@@ -258,6 +258,7 @@ impl Server {
             "query_items" => self.tool_query_items(&args),
             "get_meeting_items" => self.tool_get_meeting_items(&args),
             "search_notes" => self.tool_search(&args),
+            "search_passages" => self.tool_search_passages(&args),
             "list_folders" => self.tool_list_folders(),
             "get_note" => self.tool_get_note(&args),
             "get_transcript" => self.tool_get_transcript(&args),
@@ -292,7 +293,7 @@ impl Server {
         let base = SearchFilter {
             folder_id: arg_str(args, "folder_id"),
             since: arg_time(args, "since")?,
-            until: arg_time(args, "until")?,
+            until: arg_until(args)?,
             limit,
             offset: 0,
             // Keep-local rows are excluded inside SQL: they never fill a page,
@@ -404,13 +405,6 @@ impl Server {
     // local-only folder — must never appear in a result. A meeting counts as
     // keep-local when its note does (own flag, a sibling meeting's flag, or
     // the folder chain). Lookup errors fail closed.
-
-    /// Notes hidden from AI tools (one query; see `keep_local_note_ids`).
-    fn hidden_notes(&self) -> Result<HashSet<String>, String> {
-        self.storage
-            .keep_local_note_ids()
-            .map_err(keep_local_lookup_error)
-    }
 
     fn guard_note(&self, note_id: &str) -> Result<(), String> {
         if self.storage.note_keep_local(note_id) {
@@ -623,7 +617,7 @@ impl Server {
             .and_then(|c| c.split_once('|'))
             .map(|(ts, id)| (ts.to_string(), id.to_string()));
         let folder_id = arg_str(args, "folder_id");
-        let (since, until) = (arg_time(args, "since")?, arg_time(args, "until")?);
+        let (since, until) = (arg_time(args, "since")?, arg_until(args)?);
         // Keep-local notes are excluded inside SQL, so they never fill a page
         // and the cursor (the last row returned) is always a shareable note.
         let notes = self
@@ -667,19 +661,15 @@ impl Server {
                 .get_meeting(&i.meeting_id)
                 .map(|m| m.started_at.format("%Y-%m-%d").to_string())
                 .unwrap_or_default();
-            let mut meta = vec![format!("kind: {}", i.kind.as_str())];
-            if let Some(o) = &i.owner {
-                meta.push(format!("owner: {o}"));
-            }
-            if let Some(s) = &i.status {
-                meta.push(format!("status: {s}"));
-            }
-            meta.push(date);
-            meta.push(format!("meeting: {}", i.meeting_id));
-            if !i.segment_ids.is_empty() {
-                meta.push(format!("segments: {}", i.segment_ids.join(",")));
-            }
-            out.push_str(&format!("- {} ({})\n", i.text, meta.join(" · ")));
+            out.push_str(&context::render_item_line(
+                &i.text,
+                i.kind,
+                i.owner.as_deref(),
+                i.status.as_deref(),
+                date,
+                &i.meeting_id,
+                &i.segment_ids,
+            ));
         }
         out
     }
@@ -740,44 +730,23 @@ impl Server {
         ))
     }
 
-    // ---- context layer ----
+    // ---- context layer (fly_context::memory, under ShareableOnly) ----
+    //
+    // Everything here goes to the MCP client's (cloud) model, so the shared
+    // memory code runs with Visibility::ShareableOnly: Keep-local meetings
+    // never shape a series, a participant list or an item, and a failed
+    // Keep-local lookup refuses the whole result.
 
-    fn all_series(&self) -> Result<Vec<context::Series>, String> {
-        let meetings = self
-            .storage
-            .list_meetings(None, 2000)
-            .map_err(|e| e.to_string())?;
-        // keep-local meetings never join a series: their titles would leak
-        // through series keys and timelines
-        let hidden = self.hidden_notes()?;
-        Ok(context::detect_series(
-            meetings
-                .into_iter()
-                .filter(|m| !hidden.contains(&m.note_id))
-                .collect(),
-        ))
+    fn shared(&self) -> Context<'_> {
+        Context::new(&self.storage, Visibility::ShareableOnly)
     }
 
     fn tool_get_context(&self, args: &Value) -> Result<String, String> {
         let query = arg_query(args, "query")?;
         let since = arg_time(args, "since")?;
-        let series = self.all_series()?;
-        let mut matched = context::series_matching(&series, query);
-        if matched.is_empty() {
-            // fall back to full-text: meetings whose transcript/note matches
-            let hits = self.storage.search(query, 20).map_err(|e| e.to_string())?;
-            let hidden = self.hidden_notes()?;
-            let meeting_ids: HashSet<String> = hits
-                .iter()
-                .filter(|h| !hidden.contains(&h.note_id))
-                .filter_map(|h| h.meeting_id.clone())
-                .collect();
-            matched = series
-                .iter()
-                .filter(|s| s.meetings.iter().any(|m| meeting_ids.contains(&m.id)))
-                .collect();
-        }
-        context::build_briefing(&self.storage, &matched, since, query)
+        let b = fly_context::memory::mcp::get_context(&self.shared(), query, since)
+            .map_err(context_error)?;
+        Ok(context::render_briefing(&b, query, since))
     }
 
     fn tool_whats_changed(&self, args: &Value) -> Result<String, String> {
@@ -787,60 +756,66 @@ impl Server {
             .ok_or("missing required argument: series (a series name from get_context)")?;
         let since = arg_time(args, "since")?
             .ok_or("missing required argument: since (YYYY-MM-DD or RFC 3339)")?;
-        let series = self.all_series()?;
-        let matched = context::series_matching(&series, series_key);
-        if matched.is_empty() {
-            return Ok(format!(
-                "No series matches \"{series_key}\". get_context(query) lists series names."
-            ));
-        }
-        context::build_briefing(&self.storage, &matched, Some(since), series_key)
+        let b = fly_context::memory::mcp::whats_changed(&self.shared(), series_key, since)
+            .map_err(context_error)?;
+        Ok(context::render_whats_changed(&b, series_key, since))
     }
 
     fn tool_open_items(&self, args: &Value) -> Result<String, String> {
         let scope = arg_str(args, "scope").unwrap_or_else(|| "all".into());
-        let meeting_ids = if scope == "all" {
-            None
-        } else {
-            let series = self.all_series()?;
-            let matched = context::series_matching(&series, &scope);
-            if matched.is_empty() {
-                return Ok(format!(
-                    "No series matches \"{scope}\" — pass \"all\" or a series name from get_context."
-                ));
-            }
-            Some(
-                matched
+        let o =
+            fly_context::memory::mcp::open_items(&self.shared(), &scope).map_err(context_error)?;
+        Ok(context::render_open_items(&o))
+    }
+
+    /// Passage-level search on fly-context, keyword only (this server has
+    /// no embedding model). Transcript lines carry `[seg:ID]`.
+    fn tool_search_passages(&self, args: &Value) -> Result<String, String> {
+        let query = arg_query(args, "query")?;
+        let meeting_ids = match args.get("meeting_ids") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_array()
+                    .ok_or("meeting_ids must be an array of strings")?
                     .iter()
-                    .flat_map(|s| s.meetings.iter().map(|m| m.id.clone()))
-                    .collect::<Vec<_>>(),
-            )
+                    .map(|id| id.as_str().map(String::from))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or("meeting_ids must be an array of strings")?,
+            ),
         };
-        // open = action items / commitments not marked done in their meeting
-        let mut items = self
-            .storage
-            .query_items(&ItemFilter {
-                meeting_ids,
-                limit: 200,
-                exclude_keep_local: true,
-                ..Default::default()
-            })
-            .map_err(|e| e.to_string())?;
-        items.retain(|i| {
-            matches!(i.kind, ItemKind::ActionItem | ItemKind::Commitment)
-                && i.status.as_deref() != Some("done")
-        });
-        if items.is_empty() {
-            return Ok(format!(
-                "No open action items or commitments in scope \"{scope}\"."
-            ));
+        // Dates are checked here so the error names this server's forms.
+        let date = |key: &str| -> Result<Option<String>, String> {
+            arg_time(args, key)?;
+            Ok(arg_str(args, key))
+        };
+        // (fly-context reads a bare `until` date as the end of that day,
+        // like arg_until)
+        // Fields added to the args later keep their defaults.
+        #[allow(clippy::needless_update)]
+        let search = SearchPassagesArgs {
+            query: query.to_string(),
+            meeting_ids,
+            folder_id: arg_str(args, "folder_id"),
+            since: date("since")?,
+            until: date("until")?,
+            limit: args
+                .get("limit")
+                .and_then(|l| l.as_u64())
+                .map(|l| l.min(u64::from(u32::MAX)) as u32),
+            ..Default::default()
+        };
+        let r = self
+            .shared()
+            .search_passages(&search, None)
+            .map_err(context_error)?;
+        let mut out = fly_context::render::passages(&r);
+        if !r.passages.is_empty() {
+            out.push_str(
+                "\nTranscript lines read [seg:ID] Speaker (m:ss): text. Check one in context \
+                 with get_transcript(meeting_id, with_segment_ids: true).\n",
+            );
         }
-        Ok(format!(
-            "{} open item(s) in scope \"{scope}\" (newest meeting first; status is as stated \
-             in that meeting — verify against later meetings before chasing anyone):\n{}",
-            items.len(),
-            self.render_items(&items)
-        ))
+        Ok(out)
     }
 
     // ---- the one write ----
@@ -909,6 +884,14 @@ pub const KEEP_LOCAL_NOTE_MESSAGE: &str =
 /// A failed keep-local lookup refuses the whole result (fail closed).
 fn keep_local_lookup_error(e: StorageError) -> String {
     format!("couldn't check Keep local settings, so nothing was returned: {e}")
+}
+
+/// A fly-context error as tool text.
+fn context_error(e: fly_context::ContextError) -> String {
+    // A failed Keep-local lookup has its own variant and message
+    // ("couldn't check Keep local settings, so nothing was returned");
+    // other storage errors say what they are.
+    e.to_string()
 }
 
 /// Longest speaker label `set_speaker_label` accepts, in characters.
@@ -1027,6 +1010,21 @@ fn arg_time(args: &Value, key: &str) -> Result<Option<DateTime<Utc>>, String> {
     ))
 }
 
+/// The `until` argument: RFC 3339, or a bare YYYY-MM-DD meaning through the
+/// end of that day (UTC), the same as `search_passages` (fly-context).
+fn arg_until(args: &Value) -> Result<Option<DateTime<Utc>>, String> {
+    let Some(raw) = args.get("until").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+        return Ok(Some(DateTime::from_naive_utc_and_offset(
+            d.and_hms_milli_opt(23, 59, 59, 999).unwrap(),
+            Utc,
+        )));
+    }
+    arg_time(args, "until")
+}
+
 fn error_response(id: Value, code: i32, message: &str, data: Option<Value>) -> String {
     let mut error = json!({"code": code, "message": message});
     if let Some(data) = data {
@@ -1047,7 +1045,8 @@ fn modernize(mut result: Value) -> Value {
 }
 
 fn tools_list() -> Value {
-    let time_desc = "RFC 3339 or YYYY-MM-DD";
+    let time_desc = "RFC 3339, or YYYY-MM-DD (from the start of that day, UTC)";
+    let until_desc = "RFC 3339, or YYYY-MM-DD (through the end of that day, UTC)";
     json!({ "tools": [
         {
             "name": "get_context",
@@ -1115,9 +1114,25 @@ fn tools_list() -> Value {
                     "query": { "type": "string", "description": "Search terms" },
                     "folder_id": { "type": "string" },
                     "since": { "type": "string", "description": time_desc },
-                    "until": { "type": "string", "description": time_desc },
+                    "until": { "type": "string", "description": until_desc },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                     "cursor": { "type": "string", "description": "From a previous page's footer" }
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "search_passages",
+            "description": "Passage-level search: the transcript passages (speaker-turn windows of about 160 words) that best match the query, each line carrying its segment id as [seg:ID], plus matching paragraphs of the user's notes. Use it to find what was actually said about a topic and to quote it with ids; get_context gives the structured overview. Keyword ranking (no embeddings).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for, in plain words" },
+                    "meeting_ids": { "type": "array", "items": { "type": "string" }, "maxItems": 50, "description": "Only search these meetings" },
+                    "folder_id": { "type": "string" },
+                    "since": { "type": "string", "description": time_desc },
+                    "until": { "type": "string", "description": until_desc },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Passages to return (default 8)" }
                 },
                 "required": ["query"]
             }
@@ -1178,7 +1193,7 @@ fn tools_list() -> Value {
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                     "folder_id": { "type": "string" },
                     "since": { "type": "string", "description": time_desc },
-                    "until": { "type": "string", "description": time_desc },
+                    "until": { "type": "string", "description": until_desc },
                     "cursor": { "type": "string", "description": "From a previous page's footer" }
                 }
             }
@@ -1276,6 +1291,7 @@ mod tests {
                 "query_items",
                 "get_meeting_items",
                 "search_notes",
+                "search_passages",
                 "list_folders",
                 "get_note",
                 "get_transcript",
@@ -1371,7 +1387,7 @@ mod tests {
         assert_eq!(tools["result"]["resultType"], "complete");
         assert!(tools["result"]["ttlMs"].as_u64().unwrap() > 0);
         assert_eq!(tools["result"]["cacheScope"], "public");
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 13);
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 14);
     }
 
     #[test]
@@ -1641,6 +1657,140 @@ mod tests {
             json!({"series": "acme renewal", "since": "2099-01-01"}),
         );
         assert!(future.contains("No meetings matched"), "{future}");
+    }
+
+    #[test]
+    fn search_passages_returns_citable_lines_and_checks_arguments() {
+        let (_d, server, m0, m1) = server_with_series();
+        let text = tool_text(
+            &server,
+            "search_passages",
+            json!({"query": "renewal discussion"}),
+        );
+        assert!(text.starts_with("2 passage(s):"), "{text}");
+        assert!(text.contains(&format!("(meeting {m0})")), "{text}");
+        assert!(
+            text.contains("[seg:s0] Speaker 1 (0:00): renewal discussion"),
+            "{text}"
+        );
+        assert!(text.contains("get_transcript(meeting_id"), "{text}");
+
+        let scoped = tool_text(
+            &server,
+            "search_passages",
+            json!({"query": "renewal", "meeting_ids": [m1], "limit": 1}),
+        );
+        assert!(scoped.starts_with("1 passage(s):"), "{scoped}");
+        assert!(scoped.contains(&m1) && !scoped.contains(&m0), "{scoped}");
+
+        let none = tool_text(&server, "search_passages", json!({"query": "zebra"}));
+        assert_eq!(none, "No matching passages found in the user's meetings.\n");
+        for bad in [
+            json!({}),
+            json!({"query": "renewal", "meeting_ids": "m"}),
+            json!({"query": "renewal", "meeting_ids": [1]}),
+            json!({"query": "renewal", "since": "last week"}),
+            json!({"query": "a".repeat(MAX_QUERY_CHARS + 1)}),
+        ] {
+            tool_error(&server, "search_passages", bad);
+        }
+    }
+
+    /// Break the Keep-local lookup itself: the context layer and passage
+    /// search refuse, and say why, instead of answering unfiltered.
+    #[test]
+    fn context_layer_and_passages_fail_closed_when_keep_local_cant_be_checked() {
+        let f = server_with_keep_local();
+        rusqlite::Connection::open(f._dir.path().join("flyonthewall.db"))
+            .unwrap()
+            .execute_batch("ALTER TABLE folders RENAME COLUMN keep_local TO keep_local_broken")
+            .unwrap();
+        for (tool, args) in [
+            ("get_context", json!({"query": "acme renewal"})),
+            (
+                "whats_changed",
+                json!({"series": "acme renewal", "since": "2020-01-01"}),
+            ),
+            ("open_items", json!({})),
+            ("open_items", json!({"scope": "acme renewal"})),
+            ("search_passages", json!({"query": "renewal"})),
+        ] {
+            let err = tool_error(&f.server, tool, args);
+            assert!(
+                err.starts_with("couldn't check Keep local settings, so nothing was returned"),
+                "{tool}: {err}"
+            );
+            assert_no_leak(&f, &err);
+        }
+    }
+
+    /// One transcript that no longer parses: its meeting reads as having no
+    /// transcript (as before the move), the series still answers.
+    #[test]
+    fn one_unreadable_transcript_does_not_fail_get_context() {
+        let (d, server, m0, m1) = server_with_series();
+        rusqlite::Connection::open(d.path().join("flyonthewall.db"))
+            .unwrap()
+            .execute(
+                "UPDATE transcripts SET json = '{\"speakers\": 1}' WHERE meeting_id = ?1",
+                [&m0],
+            )
+            .unwrap();
+        let text = tool_text(&server, "get_context", json!({"query": "acme renewal"}));
+        assert!(text.contains("2 meeting(s)"), "{text}");
+        assert!(
+            text.contains(&format!("(meeting: {m0}, no transcript")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("(meeting: {m1}, transcript ✓")),
+            "{text}"
+        );
+        tool_text(&server, "open_items", json!({}));
+    }
+
+    /// A bare `until` date includes that whole day on every tool that takes
+    /// one.
+    #[test]
+    fn until_includes_the_whole_day_everywhere() {
+        let (_d, server, note_id, meeting_id) = server_with_data();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let yesterday = (Utc::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        for (tool, args, want) in [
+            (
+                "search_notes",
+                json!({"query": "roadmap", "until": today}),
+                note_id.clone(),
+            ),
+            ("list_recent", json!({"until": today}), note_id.clone()),
+            (
+                "search_passages",
+                json!({"query": "roadmap", "until": today}),
+                meeting_id.clone(),
+            ),
+        ] {
+            let text = tool_text(&server, tool, args);
+            assert!(text.contains(&want), "{tool} until today: {text}");
+        }
+        for (tool, args) in [
+            (
+                "search_notes",
+                json!({"query": "roadmap", "until": yesterday}),
+            ),
+            ("list_recent", json!({"until": yesterday})),
+            (
+                "search_passages",
+                json!({"query": "roadmap", "until": yesterday}),
+            ),
+        ] {
+            let text = tool_text(&server, tool, args);
+            assert!(
+                !text.contains(&note_id) && !text.contains(&meeting_id),
+                "{tool}: {text}"
+            );
+        }
     }
 
     #[test]
@@ -2080,6 +2230,20 @@ mod tests {
 
         let miss = tool_text(&f.server, "search_notes", json!({"query": "secretword"}));
         assert!(miss.contains("No matches"), "{miss}");
+
+        // passage search: hidden meetings never surface, even when named
+        let passages = tool_text(&f.server, "search_passages", json!({"query": "renewal"}));
+        assert!(passages.contains(&f.visible_meeting), "{passages}");
+        assert_no_leak(&f, &passages);
+        let only_hidden = tool_text(&f.server, "search_passages", json!({"query": "secretword"}));
+        let nothing = tool_text(&f.server, "search_passages", json!({"query": "nosuchword"}));
+        assert_eq!(only_hidden, nothing);
+        let scoped = tool_text(
+            &f.server,
+            "search_passages",
+            json!({"query": "renewal", "meeting_ids": [f.hidden[0].1, f.hidden[1].1]}),
+        );
+        assert_eq!(scoped, nothing);
         // hidden hits rank alongside the shared one; a 1-hit page still
         // refills to the shared note
         for limit in [1, 20] {

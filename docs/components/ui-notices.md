@@ -4,7 +4,7 @@
 > In flight: None.
 
 ## Purpose
-Every app-wide notice in one bottom-right corner: a failed user action, the macOS system-audio block, transcription failures for notes that aren't open, skipped AI cleanup, and the update prompt. The top notice shows and the rest sit behind "+N more", so notices never overlap. The pure modules decide priority, copy and which failures are held. Also owns the blocking restart screen after "Delete all my data" and the "Remind me to tell people" settings row.
+Every app-wide notice in one bottom-right corner: a failed user action, the macOS system-audio block, transcription failures for notes that aren't open, skipped AI cleanup, recovered meetings set to Keep local, and the update prompt. The top notice shows and the rest sit behind "+N more", so notices never overlap. The pure modules decide priority, copy and which failures are held. Also owns the blocking restart screen after "Delete all my data" and the "Remind me to tell people" settings row.
 
 ## Files it owns
 - `frontend/src/components/AppNotices.tsx` — builds the `StackedNotice` list and renders one `NoticeStack`.
@@ -44,6 +44,7 @@ Every app-wide notice in one bottom-right corner: a failed user action, the macO
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
 | `llm:consent-skips` | listens, `CloudConsent.tsx:122` (via `AppNotices`) | `string[]` meeting ids | `src-tauri/src/scheduler.rs:208-229` (`ai_pass`) |
+| `privacy:recovered-kept-local` | listens, `useRecoveredKeptLocal.ts` (via `AppNotices`) | `RecoveredMeeting[]` | `src-tauri/src/lib.rs` startup self-heal ([app-privacy](app-privacy.md)) |
 | `fotw:llm-settings-changed` (window) | listens, `CloudConsent.tsx:138-143` | none | `api.ts:9-11`, `CloudConsent.tsx:51` |
 | `fotw:restart-required` (window) | listens, `RestartRequired.tsx:31-35` | `CustomEvent<{report: WipeReport, includeModels}>` | `PrivacySection.tsx:120-124` |
 | `keydown` (window, capture phase) | listens while the restart screen shows, `RestartRequired.tsx:45-55` | — | Blocks app shortcuts; Tab and in-dialog Enter/Space pass |
@@ -78,7 +79,7 @@ None. `RestartRequired` lists keychain entries a wipe couldn't remove (`WipeRepo
 - **Outbound:** `ui.tsx` (`Notice`, `NoticeStack`, `useDialogFocus`), `CloudConsent.tsx` (`useConsentSkips`), `updater.ts`, `privacy.ts` (`wipeOutcome`, `RESTART_REQUIRED_EVENT`), `recordingBar.ts` (`REMIND_NOTICE_KEY`), `@tauri-apps/plugin-process`.
 
 ## Invariants
-- One corner, priority order: the user's own failed action > system audio > pipeline failures > skipped cleanup > update; ties keep insertion order (`notices.ts:9-18`, `ui.tsx:1481-1486`). A failed click's alert never hides behind "+N more" (`AppNotices.tsx:75-96`).
+- One corner, priority order: the user's own failed action > system audio > pipeline failures > skipped cleanup > recovered meetings set to Keep local > update; ties keep insertion order (`notices.ts:9-18`, `ui.tsx:1481-1486`). A failed click's alert never hides behind "+N more" (`AppNotices.tsx:75-96`).
 - Recording is sacred: the launch system-audio notice, skipped cleanup and the update wait until recording stops; errors still show (`AppNotices.tsx:61`, `:166`, `:198`).
 - The open note shows its own failure inline; only a terminal error for a meeting that isn't open is held (`pipelineFailures.ts:30-32`). Any later event for that meeting, a retry, a dismiss or the note's deletion clears it (`pipelineFailures.ts:43-64`). After the async note lookup, it's added only if nothing newer happened to that meeting and its note wasn't opened (`pipelineFailures.ts:79-86`, `App.tsx:341-363`).
 - "Try again" only for a first transcription; with a transcript the failed run may have been a speaker re-analysis (`AppNotices.tsx:113-115`).
@@ -86,6 +87,7 @@ None. `RestartRequired` lists keychain entries a wipe couldn't remove (`WipeRepo
 - The engine notice is chosen by matching backend text: `/whisper-cli is not installed/i` (`pipelineNotice.ts:36`) ← `"{name} is not installed — …"` (`src-tauri/src/models.rs:292`, `:377-380`); `/download (failed|interrupted)/i` (`pipelineNotice.ts:38`) ← `src-tauri/src/models.rs:293`, `:530-553`, `:711`; `/^engine install failed/i` (`pipelineNotice.ts:42`) ← App's own tag (`App.tsx:749`). No test checks these against the Rust strings.
 - The tccutil command names the bundle id from a TS copy (`notices.ts:32`) of `src-tauri/tauri.conf.json:5` and `crates/fly-audio/src/tap_messages.rs:11`.
 - Skipped cleanup runs only once the provider is allowed: "Run" asks through `request_cloud_consent` (the backend's native dialog) when there's no consent yet, and a decline records nothing and runs nothing (`CloudConsent.tsx:163-176`). The backend enforces consent again in `build_provider` (spec §2 item 1).
+- The skipped-cleanup notice reads "Review and allow" (consent missing), "Run them now", or, while the saved cloud provider has no API key, "Add a key", which calls the `onOpenLlmKeySettings` prop (App opens Settings at the key field).
 - After a wipe, the restart screen blocks the app until it restarts; a clean wipe relaunches by itself after 1.5 s; other outcomes wait for the user (`RestartRequired.tsx:14-66`; `privacy.ts:127-131`).
 - A failed update check stays in Settings; only a failed download/install shows in the stack (`notices.ts:108-124`).
 
@@ -108,6 +110,7 @@ None. `RestartRequired` lists keychain entries a wipe couldn't remove (`WipeRepo
 
 ## Changing it safely
 - Run `npm --prefix frontend test` (AppNotices, notices, pipelineFailures, pipelineNotice).
+- Recovered meetings set to Keep local (`useRecoveredKeptLocal.ts`, `recovered_kept_local` / `dismiss_recovered_kept_local`): "N recovered meetings were set to Keep local because their privacy setting couldn't be confirmed." Review takes the first off the list and opens its note (`onOpenNote`); Dismiss clears the list. Keep local itself is never changed by the notice. Waits out a recording.
 - A new notice: add a priority to `NOTICE_PRIORITY` (with its relation tests), build its copy in a pure module, and decide whether it waits out a recording.
 - Changing a backend error string in `models.rs` or the pipeline: grep `pipelineNotice.ts` and `recordingBar.ts` for the phrase and update both sides in one PR.
 - Any new terminal pipeline stage must be handled in `isBackgroundFailure` and `runStateOf` (`homeModel.ts:116-119`); `"cancelled"` is load-bearing.
