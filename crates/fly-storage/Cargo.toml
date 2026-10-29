@@ -11,7 +11,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 chrono.workspace = true
-rusqlite.workspace = true
+# `hooks`: the vector cache counts this connection's writes to
+# embedding_chunks (cache.rs).
+rusqlite = { workspace = true, features = ["hooks"] }
 dirs.workspace = true
 sha2.workspace = true
 
