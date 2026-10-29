@@ -1550,10 +1550,12 @@ pub fn cancel_ask(ask_id: String) -> CmdResult<()> {
 /// How long the `@` list is reused before the library is scanned again.
 const ASK_PEOPLE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// The last `@` list and when it was made.
-static ASK_PEOPLE: std::sync::LazyLock<
-    std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
-> = std::sync::LazyLock::new(Default::default);
+/// An `@` list and when it was made.
+type PeopleCache = Option<(std::time::Instant, Vec<String>)>;
+
+/// The last `@` list.
+static ASK_PEOPLE: std::sync::LazyLock<std::sync::Mutex<PeopleCache>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// The `@` suggestions for the Ask composer: everyone in the library the
 /// router can match (attendees, speaker labels, item owners). For the
