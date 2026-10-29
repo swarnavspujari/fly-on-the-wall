@@ -21,7 +21,9 @@ use crate::ollama;
 use crate::state::AppState;
 
 /// The model and its prompts live in fly-core so the retrieval eval
-/// (evals/runner) embeds exactly what the app does.
+/// (evals/runner) embeds exactly what the app does. Its similarity floor,
+/// used by fly-context's Ask search, lives in fly-storage
+/// (`embeddings::similarity_floor`).
 pub use fly_core::embed_prompt::{doc_prompt, query_prompt, EMBED_MODEL};
 
 /// Chunks per `/api/embed` call. Small enough to keep each request quick on

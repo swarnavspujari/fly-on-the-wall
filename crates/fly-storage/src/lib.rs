@@ -21,6 +21,7 @@
 
 mod atomic;
 mod attachments;
+mod cache;
 pub mod citations;
 pub mod embeddings;
 mod folders;
@@ -32,6 +33,7 @@ mod migrations;
 pub mod naming;
 mod notes;
 pub mod privacy;
+pub mod query;
 mod recording_store;
 mod recovery;
 pub mod safe_path;
@@ -44,7 +46,7 @@ mod transcripts;
 
 pub use atomic::rename_with_retry;
 pub use citations::{CitationLocator, CitationStatus};
-pub use embeddings::{PendingChunk, VectorHit};
+pub use embeddings::{PendingChunk, VectorHit, VectorResults};
 pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::MeetingFilter;
@@ -207,6 +209,8 @@ const EXPECTED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 pub struct Storage {
     conn: Connection,
     data_dir: PathBuf,
+    /// Embedding vectors kept between searches (see `cache.rs`).
+    read_cache: cache::ReadCache,
     /// Meetings whose folder a background job is working inside (recording
     /// compression). Folder renames skip them, like a running transcription.
     /// In memory: a crash releases every lease.
@@ -233,6 +237,7 @@ impl Storage {
         // lingering in free pages until reused (confidential-data disposal).
         conn.pragma_update(None, "secure_delete", "ON")?;
         let storage = Self {
+            read_cache: cache::ReadCache::watching(&conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
             folder_leases: Default::default(),
@@ -284,6 +289,7 @@ impl Storage {
         conn.pragma_update(None, "secure_delete", "ON")?;
         Self::check_schema(&conn)?;
         Ok(Self {
+            read_cache: cache::ReadCache::watching(&conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
             folder_leases: Default::default(),
