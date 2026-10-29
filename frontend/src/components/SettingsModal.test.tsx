@@ -381,6 +381,31 @@ describe("Settings overlay", () => {
     await choose(runsOn, "anthropic");
   });
 
+  it("local models say what uses them, and in-use ones have no Delete", async () => {
+    await open();
+    const runsOn = $<HTMLSelectElement>('select[aria-label="Runs on"]')!;
+    await choose(runsOn, "ollama");
+    // the labels come from the backend's status, reloaded after the switch
+    const usedFor = async (name: string) =>
+      (await api.ollamaStatus()).models.find((m) => m.name === name)?.used_for ?? null;
+    expect(await usedFor("llama3.1:latest")).toBe("Used for Ask and Enhance.");
+    expect(await usedFor("embeddinggemma:300m")).toBe("Used for search.");
+    await click($('[aria-labelledby="settings-h-ai"] .fly-sgroup-more'));
+    const rowOf = (name: string) =>
+      $$(".fly-srow-below > div > div").find((r) => r.textContent?.startsWith(name))!;
+    const llama = rowOf("llama3.1:latest");
+    expect(llama.textContent).toContain("Used for Ask and Enhance.");
+    const embed = rowOf("embeddinggemma:300m");
+    expect(embed.textContent).toContain("Used for search.");
+    for (const r of [llama, embed]) {
+      expect(r.textContent).toContain("in use");
+      expect([...r.querySelectorAll("button")].some((b) => b.textContent === "Delete")).toBe(false);
+    }
+    await choose(runsOn, "anthropic");
+    expect(await usedFor("llama3.1:latest")).toBeNull();
+    expect(await usedFor("embeddinggemma:300m")).toBe("Used for search.");
+  });
+
   it("More options reveals advanced rows per group", async () => {
     await open();
     expect(host!.textContent).not.toContain("Endpoint and model");

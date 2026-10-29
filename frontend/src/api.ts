@@ -49,6 +49,8 @@ import type {
   Note,
   NoteSummary,
   OllamaStatus,
+  ModelStorageReport,
+  DeleteOutcome,
   PolishResult,
   PlaybackSource,
   PrivacySettings,
@@ -187,6 +189,11 @@ export const api = {
   getAsrSettings: () => invoke<AsrSettings>("get_asr_settings"),
   setAsrSettings: (update: AsrSettingsUpdate) => invoke<void>("set_asr_settings", { update }),
   downloadModel: (id: string) => invoke<string>("download_model", { id }),
+  modelStorageReport: () => invoke<ModelStorageReport>("model_storage_report"),
+  /** Per-row Delete sends one id; Free up sends everything its confirm listed.
+   *  The backend re-checks each against a fresh report. */
+  deleteModelFiles: (ids: string[], paths: string[]) =>
+    invoke<DeleteOutcome>("delete_model_files", { ids, paths }),
 
   // enhance / ask / templates / LLM settings
   enhanceNote: (noteId: string, templateId: string) =>

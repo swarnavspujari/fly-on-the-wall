@@ -231,12 +231,16 @@ pub fn finish(app: &AppHandle, app_state: AppState) {
         });
     }
     // Reclaim disk from download temp files a crashed run stranded
-    // (per-attempt unique names — nothing else ever opens them).
+    // (per-attempt unique names — nothing else ever opens them), and from
+    // model folders an interrupted delete left behind.
     {
         let data_dir = app.state::<AppState>().data_dir.clone();
         tauri::async_runtime::spawn(async move {
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 models::sweep_stale_downloads(&data_dir, std::time::Duration::from_secs(60 * 60));
+                // Folders a model delete moved aside but couldn't finish
+                // (a file was in use).
+                crate::model_cleanup::sweep_partly_deleted(&data_dir);
             })
             .await;
         });

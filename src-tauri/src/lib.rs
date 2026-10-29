@@ -16,6 +16,7 @@ mod import_commands;
 pub mod live;
 pub mod llm_commands;
 pub mod logging;
+pub mod model_cleanup;
 pub mod models;
 mod nav_guard;
 pub mod ollama;
@@ -155,6 +156,8 @@ pub fn run() {
             asr_commands::get_asr_settings,
             asr_commands::set_asr_settings,
             asr_commands::download_model,
+            model_cleanup::model_storage_report,
+            model_cleanup::delete_model_files,
             llm_commands::enhance_note,
             llm_commands::polish_transcript,
             llm_commands::edit_note_block,
