@@ -11,6 +11,7 @@ members = [
     "crates/fly-storage",
     "crates/fly-context",
     "crates/fly-mcp",
+    "crates/fly-mcp-client",
     "crates/fly-secrets",
     "src-tauri",
 ]
