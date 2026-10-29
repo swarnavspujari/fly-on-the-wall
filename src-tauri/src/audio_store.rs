@@ -28,8 +28,10 @@
 //! 4. delete the old WAVs. A WAV left behind by a crash after step 3 is
 //!    deleted on a later pass, again only after re-verifying it.
 //!
-//! The job yields (pauses in place) while anything else needs the machine:
-//! a recording, a transcription or re-diarize, a media import.
+//! The job yields while anything else needs the machine (a recording, a
+//! transcription, re-diarize or polish, a media import; see `busy_reason`):
+//! it abandons the step in flight (temp file deleted, WAVs untouched),
+//! waits, and takes the meeting again, reusing FLACs it already verified.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -57,7 +59,7 @@ const START_DELAY: Duration = Duration::from_secs(120);
 /// Re-scan at least this often even without a nudge.
 const IDLE_RECHECK: Duration = Duration::from_secs(30 * 60);
 /// How often a paused job re-checks whether it may continue.
-const PAUSE_POLL: Duration = Duration::from_secs(2);
+const PAUSE_POLL: Duration = Duration::from_millis(500);
 /// A meeting whose playback was requested this recently is left alone: the
 /// player may be streaming a file compression would delete.
 const PLAYBACK_GRACE: Duration = Duration::from_secs(30 * 60);
@@ -805,7 +807,13 @@ fn run_pass(app: &tauri::AppHandle, state: &AppState) {
         if store.halted.load(Ordering::SeqCst) {
             break;
         }
-        match compress_one_now(app, state, id) {
+        // Abandoned because something needed the machine: wait it out,
+        // then take the same meeting again (its verified FLACs are reused).
+        let mut result = compress_one_now(app, state, id);
+        while matches!(result, Err(MeetingError::Stopped)) && !store.cancelled(id) {
+            result = compress_one_now(app, state, id);
+        }
+        match result {
             Ok(Some(o)) => {
                 pass_saved += o.saved();
                 let total = {
@@ -945,12 +953,10 @@ fn compress_one_now(
     }
     let _release = Release(state, id);
 
-    let mut checkpoint = || -> bool {
-        if store.cancelled(id) {
-            return false;
-        }
-        wait_until_idle(app, state, id)
-    };
+    // Something else needs the machine (or this meeting was cancelled):
+    // abandon the step in flight. Its temp file goes, the WAVs are
+    // untouched, FLACs already verified stay for the retry to reuse.
+    let mut checkpoint = || -> bool { !store.cancelled(id) && busy_reason(state).is_none() };
     let mut on_file_done = |bytes: u64| emit(app, store, |s| s.bytes_done += bytes);
     let mut ctx = MeetingCtx {
         data_dir: &state.data_dir,
