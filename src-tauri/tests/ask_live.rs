@@ -10,7 +10,7 @@
 //! one constructor) on a throwaway data dir, never the user's.
 //!
 //! ```text
-//! cargo test -p fly-app --test ask_live -- --ignored --nocapture
+//! cargo test -p fly-app --features ask-live --test ask_live -- --ignored --nocapture
 //! FOTW_ASK_LIVE_MODELS=llama3.1,qwen3.5:9b,gemma4:12b   models to try
 //! FOTW_ASK_LIVE_LIMIT=20                                 scenarios per model
 //! FOTW_ASK_LIVE_MATCH=q0                                 only ids containing this

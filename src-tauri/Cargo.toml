@@ -66,6 +66,19 @@ rfd = { version = "0.16", default-features = false, features = ["common-controls
 [dev-dependencies]
 tempfile = "3"
 async-trait.workspace = true
-# ask_live.rs (ignored): runs the harness on the evals' fixture corpus and
-# records replays with their RecordingProvider. Tests only.
-fly-evals = { path = "../evals/runner" }
+
+# tests/ask_live.rs (ignored) runs the Ask harness on the evals' fixture
+# corpus and records replays with their RecordingProvider. Behind a feature
+# that's off by default, so neither the app nor its CI test build links the
+# evals (an evals API change can't break them):
+#   cargo test -p fly-app --features ask-live --test ask_live -- --ignored --nocapture
+[features]
+ask-live = ["dep:fly-evals"]
+
+[dependencies.fly-evals]
+path = "../evals/runner"
+optional = true
+
+[[test]]
+name = "ask_live"
+required-features = ["ask-live"]
