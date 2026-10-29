@@ -47,13 +47,14 @@ pub use embeddings::{PendingChunk, VectorHit};
 pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::MeetingFilter;
-pub use meetings::{contained_recordings_dir, recording_dir_rel};
+pub use meetings::{contained_recordings_dir, recording_dir_rel, IMPORT_STAGED_PREFIX};
 pub use notes::NoteSummary;
 pub use privacy::{
     AudioPurge, EraseOutcome, MeetingPrivacy, AUDIO_RETENTION_SETTING, RETENTION_CHOICES,
 };
 pub use recovery::{
-    HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR, RECORDING_MANIFEST,
+    HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR,
+    NOTE_MIRROR_VERSION, RECORDING_MANIFEST,
 };
 pub use search::{SearchFilter, SearchHit, SearchHitKind};
 pub use segments::SegmentHit;

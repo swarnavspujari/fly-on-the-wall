@@ -4,7 +4,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, LLM_SETTINGS_CHANGED_EVENT } from "../api";
-import type { LlmSettings } from "../types";
+import type { LlmSettings, RecoveredMeeting } from "../types";
 import type { Updater, UpdatePhase } from "../updater";
 import type { PipelineFailure } from "../pipelineFailures";
 import AppNotices from "./AppNotices";
@@ -39,10 +39,12 @@ function render(ui: ReactNode) {
 
 // The consent-skips notice reads these; by default nothing was skipped.
 let skipped: string[];
+let recovered: RecoveredMeeting[];
 let consents: Record<string, string>;
 let llm: LlmSettings;
 beforeEach(() => {
   skipped = [];
+  recovered = [];
   consents = {};
   llm = {
     provider: "anthropic",
@@ -66,6 +68,11 @@ beforeEach(() => {
     ],
   };
   vi.spyOn(api, "consentSkippedMeetings").mockImplementation(async () => [...skipped]);
+  vi.spyOn(api, "recoveredKeptLocal").mockImplementation(async () => [...recovered]);
+  vi.spyOn(api, "dismissRecoveredKeptLocal").mockImplementation(async (id) => {
+    recovered = id ? recovered.filter((m) => m.meeting_id !== id) : [];
+    return [...recovered];
+  });
   vi.spyOn(api, "retryConsentSkipped").mockImplementation(async () => {
     const n = skipped.length;
     skipped = [];
@@ -145,9 +152,11 @@ function props(over: Partial<Props> = {}): Props {
     pipelineFailures: [],
     engine: { installed: true, managed: true },
     onOpenFailedNote: vi.fn(),
+    onOpenNote: vi.fn(),
     onRetryFailure: vi.fn(),
     onDismissPipelineFailure: vi.fn(),
     onOpenEngineSettings: vi.fn(),
+    onOpenLlmKeySettings: vi.fn(),
     updater: fakeUpdater("idle"),
     ...over,
   };
@@ -443,6 +452,30 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
     expect(notice(host)!.textContent).toContain("OpenAI needs your OK");
   });
 
+  it("a provider with no API key: Add a key opens Settings, then it offers to run them", async () => {
+    skipped = ["m1"];
+    consents["consent.cloud_llm.anthropic"] = "true";
+    llm.providers[1].has_key = false;
+    const p = props();
+    const { host } = render(<AppNotices {...p} />);
+    await flush();
+    expect(notice(host)!.textContent).toContain(
+      "There's no API key for Anthropic yet, so 1 meeting kept the raw transcript and got no action items. Add one in Settings › Ask and Enhance, then run them.",
+    );
+    click(button(host, "Add a key"));
+    expect(p.onOpenLlmKeySettings).toHaveBeenCalledTimes(1);
+    expect(api.retryConsentSkipped).not.toHaveBeenCalled();
+    // the key is saved in Settings
+    llm.providers[1].has_key = true;
+    act(() => {
+      window.dispatchEvent(new Event(LLM_SETTINGS_CHANGED_EVENT));
+    });
+    await flush();
+    click(button(host, "Run them now"));
+    await flush();
+    expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
+  });
+
   it("follows the backend's list, waits out a recording, and Dismiss hides it", async () => {
     const { host, rerender } = render(<AppNotices {...props()} />);
     await flush();
@@ -455,5 +488,53 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
     rerender(<AppNotices {...props()} />);
     click(button(host, "Dismiss"));
     expect(notice(host)).toBeUndefined();
+  });
+});
+
+describe("AppNotices › recovered meetings set to Keep local", () => {
+  const notice = (host: HTMLElement) =>
+    [...host.querySelectorAll<HTMLElement>(".fly-notice")].find((n) =>
+      n.textContent?.includes("set to Keep local"),
+    );
+  const two: RecoveredMeeting[] = [
+    { meeting_id: "m1", note_id: "n1", title: "Board prep" },
+    { meeting_id: "m2", note_id: "n2", title: "Vendor call" },
+  ];
+
+  it("says why, and Review opens each meeting in turn", async () => {
+    recovered = [...two];
+    const p = props();
+    const { host } = render(<AppNotices {...p} />);
+    await flush();
+    expect(notice(host)!.textContent).toContain(
+      "2 recovered meetings were set to Keep local because their privacy setting couldn't be confirmed.",
+    );
+    click(button(host, "Review the first"));
+    await flush();
+    expect(p.onOpenNote).toHaveBeenCalledWith("n1");
+    expect(api.dismissRecoveredKeptLocal).toHaveBeenLastCalledWith("m1");
+    expect(notice(host)!.textContent).toContain(
+      '"Vendor call" was set to Keep local because its privacy setting',
+    );
+    click(button(host, "Review"));
+    await flush();
+    expect(p.onOpenNote).toHaveBeenLastCalledWith("n2");
+    expect(notice(host)).toBeUndefined();
+  });
+
+  it("follows the backend's event, waits out a recording, and Dismiss clears it", async () => {
+    const { host, rerender } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(notice(host)).toBeUndefined();
+    act(() => eventHandlers["privacy:recovered-kept-local"]({ payload: two }));
+    await flush();
+    expect(notice(host)).toBeDefined();
+    rerender(<AppNotices {...props({ recordingActive: true })} />);
+    expect(notice(host)).toBeUndefined();
+    rerender(<AppNotices {...props()} />);
+    click(button(host, "Dismiss"));
+    await flush();
+    expect(notice(host)).toBeUndefined();
+    expect(api.dismissRecoveredKeptLocal).toHaveBeenLastCalledWith(null);
   });
 });

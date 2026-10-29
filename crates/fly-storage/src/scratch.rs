@@ -71,16 +71,17 @@ pub fn meeting_scratch_dir(data_dir: &Path, meeting_id: &str) -> PathBuf {
     scratch_root(data_dir).join(scratch_component(meeting_id))
 }
 
+/// `id` when it's a plain id, else a stable hash of it: safe to use as (part
+/// of) one path component.
+pub(crate) fn id_component(id: &str) -> String {
+    scratch_component(id)
+}
+
 /// Ids are UUIDs, but a resurrected meeting's id comes from a manifest that
 /// may have been copied in from anywhere: anything that isn't a short plain
 /// name is replaced by a stable hash, so it can never steer a path.
 fn scratch_component(meeting_id: &str) -> String {
-    let plain = !meeting_id.is_empty()
-        && meeting_id.len() <= 64
-        && meeting_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    if plain {
+    if crate::safe_path::is_safe_id(meeting_id) {
         return meeting_id.to_string();
     }
     // FNV-1a: stability, not secrecy
