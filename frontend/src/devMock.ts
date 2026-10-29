@@ -59,6 +59,13 @@
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
 
+   Query-string toggle (no reload dance needed):
+     ?fotwMockUpgrade=1    → startup library upgrade: library_status says
+                             "upgrading" and library:upgrade events walk the
+                             bar to 100 % in ~6 s, then "ready" mounts the app
+     ?fotwMockUpgrade=hold → stays at 40 % (screenshots)
+     ?fotwMockUpgrade=fail → stops at 70 % with "failed"
+
    QA hook: fotwMockEmit(event, payload) fires a mock backend event at the
    app's listeners (pipeline:progress, model:progress, …) from the console.
    ============================================================ */
@@ -1042,6 +1049,31 @@ function mockRetryConsentSkipped(): number {
   return ids.length;
 }
 
+/* ---- startup library upgrade (?fotwMockUpgrade=1 | hold | fail) ----
+   library_status is ready by default, like a launch with nothing to
+   upgrade. The upgrade run is driven from installDevMock (it emits). */
+const mockUpgradeMode =
+  typeof location !== "undefined"
+    ? new URLSearchParams(location.search).get("fotwMockUpgrade")
+    : null;
+const mockLibrary = {
+  phase: mockUpgradeMode ? "upgrading" : "ready",
+  done: 0,
+  total: mockUpgradeMode ? 900 : 0,
+};
+function runMockUpgrade(emit: (event: string, payload: unknown) => void) {
+  if (!mockUpgradeMode) return;
+  const stopAt = mockUpgradeMode === "hold" ? 360 : mockUpgradeMode === "fail" ? 630 : 900;
+  const t = window.setInterval(() => {
+    mockLibrary.done = Math.min(stopAt, mockLibrary.done + 30);
+    if (mockLibrary.done >= stopAt && mockUpgradeMode !== "hold") {
+      window.clearInterval(t);
+      mockLibrary.phase = mockUpgradeMode === "fail" ? "failed" : "ready";
+    }
+    emit("library:upgrade", { ...mockLibrary });
+  }, 200);
+}
+
 /* ---- command router ---- */
 function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
   // Stateful delete for the session, so Home's Undo-then-expire is visible
@@ -1062,6 +1094,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     if (cmd === "keep_note_block") return note(String(args.noteId ?? "n1"));
   }
   switch (cmd) {
+    case "library_status":
+      return { ...mockLibrary };
     case "ping":
       return "pong";
     case "app_info":
@@ -1641,6 +1675,7 @@ function installDevMock() {
     registerListener() {},
     unregisterListener() {},
   };
+  runMockUpgrade(w.fotwMockEmit as (event: string, payload: unknown) => void);
   console.info("[devMock] Tauri IPC stubbed (dev browser only — no native runtime).");
 }
 

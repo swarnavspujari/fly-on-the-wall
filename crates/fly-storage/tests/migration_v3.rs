@@ -15,7 +15,10 @@ use std::path::Path;
 
 use fly_core::{BlockOrigin, NoteBlock, Speaker, Transcript, TranscriptSegment};
 use fly_storage::citations::{OWNER_ITEM, OWNER_NOTE_BLOCK};
-use fly_storage::{CitationStatus, MeetingFilter, SearchFilter, SearchHitKind, Storage};
+use fly_storage::{
+    CitationStatus, MeetingFilter, OpenRetry, SearchFilter, SearchHitKind, Storage,
+    UpgradeProgress, UpgradeStage,
+};
 use rusqlite::Connection;
 
 /// `create_baseline` exactly as v2 builds ship it (comments dropped).
@@ -386,6 +389,348 @@ fn v2_fixture(dir: &Path) -> Fixture {
         case_block: case_block.id,
         budget_item,
     }
+}
+
+/// A v2 library at a chosen size, shaped like real data: every segment
+/// carries word timings (~14 words), a third of the meetings have a polished
+/// variant, each note has AI blocks citing segments, each meeting has
+/// extracted items, and the v2 transcript chunks carry 768-dim vectors.
+/// Synthetic text only. Written in one transaction (minutes otherwise).
+fn v2_library(dir: &Path, meetings: usize, segments: usize) {
+    const VOCAB: &[&str] = &[
+        "roadmap", "hiring", "budget", "launch", "review", "customer", "pricing", "renewal",
+        "timeline", "design", "metrics", "quarter", "vendor", "contract", "follow", "up", "the",
+        "we", "should", "next", "week", "plan", "team", "agreed", "on", "and",
+    ];
+    for sub in ["notes", "transcripts", "attachments", "recordings"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let conn = Connection::open(dir.join("flyonthewall.db")).unwrap();
+    conn.execute_batch(V2_DDL).unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    let ts = "2026-09-01T10:00:00Z";
+    let vector: Vec<f32> = (0..768).map(|i| (i % 7) as f32 + 0.5).collect();
+    for i in 0..meetings {
+        let (mid, nid) = (format!("m-lib-{i}"), format!("n-lib-{i}"));
+        let title = format!("Weekly sync {i}");
+        let segs: Vec<TranscriptSegment> = (0..segments)
+            .map(|j| {
+                let start = j as u64 * 4_000;
+                let words: Vec<fly_core::Word> = (0..14)
+                    .map(|w| fly_core::Word {
+                        text: VOCAB[(i * 7 + j * 3 + w) % VOCAB.len()].into(),
+                        start_ms: start + w as u64 * 250,
+                        end_ms: start + w as u64 * 250 + 200,
+                    })
+                    .collect();
+                TranscriptSegment {
+                    id: format!("{mid}-s{j}"),
+                    speaker_key: ["mic", "spk_0", "spk_1"][j % 3].into(),
+                    start_ms: start,
+                    end_ms: start + 3_600,
+                    text: words
+                        .iter()
+                        .map(|w| w.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    words,
+                }
+            })
+            .collect();
+        let t = transcript(&mid, segs);
+        // AI blocks citing segments; items citing segments.
+        let blocks: Vec<NoteBlock> = (0..6)
+            .map(|b| {
+                NoteBlock::ai(
+                    format!("- point {b}"),
+                    (0..3)
+                        .map(|k| format!("{mid}-s{}", (b * 40 + k) % segments))
+                        .collect(),
+                )
+            })
+            .collect();
+        conn.execute(
+            "INSERT INTO notes (id, title, blocks_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+            (&nid, &title, serde_json::to_string(&blocks).unwrap(), ts),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meetings (id, title, note_id, started_at) VALUES (?1, ?2, ?3, ?4)",
+            (
+                &mid,
+                &title,
+                &nid,
+                format!("2026-08-{:02}T09:00:00Z", 1 + i % 28),
+            ),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transcripts (meeting_id, json) VALUES (?1, ?2)",
+            (&mid, serde_json::to_string(&t).unwrap()),
+        )
+        .unwrap();
+        if i % 3 == 0 {
+            let mut polished = t.clone();
+            for s in &mut polished.segments {
+                s.text = format!("{}.", s.text);
+            }
+            conn.execute(
+                "UPDATE transcripts SET cleaned_json = ?1 WHERE meeting_id = ?2",
+                (serde_json::to_string(&polished).unwrap(), &mid),
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO transcripts_fts (meeting_id, body) VALUES (?1, ?2)",
+            (&mid, v2_chunk_text(&t)),
+        )
+        .unwrap();
+        // v2 chunking: labelled lines, ~25 segments a chunk, all embedded.
+        for (c, part) in t.segments.chunks(25).enumerate() {
+            let text = part
+                .iter()
+                .map(|s| format!("{}: {}", t.label_for(&s.speaker_key), s.text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            conn.execute(
+                "INSERT INTO embedding_chunks
+                 (owner_kind, owner_id, chunk_index, title, text, start_ms, embedding, model)
+                 VALUES ('transcript', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    &mid,
+                    c as i64,
+                    &title,
+                    text,
+                    part[0].start_ms as i64,
+                    blob(&vector),
+                    MODEL
+                ],
+            )
+            .unwrap();
+        }
+        for k in 0..8 {
+            conn.execute(
+                "INSERT INTO meeting_items (id, meeting_id, kind, text, segment_ids_json, created_at, extracted_by)
+                 VALUES (?1, ?2, 'action_item', 'follow up', ?3, ?4, 'test')",
+                (
+                    format!("{mid}-item-{k}"),
+                    &mid,
+                    format!("[\"{mid}-s{}\"]", (k * 30 + 5) % segments),
+                    ts,
+                ),
+            )
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+}
+
+fn bench_meetings() -> usize {
+    std::env::var("FOTW_V3_BENCH_MEETINGS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000)
+}
+
+/// Times the v3 step, per stage, over a realistic large library (release
+/// build): `cargo test --release -p fly-storage --test migration_v3 --
+/// --ignored --nocapture v3_step_timing`. Size via FOTW_V3_BENCH_MEETINGS
+/// (default 1,000 meetings × 300 segments).
+#[test]
+#[ignore = "manual benchmark: about a minute in release"]
+fn v3_step_timing() {
+    let meetings = bench_meetings();
+    let tmp = tempfile::tempdir().unwrap();
+    let built = std::time::Instant::now();
+    v2_library(tmp.path(), meetings, 300);
+    let size = std::fs::metadata(tmp.path().join("flyonthewall.db"))
+        .unwrap()
+        .len();
+    eprintln!(
+        "fixture: {meetings} meetings x 300 segments, {} MB, built in {:?}",
+        size / 1_000_000,
+        built.elapsed()
+    );
+    // A stage's first report marks its start (stage changes are never
+    // throttled); the final report comes right after the commit.
+    let mut marks: Vec<(UpgradeStage, std::time::Instant)> = Vec::new();
+    let mut reports = 0;
+    let started = std::time::Instant::now();
+    let s = Storage::open_with_progress(tmp.path(), &mut |p| {
+        reports += 1;
+        if marks.last().is_none_or(|(s, _)| *s != p.stage) {
+            marks.push((p.stage, std::time::Instant::now()));
+        }
+    })
+    .unwrap();
+    let opened = std::time::Instant::now();
+    eprintln!("open + v3 step: {:?} ({reports} reports)", opened - started);
+    for (i, (stage, at)) in marks.iter().enumerate() {
+        let end = marks.get(i + 1).map_or(opened, |(_, t)| *t);
+        eprintln!("  {stage:?}: {:?}", end - *at);
+    }
+    drop(s);
+    assert_eq!(user_version(tmp.path()), 3);
+    assert_eq!(
+        count(tmp.path(), "SELECT COUNT(*) FROM transcript_segments"),
+        (meetings * 300) as i64
+    );
+}
+
+/// Writes a synthetic v2 library (as [`v3_step_timing`] measures) into
+/// FOTW_V2_LIBRARY_DIR for a manual first-launch check of the app's upgrade
+/// screen. Refuses a dir that already holds a database.
+#[test]
+#[ignore = "manual: writes outside the temp dir"]
+fn write_v2_library_for_manual_check() {
+    let Ok(dir) = std::env::var("FOTW_V2_LIBRARY_DIR") else {
+        eprintln!("set FOTW_V2_LIBRARY_DIR");
+        return;
+    };
+    let dir = Path::new(&dir);
+    assert!(
+        !dir.join("flyonthewall.db").exists() && !dir.join("looma.db").exists(),
+        "{} already has a database",
+        dir.display()
+    );
+    std::fs::create_dir_all(dir).unwrap();
+    v2_library(dir, bench_meetings(), 300);
+    assert_eq!(user_version(dir), 2);
+}
+
+/// Every report, collected.
+fn open_reporting(dir: &Path) -> (Storage, Vec<UpgradeProgress>) {
+    let mut seen = Vec::new();
+    let s = Storage::open_with_retry_and_progress(
+        dir,
+        OpenRetry {
+            attempts: 1,
+            backoff: std::time::Duration::ZERO,
+        },
+        &mut |p| seen.push(p),
+    )
+    .unwrap();
+    (s, seen)
+}
+
+fn dir_listing(dir: &Path) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = std::fs::read_dir(dir)
+        .map(|it| {
+            it.flatten()
+                .map(|e| {
+                    let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+                    (e.file_name().to_string_lossy().into_owned(), len)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+/// `pending_upgrade` predicts exactly whether `open` runs the v3 step (it
+/// reports progress only then), and touches nothing itself.
+#[test]
+fn pending_upgrade_agrees_with_open_and_writes_nothing() {
+    // Fresh install: no data dir at all, then an empty one.
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("not-yet");
+    assert_eq!(Storage::pending_upgrade(&missing).unwrap(), None);
+    assert!(!missing.exists(), "the peek creates nothing");
+    assert_eq!(Storage::pending_upgrade(tmp.path()).unwrap(), None);
+    assert!(dir_listing(tmp.path()).is_empty());
+    let (s, seen) = open_reporting(&missing);
+    assert!(seen.is_empty(), "a fresh database runs no step: {seen:?}");
+    drop(s);
+    // Now v3: nothing pending, nothing reported.
+    assert_eq!(Storage::pending_upgrade(&missing).unwrap(), None);
+    assert!(open_reporting(&missing).1.is_empty());
+    // A zero-byte database file counts as fresh too.
+    let empty = tempfile::tempdir().unwrap();
+    std::fs::write(empty.path().join("flyonthewall.db"), b"").unwrap();
+    assert_eq!(Storage::pending_upgrade(empty.path()).unwrap(), None);
+    assert!(open_reporting(empty.path()).1.is_empty());
+
+    // v2 file: pending, sized, and left byte-for-byte alone by the peek.
+    let v2 = tempfile::tempdir().unwrap();
+    v2_fixture(v2.path());
+    let before = dir_listing(v2.path());
+    let pending = Storage::pending_upgrade(v2.path()).unwrap().unwrap();
+    assert_eq!(pending.from_version, 2);
+    assert_eq!(pending.transcripts, (BULK_MEETINGS + 5) as u64);
+    assert_eq!(dir_listing(v2.path()), before, "the peek writes nothing");
+    assert_eq!(user_version(v2.path()), 2);
+    assert_eq!(
+        count(
+            v2.path(),
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'transcript_segments'"
+        ),
+        0
+    );
+    let (s, seen) = open_reporting(v2.path());
+    assert!(!seen.is_empty());
+    drop(s);
+    assert_eq!(Storage::pending_upgrade(v2.path()).unwrap(), None);
+    assert!(open_reporting(v2.path()).1.is_empty(), "v3 reopen: no step");
+
+    // A NEWER-stamped file re-runs the step (see SCHEMA_VERSION).
+    db(v2.path())
+        .pragma_update(None, "user_version", Storage::SCHEMA_VERSION + 1)
+        .unwrap();
+    let pending = Storage::pending_upgrade(v2.path()).unwrap().unwrap();
+    assert_eq!(pending.from_version, Storage::SCHEMA_VERSION + 1);
+    assert!(!open_reporting(v2.path()).1.is_empty());
+    assert_eq!(user_version(v2.path()), Storage::SCHEMA_VERSION);
+
+    // A pre-rebrand looma.db is what open will migrate; the peek reads it
+    // without renaming it.
+    let legacy = tempfile::tempdir().unwrap();
+    v2_fixture(legacy.path());
+    std::fs::rename(
+        legacy.path().join("flyonthewall.db"),
+        legacy.path().join("looma.db"),
+    )
+    .unwrap();
+    assert!(Storage::pending_upgrade(legacy.path()).unwrap().is_some());
+    assert!(!legacy.path().join("flyonthewall.db").exists());
+    assert!(!open_reporting(legacy.path()).1.is_empty());
+    assert!(legacy.path().join("flyonthewall.db").exists());
+}
+
+#[test]
+fn upgrade_progress_runs_through_every_stage_to_total() {
+    let tmp = tempfile::tempdir().unwrap();
+    v2_fixture(tmp.path());
+    let (_s, seen) = open_reporting(tmp.path());
+    let (first, last) = (seen.first().unwrap(), seen.last().unwrap());
+    assert_eq!((first.stage, first.done), (UpgradeStage::Segments, 0));
+    assert_eq!(last.stage, UpgradeStage::Index);
+    assert_eq!(last.done, last.total, "ends at total");
+    assert!(seen.iter().all(|p| p.total == last.total), "fixed total");
+    assert!(
+        seen.windows(2)
+            .all(|w| w[0].done <= w[1].done && w[0].stage <= w[1].stage),
+        "monotonic: {seen:?}"
+    );
+    let stages: Vec<UpgradeStage> = seen.iter().map(|p| p.stage).fold(vec![], |mut v, s| {
+        if v.last() != Some(&s) {
+            v.push(s);
+        }
+        v
+    });
+    assert_eq!(
+        stages,
+        [
+            UpgradeStage::Segments,
+            UpgradeStage::Chunks,
+            UpgradeStage::Citations,
+            UpgradeStage::Index
+        ]
+    );
+    // Throttled: a small library sends a handful of reports, not one per
+    // meeting and stage.
+    assert!(seen.len() < 20, "{} reports", seen.len());
+    assert_eq!(user_version(tmp.path()), 3);
 }
 
 fn db(dir: &Path) -> Connection {

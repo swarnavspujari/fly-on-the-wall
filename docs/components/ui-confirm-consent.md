@@ -51,7 +51,7 @@ Behaviour details:
 | Key (or prefix) | Read / write | Webview-settable? (`is_webview_writable_setting_key`) | Meaning |
 |---|---|---|---|
 | `consent.cloud_llm.<provider>` | read only (`CloudConsent.tsx:45`, `:152`) | **No.** Readable (`is_webview_setting_key`, `commands.rs:59-66`), but `set_app_setting` refuses it in any letter case (`commands.rs:68-79`) | `"true"` = you allowed this cloud provider. Only the backend writes it: `record_cloud_consent`, after a click on allow in the native dialog (`llm_commands.rs:264-279`). `build_provider` reads it (`llm_commands.rs:602`). |
-| `migration.cloud_consent_reset_v2_4` | not touched by UI | No | Backend flag for the one-time v2.4 reset (`llm_commands.rs:72-75`, `:93-115`, run from `lib.rs:115`). |
+| `migration.cloud_consent_reset_v2_4` | not touched by UI | No | Backend flag for the one-time v2.4 reset (`llm_commands.rs:72-75`, `:93-115`, run from `startup.rs:193`). |
 
 localStorage keys: none. devMock toggles: `fotwMockConsentReset="1"` (no consent recorded, so the launch check asks), `fotwMockConsentSkips="1"` (the skipped-cleanup notice shows). Test-only export `resetMockAppSettings()` (`devMock.ts:877`).
 

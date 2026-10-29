@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use fly_audio::cpal_backend::CpalAudioCapture;
 use fly_audio::AudioCapture;
 use fly_secrets::{KeychainSecretStore, SecretStore};
-use fly_storage::{OpenRetry, Storage};
+use fly_storage::{OpenRetry, Storage, UpgradeProgress};
 
 use crate::recording::ActiveRecording;
 use crate::screen_commands::ActiveScreenRecording;
@@ -59,6 +59,21 @@ pub struct AppState {
 
 impl AppState {
     pub fn init() -> anyhow::Result<Self> {
+        let (data_dir, secrets) = Self::prepare()?;
+        Self::init_with(data_dir, secrets)
+    }
+
+    /// [`init`](Self::init) for the background startup open (startup.rs):
+    /// the same open, reporting the one-time schema step's progress.
+    pub fn init_with_progress(progress: &mut dyn FnMut(UpgradeProgress)) -> anyhow::Result<Self> {
+        let (data_dir, secrets) = Self::prepare()?;
+        let storage =
+            Storage::open_with_retry_and_progress(&data_dir, OpenRetry::STARTUP, progress)?;
+        tracing::info!(dir = %data_dir.display(), "storage ready");
+        Ok(Self::with_storage(storage, data_dir, secrets))
+    }
+
+    fn prepare() -> anyhow::Result<(PathBuf, Arc<dyn SecretStore>)> {
         let data_dir = prepared_data_dir()?;
         let secrets = Arc::new(KeychainSecretStore::new());
         // Best-effort: copy secrets out of the pre-rebrand keychain service. A
@@ -69,7 +84,7 @@ impl AppState {
             secrets.as_ref(),
             &migrated_secret_keys(),
         );
-        Self::init_with(data_dir, secrets)
+        Ok((data_dir, secrets))
     }
 
     /// Composition with explicit data dir + secret store — used by tests.
@@ -81,7 +96,11 @@ impl AppState {
         // does the caller reach the startup error dialog.
         let storage = Storage::open_with_retry(&data_dir, OpenRetry::STARTUP)?;
         tracing::info!(dir = %data_dir.display(), "storage ready");
-        Ok(Self {
+        Ok(Self::with_storage(storage, data_dir, secrets))
+    }
+
+    fn with_storage(storage: Storage, data_dir: PathBuf, secrets: Arc<dyn SecretStore>) -> Self {
+        Self {
             storage: Mutex::new(storage),
             data_dir,
             audio: Box::new(CpalAudioCapture::new()),
@@ -96,7 +115,7 @@ impl AppState {
             consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
             consent_prompt: tokio::sync::Mutex::new(Default::default()),
             embed_notify: tokio::sync::Notify::new(),
-        })
+        }
     }
 
     /// Shared handle for components that hold the secret store themselves

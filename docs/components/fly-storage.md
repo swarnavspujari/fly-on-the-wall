@@ -7,8 +7,8 @@
 The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) is the index. Markdown/JSON mirrors on disk are the copy the user owns: one folder per meeting, note mirrors, a portability manifest and `note.json` that let a copied folder rebuild its meeting on another machine (self-heal). It also owns hybrid search (FTS5 + brute-force vectors fused with RRF), the per-note/per-folder Keep-local flags, audio retention, the in-place database erase used by "Delete all my data", path containment, and the machine-local pipeline scratch folder.
 
 ## Files it owns
-- `crates/fly-storage/src/lib.rs` — `Storage`, `open` / `open_existing` / `open_with_retry`, pragmas, baseline schema, column repair, `user_version` gate.
-- `crates/fly-storage/src/migrations.rs` — `looma.db` rename, v2 human-readable layout migration.
+- `crates/fly-storage/src/lib.rs` — `Storage`, `open` / `open_with_progress` / `open_existing` / `open_with_retry` / `open_with_retry_and_progress`, the read-only `pending_upgrade` peek, pragmas, baseline schema, column repair, `user_version` gate.
+- `crates/fly-storage/src/migrations.rs` — `looma.db` rename, v2 human-readable layout migration, the v3 index/locator step (`to_v3`, see `SCHEMA_V3.md`) and its throttled progress reports (`UpgradeProgress`).
 - `crates/fly-storage/src/atomic.rs` — crash-safe mirror writes (`write_atomic`), `rename_with_retry`.
 - `crates/fly-storage/src/safe_path.rs` — lexical path containment (`is_plain_name`, `contained`).
 - `crates/fly-storage/src/scratch.rs` — per-meeting scratch outside the data dir; startup sweep.
@@ -27,13 +27,13 @@ The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) 
 - `crates/fly-storage/src/templates.rs` — Enhance templates + built-in seeds.
 - `crates/fly-storage/src/privacy.rs` — Keep local, participants notified, retention, `erase_all_content`.
 - `crates/fly-storage/src/recovery.rs` — manifest v2, `note.json`, self-heal, portability backfill.
-- `crates/fly-storage/tests/storage_safety.rs`, `crates/fly-storage/tests/migration_v2.rs` — integration tests.
+- `crates/fly-storage/tests/storage_safety.rs`, `crates/fly-storage/tests/migration_v2.rs`, `crates/fly-storage/tests/migration_v3.rs` — integration tests.
 
 ## Surface area
 ### Public API
 | Group | Items |
 |---|---|
-| Open / lifecycle | `Storage::open` (creates + migrates + seeds, `lib.rs:190`), `Storage::open_with_retry` + `OpenRetry::STARTUP` (6 × 2.5 s, `lib.rs:99`), `Storage::open_existing` (second-process read/write open, never migrates, `lib.rs:231`), `Storage::EXISTING_BUSY_TIMEOUT` (5 s), `data_dir()`, `StorageError`, `Result` |
+| Open / lifecycle | `Storage::open` (creates + migrates + seeds, `lib.rs:227`), `Storage::open_with_progress(dir, &mut dyn FnMut(UpgradeProgress))` (the same open, reporting the v3 step, `lib.rs:234`), `Storage::open_with_retry` + `OpenRetry::STARTUP` (6 × 2.5 s, `lib.rs:264`, `:105`), `Storage::open_with_retry_and_progress` (`lib.rs:271`), `Storage::pending_upgrade(dir) -> Option<PendingUpgrade { from_version, transcripts }>` (read-only: will the next open run the v3 step, and how big is it; `lib.rs:284`, `:114`), `UpgradeProgress { stage, done, total }` + `UpgradeStage` (`migrations.rs:40-62`), `Storage::open_existing` (second-process read/write open, never migrates, `lib.rs:324`), `Storage::EXISTING_BUSY_TIMEOUT` (5 s), `data_dir()`, `StorageError`, `Result` |
 | Notes | `create_note`, `get_note`, `list_notes_in_folder`, `list_recent_notes`, `list_notes_filtered` (cursor + `exclude_keep_local`), `update_note_title`, `update_note_scratchpad`, `update_note_blocks`, `edit_note_block`, `keep_note_block`, `move_note`, `delete_note`, `note_mirror_abs`, `NoteSummary` |
 | Folders | `create_folder`, `list_folders`, `rename_folder`, `move_folder`, `delete_folder` |
 | Meetings | `create_meeting`, `update_attendees`, `end_meeting`, `set_meeting_started_at`, `get_meeting`, `get_meeting_for_note`, `meetings_for_note`, `allocate_meeting_dir`, `purge_meeting`, `list_meetings`, free fns `recording_dir_rel`, `contained_recordings_dir` |
@@ -67,7 +67,7 @@ The `settings` table is a generic key/value store (`settings.rs:8-43`); keys are
 `delete_settings_with_prefix` (`settings.rs:35`) is used by the app to void `consent.cloud_llm.*` (`src-tauri/src/llm_commands.rs:102`).
 
 ### Database
-`flyonthewall.db`, `user_version` = 2 (`lib.rs:385`). Schema in `create_baseline` (`lib.rs:416-552`); columns added after first release are back-filled by `repair_missing_columns` (`lib.rs:123-177`, `559-569`). No foreign key ties `meetings.note_id`, `transcripts`, `meeting_items`, `transcription_jobs` or `embedding_chunks` to their owners; deletes clean them up by hand (`notes.rs:263`, `meetings.rs:98`).
+`flyonthewall.db`, `user_version` = 3 (`SCHEMA_VERSION`, `lib.rs:503`; the v3 tables and the cross-version contract are in `crates/fly-storage/SCHEMA_V3.md`, not yet in the table below). `migrate` (`lib.rs:512-544`) runs v2 when `from < 2`, and the v3 step when `runs_v3_step(from, fresh)` (`lib.rs:508-510`: `from < 3 || from > SCHEMA_VERSION`, never on a fresh file), in one transaction, reporting `UpgradeProgress`. Schema in `create_baseline` (`lib.rs:416-552`); columns added after first release are back-filled by `repair_missing_columns` (`lib.rs:123-177`, `559-569`). No foreign key ties `meetings.note_id`, `transcripts`, `meeting_items`, `transcription_jobs` or `embedding_chunks` to their owners; deletes clean them up by hand (`notes.rs:263`, `meetings.rs:98`).
 
 | Table | Columns | Read / write |
 |---|---|---|
@@ -90,8 +90,8 @@ Under `<data_dir>` (`%APPDATA%\FlyOnTheWall` on Windows):
 
 | Path | Written by | Notes |
 |---|---|---|
-| `flyonthewall.db`, `-wal`, `-shm` | `lib.rs:196-203` | Persistent WAL (`SQLITE_FCNTL_PERSIST_WAL`, `lib.rs:278-299`), `journal_size_limit` 16 MiB, WAL truncated on close. Legacy `looma.db*` renamed on open (`migrations.rs:43`). |
-| `notes/`, `transcripts/`, `attachments/`, `recordings/` | created on every `open` (`lib.rs:192-194`) | |
+| `flyonthewall.db`, `-wal`, `-shm` | `lib.rs:242-249` | Persistent WAL (`SQLITE_FCNTL_PERSIST_WAL`, `lib.rs:371-392`), `journal_size_limit` 16 MiB, WAL truncated on close. Legacy `looma.db*` renamed on open (`migrations.rs:228`). `pending_upgrade` opens the file read-only and writes nothing. |
+| `notes/`, `transcripts/`, `attachments/`, `recordings/` | created on every `open` (`lib.rs:238-241`) | |
 | `notes/<date> <title>[ (n)].md` | `notes.rs:329` (atomic) | Path stored in `notes.disk_path`; renamed on title edit; removed on delete. |
 | `notes/_unlinked/` | v2 migration only (`migrations.rs:237`) | Mirrors with no row; never deleted. |
 | `attachments/<note_id>/<file>[ (n)]` | `attachments.rs:11-50` | Copies; folder removed on note delete (`notes.rs:277`). |
@@ -129,9 +129,11 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 - Attachment paths from IPC must be `attachments/…` or `recordings/…` with plain components (`attachments.rs:70-79`, `safe_path.rs:40-58`). THREAT_MODEL T3.
 - Deletes are transactions, `secure_delete=ON`, and a WAL `TRUNCATE` checkpoint follows (`lib.rs:202`, `notes.rs:267-276`, `meetings.rs:107-120`, `notes.rs:475-479`). THREAT_MODEL T11.
 - Mirrors are replaced atomically (temp in the same folder, `sync_all`, rename, Unix dir fsync); a lock that never clears falls back to an in-place (non-atomic) write so the mirror doesn't go stale (`atomic.rs:66-120`). `atomic.rs` module docs.
-- A fresh (table-less) database never runs the v2 orphan sweep, so a lost index never mass-parks folders (`lib.rs:390`, `402-404`). DECISIONS.md "Storage naming & startup latency"; 2026-07-13 incident.
+- A fresh (table-less) database never runs the v2 orphan sweep, so a lost index never mass-parks folders (`lib.rs:516`, `529-534`). DECISIONS.md "Storage naming & startup latency"; 2026-07-13 incident.
+- `pending_upgrade` and `migrate` decide with the same `runs_v3_step` (`lib.rs:508-510`), so the app's choice to open in the background always matches what `open` will do. The peek reads the file `open` will open (`flyonthewall.db`, else a `looma.db` it would rename; `migrations.rs:242-247`), read-only, and creates or renames nothing (`pending_upgrade_agrees_with_open_and_writes_nothing`).
+- The v3 step stays one transaction and a full, idempotent rebuild with progress reporting on. The trigger rebuild runs per transcript (`UPDATE … WHERE meeting_id = ?`, the same trigger firing as a table-wide `UPDATE`). Reports are throttled to one per 100 ms per stage, plus every stage start and a final `done == total` after the commit (`migrations.rs:153-222`). A progress callback runs inside the transaction and must not touch the database.
 - Backfill never overwrites a mirror that may be newer: manifests only gain missing fields; `note.json` is replaced only when its `updated_at` is older; unreadable/foreign/future files are left alone (`recovery.rs:331-414`).
-- `open_existing` (MCP) never creates, migrates, repairs or seeds, and refuses any schema that isn't exactly v2 with every expected column (`lib.rs:231-335`). Spec §2 item 5 (MCP holds no keys; reads the app's DB).
+- `open_existing` (MCP) never creates, migrates, repairs or seeds, and refuses any schema that isn't exactly `SCHEMA_VERSION` (3) with every expected column (`lib.rs:324-434`). Spec §2 item 5 (MCP holds no keys; reads the app's DB).
 - Keep local fails closed: unknown meeting or lookup error answers `true` (`privacy.rs:209-241`). Bulk readers filter inside SQL before `LIMIT` via `KEEP_LOCAL_CTE` (`privacy.rs:90-102`; used in `search.rs:84-92`, `notes.rs:144-151`, `items.rs:89-100`, `privacy.rs:306-337`). **Not** applied in `vector_search` (`embeddings.rs:391-418` ignores `SearchFilter.exclude_keep_local`), `list_meetings` (`items.rs:180`) or `search()` / `search_filtered` without the flag. Spec §2 item 1 (enforcement in the app), THREAT_MODEL T10.
 - A re-recording into a keep-local note inherits the flag (`meetings.rs:73`, `privacy.rs:266-275`).
 - Calendar-seeded attendees start unconfirmed; only the editor's save sets `attendees_confirmed` (`meetings.rs:42-91`). Spec §2 item 7.
@@ -147,6 +149,7 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 | unit | `crates/fly-storage/src/*.rs` | 126 (122 off Windows: 4 `#[cfg(windows)]` in `atomic.rs`) | open/open_existing/retry, migrations, atomic writes, containment, naming, notes/folders/meetings/transcripts/items/jobs/attachments/settings/templates, FTS + RRF + vectors, keep-local, retention, erase, self-heal, scratch |
 | integration (runs in CI) | `crates/fly-storage/tests/storage_safety.rs` | 10 | fresh-DB no-park, backfill no-clobber, edits refresh manifests, persistent WAL, scratch independence/sweep, erase removes scratch |
 | integration (runs in CI) | `crates/fly-storage/tests/migration_v2.rs` | 1 | v1 → v2 layout on a synthetic v1 fixture |
+| integration (runs in CI) | `crates/fly-storage/tests/migration_v3.rs` | 9 (+2 ignored) | v2 → v3 step, rerun no-op, rollback on failure, older-build round trip, keep-local filters; `pending_upgrade` vs `open` on fresh / zero-byte / v2 / v3 / newer-stamped / `looma.db` files (and that the peek writes nothing); progress runs through all four stages, monotonic and throttled, to `done == total`. Ignored: `v3_step_timing` (release-build benchmark over a synthetic 1,000-meeting × 300-segment v2 library, per-stage split) and `write_v2_library_for_manual_check` (writes that library to `FOTW_V2_LIBRARY_DIR` for a manual first-launch check) |
 | integration (other crates) | `crates/fly-mcp`, `crates/fly-context` tests | — | `exclude_keep_local` on `search_split` / `list_notes_filtered` is exercised there, not in this crate (inferred) |
 | env-gated | `src-tauri/tests/search_eval.rs` | 1 | hybrid vs FTS hit rate; returns early (passes) when Ollama with the embedding model isn't reachable, so CI checks nothing |
 
@@ -162,6 +165,7 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 ## Changing it safely
 - Run `cargo test -p fly-storage` (and `-p fly-mcp -p fly-context`, which read through it), then `cargo clippy --workspace --all-targets -D warnings`.
 - Schema change: bump `SCHEMA_VERSION` and add an `if from < N` step in `migrate`; add new columns to BOTH `create_baseline` and `EXPECTED_COLUMNS`; add new tables to `REQUIRED_TABLES`. `open_existing` rejects any other version, so the MCP binary and the app must ship from the same build.
+- A new slow step: give it a condition helper that `pending_upgrade` shares (as `runs_v3_step` is), and report through the step's `Reporter` so the app's upgrade screen moves. Re-measure with `v3_step_timing` and re-weigh the `UNITS_*` constants if the stage split changes.
 - New readers that hand data to AI tools must filter keep-local inside SQL (`KEEP_LOCAL_CTE` / `SHAREABLE_CHUNK`) before `LIMIT`; never post-filter a truncated list.
 - New recursive deletes go through `contained_recordings_dir`, and any id or path that came from a manifest or `note.json` is checked with `safe_path` before use; new mirror files go through `write_atomic`; new manifest fields are `Option` with `#[serde(default)]` so v1/v2 files still parse.
 - New files outside `<data_dir>` must be added to `erase_all_content` (the restart wipe only clears the data dir). New tables are erased automatically (`sqlite_master` scan).

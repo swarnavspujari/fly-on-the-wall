@@ -15,10 +15,10 @@ Called by other src-tauri modules:
 
 | Item | Caller |
 |---|---|
-| `startup(data_dir)` — take the per-data-dir instance lock; finish a pending wipe before logging/DB touch the folder (`privacy.rs:672`) | `src-tauri/src/lib.rs:39` |
-| `record_pending_wipe(&Storage)` — persist the startup wipe's leftovers/notes (`privacy.rs:761`) | `lib.rs:116` |
-| `spawn_disk_encryption_check(data_dir)` (`privacy.rs:1056`) | `lib.rs:118` |
-| `spawn_retention(app)` — first sweep after 60 s, then every 24 h (`privacy.rs:281`) | `lib.rs:179` |
+| `startup(data_dir)` — take the per-data-dir instance lock; finish a pending wipe before logging/DB touch the folder (`privacy.rs:672`) | `src-tauri/src/lib.rs:40` |
+| `record_pending_wipe(&Storage)` — persist the startup wipe's leftovers/notes (`privacy.rs:761`) | `startup.rs:194` |
+| `spawn_disk_encryption_check(data_dir)` (`privacy.rs:1056`) | `startup.rs:196` |
+| `spawn_retention(app)` — first sweep after 60 s, then every 24 h (`privacy.rs:281`) | `startup.rs:254` |
 | `ImportGuard::enter()` — marks an import in flight so delete-all refuses (`privacy.rs:383-401`) | `src-tauri/src/import_commands.rs:446`, `606` |
 | `sweep_retention(storage, now, busy, explicit) -> SweepReport` (`privacy.rs:175`) | internal + tests |
 | `delete_owned_secrets(stores)`, `wipe_data_dir(dir, keep_models, only)`, `classify_bitlocker`, `classify_fdesetup`, `windows_drive` | internal + tests |
@@ -40,7 +40,7 @@ Called by other src-tauri modules:
 | `delete_all_data` | `include_models: bool, confirmation: String` (must be `"delete everything"`) | `Result<WipeReport, String>` | `ui-settings` (`PrivacySection.tsx:111`); retry from `ui-notices` (`RestartRequired.tsx:75`); via `api.deleteAllData` |
 | `disk_encryption_status` | — | `Result<DiskEncryption, String>` (`state` on/off/unknown, `method`, `volume`) | `ui-settings` (`PrivacySection.tsx:55`), via `api.diskEncryptionStatus` |
 
-All 12 are registered at `src-tauri/src/lib.rs:276-287` and mirrored in `frontend/src/devMock.ts:1420-1481`. Drift: the mock's `delete_all_data` rejects a wrong phrase with `"confirmation mismatch"` (backend: `"confirmation text doesn't match — nothing was deleted"`), never refuses for busy work, and always returns `last_wipe: null`; `set_note_keep_local` doesn't error on an unknown note.
+All 12 are registered at `src-tauri/src/lib.rs:188-199` and mirrored in `frontend/src/devMock.ts:1420-1481`. Drift: the mock's `delete_all_data` rejects a wrong phrase with `"confirmation mismatch"` (backend: `"confirmation text doesn't match — nothing was deleted"`), never refuses for busy work, and always returns `last_wipe: null`; `set_note_keep_local` doesn't error on an unknown note.
 
 ### Events
 No Tauri events are emitted or listened to here. Two frontend `window` events carry the feature in the UI:
@@ -111,7 +111,7 @@ The result (including `unknown`) is cached for the session under a mutex held ac
 - Retention can only be set to 7/30/90/365 through a validating command; `privacy.*` keys are not webview-settable (`privacy.rs:19-21`, `330-334`; `src-tauri/src/commands.rs:59-66`). Spec §2 item 2.
 - A background sweep never runs mid-recording, skips meetings a pipeline holds, refuses when the clock went back more than 1 h, and holds back when it would delete more than half the remaining audio (≥3 meetings); an explicit sweep from Settings may proceed (`privacy.rs:175-278`).
 - Delete-all refuses while recording, importing, transcribing or with queued jobs (`privacy.rs:404-425`), requires the confirmation phrase (an accident guard, not authorization, `privacy.rs:451-454`, `797-799`), and writes the marker before deleting anything (`privacy.rs:822-832`).
-- The restart wipe runs only while holding the instance lock (after the requesting instance exited), only for an unconsumed marker 0–10 minutes old, and renames the marker first so no second process acts on it (`privacy.rs:637-742`). It runs before logging and the DB open (`lib.rs:35-41`).
+- The restart wipe runs only while holding the instance lock (after the requesting instance exited), only for an unconsumed marker 0–10 minutes old, and renames the marker first so no second process acts on it (`privacy.rs:637-742`). It runs before logging and the DB open (`lib.rs:36-42`).
 
 ## Tests
 | Kind | File | Tests | Covers |

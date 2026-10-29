@@ -55,7 +55,7 @@ None.
 None.
 
 ## Dependencies
-- **Inbound:** `lib.rs:268-272` (registration), `state.rs:13` / `:33` (`AppState.screen`), `scheduler.rs:469`.
+- **Inbound:** `lib.rs:180-184` (registration), `state.rs:13` / `:33` (`AppState.screen`), `scheduler.rs:469`.
 - **Outbound:** [fly-capture-screen](fly-capture-screen.md) (`FallbackScreenRecorder`, `WgcScreenRecorder`, `FfmpegScreenRecorder`, `window_list`), `models.rs` (`ensure_tool`), [fly-storage](fly-storage.md) (`get_note`, `attachment_abs_path`, `add_attachment_in_place`), `AppState.jobs_notify`.
 
 ## Invariants
@@ -78,7 +78,7 @@ None.
 - None of the 5 commands is invoked by a test; `start_screen_recording` / `stop_screen_recording` (single-capture guard, note check, attachment registration, queue nudge) are untested.
 - The two env-gated tests look for ffmpeg in the real `<data_dir>` and then on PATH (`screen_commands.rs:273-280`). CI installs no ffmpeg, so whether they run there depends on the runner image (unverified).
 - The missing-window test drives `FfmpegScreenRecorder` directly; on Windows the app path is title resolution then WGC (`build_recorder`), so the test proves only the fallback leg.
-- **Closing the app mid-capture (inferred, untested):** `RunEvent::Exit` only stops Ollama (`lib.rs:291-296`). The capture is not stopped, the MP4 is not finalized (WGC needs `finish()`), and the file is never registered on the note.
+- **Closing the app mid-capture (inferred, untested):** `RunEvent::Exit` only stops Ollama (`lib.rs:202-211`). The capture is not stopped, the MP4 is not finalized (WGC needs `finish()`), and the file is never registered on the note.
 - **Deleting the note mid-capture (inferred, untested):** `delete_note` refuses only the audio-recording note (`commands.rs:284-287`), not `state.screen.note_id`. It removes `attachments/<note_id>/` while the encoder writes there; `stop_screen_recording` then fails with a missing note.
 - On Windows, `ensure_tool("ffmpeg")` runs before every start even though WGC does the capture, so a first screen recording on a fresh install waits for a ~90 MB download (`screen_commands.rs:98-105`).
 - Region capture in the UI asks with `window.prompt` (`Editor.tsx:481`). tauri-plugin-dialog overrides only `alert`/`confirm`, the ESLint ban covers only those two, and no test runs in a real webview, so region capture's behavior in WebView2/WKWebView is unverified.

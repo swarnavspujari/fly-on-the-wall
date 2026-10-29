@@ -340,6 +340,16 @@ fn map_ids(ids: &[String], map: &HashMap<String, String>) -> (Vec<String>, bool)
     (out, changed)
 }
 
+/// Block owners recorded for one note, and item owners for one meeting
+/// (stale ones are dropped on re-sync). `+owner_kind` keeps SQLite on the
+/// note / meeting index: the primary key's `owner_kind` prefix would scan
+/// every locator of that kind in the library, once per note or meeting —
+/// quadratic over the v3 step, and linear in the library on every save.
+const NOTE_OWNERS_SQL: &str = "SELECT DISTINCT owner_id FROM citation_locators
+                                WHERE +owner_kind = ?1 AND note_id = ?2";
+const MEETING_OWNERS_SQL: &str = "SELECT DISTINCT owner_id FROM citation_locators
+                                   WHERE +owner_kind = ?1 AND meeting_id = ?2";
+
 /// Raw transcripts read once per call; an unreadable one reads as absent
 /// (logged) so a damaged row never fails a note or item save.
 #[derive(Default)]
@@ -581,10 +591,7 @@ impl Storage {
         }
         let owners: Vec<String> = self
             .conn
-            .prepare(
-                "SELECT DISTINCT owner_id FROM citation_locators
-                  WHERE owner_kind = ?1 AND note_id = ?2",
-            )?
+            .prepare(NOTE_OWNERS_SQL)?
             .query_map((OWNER_NOTE_BLOCK, &note.id), |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
         for owner in owners.iter().filter(|o| !cited.contains(o.as_str())) {
@@ -615,10 +622,7 @@ impl Storage {
         }
         let owners: Vec<String> = self
             .conn
-            .prepare(
-                "SELECT DISTINCT owner_id FROM citation_locators
-                  WHERE owner_kind = ?1 AND meeting_id = ?2",
-            )?
+            .prepare(MEETING_OWNERS_SQL)?
             .query_map((OWNER_ITEM, meeting_id), |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
         for owner in owners.iter().filter(|o| !cited.contains(o.as_str())) {
@@ -901,7 +905,8 @@ impl Storage {
     /// block's and item's citations. Rows that already exist keep their
     /// hash and status. A note or meeting that fails is logged and skipped,
     /// never fatal (a failing step would stop the app from opening).
-    pub(crate) fn sync_all_citations(&self) -> Result<()> {
+    /// `progress(done, total)` is called after each note and meeting.
+    pub(crate) fn sync_all_citations(&self, progress: &mut dyn FnMut(usize, usize)) -> Result<()> {
         self.conn.execute_batch(
             "DELETE FROM citation_locators
               WHERE meeting_id NOT IN (SELECT meeting_id FROM transcripts);
@@ -921,23 +926,26 @@ impl Storage {
             .prepare("SELECT id FROM notes WHERE blocks_json LIKE '%source_segment_ids%'")?
             .query_map([], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
-        for id in note_ids {
-            let res = self
-                .get_note(&id)
-                .and_then(|note| self.sync_note_citations(&note));
-            if let Err(e) = res {
-                tracing::warn!(note = %id, error = %e, "v3: skipping note citations");
-            }
-        }
         let meeting_ids: Vec<String> = self
             .conn
             .prepare("SELECT DISTINCT meeting_id FROM meeting_items")?
             .query_map([], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
-        for id in meeting_ids {
-            if let Err(e) = self.sync_item_citations(&id) {
+        let total = note_ids.len() + meeting_ids.len();
+        for (i, id) in note_ids.iter().enumerate() {
+            let res = self
+                .get_note(id)
+                .and_then(|note| self.sync_note_citations(&note));
+            if let Err(e) = res {
+                tracing::warn!(note = %id, error = %e, "v3: skipping note citations");
+            }
+            progress(i + 1, total);
+        }
+        for (i, id) in meeting_ids.iter().enumerate() {
+            if let Err(e) = self.sync_item_citations(id) {
                 tracing::warn!(meeting_id = %id, error = %e, "v3: skipping item citations");
             }
+            progress(note_ids.len() + i + 1, total);
         }
         Ok(())
     }
@@ -948,6 +956,28 @@ mod tests {
     use super::*;
     use crate::test_storage;
     use fly_core::{ItemKind, MeetingItem, NoteBlock, Speaker, TranscriptSegment};
+
+    /// The per-note / per-meeting owner lookups use the note and meeting
+    /// indexes, not a scan of every locator of the kind (the v3 step's
+    /// citation stage went quadratic on a 1,000-meeting library).
+    #[test]
+    fn owner_lookups_use_the_note_and_meeting_indexes() {
+        let (_dir, s) = test_storage();
+        for (sql, index) in [
+            (NOTE_OWNERS_SQL, "idx_citation_locators_note"),
+            (MEETING_OWNERS_SQL, "idx_citation_locators_meeting"),
+        ] {
+            let plan: Vec<String> = s
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(("k", "x"), |r| r.get(3))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert!(plan.iter().any(|p| p.contains(index)), "{plan:?}");
+        }
+    }
 
     fn seg(id: &str, start_ms: u64, text: &str) -> TranscriptSegment {
         TranscriptSegment {
