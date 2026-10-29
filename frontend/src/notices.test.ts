@@ -155,7 +155,9 @@ describe("audioLostCopy", () => {
     expect(audioLostCopy(lost(1250, 0)).cause).toBe(
       "1.3 s of your microphone was lost because the computer was too busy. Those moments are silent in the recording and missing from its transcript.",
     );
-    expect(audioLostCopy(lost(0, 60)).cause).toMatch(/^0.1 s of the other participants’ audio was lost/);
+    expect(audioLostCopy(lost(0, 60)).cause).toMatch(
+      /^0.1 s of the other participants’ audio was lost/,
+    );
     expect(audioLostCopy(lost(900, 2000)).cause).toMatch(
       /^0.9 s of your microphone and 2.0 s of the other participants’ audio were lost/,
     );

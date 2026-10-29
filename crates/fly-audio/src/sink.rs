@@ -73,6 +73,12 @@ pub(crate) struct ChannelStats {
     pub write_errors: AtomicU64,
     /// The capture thread got real-time (MMCSS "Pro Audio") scheduling.
     pub boosted: AtomicBool,
+    /// Longest wait between two callbacks (µs): how long this capture
+    /// thread went without running.
+    pub max_callback_gap_us: AtomicU64,
+    /// Losses that happened while the callback was running on time: audio
+    /// the OS audio engine or driver dropped before this app could read it.
+    pub upstream_lost_events: AtomicU64,
 }
 
 impl ChannelStats {
@@ -96,6 +102,8 @@ impl ChannelStats {
             last_loss_at_ms: last.checked_sub(1),
             write_errors: self.write_errors.load(Ordering::Relaxed),
             realtime_priority: self.boosted.load(Ordering::Relaxed),
+            max_callback_gap_ms: self.max_callback_gap_us.load(Ordering::Relaxed) / 1000,
+            upstream_lost_events: self.upstream_lost_events.load(Ordering::Relaxed),
         }
     }
 }
@@ -123,6 +131,15 @@ pub struct ChannelReport {
     pub last_loss_at_ms: Option<u64>,
     pub write_errors: u64,
     pub realtime_priority: bool,
+    /// Longest the capture thread went without running (Windows; 0 where
+    /// not measured).
+    #[serde(default)]
+    pub max_callback_gap_ms: u64,
+    /// Of `lost_events`, the ones with no stall of the capture thread before
+    /// them: dropped upstream (OS audio engine or driver), which no in-app
+    /// change can prevent — only report.
+    #[serde(default)]
+    pub upstream_lost_events: u64,
 }
 
 impl ChannelReport {
@@ -266,7 +283,13 @@ pub(crate) fn channel(path: PathBuf, rate: u32) -> Result<(ChannelProducer, Chan
     let wav = hound::WavWriter::new(BufWriter::with_capacity(1 << 16, file), spec)
         .map_err(|e| AudioError::Backend(e.to_string()))?;
     let slots = (rate as usize * RING_SECS as usize).div_ceil(BLOCK) + 64;
-    let (tx, rx) = rtrb::RingBuffer::new(slots);
+    let (mut tx, mut rx) = rtrb::RingBuffer::new(slots);
+    // Touch every slot once now, so the callback's first pass over the ring
+    // doesn't take a page fault per 4 KB (slow exactly when memory is tight).
+    for _ in 0..slots {
+        let _ = tx.push(Block::Silence { frames: 0 });
+    }
+    while rx.pop().is_ok() {}
     let stats = Arc::new(ChannelStats::default());
     Ok((
         ChannelProducer {

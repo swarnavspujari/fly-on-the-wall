@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -267,11 +267,16 @@ impl CaptureSession for CpalSession {
     }
 }
 
-/// Pause-aware wall clock shared with the stream callbacks.
+/// Pause-aware wall clock shared with the stream callbacks. Lock-free: the
+/// callbacks read it on every packet, and a mutex there could leave a
+/// real-time thread waiting on a preempted normal-priority one.
 pub(crate) struct Clock {
-    accum_ms: AtomicU64,
+    base: Instant,
+    /// Recorded time before the current run, µs.
+    accum_us: AtomicU64,
     running: AtomicBool,
-    last_resume: Mutex<Instant>,
+    /// When the clock last (re)started, µs since `base`.
+    last_resume_us: AtomicU64,
     /// Bumped on every resume, so callbacks know a stream restarted and its
     /// capture timestamps jumped by the paused time (not a loss).
     epoch: AtomicU64,
@@ -280,34 +285,44 @@ pub(crate) struct Clock {
 impl Clock {
     pub(crate) fn new() -> Self {
         Self {
-            accum_ms: AtomicU64::new(0),
+            base: Instant::now(),
+            accum_us: AtomicU64::new(0),
             running: AtomicBool::new(true),
-            last_resume: Mutex::new(Instant::now()),
+            last_resume_us: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
         }
     }
 
+    fn now_us(&self) -> u64 {
+        self.base.elapsed().as_micros() as u64
+    }
+
     pub(crate) fn pause(&self) {
         if self.running.swap(false, Ordering::SeqCst) {
-            let since = self.last_resume.lock().unwrap().elapsed().as_millis() as u64;
-            self.accum_ms.fetch_add(since, Ordering::SeqCst);
+            let since = self
+                .now_us()
+                .saturating_sub(self.last_resume_us.load(Ordering::SeqCst));
+            self.accum_us.fetch_add(since, Ordering::SeqCst);
         }
     }
 
     pub(crate) fn resume(&self) {
-        if !self.running.swap(true, Ordering::SeqCst) {
-            *self.last_resume.lock().unwrap() = Instant::now();
+        if !self.running.load(Ordering::SeqCst) {
+            self.last_resume_us.store(self.now_us(), Ordering::SeqCst);
             self.epoch.fetch_add(1, Ordering::SeqCst);
+            self.running.store(true, Ordering::SeqCst);
         }
     }
 
     pub(crate) fn elapsed_ms(&self) -> u64 {
-        let base = self.accum_ms.load(Ordering::SeqCst);
-        if self.running.load(Ordering::SeqCst) {
-            base + self.last_resume.lock().unwrap().elapsed().as_millis() as u64
+        let base = self.accum_us.load(Ordering::SeqCst);
+        let run = if self.running.load(Ordering::SeqCst) {
+            self.now_us()
+                .saturating_sub(self.last_resume_us.load(Ordering::SeqCst))
         } else {
-            base
-        }
+            0
+        };
+        (base + run) / 1000
     }
 
     pub(crate) fn epoch(&self) -> u64 {
@@ -624,7 +639,18 @@ struct GapTracker {
     /// Expected capture time of the next packet's first frame.
     next_capture_ns: Option<i128>,
     last_callback_ns: i128,
+    /// When this thread last came back from a long wait (callback time).
+    /// A loss within a buffer's length of it was this thread's stall; a loss
+    /// with no recent stall happened upstream (audio engine / driver).
+    last_stall_end_ns: Option<i128>,
 }
+
+/// A wait between callbacks longer than this counts as a stall of the
+/// capture thread (a WASAPI period is 10 ms).
+const STALL_NS: i128 = 100_000_000;
+/// How long after a stall a timestamp gap is still blamed on it: the deep
+/// buffer drains for up to its length after the thread wakes.
+const STALL_BLAME_NS: i128 = 1_000_000_000;
 
 /// Build a capture stream for one channel. On Windows it first asks for a
 /// deep WASAPI buffer; a driver that refuses it still gets a working stream
@@ -699,6 +725,7 @@ fn build_stream(
                 epoch: clock.epoch(),
                 next_capture_ns: None,
                 last_callback_ns: 0,
+                last_stall_end_ns: None,
             };
             device.build_input_stream(
                 stream_config,
@@ -727,15 +754,45 @@ fn build_stream(
                             let gap_ns = cap - next;
                             let waited_ns = cb - gaps.last_callback_ns;
                             let idle = kind == ChannelKind::Loopback && waited_ns * 2 >= gap_ns;
-                            if gap_ns > GAP_MIN_NS && !idle {
+                            if !idle {
+                                // how late this thread ran (idle loopback waits
+                                // legitimately, so only when not idle)
+                                producer.stats().max_callback_gap_us.fetch_max(
+                                    (waited_ns / 1000).max(0) as u64,
+                                    Ordering::Relaxed,
+                                );
+                                if waited_ns > STALL_NS {
+                                    gaps.last_stall_end_ns = Some(cb);
+                                }
+                            }
+                            if gap_ns > GAP_MIN_NS {
+                                // Every gap becomes the same length of silence,
+                                // so the channel follows the device's timeline
+                                // exactly. It counts as a loss unless it can be
+                                // idle output. (An audio-engine stall looks
+                                // like idle on loopback — the callback waits
+                                // as long as the gap — so loopback losses can
+                                // be undercounted, never overcounted; the mic,
+                                // which never idles, reports such stalls.)
+                                let lost = !idle;
+                                if lost
+                                    && !gaps
+                                        .last_stall_end_ns
+                                        .is_some_and(|at| cb - at < STALL_BLAME_NS)
+                                {
+                                    producer
+                                        .stats()
+                                        .upstream_lost_events
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
                                 let gap = (gap_ns * rate as i128 / 1_000_000_000) as u64;
                                 // never run more than half a second ahead of
                                 // the clock, whatever a timestamp claims
                                 let room = (expected + rate as u64 / 2)
                                     .saturating_sub(producer.timeline() + frames);
                                 let fill = gap.min(room);
-                                producer.silence(fill, true, now_ms);
-                                if gap > fill {
+                                producer.silence(fill, lost, now_ms);
+                                if lost && gap > fill {
                                     producer
                                         .stats()
                                         .lost
