@@ -26,8 +26,9 @@ runs retrieval with the app's real embedder, so it needs Ollama with
 - The PreToolUse hook in `.claude/hooks/` asks the user before any change to
   these paths, so they approve or decline each one. It denies outright the
   trust roots (the lock variable, repository variables, rulesets, branch
-  protection, admin merges) and anything that would switch hooks off. Don't
-  work around it, and never switch hooks off.
+  protection, admin merges) and anything that would switch hooks off,
+  including removing its own registration from `.claude/settings.json`.
+  Don't work around it, and never switch hooks off.
 
 How the evals work, what each suite checks, and how an eval gets changed:
 [evals/README.md](evals/README.md).

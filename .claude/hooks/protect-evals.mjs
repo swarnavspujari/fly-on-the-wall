@@ -64,8 +64,37 @@ const DENY_REASON =
   "variables, rulesets, branch protection, admin merges) or switch hooks off; only the user " +
   "does that, outside Claude Code. Stop and tell the user what you need.";
 
+const GUARD_REASON =
+  "Eval guard change: %WHAT%. This edits the hook that guards the evals or its settings " +
+  "(.claude/hooks/**, .claude/settings*.json), not an eval. Approve only if you asked to change " +
+  "the guard itself.";
+
 /** A protected-path change: the user approves or declines it. */
 const ask = (what) => ({ decision: "ask", reason: ASK_REASON.replace("%WHAT%", what) });
+/** A change to the guard itself: asked separately, with its own reason. */
+const askGuard = (what) => ({ decision: "ask", reason: GUARD_REASON.replace("%WHAT%", what) });
+
+/** The guard's own files (repo-relative). */
+const isGuardRel = (rel) => {
+  const r = fold(norm(rel));
+  return r === ".claude/hooks" || r.startsWith(".claude/hooks/") || /^\.claude\/settings(\.local)?\.json$/.test(r);
+};
+/** A command that names one of the guard's own files. */
+const namesGuard = (command) =>
+  /\.claude[\\/]+(hooks\b|settings(\.local)?\.json)/i.test(String(command ?? "").replace(/["']/g, ""));
+
+/** What keeps this hook registered in .claude/settings.json. */
+const REGISTRATION = ["protect-evals", "PreToolUse", '"hooks"'];
+/** A file-tool call that would drop the hook's registration from
+ * .claude/settings.json: that switches the hook off, so it's denied. */
+function dropsRegistration(tool, ti) {
+  const lost = (before, after) =>
+    REGISTRATION.some((t) => String(before ?? "").includes(t) && !String(after ?? "").includes(t));
+  if (tool === "Write") return REGISTRATION.some((t) => !String(ti.content ?? "").includes(t));
+  if (tool === "Edit") return lost(ti.old_string, ti.new_string);
+  if (tool === "MultiEdit") return (ti.edits ?? []).some((e) => lost(e?.old_string, e?.new_string));
+  return false;
+}
 /** A trust-root command or a hook switch: always denied. */
 const deny = (what) => ({ decision: "deny", reason: DENY_REASON.replace("%WHAT%", what) });
 /** A commandViolation result that is denied rather than asked. */
@@ -977,12 +1006,17 @@ export function decide(input, env = process.env) {
   if (disablesHooks(JSON.stringify(ti))) return deny("switching hooks off (disableAllHooks)");
   if (["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(tool)) {
     const target = protectedTarget(ti.file_path ?? ti.notebook_path, ctx);
-    return target ? ask(`${target} is protected`) : null;
+    if (!target) return null;
+    if (fold(norm(target)) === fold(".claude/settings.json") && dropsRegistration(tool, ti)) {
+      return deny("removing the eval hook's registration from .claude/settings.json (that switches it off)");
+    }
+    return isGuardRel(target) ? askGuard(`${target} is part of the eval guard`) : ask(`${target} is protected`);
   }
   if (tool === "Bash" || tool === "PowerShell") {
     const why = commandViolation(ti.command, ctx);
     if (!why) return null;
-    return typeof why === "object" ? deny(why.why) : ask(why);
+    if (typeof why === "object") return deny(why.why);
+    return namesGuard(ti.command) ? askGuard(why) : ask(why);
   }
   return null;
 }

@@ -401,6 +401,27 @@ test("PowerShell: writes ask the user, reads allowed", () => {
   );
 });
 
+test("the guard itself: its own prompt, and unregistering it is denied", () => {
+  const settings = at(".claude", "settings.json");
+  const tool = (tool_name, tool_input) => decide({ tool_name, cwd: root, tool_input }, env);
+  const registered = JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: "node protect-evals.mjs" }] }] } });
+  // Dropping the registration switches the hook off: denied.
+  isDeny(tool("Edit", { file_path: settings, old_string: '"command": "node \\"${CLAUDE_PROJECT_DIR}/.claude/hooks/protect-evals.mjs\\""', new_string: '"command": "true"' }));
+  isDeny(tool("Edit", { file_path: settings, old_string: '"PreToolUse": [', new_string: '"Disabled": [' }));
+  isDeny(tool("MultiEdit", { file_path: settings, edits: [{ old_string: '"hooks": {', new_string: '"x": {' }] }));
+  isDeny(tool("Write", { file_path: settings, content: "{}" }));
+  // Changing the guard otherwise is asked, with its own reason.
+  const keep = tool("Write", { file_path: settings, content: registered });
+  isAsk(keep);
+  assert.match(keep.reason, /Eval guard change/);
+  assert.match(tool("Edit", { file_path: at(".claude", "hooks", "protect-evals.mjs"), old_string: "a", new_string: "b" }).reason, /Eval guard change/);
+  assert.match(bash("rm .claude/hooks/protect-evals.mjs").reason, /Eval guard change/);
+  // An ordinary eval edit isn't labeled a guard change.
+  const evalEdit = tool("Edit", { file_path: at("evals", "thresholds.toml"), old_string: "a", new_string: "b" });
+  isAsk(evalEdit);
+  assert.match(evalEdit.reason, /^Eval change/);
+});
+
 test("protectedTarget resolves relative to cwd", () => {
   assert.equal(protectedTarget("thresholds.toml", { cwd: at("evals") }), "evals/thresholds.toml");
   assert.equal(protectedTarget("evals", { cwd: at("crates") }), null);
