@@ -1227,7 +1227,7 @@ async fn with_connectors_offered_the_turn_reads_without_keep_local_content() {
 fn keep_local_content_in_the_context_trips_the_connector_turn() {
     let f = fx();
     let ext = Connector::default();
-    fly_ask::mark_if_keep_local(&ext, &[f.launch.clone()], &f.s);
+    fly_ask::mark_if_keep_local(&ext, std::slice::from_ref(&f.launch), &f.s);
     assert!(!ext.marked.load(std::sync::atomic::Ordering::SeqCst));
     fly_ask::mark_if_keep_local(&ext, &[f.launch.clone(), f.osprey.clone()], &f.s);
     assert!(ext.marked.load(std::sync::atomic::Ordering::SeqCst));
