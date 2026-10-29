@@ -701,7 +701,9 @@ fn pending_upgrade_agrees_with_open_and_writes_nothing() {
 fn upgrade_progress_runs_through_every_stage_to_total() {
     let tmp = tempfile::tempdir().unwrap();
     v2_fixture(tmp.path());
+    let started = std::time::Instant::now();
     let (_s, seen) = open_reporting(tmp.path());
+    let elapsed = started.elapsed();
     let (first, last) = (seen.first().unwrap(), seen.last().unwrap());
     assert_eq!((first.stage, first.done), (UpgradeStage::Segments, 0));
     assert_eq!(last.stage, UpgradeStage::Index);
@@ -727,9 +729,11 @@ fn upgrade_progress_runs_through_every_stage_to_total() {
             UpgradeStage::Index
         ]
     );
-    // Throttled: a small library sends a handful of reports, not one per
-    // meeting and stage.
-    assert!(seen.len() < 20, "{} reports", seen.len());
+    // Throttled: at most one report per 100 ms per stage, plus each
+    // stage's start and the final one (a wall-clock bound, so a slow,
+    // busy machine may send more than a fast one, never more than this).
+    let bound = 2 * stages.len() + 1 + (elapsed.as_millis() / 100) as usize;
+    assert!(seen.len() <= bound, "{} reports in {elapsed:?}", seen.len());
     assert_eq!(user_version(tmp.path()), 3);
 }
 
@@ -1472,4 +1476,54 @@ fn early_v3_file_without_speaker_key_is_repaired() {
     drop(s);
     assert!(Storage::open_existing(tmp.path()).is_ok());
     assert!(!mid.is_empty());
+}
+
+#[test]
+fn the_v3_re_embed_queue_starts_with_the_newest_meeting() {
+    let dir = tempfile::tempdir().unwrap();
+    // Meetings created in one order, dated in another, with random (UUID)
+    // ids: only the dates may decide the queue.
+    let days = [5u32, 1, 7, 3, 8, 2, 6, 4];
+    {
+        let s = Storage::open(dir.path()).unwrap();
+        for (i, day) in days.iter().enumerate() {
+            let title = format!("Day {day}");
+            let note = s.create_note(&title, None).unwrap();
+            let m = s.create_meeting(&title, &note.id, &[]).unwrap();
+            s.set_meeting_started_at(
+                &m.id,
+                chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 9, *day, 10, 0, 0).unwrap(),
+            )
+            .unwrap();
+            s.save_transcript(&transcript(
+                &m.id,
+                vec![seg(&format!("s{i}"), "spk_0", 0, "words to index here")],
+            ))
+            .unwrap();
+        }
+    }
+    {
+        // As a v2 build leaves it: labelled chunk text (so v3 re-chunks
+        // every transcript), old vectors, user_version 2.
+        let c = db(dir.path());
+        c.execute_batch(
+            "UPDATE embedding_chunks SET text = 'Speaker 1: ' || text, embedding = x'00', model = 'old'
+               WHERE owner_kind = 'transcript';
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+    let s = Storage::open(dir.path()).unwrap();
+    assert_eq!(user_version(dir.path()), 3);
+    let queue: Vec<String> = s
+        .pending_embedding_chunks("new-model", 100)
+        .unwrap()
+        .into_iter()
+        .map(|p| p.title)
+        .filter(|t| t.starts_with("Day "))
+        .collect();
+    let mut newest_first: Vec<u32> = days.to_vec();
+    newest_first.sort_unstable_by(|a, b| b.cmp(a));
+    let want: Vec<String> = newest_first.iter().map(|d| format!("Day {d}")).collect();
+    assert_eq!(queue, want);
 }

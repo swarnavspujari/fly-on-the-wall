@@ -161,8 +161,16 @@ pub(crate) fn to_v3(storage: &Storage, progress: &mut dyn FnMut(UpgradeProgress)
           WHERE owner_kind = 'transcript'
             AND owner_id NOT IN (SELECT meeting_id FROM transcripts);",
     )?;
+    // Oldest meeting first: the re-chunk below hands each meeting's new
+    // chunk rows the next ids, and the embedding queue takes the highest
+    // ids first, so the newest meeting is re-embedded first. (Primary-key
+    // order would be the random order of the UUIDs.)
     let meeting_ids: Vec<String> = conn
-        .prepare("SELECT meeting_id FROM transcripts")?
+        .prepare(
+            "SELECT t.meeting_id FROM transcripts t
+               LEFT JOIN meetings m ON m.id = t.meeting_id
+              ORDER BY COALESCE(m.started_at, ''), t.meeting_id",
+        )?
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
     // Units per transcript; an empty library still goes 0 → total.

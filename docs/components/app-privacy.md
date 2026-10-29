@@ -45,7 +45,7 @@ Called by other src-tauri modules:
 All 14 are registered in `src-tauri/src/lib.rs` (`recovered_kept_local` / `dismiss_recovered_kept_local` mirrored in devMock, with `fotwMockRecoveredKeptLocal = "1"` seeding one entry). The original 12 are at `src-tauri/src/lib.rs:188-199` and mirrored in `frontend/src/devMock.ts:1420-1481`. Drift: the mock's `delete_all_data` rejects a wrong phrase with `"confirmation mismatch"` (backend: `"confirmation text doesn't match — nothing was deleted"`), never refuses for busy work, and always returns `last_wipe: null`; `set_note_keep_local` doesn't error on an unknown note.
 
 ### Events
-One Tauri event: `privacy:recovered-kept-local` (`RECOVERED_KEPT_LOCAL_EVENT`), emitted by the startup self-heal in `lib.rs` when it kept meetings local without a recorded setting, payload the whole current `RecoveredMeeting[]`; listened to by `useRecoveredKeptLocal.ts`. Two frontend `window` events carry the rest of the feature in the UI:
+One Tauri event: `privacy:recovered-kept-local` (`RECOVERED_KEPT_LOCAL_EVENT`), emitted by the startup self-heal in `startup.rs` (`startup::finish`) when it kept meetings local without a recorded setting, payload the whole current `RecoveredMeeting[]`; listened to by `useRecoveredKeptLocal.ts`. Two frontend `window` events carry the rest of the feature in the UI:
 
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
@@ -107,7 +107,7 @@ The result (including `unknown`) is cached for the session under a mutex held ac
 
 ## Invariants
 - **T10 (cloud without the user realizing):** Keep local is enforced where providers are chosen, not here: `build_provider` refuses cloud LLMs for keep-local notes/meetings (`src-tauri/src/llm_commands.rs:605-613`), the pipeline skips Groq (`src-tauri/src/pipeline.rs:148-149`, `274`), and the embedding worker uses the shareable queue (`src-tauri/src/embeddings.rs:176`, `202`). Lookups fail closed (fly-storage `privacy.rs:209-241`). A folder flag can't be overridden per note (UI: `Editor.tsx:1045`). Spec §2 item 1.
-- Self-heal fails closed on Keep local (fly-storage), and the meetings it set that way are surfaced, not just logged: `lib.rs` stores `HealReport::kept_local_unconfirmed` in `AppState::recovered_kept_local` and emits the event; the review notice reads it.
+- Self-heal fails closed on Keep local (fly-storage), and the meetings it set that way are surfaced, not just logged: `startup.rs` stores `HealReport::kept_local_unconfirmed` in `AppState::recovered_kept_local` and emits the event; the review notice reads it.
 - **T11 (deleted data recoverable from the DB):** `erase_all_content` deletes every row, runs `VACUUM`, and reports `checkpointed: false` when a reader blocks the WAL truncate; the report is then not `clean()` and the UI won't auto-restart (`privacy.rs:854-870`, `516-523`; `RestartRequired.tsx:59-66`).
 - **T12 (consent of other participants):** the participants-notified flag and the recording notice (≤2000 chars, `privacy.rs:113-129`) are records/helpers only; nothing blocks recording.
 - **T13 (stolen laptop):** retention and delete-all limit what's on disk; the disk probe never needs elevation and says nothing when unsure (`privacy.rs:894-913`).

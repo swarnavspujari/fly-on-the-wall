@@ -77,7 +77,8 @@ pub enum BackgroundYield {
     /// A transcription pipeline stage is running (ASR, diarization,
     /// polish). A merely queued job ("waiting") doesn't count.
     Transcription,
-    /// A [`ForegroundAi`] guard is alive (Ask, Enhance).
+    /// A [`ForegroundAi`] guard is alive: a model request is running (Ask,
+    /// Enhance, transcript polish, item extraction).
     ForegroundAi,
 }
 
@@ -154,7 +155,7 @@ impl AppState {
         }
     }
 
-    /// Mark a user-facing AI request (Ask, Enhance) as running until the
+    /// Mark a model request (Ask, Enhance, polish, extraction) as running until the
     /// guard drops: background work that competes for the same model
     /// runtime (the embedding backlog) waits meanwhile.
     pub fn foreground_ai(&self) -> ForegroundAi<'_> {

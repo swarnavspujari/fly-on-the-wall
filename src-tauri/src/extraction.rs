@@ -269,6 +269,8 @@ pub async fn extract_items(
 /// polished transcript (same segment ids, cleaner text for the model);
 /// falls back to the raw one. Re-runnable: replaces the meeting's items.
 pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<usize, String> {
+    // The embedding backlog steps aside while the model works.
+    let _model = state.foreground_ai();
     ensure_provider_ready(state).await?;
     let provider = build_provider(state, DataScope::Meeting(meeting_id))?;
     let (meeting, transcript) = {

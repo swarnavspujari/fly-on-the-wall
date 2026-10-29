@@ -119,21 +119,25 @@ pub fn open_in_background(app: AppHandle) {
     app.manage(gate);
     tauri::async_runtime::spawn_blocking(move || {
         let gate = app.state::<LibraryGate>();
-        let opened = AppState::init_with_progress(&mut |p| {
-            gate.set(
-                &app,
-                LibraryStatus {
-                    phase: LibraryPhase::Upgrading,
-                    done: p.done,
-                    total: p.total,
-                },
-            )
+        // A panic here (in the upgrade or the startup tail) must reach the
+        // error dialog too, not leave "Upgrading" on screen forever: this
+        // task's handle is dropped, so nobody else would see it.
+        let opened = catch_panic(|| {
+            let app_state = AppState::init_with_progress(&mut |p| {
+                gate.set(
+                    &app,
+                    LibraryStatus {
+                        phase: LibraryPhase::Upgrading,
+                        done: p.done,
+                        total: p.total,
+                    },
+                )
+            })?;
+            finish(&app, app_state);
+            Ok(())
         });
         match opened {
-            Ok(app_state) => {
-                finish(&app, app_state);
-                gate.set(&app, LibraryStatus::READY);
-            }
+            Ok(()) => gate.set(&app, LibraryStatus::READY),
             Err(e) => {
                 gate.set(
                     &app,
@@ -147,6 +151,23 @@ pub fn open_in_background(app: AppHandle) {
             }
         }
     });
+}
+
+/// `f`'s result, with a panic turned into an error carrying its message.
+fn catch_panic(f: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(panic) => {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            Err(anyhow::anyhow!(
+                "opening the library stopped unexpectedly: {msg}"
+            ))
+        }
+    }
 }
 
 /// A failed storage open must NEVER be a silent flash-crash: the window
@@ -270,8 +291,18 @@ pub fn finish(app: &AppHandle, app_state: AppState) {
 mod tests {
     use super::*;
 
-    /// The shape `frontend/src/libraryGate.ts` reads, from the command and
-    /// the event alike.
+    /// The shape `frontend/src/components/LibraryGate.tsx` reads, from the
+    /// command and the event alike.
+    #[test]
+    fn a_panic_while_opening_becomes_an_error() {
+        let e = catch_panic(|| panic!("boom in the v3 step")).unwrap_err();
+        assert!(e.to_string().contains("boom in the v3 step"), "{e}");
+        let e = catch_panic(|| panic!("{}", String::from("owned message"))).unwrap_err();
+        assert!(e.to_string().contains("owned message"), "{e}");
+        assert!(catch_panic(|| Ok(())).is_ok());
+        assert!(catch_panic(|| Err(anyhow::anyhow!("plain error"))).is_err());
+    }
+
     #[test]
     fn library_status_serializes_as_the_frontend_expects() {
         let upgrading = LibraryStatus {

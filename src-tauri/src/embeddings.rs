@@ -152,6 +152,14 @@ const REST_RATIO: u32 = 1;
 const MIN_REST: Duration = Duration::from_millis(250);
 /// Notes/transcripts re-chunked per storage-lock hold in the startup pass.
 const BACKFILL_OWNERS_PER_LOCK: usize = 8;
+/// After a content write wakes the worker, embedding waits until writes
+/// pause this long: autosave fires every few hundred ms while the user
+/// types, and every save re-chunks the note, so embedding at once would
+/// re-embed the same note again and again.
+const SETTLE: Duration = Duration::from_secs(2);
+/// ...but no longer than this, so a note typed into without a pause is
+/// still indexed while it's being written.
+const SETTLE_MAX: Duration = Duration::from_secs(20);
 
 /// Why the worker shouldn't embed right now, if it shouldn't: the shared
 /// background rule ([`AppState::background_yield_reason`]).
@@ -162,6 +170,47 @@ pub(crate) fn yield_reason(state: &AppState) -> Option<BackgroundYield> {
 /// How long to rest after a batch that took `took`.
 pub(crate) fn rest_after(took: Duration) -> Duration {
     (took * REST_RATIO).max(MIN_REST)
+}
+
+/// Wait until `notify` (content writes) stays quiet for `quiet`, or until
+/// `max` has passed.
+pub(crate) async fn settle(notify: &tokio::sync::Notify, quiet: Duration, max: Duration) {
+    let deadline = tokio::time::Instant::now() + max;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero()
+            || tokio::time::timeout(quiet.min(left), notify.notified())
+                .await
+                .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Rest `rest` after a batch. A content write may cut a rest short (fresh
+/// content then waits for writes to settle, not for the backlog), but only
+/// every other rest: the rest right after a batch a write started is served
+/// in full, so steady writes (autosave while typing) can't run batches back
+/// to back. Returns whether the next rest may be cut short.
+pub(crate) async fn rest_between_batches(
+    notify: &tokio::sync::Notify,
+    rest: Duration,
+    may_cut: bool,
+    settle_quiet: Duration,
+    settle_max: Duration,
+) -> bool {
+    if !may_cut {
+        tokio::time::sleep(rest).await;
+        return true;
+    }
+    match tokio::time::timeout(rest, notify.notified()).await {
+        Ok(()) => {
+            settle(notify, settle_quiet, settle_max).await;
+            false
+        }
+        Err(_) => true,
+    }
 }
 
 /// Something that turns document prompts into vectors (Ollama in the app,
@@ -254,13 +303,22 @@ pub(crate) async fn embed_batch_unless<E: Embedder>(
 
 /// The startup chunk pass, a few owners per storage-lock hold, so commands
 /// and the recording path never wait behind a whole library's re-chunk.
-fn backfill_chunks(storage: &Mutex<Storage>) -> Result<usize, String> {
+/// Oldest owners first ([`Storage::chunk_owners`]), so the newest content's
+/// re-written chunks head the newest-first embedding queue. Between groups
+/// it waits while `should_yield` says background work should step aside.
+fn backfill_chunks(
+    storage: &Mutex<Storage>,
+    should_yield: impl Fn() -> bool,
+) -> Result<usize, String> {
     let owners = storage
         .lock()
         .unwrap()
         .chunk_owners()
         .map_err(|e| e.to_string())?;
     for group in owners.chunks(BACKFILL_OWNERS_PER_LOCK) {
+        while should_yield() {
+            std::thread::sleep(IN_FLIGHT_CHECK);
+        }
         let storage = storage.lock().unwrap();
         for owner in group {
             if let Err(e) = storage.sync_owner_chunks(owner) {
@@ -287,7 +345,8 @@ pub fn spawn(app: tauri::AppHandle) {
         {
             let handle = app.clone();
             let done = tauri::async_runtime::spawn_blocking(move || {
-                backfill_chunks(&handle.state::<AppState>().storage)
+                let state = handle.state::<AppState>();
+                backfill_chunks(&state.storage, || state.background_should_yield())
             })
             .await;
             match done {
@@ -298,6 +357,7 @@ pub fn spawn(app: tauri::AppHandle) {
         }
 
         let mut yielded: Option<BackgroundYield> = None;
+        let mut rest_may_be_cut = true;
         loop {
             let state = app.state::<AppState>();
             if let Some(reason) = yield_reason(&state) {
@@ -313,27 +373,33 @@ pub fn spawn(app: tauri::AppHandle) {
             }
             // An Ollama on another machine must never receive keep-local
             // notes or transcripts: index only the shareable queue then.
-            // (Backlog only decides whether to wake up; the batch below
+            // (This check only decides whether to wake up; the batch below
             // re-derives the filter from the URL it actually sends to.)
             let remote = !crate::llm_commands::is_loopback_url(&ollama::root_url(&state));
-            let backlog = {
+            let pending = {
                 let storage = state.storage.lock().unwrap();
                 if remote {
-                    storage.embedding_backlog_shareable(EMBED_MODEL)
+                    storage.has_pending_embeddings_shareable(EMBED_MODEL)
                 } else {
-                    storage.embedding_backlog(EMBED_MODEL)
+                    storage.has_pending_embeddings(EMBED_MODEL)
                 }
-                .unwrap_or(0)
+                .unwrap_or(false)
             };
-            if backlog == 0 {
-                let _ = tokio::time::timeout(IDLE_POLL, state.embed_notify.notified()).await;
+            if !pending {
+                let nudged = tokio::time::timeout(IDLE_POLL, state.embed_notify.notified())
+                    .await
+                    .is_ok();
+                if nudged {
+                    // A content write: let a burst of them (autosave) end.
+                    settle(&state.embed_notify, SETTLE, SETTLE_MAX).await;
+                }
                 continue;
             }
 
             let root = match ensure_ready(&app).await {
                 Ok(root) => root,
                 Err(e) => {
-                    tracing::debug!(error = %e, backlog, "embedding index paused (FTS-only until Ollama is available)");
+                    tracing::debug!(error = %e, "embedding index paused (FTS-only until Ollama is available)");
                     let _ = tokio::time::timeout(RETRY_DELAY, state.embed_notify.notified()).await;
                     continue;
                 }
@@ -360,12 +426,20 @@ pub fn spawn(app: tauri::AppHandle) {
                 None => tracing::info!("embedding batch abandoned to step aside"),
                 Some(Ok(0)) => {}
                 Some(Ok(n)) => {
-                    tracing::debug!(embedded = n, backlog, "embedded chunk batch");
+                    tracing::debug!(embedded = n, "embedded chunk batch");
                     // A content write (a note edit, a finished transcription)
-                    // ends the rest early: the next batch takes the newest
-                    // chunks, so fresh content waits at most for one batch.
-                    let rest = rest_after(started.elapsed());
-                    let _ = tokio::time::timeout(rest, state.embed_notify.notified()).await;
+                    // may end the rest early: the next batch takes the
+                    // newest chunks, so fresh content doesn't wait for the
+                    // backlog. Only every other rest, so writes can't defeat
+                    // the pacing.
+                    rest_may_be_cut = rest_between_batches(
+                        &state.embed_notify,
+                        rest_after(started.elapsed()),
+                        rest_may_be_cut,
+                        SETTLE,
+                        SETTLE_MAX,
+                    )
+                    .await;
                 }
                 Some(Err(e)) => {
                     tracing::warn!(error = %e, "embedding batch failed, backing off");
@@ -514,7 +588,7 @@ mod tests {
         }
         // Owners listed: 17 notes (empty, no chunks) + 17 transcripts.
         assert_eq!(
-            backfill_chunks(&storage),
+            backfill_chunks(&storage, || false),
             Ok((BACKFILL_OWNERS_PER_LOCK * 2 + 1) * 2)
         );
         // Idempotent: nothing becomes pending twice.
@@ -523,7 +597,7 @@ mod tests {
             .unwrap()
             .embedding_backlog(EMBED_MODEL)
             .unwrap();
-        backfill_chunks(&storage).unwrap();
+        backfill_chunks(&storage, || false).unwrap();
         assert_eq!(
             storage
                 .lock()
@@ -532,6 +606,103 @@ mod tests {
                 .unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn the_startup_pass_waits_while_background_work_should_yield() {
+        let (_dir, storage) = storage();
+        meeting(&storage.lock().unwrap(), "M", "words to index");
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        // Busy for the first two checks (a recording, say), then free.
+        let busy = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2;
+        let started = std::time::Instant::now();
+        assert_eq!(backfill_chunks(&storage, busy), Ok(2));
+        assert!(asked.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+        assert!(started.elapsed() >= IN_FLIGHT_CHECK * 2);
+    }
+
+    #[test]
+    fn a_remote_embedder_gets_only_shareable_chunks() {
+        let (_dir, storage) = storage();
+        {
+            let s = storage.lock().unwrap();
+            meeting(&s, "Shared standup", "the shareable line");
+            let note = s.create_note("Private review", None).unwrap();
+            let m = s.create_meeting("Private review", &note.id, &[]).unwrap();
+            s.save_transcript(&Transcript {
+                meeting_id: m.id.clone(),
+                language: Some("en".into()),
+                engine: "test".into(),
+                segments: vec![TranscriptSegment {
+                    id: "p-0".into(),
+                    speaker_key: "spk_0".into(),
+                    start_ms: 0,
+                    end_ms: 1000,
+                    text: "the keep local line".into(),
+                    words: vec![],
+                }],
+                speakers: vec![],
+            })
+            .unwrap();
+            s.set_note_keep_local(&note.id, true).unwrap();
+        }
+        let fake = Fake::new(&storage);
+        assert_eq!(run(embed_next_batch(&storage, &fake, true, 10)), Ok(1));
+        let seen = fake.seen.lock().unwrap().clone();
+        assert!(seen.iter().all(|t| !t.contains("keep local")), "{seen:?}");
+        assert!(seen.iter().any(|t| t.contains("shareable")), "{seen:?}");
+        // The keep-local chunk stays pending (for a local embedder).
+        let s = storage.lock().unwrap();
+        assert!(!s.has_pending_embeddings_shareable(EMBED_MODEL).unwrap());
+        assert!(s.has_pending_embeddings(EMBED_MODEL).unwrap());
+        assert_eq!(s.embedding_backlog(EMBED_MODEL).unwrap(), 1);
+    }
+
+    #[test]
+    fn writes_settle_before_embedding_and_cannot_cut_every_rest() {
+        let ms = Duration::from_millis;
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        run(async {
+            // Writes every 30 ms for 300 ms, then quiet: settle returns once
+            // they pause for the quiet period (not before the burst ends).
+            let n = notify.clone();
+            let burst = tokio::spawn(async move {
+                for _ in 0..10 {
+                    n.notify_one();
+                    tokio::time::sleep(ms(30)).await;
+                }
+            });
+            let t = tokio::time::Instant::now();
+            settle(&notify, ms(150), ms(5_000)).await;
+            assert!(t.elapsed() >= ms(300), "{:?}", t.elapsed());
+            assert!(t.elapsed() < ms(2_000), "{:?}", t.elapsed());
+            burst.await.unwrap();
+
+            // Steady writes never settle: the cap ends the wait.
+            let n = notify.clone();
+            let steady = tokio::spawn(async move {
+                for _ in 0..40 {
+                    n.notify_one();
+                    tokio::time::sleep(ms(20)).await;
+                }
+            });
+            let t = tokio::time::Instant::now();
+            settle(&notify, ms(150), ms(300)).await;
+            assert!(t.elapsed() < ms(700), "{:?}", t.elapsed());
+            steady.await.unwrap();
+
+            // A write cuts a rest short once; the next rest is served in full.
+            notify.notify_one();
+            let t = tokio::time::Instant::now();
+            let may_cut = rest_between_batches(&notify, ms(2_000), true, ms(10), ms(50)).await;
+            assert!(!may_cut);
+            assert!(t.elapsed() < ms(1_000), "{:?}", t.elapsed());
+            notify.notify_one();
+            let t = tokio::time::Instant::now();
+            let may_cut = rest_between_batches(&notify, ms(300), may_cut, ms(10), ms(50)).await;
+            assert!(may_cut);
+            assert!(t.elapsed() >= ms(300), "{:?}", t.elapsed());
+        });
     }
 
     #[test]

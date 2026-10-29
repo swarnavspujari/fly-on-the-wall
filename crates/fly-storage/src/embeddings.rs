@@ -528,6 +528,26 @@ impl Storage {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Whether any chunk waits for a vector from `model`: the worker's
+    /// per-batch check. It looks from the newest row down and stops at the
+    /// first pending one, where [`embedding_backlog`](Self::embedding_backlog)
+    /// counts every row (each embedded row's vector sits in overflow pages
+    /// that a scan walks).
+    pub fn has_pending_embeddings(&self, model: &str) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM embedding_chunks
+                  WHERE embedding IS NULL OR model IS NOT ?1
+                  ORDER BY id DESC LIMIT 1",
+                [model],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Number of chunks still waiting for a vector from `model`.
     pub fn embedding_backlog(&self, model: &str) -> Result<usize> {
         let n: i64 = self.conn.query_row(
@@ -578,10 +598,12 @@ impl Storage {
         Ok(stored)
     }
 
-    /// Every note and transcript that should have chunk rows, newest first
+    /// Every note and transcript that should have chunk rows, oldest first
     /// (notes by `updated_at`, meetings by `started_at`): the startup pass
     /// walks them a few at a time ([`sync_owner_chunks`](Self::sync_owner_chunks)),
-    /// releasing the storage lock in between.
+    /// releasing the storage lock in between. Oldest first because a
+    /// re-chunk gives the owner's new rows the next ids and the embedding
+    /// queue takes the highest ids first: the newest owner is embedded first.
     pub fn chunk_owners(&self) -> Result<Vec<ChunkOwner>> {
         let mut owners: Vec<(String, ChunkOwner)> = Vec::new();
         let mut stmt = self.conn.prepare("SELECT id, updated_at FROM notes")?;
@@ -597,7 +619,7 @@ impl Storage {
             let (id, at) = row?;
             owners.push((at, ChunkOwner::Transcript(id)));
         }
-        owners.sort_by(|a, b| b.0.cmp(&a.0));
+        owners.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(owners.into_iter().map(|(_, o)| o).collect())
     }
 
@@ -1116,13 +1138,13 @@ mod tests {
     }
 
     #[test]
-    fn chunk_owners_newest_first_and_deleted_owners_skip() {
+    fn chunk_owners_oldest_first_and_deleted_owners_skip() {
         let (_dir, s) = test_storage();
         let a = s.create_note("a", None).unwrap();
         let b = s.create_note("b", None).unwrap();
         s.update_note_scratchpad(&a.id, "touched last").unwrap();
         let owners = s.chunk_owners().unwrap();
-        assert_eq!(owners[0], ChunkOwner::Note(a.id.clone()));
+        assert_eq!(owners.last(), Some(&ChunkOwner::Note(a.id.clone())));
         assert!(owners.contains(&ChunkOwner::Note(b.id.clone())));
         s.delete_note(&b.id).unwrap();
         s.sync_owner_chunks(&ChunkOwner::Note(b.id)).unwrap();

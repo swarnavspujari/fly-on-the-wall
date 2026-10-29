@@ -45,9 +45,9 @@ The process entry point and the only place platform implementations are chosen. 
 | `consent_skipped` | `Mutex<BTreeSet<meeting_id>>` | Inserted/retried by scheduler.rs; read/drained by llm_commands.rs:449-463 |
 | `consent_prompt` | `tokio::sync::Mutex<ConsentPacing>` | llm_commands.rs only: `request_cloud_consent` holds it while the cloud-consent dialog is open (one dialog at a time) and keeps each provider's recent declines in it |
 | `embed_notify` | `tokio::sync::Notify` | Notified by commands.rs, llm_commands.rs, scheduler.rs; awaited by embeddings.rs |
-| `foreground_ai` (private) | `AtomicUsize`, via `foreground_ai()` → RAII `ForegroundAi` guard and `foreground_ai_active()` | Guards held by llm_commands.rs (`ask_meeting`, `enhance_note`); read by `background_yield_reason()` |
+| `foreground_ai` (private) | `AtomicUsize`, via `foreground_ai()` → RAII `ForegroundAi` guard and `foreground_ai_active()` | Guards held by llm_commands.rs (`ask_meeting`, `enhance_note`, `run_polish`) and extraction.rs (`run_extraction`); read by `background_yield_reason()` |
 
-**Background work's one yield rule:** `AppState::background_should_yield()` / `background_yield_reason() -> Option<BackgroundYield { Recording, Transcription, ForegroundAi }>`. It is true while an audio or screen recording runs, while a transcription pipeline stage other than "waiting" runs (polish included), or while a `foreground_ai()` guard is alive. Every background job calls it (the embedding backlog today; audio compression next) rather than restating the rule.
+**Background work's one yield rule:** `AppState::background_should_yield()` / `background_yield_reason() -> Option<BackgroundYield { Recording, Transcription, ForegroundAi }>`. It is true while an audio or screen recording runs, while a transcription pipeline stage other than "waiting" runs (polish included), or while a `foreground_ai()` guard is alive (a model request: Ask, Enhance, polish, extraction). Every background job calls it (the embedding backlog today; audio compression next) rather than restating the rule.
 
 Observed lock nesting: `recording` → `storage` (`recording.rs:134-140`), `recording` → `screen` (`scheduler.rs:469`), `consent_prompt` → `storage` (`llm_commands.rs:294-308`). No reverse order was found.
 
