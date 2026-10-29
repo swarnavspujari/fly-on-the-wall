@@ -50,7 +50,7 @@ Observed lock nesting: `recording` → `storage` (`recording.rs:134-140`), `reco
 - **CSP** (`tauri.conf.json:36`): `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http(s)://asset.localhost data: blob:; media-src 'self' asset: http(s)://asset.localhost blob:; font-src 'self' data:; connect-src 'self' ipc: http(s)://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'; worker-src 'self' blob:`.
 - **devCsp** (`:37`) adds `'unsafe-inline'` + `http://localhost:1420` to `script-src` and `ws://`/`http://localhost:1420` to `connect-src`.
 - `dangerousDisableAssetCspModification: ["style-src"]` (`:38`) keeps Tauri from adding nonces to `style-src`, so `'unsafe-inline'` styles work.
-- **Asset protocol** enabled with an empty static scope (`:39-42`); the two folders are added at runtime (`lib.rs:104-108`). Cargo feature `protocol-asset`.
+- **Asset protocol** enabled with an empty static scope (`:39-42`); the two folders are added at runtime (`lib.rs:104-108`). Cargo feature `protocol-asset`. One more file at a time joins it: a compressed recording's rebuilt playback mix in scratch (`audio_store::prepare_playback` calls `allow_file` on exactly that file; scratch as a whole stays out).
 - **Capabilities** (`capabilities/default.json:6`), window `main` only: `core:default`, `updater:default`, `process:allow-restart`. No `fs`, `shell`, `http`, `dialog`, `opener` or `clipboard` permissions: dialogs, opening and clipboard go through Rust commands (DECISIONS.md "M1 — Native dialogs/openers via Rust plugin APIs").
 - **Navigation guard** (`nav_guard.rs:32-48`): allows `tauri:`, `asset:`, `ipc:`, `about:blank`, `http(s)://tauri.localhost`, and `localhost`/`127.0.0.1:1420` in debug builds only; anything else is blocked, and http(s)/mailto targets are handed to the system browser.
 
@@ -61,7 +61,7 @@ Observed lock nesting: `recording` → `storage` (`recording.rs:134-140`), `reco
 
 **Startup sequence**
 Before the builder (`lib.rs:34-41`): `prepared_data_dir()` (legacy move) → `privacy::startup` (instance lock, finish a pending "Delete all my data") → `logging::init`.
-In `setup` (`lib.rs:68-180`): `AppState::init` (on failure: error dialog, `exit(1)`) → asset scope → `migrate_anthropic_model`, `reset_unseen_cloud_consent`, `record_pending_wipe` → disk-encryption check → `manage` → off-thread: hardware detection, stale-download sweep (1 h), recording self-heal → `scheduler::spawn`, `embeddings::spawn`, `privacy::spawn_retention`.
+In `setup` (`lib.rs:68-180`): `AppState::init` (on failure: error dialog, `exit(1)`) → asset scope → `migrate_anthropic_model`, `reset_unseen_cloud_consent`, `record_pending_wipe` → disk-encryption check → `manage` → off-thread: hardware detection, stale-download sweep (1 h), recording self-heal → `scheduler::spawn`, `embeddings::spawn`, `privacy::spawn_retention`, `audio_store::spawn` (recording compression, its own low-priority thread, first pass ~2 min after launch).
 
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
