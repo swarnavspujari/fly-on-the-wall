@@ -46,7 +46,7 @@ Per-file progress during ASR: `import_transcribe` stores `boundaries_ms` (the cu
 |---|---|---|
 | `notes` | new row titled after the first file's stem | W (`create_note`, `import_commands.rs:473-475`) |
 | `meetings` | new row, no attendees (unconfirmed); `recording_json.mixed_path`, `ended_at` | W (`create_meeting`, `allocate_meeting_dir`; `end_meeting` at transcribe, `import_commands.rs:711-723`) |
-| attachments (via `add_attachment_in_place`) | imported videos registered in place on the note | W (`import_commands.rs:724-731`) |
+| attachments (via `add_attachment_in_place`) | imported videos registered in place on the note, from the meeting folder (`record_joined_import`, after the join) | W (`import_commands.rs` `record_joined_import`; test `an_imported_video_is_listed_as_the_notes_attachment`) |
 | `settings` | `import.staged.*` | R/W |
 | `transcription_jobs` | | W via `scheduler::enqueue`; R/delete in cancel (`import_commands.rs:372-384`) |
 | `transcripts` | existence check only | R (`import_state`, `import_commands.rs:554-560`) |
