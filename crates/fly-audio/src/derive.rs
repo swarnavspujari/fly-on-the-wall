@@ -246,7 +246,9 @@ impl Resampler {
             let idx = pos as usize;
             let frac = (pos - idx as f64) as f32;
             self.fill_to(idx as u64 + 1)?;
-            if (idx as u64) < self.win_start || (idx as u64) >= self.win_start + self.win.len() as u64 {
+            if (idx as u64) < self.win_start
+                || (idx as u64) >= self.win_start + self.win.len() as u64
+            {
                 return Err(AudioError::Backend(
                     "source ended before its declared length".into(),
                 ));
@@ -314,7 +316,7 @@ fn generate(
     let mut total = 0u64;
     let mut steps = 0usize;
     loop {
-        if steps % 8 == 0 && !checkpoint() {
+        if steps.is_multiple_of(8) && !checkpoint() {
             return Err(AudioError::Backend("stopped before finishing".into()));
         }
         steps += 1;
@@ -369,10 +371,10 @@ pub fn regenerate(
                     bits_per_sample: 16,
                     sample_format: hound::SampleFormat::Int,
                 };
-                writer = Some(
-                    hound::WavWriter::create(out, spec)
-                        .map_err(|e| AudioError::Backend(format!("create {}: {e}", out.display())))?,
-                );
+                writer =
+                    Some(hound::WavWriter::create(out, spec).map_err(|e| {
+                        AudioError::Backend(format!("create {}: {e}", out.display()))
+                    })?);
             }
             let w = writer.as_mut().expect("created above");
             let mut i16w = w.get_i16_writer(chunk.len() as u32);
@@ -530,7 +532,9 @@ mod tests {
             }
             assert_eq!(got.len(), want.len(), "{from}->{to} len {len}");
             assert!(
-                got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),
+                got.iter()
+                    .zip(&want)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
                 "{from}->{to} len {len}: samples differ"
             );
         }
@@ -549,10 +553,16 @@ mod tests {
                 let (got, gr) = MonoFile::open(p).unwrap().read_all().unwrap();
                 assert_eq!(gr, wr);
                 assert_eq!(got.len(), want.len());
-                assert!(got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()));
+                assert!(got
+                    .iter()
+                    .zip(&want)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()));
             }
             let (via, _) = mix::read_audio_mono(&flac).unwrap();
-            assert!(via.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()));
+            assert!(via
+                .iter()
+                .zip(&want)
+                .all(|(a, b)| a.to_bits() == b.to_bits()));
         }
     }
 
@@ -607,7 +617,9 @@ mod tests {
                     std::fs::read(&want).unwrap(),
                     "layout {i} {kind:?}: files differ"
                 );
-                assert!(matches_stored(kind, m.as_deref(), s.as_deref(), &want, &mut go()).unwrap());
+                assert!(
+                    matches_stored(kind, m.as_deref(), s.as_deref(), &want, &mut go()).unwrap()
+                );
             }
         }
     }
@@ -651,7 +663,14 @@ mod tests {
         let (orig, rate) = wav_samples(&stored);
         let check = |s: &[i16], rate: u32| {
             write_wav(&stored, s, 1, rate);
-            matches_stored(DerivedKind::Mixdown, Some(&mic), Some(&sys), &stored, &mut go()).unwrap()
+            matches_stored(
+                DerivedKind::Mixdown,
+                Some(&mic),
+                Some(&sys),
+                &stored,
+                &mut go(),
+            )
+            .unwrap()
         };
         // one sample, one LSB
         let mut s = orig.clone();
@@ -666,7 +685,16 @@ mod tests {
         assert!(!check(&orig, 16_001));
         // the mic-only mix is not the two-channel mix
         assert!(check(&orig, rate));
-        assert!(matches_stored(DerivedKind::Mixdown, Some(&mic), Some(&sys), &stored, &mut go()).unwrap());
-        assert!(!matches_stored(DerivedKind::Mixdown, Some(&mic), None, &stored, &mut go()).unwrap());
+        assert!(matches_stored(
+            DerivedKind::Mixdown,
+            Some(&mic),
+            Some(&sys),
+            &stored,
+            &mut go()
+        )
+        .unwrap());
+        assert!(
+            !matches_stored(DerivedKind::Mixdown, Some(&mic), None, &stored, &mut go()).unwrap()
+        );
     }
 }

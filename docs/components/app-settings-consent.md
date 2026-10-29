@@ -99,6 +99,8 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 | `privacy.audio_retention_days` | app-privacy | `crates/fly-storage/src/privacy.rs:451` | `crates/fly-storage/src/privacy.rs:460-462` (choices only) | no |
 | `privacy.retention_last_sweep` | app-privacy | `privacy.rs:187` | `privacy.rs:225` | no |
 | `privacy.retention_held` | app-privacy | `privacy.rs:316` | `privacy.rs:215`; deleted 183, 223 | no |
+| `storage.compress.saved_bytes` | app-audio-store | `audio_store.rs` (`spawn`, `run_pass`) | `audio_store.rs` (`run_pass`) | no |
+| `storage.compress.notice` | app-audio-store | `audio_store.rs` (`run_pass`) | `audio_store.rs` (`run_pass` → `pending`, `dismiss_compress_notice` → `shown`) | no |
 | `privacy.last_wipe_report` | app-privacy | `privacy.rs:311` | `privacy.rs:775`; deleted 375 | no |
 
 Any other key under `consent.`, `capture.` or `ui.` (except `consent.cloud_llm.*`) can also be created by the webview. Today no backend code reads one.

@@ -7,7 +7,7 @@
 The open note: title, meta chips (date, template, folder, attendees, Keep local, recording, attachments), and one content region with three views. **Notes** is a WYSIWYG markdown editor. **Transcript** has the audio player, speaker relabel, line edits, VTT export and engine/download notices. **Enhanced** shows AI blocks colored by provenance, with Keep / Remove and source previews. The Ask composer docks in the same floating switcher (see [ui-ask](ui-ask.md)). Untrusted content (AI output, imported notes) is rendered through `safeContent.ts` / `markdownSafe.tsx`, which never fetch remote images and never navigate the app window (THREAT_MODEL T1/T2).
 
 ## Files it owns
-- `frontend/src/components/Editor.tsx` — container: autosave, Keep-local chip, view switcher, audio player, video strip/lightbox, screen-capture menu, Ask wiring.
+- `frontend/src/components/Editor.tsx` — container: autosave, Keep-local chip, view switcher, audio player, video strip/lightbox, screen-capture menu, Ask wiring. The player asks `prepare_playback(meeting, build: false)` for its file on note open; a compressed two-channel recording (no stored mix) answers `needs_build`, and the first Play calls it with `build: true` (spinner on the button), then plays the rebuilt mix ([app-audio-store](app-audio-store.md)).
 - `frontend/src/components/NotesEditor.tsx` — contentEditable notes stored as markdown (marked → DOMPurify on load, turndown on edit).
 - `frontend/src/components/EnhancedDoc.tsx` — provenance-colored blocks, legend, Keep / Remove with undo, source chip preview / zoom-in, block edit.
 - `frontend/src/components/TranscriptPanel.tsx` — stage banner, engine / download notices, AI-cleaned ⇄ Raw, speaker menu, inline segment edit, VTT export, re-run.

@@ -19,7 +19,9 @@ fn mb(b: u64) -> f64 {
 
 fn main() {
     let args: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
-    let (out_dir, folders) = args.split_first().expect("usage: <out_dir> <meeting_folder>...");
+    let (out_dir, folders) = args
+        .split_first()
+        .expect("usage: <out_dir> <meeting_folder>...");
     std::fs::create_dir_all(out_dir).unwrap();
     let mut go = || true;
     let (mut wav_total, mut kept_total, mut derived_total) = (0u64, 0u64, 0u64);
@@ -69,14 +71,18 @@ fn main() {
             }
         }
         let flac_of = |r: &str| flacs.iter().find(|(n, _)| n == r).map(|(_, p)| p.clone());
-        for (r, kind) in [("mixed", DerivedKind::Mixdown), ("playback", DerivedKind::Playback)] {
+        for (r, kind) in [
+            ("mixed", DerivedKind::Mixdown),
+            ("playback", DerivedKind::Playback),
+        ] {
             let Some(stored) = role(r) else { continue };
             if mic.is_none() && sys.is_none() {
                 continue;
             }
             let t = Instant::now();
-            let same = derive::matches_stored(kind, mic.as_deref(), sys.as_deref(), &stored, &mut go)
-                .unwrap_or(false);
+            let same =
+                derive::matches_stored(kind, mic.as_deref(), sys.as_deref(), &stored, &mut go)
+                    .unwrap_or(false);
             let check_s = t.elapsed().as_secs_f64();
             // Regenerate from the FLAC sources: the player's cold-start cost.
             let regen = out_dir.join(format!("m{}-{r}.regen.wav", i + 1));

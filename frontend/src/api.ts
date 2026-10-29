@@ -34,11 +34,13 @@ import type {
   NoteSummary,
   OllamaStatus,
   PolishResult,
+  PlaybackSource,
   PrivacySettings,
   RecordingStatus,
   ReDiarizeOutcome,
   SearchHit,
   SpeakerUndoState,
+  StorageReport,
   SweepReport,
   SystemAudioPreflight,
   Template,
@@ -119,6 +121,14 @@ export const api = {
       "live_status",
       { meetingId },
     ),
+  /** The file the player streams. `build` rebuilds a compressed recording's
+   *  playback mix (on Play); without it, opening a note never does work. */
+  preparePlayback: (meetingId: string, build: boolean) =>
+    invoke<PlaybackSource | null>("prepare_playback", { meetingId, build }),
+  /** Settings › Storage: sizes by kind plus the compression job's status. */
+  storageReport: () => invoke<StorageReport>("storage_report"),
+  /** The one-time "recordings compressed" notice was seen. */
+  dismissCompressNotice: () => invoke<void>("dismiss_compress_notice"),
   // Set the meeting's start date/time (RFC 3339 UTC). Length is preserved
   // (ended_at shifts); the meeting folder + manifest re-mirror the date.
   updateMeetingStartedAt: (meetingId: string, startedAt: string) =>

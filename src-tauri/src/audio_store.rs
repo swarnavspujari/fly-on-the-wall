@@ -301,7 +301,9 @@ impl Role {
 /// `a/b/recording.mic.wav` → `a/b/recording.mic.flac` (also for the
 /// data-dir-relative `/`-separated form).
 fn flac_twin(rel: &str) -> String {
-    let stem = rel.strip_suffix(".wav").or_else(|| rel.strip_suffix(".WAV"));
+    let stem = rel
+        .strip_suffix(".wav")
+        .or_else(|| rel.strip_suffix(".WAV"));
     format!("{}.flac", stem.unwrap_or(rel))
 }
 
@@ -407,7 +409,9 @@ fn convert_one(
         if let Some(dir) = final_flac.parent() {
             fsync_dir(dir);
         }
-        std::fs::metadata(final_flac).map(|m| m.len()).map_err(failed)
+        std::fs::metadata(final_flac)
+            .map(|m| m.len())
+            .map_err(failed)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -492,11 +496,15 @@ pub fn compress_meeting(
 
     // 1. Sources → FLAC.
     for role in [Role::Mic, Role::System] {
-        let Some(rel) = role.path(&planned).clone() else { continue };
+        let Some(rel) = role.path(&planned).clone() else {
+            continue;
+        };
         if !has_ext(&rel, "wav") {
             continue;
         }
-        let Some(wav) = abs(&Some(rel.clone())) else { continue };
+        let Some(wav) = abs(&Some(rel.clone())) else {
+            continue;
+        };
         let size = std::fs::metadata(&wav).map(|m| m.len()).unwrap_or(0);
         if let Err(e) = fly_audio::flac::inspect_pcm16_wav(&wav) {
             out.kept.push(format!("{}: {e}", role.wav_name()));
@@ -523,11 +531,15 @@ pub fn compress_meeting(
     let mic_now = abs(&next.mic_path);
     let sys_now = abs(&next.system_path);
     for role in [Role::Mixed, Role::Playback] {
-        let Some(rel) = role.path(&planned).clone() else { continue };
+        let Some(rel) = role.path(&planned).clone() else {
+            continue;
+        };
         if !has_ext(&rel, "wav") || role.path(&next).as_deref() != Some(rel.as_str()) {
             continue; // not a WAV, or it followed a source above
         }
-        let Some(wav) = abs(&Some(rel.clone())) else { continue };
+        let Some(wav) = abs(&Some(rel.clone())) else {
+            continue;
+        };
         let size = std::fs::metadata(&wav).map(|m| m.len()).unwrap_or(0);
         let kind = role.derived().expect("derived role");
         let sources_are_v2 = is_storage_v2(&next);
@@ -586,11 +598,8 @@ pub fn compress_meeting(
                 continue;
             }
             let proven = match (role.derived(), abs(role.path(&next))) {
-                (None, Some(flac)) | (Some(_), Some(flac)) if has_ext(&flac.to_string_lossy(), "flac") => {
-                    matches!(
-                        fly_audio::flac::verify_flac_matches_wav(&flac, &twin, ctx.checkpoint),
-                        Ok(_)
-                    )
+                (_, Some(flac)) if has_ext(&flac.to_string_lossy(), "flac") => {
+                    fly_audio::flac::verify_flac_matches_wav(&flac, &twin, ctx.checkpoint).is_ok()
                 }
                 (Some(kind), None) => fly_audio::derive::matches_stored(
                     kind,
@@ -615,10 +624,7 @@ pub fn compress_meeting(
     {
         let storage = ctx.storage.lock().unwrap();
         (ctx.may_commit)(&storage).map_err(MeetingError::Busy)?;
-        let current = storage
-            .get_meeting(meeting_id)
-            .map_err(failed)?
-            .recording;
+        let current = storage.get_meeting(meeting_id).map_err(failed)?.recording;
         if current.as_ref() != Some(&planned) {
             return Err(MeetingError::Busy("the recording changed".into()));
         }
@@ -855,7 +861,9 @@ fn compress_one_now(
         if storage
             .transcription_job(id)
             .map_err(|e| e.to_string())?
-            .is_some_and(|j| j.status == fly_storage::JOB_QUEUED || j.status == fly_storage::JOB_RUNNING)
+            .is_some_and(|j| {
+                j.status == fly_storage::JOB_QUEUED || j.status == fly_storage::JOB_RUNNING
+            })
         {
             return Err("transcription queued".into());
         }
@@ -947,10 +955,11 @@ fn wait_until_idle(app: &tauri::AppHandle, state: &AppState, id: &str) -> bool {
 /// What the editor's player should load.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PlaybackSource {
-    /// Absolute path, for the asset protocol.
-    pub path: String,
-    /// Rebuilt from the sources (storage v2) rather than stored.
-    pub regenerated: bool,
+    /// Absolute path, for the asset protocol. `None` until a compressed
+    /// recording's playback mix is built (`needs_build`).
+    pub path: Option<String>,
+    /// Call again with `build: true` (on Play) to rebuild the mix.
+    pub needs_build: bool,
 }
 
 /// Pick (or rebuild) the file to play. Stored files win; a storage-v2
@@ -972,7 +981,9 @@ fn playback_plan(data_dir: &Path, rec: &RecordingRef) -> (Option<PathBuf>, bool)
 
 fn evict_playback_cache(data_dir: &Path, keep: &Path) {
     let root = fly_storage::scratch::scratch_root(data_dir);
-    let Ok(entries) = std::fs::read_dir(&root) else { return };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
     let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
         .flatten()
         .map(|e| e.path().join(PLAYBACK_CACHE_FILE))
@@ -981,7 +992,7 @@ fn evict_playback_cache(data_dir: &Path, keep: &Path) {
             Some((m.modified().ok()?, m.len(), p))
         })
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
     let mut total = 0u64;
     for (_, len, p) in files {
         total += len;
@@ -991,14 +1002,17 @@ fn evict_playback_cache(data_dir: &Path, keep: &Path) {
     }
 }
 
-/// The file the player should stream for a meeting, regenerating the
-/// playback mix of a compressed two-channel recording when needed. `None`
-/// when the meeting has no audio left.
+/// The file the player should stream for a meeting. A compressed
+/// two-channel recording has no stored playback mix: with `build: false`
+/// (opening the note) a cached rebuild is returned if there is one, else
+/// `needs_build`; `build: true` (pressing Play) rebuilds it, a few seconds
+/// per half hour of audio. `None` when the meeting has no audio left.
 #[tauri::command]
 pub async fn prepare_playback(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
+    build: bool,
 ) -> Result<Option<PlaybackSource>, String> {
     let store = &state.audio_store;
     store
@@ -1012,7 +1026,9 @@ pub async fn prepare_playback(
     }
     let rec = {
         let storage = state.storage.lock().unwrap();
-        let m = storage.get_meeting(&meeting_id).map_err(|e| e.to_string())?;
+        let m = storage
+            .get_meeting(&meeting_id)
+            .map_err(|e| e.to_string())?;
         match m.recording {
             Some(r) => r,
             None => return Ok(None),
@@ -1022,14 +1038,13 @@ pub async fn prepare_playback(
     let (stored, regenerate) = playback_plan(&data_dir, &rec);
     if let Some(p) = stored {
         return Ok(Some(PlaybackSource {
-            path: p.to_string_lossy().into_owned(),
-            regenerated: false,
+            path: Some(p.to_string_lossy().into_owned()),
+            needs_build: false,
         }));
     }
     if !regenerate {
         return Ok(None);
     }
-    let _one_at_a_time = store.playback_lock.lock().await;
     let cache_dir = fly_storage::scratch::meeting_scratch_dir(&data_dir, &meeting_id);
     let cache = cache_dir.join(PLAYBACK_CACHE_FILE);
     let abs = |p: &Option<String>| p.as_ref().map(|r| data_dir.join(r));
@@ -1039,10 +1054,17 @@ pub async fn prepare_playback(
         .flatten()
         .filter_map(|p| mtime(p))
         .max();
-    let fresh = std::fs::metadata(&cache).is_ok_and(|m| {
-        m.len() > 44 && m.modified().ok() >= newest_source
-    });
-    if !fresh {
+    let is_fresh = || {
+        std::fs::metadata(&cache).is_ok_and(|m| m.len() > 44 && m.modified().ok() >= newest_source)
+    };
+    if !build && !is_fresh() {
+        return Ok(Some(PlaybackSource {
+            path: None,
+            needs_build: true,
+        }));
+    }
+    let _one_at_a_time = store.playback_lock.lock().await;
+    if !is_fresh() {
         let (cache_c, dir_c) = (cache.clone(), cache_dir.clone());
         tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
             std::fs::create_dir_all(&dir_c).map_err(|e| e.to_string())?;
@@ -1071,8 +1093,8 @@ pub async fn prepare_playback(
     // attachments/ are allowed at startup; scratch as a whole is not).
     let _ = tauri::Manager::asset_protocol_scope(&app).allow_file(&cache);
     Ok(Some(PlaybackSource {
-        path: cache.to_string_lossy().into_owned(),
-        regenerated: true,
+        path: Some(cache.to_string_lossy().into_owned()),
+        needs_build: false,
     }))
 }
 
@@ -1080,7 +1102,9 @@ pub async fn prepare_playback(
 // Settings › Storage
 // ---------------------------------------------------------------------------
 
-const AUDIO_EXTS: &[&str] = &["wav", "flac", "mp3", "m4a", "aac", "ogg", "oga", "opus", "wma"];
+const AUDIO_EXTS: &[&str] = &[
+    "wav", "flac", "mp3", "m4a", "aac", "ogg", "oga", "opus", "wma",
+];
 const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm", "avi"];
 
 /// Disk use of the data folder's media, by kind.
@@ -1126,7 +1150,9 @@ pub fn measure(data_dir: &Path) -> StorageReport {
             if !ft.is_dir() {
                 continue;
             }
-            let Ok(files) = std::fs::read_dir(d.path()) else { continue };
+            let Ok(files) = std::fs::read_dir(d.path()) else {
+                continue;
+            };
             for f in files.flatten() {
                 if f.file_type().is_ok_and(|t| t.is_file()) {
                     if let Ok(m) = f.metadata() {

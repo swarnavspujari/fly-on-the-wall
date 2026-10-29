@@ -36,6 +36,7 @@ import { briefError } from "../pipelineNotice";
 import { useCloudConsent } from "./CloudConsent";
 import { useConfirm } from "./confirm";
 import PrivacySection from "./PrivacySection";
+import StorageRows from "./StorageRows";
 import RemindNoticeRow from "./RemindNoticeRow";
 import type { Updater } from "../updater";
 import {
@@ -2096,6 +2097,7 @@ export default function SettingsModal({
                         </Button>
                       }
                     />
+                    <StorageRows />
                     <SettingsRow
                       title="Search index"
                       helper="Pulls decisions and action items out of meetings recorded before this existed, so Ask and other AI apps can find them. Uses your Ask and Enhance provider."

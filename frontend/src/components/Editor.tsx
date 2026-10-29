@@ -24,6 +24,7 @@ import {
   Folder as FolderIcon,
   LayoutTemplate,
   List,
+  Loader2,
   Lock,
   LockOpen,
   Mic,
@@ -131,19 +132,26 @@ function fmtWhen(iso: string): string {
 
 /* ---- Audio player: embeds the local recording via the asset protocol so it
    plays and scrubs in-app (round violet play/pause, progress-filled waveform,
-   mono timecodes). Falls back to opening the OS player if the src is missing. ---- */
+   mono timecodes). Falls back to opening the OS player if the src is missing.
+   A compressed recording (lossless FLAC, no stored mix) rebuilds its
+   playback mix on the first Play (`onBuild`), then starts playing. ---- */
 const BAR_COUNT = 56;
 function AudioPlayer({
   src,
   durationMs,
   onFallback,
+  onBuild,
 }: {
   src: string | null;
   durationMs: number;
   onFallback: () => void;
+  /** Set when the mix must be rebuilt first; resolves to the new src. */
+  onBuild?: () => Promise<string | null>;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const playWhenReady = useRef(false);
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(durationMs / 1000);
 
@@ -155,6 +163,18 @@ function AudioPlayer({
 
   const toggle = () => {
     const a = audioRef.current;
+    if (!src && onBuild) {
+      if (building) return;
+      setBuilding(true);
+      onBuild()
+        .then((s) => {
+          if (s) playWhenReady.current = true;
+          else onFallback();
+        })
+        .catch(onFallback)
+        .finally(() => setBuilding(false));
+      return;
+    }
     if (!a || !src) {
       onFallback();
       return;
@@ -187,17 +207,25 @@ function AudioPlayer({
           onLoadedMetadata={(e) => {
             if (Number.isFinite(e.currentTarget.duration)) setDur(e.currentTarget.duration);
           }}
+          onCanPlay={(e) => {
+            if (!playWhenReady.current) return;
+            playWhenReady.current = false;
+            void e.currentTarget.play().catch(onFallback);
+          }}
         />
       )}
       <Button
         variant="primary"
         size="sm"
         onClick={toggle}
-        title={playing ? "Pause" : "Play recording"}
-        aria-label={playing ? "Pause" : "Play recording"}
+        disabled={building}
+        title={building ? "Preparing the recording…" : playing ? "Pause" : "Play recording"}
+        aria-label={building ? "Preparing the recording" : playing ? "Pause" : "Play recording"}
         className="!h-[38px] !w-[38px] !rounded-full !p-0"
       >
-        {playing ? (
+        {building ? (
+          <Loader2 size={16} strokeWidth={2} className="animate-spin" />
+        ) : playing ? (
           <Pause size={16} strokeWidth={2} />
         ) : (
           <Play size={16} strokeWidth={2} style={{ marginLeft: 2 }} />
@@ -1230,19 +1258,47 @@ export default function Editor({
 
   const rec = meeting?.recording ?? null;
   // full-quality playback mix first; older recordings fall back to the
-  // 16 kHz ASR mixdown, then raw channels
+  // 16 kHz ASR mixdown, then raw channels (also what "open in your player"
+  // and "show in folder" use)
   const audioPath =
     rec?.playback_path || rec?.mixed_path || rec?.mic_path || rec?.system_path || null;
-  // Absolute path → asset URL so the <audio> element can stream it in-app.
-  const audioSrc =
-    dataDir && audioPath
-      ? convertFileSrc(
-          `${dataDir.replace(/[\\/]+$/, "")}/${audioPath.replace(/^[\\/]+/, "")}`.replace(
-            /\\/g,
-            "/",
-          ),
-        )
-      : null;
+  // The backend picks the file to stream (prepare_playback): the stored mix,
+  // or, for a compressed recording, a mix rebuilt from its lossless sources
+  // on the first Play. Absolute path -> asset URL for the <audio> element.
+  const meetingId = meeting?.id ?? null;
+  const [playback, setPlayback] = useState<{
+    meetingId: string;
+    path: string | null;
+    needsBuild: boolean;
+  } | null>(null);
+  const recKey = rec
+    ? `${rec.mic_path}|${rec.system_path}|${rec.mixed_path}|${rec.playback_path ?? ""}`
+    : "";
+  useEffect(() => {
+    setPlayback(null);
+    if (!meetingId || !recKey) return;
+    let live = true;
+    api
+      .preparePlayback(meetingId, false)
+      .then((p) => {
+        if (live && p) setPlayback({ meetingId, path: p.path, needsBuild: p.needs_build });
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [meetingId, recKey]);
+  const shown = playback && playback.meetingId === meetingId ? playback : null;
+  const audioSrc = shown?.path ? convertFileSrc(shown.path) : null;
+  const buildPlayback =
+    shown?.needsBuild && meetingId
+      ? async () => {
+          const p = await api.preparePlayback(meetingId, true);
+          if (!p?.path) return null;
+          setPlayback({ meetingId, path: p.path, needsBuild: false });
+          return convertFileSrc(p.path);
+        }
+      : undefined;
   const videos = note.attachments.filter(isVideo);
   const playAudio = () => {
     if (audioPath) void api.openAttachment(audioPath);
@@ -1491,6 +1547,7 @@ export default function Editor({
                     src={audioSrc}
                     durationMs={rec?.duration_ms ?? 0}
                     onFallback={playAudio}
+                    onBuild={buildPlayback}
                   />
                 )}
                 {clipStrip(false)}

@@ -884,6 +884,37 @@ const mockPrivacy: Record<
   { keep_local: boolean; participants_notified: boolean; audio_deleted_at: string | null }
 > = {};
 let mockRetentionDays: number | null = null;
+// Recording storage v2 (audio_store.rs). fotwMockCompress = working |
+// paused | done (default) picks the job state Settings › Storage shows;
+// fotwMockCompressNotice = "1" shows the one-time notice; fotwMockCompressed
+// = "1" makes the player need a Play-time rebuild (prepare_playback).
+let mockCompressNoticeDismissed = false;
+const GB = 1024 * 1024 * 1024;
+function mockStorageReport() {
+  const state = mockFlag("fotwMockCompress") ?? "done";
+  const working = state === "working" || state === "paused";
+  return {
+    audio_bytes: working ? 15.8 * GB : 3.6 * GB,
+    wav_bytes: working ? 12.4 * GB : 0,
+    imported_video_bytes: 14.1 * GB,
+    imported_video_files: 6,
+    screen_recording_bytes: 5.6 * GB,
+    screen_recording_files: 11,
+    other_attachment_bytes: 0.12 * GB,
+    compress: {
+      state,
+      paused_for: state === "paused" ? "recording" : null,
+      meetings_total: working ? 25 : 25,
+      meetings_done: working ? 11 : 25,
+      bytes_total: 26.4 * GB,
+      bytes_done: working ? 14 * GB : 26.4 * GB,
+      saved_bytes: working ? 10.6 * GB : 23.1 * GB,
+      kept_files: 0,
+      notice_pending: mockFlag("fotwMockCompressNotice") === "1" && !mockCompressNoticeDismissed,
+      last_error: null,
+    },
+  };
+}
 let mockBackfillPending = 3;
 function meetingPrivacy(meetingId: string) {
   const p = (mockPrivacy[meetingId] ??= {
@@ -1129,6 +1160,15 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return m ? [m] : [];
     }
     case "live_status":
+      return null;
+    case "prepare_playback":
+      if (mockFlag("fotwMockCompressed") === "1" && !args.build)
+        return { path: null, needs_build: true };
+      return { path: "/mock/recording.playback.wav", needs_build: false };
+    case "storage_report":
+      return mockStorageReport();
+    case "dismiss_compress_notice":
+      mockCompressNoticeDismissed = true;
       return null;
     case "get_transcript":
       // staged import: no transcript until the mock pipeline finishes

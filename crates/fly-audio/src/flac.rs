@@ -171,9 +171,7 @@ pub fn inspect_pcm16_wav(path: &Path) -> Result<PcmWavInfo> {
                 };
                 let end = body + size + (size & 1);
                 if end != file_len {
-                    return Err(unsupported(
-                        "data chunk doesn't end at the end of the file",
-                    ));
+                    return Err(unsupported("data chunk doesn't end at the end of the file"));
                 }
                 if size % (u64::from(channels) * 2) != 0 {
                     return Err(unsupported("partial sample frame"));
@@ -225,8 +223,10 @@ impl PcmWavReader {
         self.remaining -= want as u64;
         out.extend(
             self.bytes
-                .chunks_exact(2)
-                .map(|b| i32::from(i16::from_le_bytes([b[0], b[1]]))),
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| i32::from(i16::from_le_bytes(*b))),
         );
         Ok(want / (self.channels * 2))
     }
@@ -270,8 +270,8 @@ pub fn encode_pcm16_wav_to_flac(
     let config = flacenc::config::Encoder::default()
         .into_verified()
         .map_err(|(_, e)| enc(&e))?;
-    let mut info = StreamInfo::new(wav_info.sample_rate as usize, channels, 16)
-        .map_err(|e| enc(&e))?;
+    let mut info =
+        StreamInfo::new(wav_info.sample_rate as usize, channels, 16).map_err(|e| enc(&e))?;
 
     let mut reader = PcmWavReader::open(wav, &wav_info)?;
     let mut file = File::create(out)?;
@@ -289,7 +289,7 @@ pub fn encode_pcm16_wav_to_flac(
     let (mut min_frame, mut max_frame) = (usize::MAX, 0usize);
     let mut blocks = 0usize;
     loop {
-        if blocks % CHECKPOINT_EVERY == 0 && !checkpoint() {
+        if blocks.is_multiple_of(CHECKPOINT_EVERY) && !checkpoint() {
             return Err(FlacError::Interrupted);
         }
         blocks += 1;
@@ -353,11 +353,8 @@ pub fn verify_flac_matches_wav(
     let wav_info = inspect_pcm16_wav(wav)?;
     let mismatch = |why: String| FlacError::Mismatch(why);
     let dec = |e: claxon::Error| FlacError::Decode(e.to_string());
-    let mut reader = claxon::FlacReader::new(BufReader::with_capacity(
-        1 << 20,
-        File::open(flac)?,
-    ))
-    .map_err(dec)?;
+    let mut reader = claxon::FlacReader::new(BufReader::with_capacity(1 << 20, File::open(flac)?))
+        .map_err(dec)?;
     let si = reader.streaminfo();
     if si.sample_rate != wav_info.sample_rate
         || si.channels != u32::from(wav_info.channels)
@@ -365,7 +362,11 @@ pub fn verify_flac_matches_wav(
     {
         return Err(mismatch(format!(
             "format {} Hz/{} ch/{} bit vs {} Hz/{} ch/16 bit",
-            si.sample_rate, si.channels, si.bits_per_sample, wav_info.sample_rate, wav_info.channels
+            si.sample_rate,
+            si.channels,
+            si.bits_per_sample,
+            wav_info.sample_rate,
+            wav_info.channels
         )));
     }
     // FLAC writes a total of 0 as "unknown"; only an empty file may say so.
@@ -386,7 +387,7 @@ pub fn verify_flac_matches_wav(
     let mut frame_reader = reader.blocks();
     let mut buffer = Vec::new();
     loop {
-        if blocks % CHECKPOINT_EVERY == 0 && !checkpoint() {
+        if blocks.is_multiple_of(CHECKPOINT_EVERY) && !checkpoint() {
             return Err(FlacError::Interrupted);
         }
         blocks += 1;
@@ -581,7 +582,10 @@ pub(crate) mod tests {
         let out = encode_pcm16_wav_to_flac(&wav, &flac, &mut go()).unwrap();
         assert_eq!(out.frames, s.len() as u64);
         assert!(is_flac(&flac) && !is_flac(&wav));
-        assert_eq!(verify_flac_matches_wav(&flac, &wav, &mut go()).unwrap(), s.len() as u64);
+        assert_eq!(
+            verify_flac_matches_wav(&flac, &wav, &mut go()).unwrap(),
+            s.len() as u64
+        );
         assert!(out.flac_bytes < std::fs::metadata(&wav).unwrap().len());
 
         // An independent full decode agrees too.
@@ -592,7 +596,12 @@ pub(crate) mod tests {
 
     #[test]
     fn stereo_and_odd_rates_roundtrip() {
-        for (rate, ch, len) in [(44_100u32, 2u16, 10_000usize), (16_000, 1, 4096), (22_050, 2, 1), (8_000, 1, 0)] {
+        for (rate, ch, len) in [
+            (44_100u32, 2u16, 10_000usize),
+            (16_000, 1, 4096),
+            (22_050, 2, 1),
+            (8_000, 1, 0),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let wav = dir.path().join("a.wav");
             let flac = dir.path().join("a.flac");
@@ -649,7 +658,12 @@ pub(crate) mod tests {
     fn interrupted_encode_reports_it() {
         let dir = tempfile::tempdir().unwrap();
         let wav = dir.path().join("a.wav");
-        write_wav(&wav, &test_signal(BLOCK_SIZE * CHECKPOINT_EVERY * 2, 1, 1), 1, 48_000);
+        write_wav(
+            &wav,
+            &test_signal(BLOCK_SIZE * CHECKPOINT_EVERY * 2, 1, 1),
+            1,
+            48_000,
+        );
         let mut calls = 0;
         let mut stop_second = || {
             calls += 1;
@@ -697,23 +711,75 @@ pub(crate) mod tests {
             std::fs::write(&p, bytes).unwrap();
             inspect_pcm16_wav(&p)
         };
-        let ok = check(raw_wav(&[(b"fmt ", fmt_pcm(1, 1, 48_000, 16)), (b"data", data.clone())], None, &[]))
-            .unwrap();
+        let ok = check(raw_wav(
+            &[
+                (b"fmt ", fmt_pcm(1, 1, 48_000, 16)),
+                (b"data", data.clone()),
+            ],
+            None,
+            &[],
+        ))
+        .unwrap();
         assert_eq!(ok.frames(), 4);
         assert_eq!(ok.data_offset, 44);
 
         // Unfinalized: RIFF size still 0 (a crash before finalize).
-        assert!(check(raw_wav(&[(b"fmt ", fmt_pcm(1, 1, 48_000, 16)), (b"data", data.clone())], Some(0), &[])).is_err());
+        assert!(check(raw_wav(
+            &[
+                (b"fmt ", fmt_pcm(1, 1, 48_000, 16)),
+                (b"data", data.clone())
+            ],
+            Some(0),
+            &[]
+        ))
+        .is_err());
         // Bytes after the data chunk the header doesn't account for.
-        assert!(check(raw_wav(&[(b"fmt ", fmt_pcm(1, 1, 48_000, 16)), (b"data", data.clone())], None, &[9, 9])).is_err());
+        assert!(check(raw_wav(
+            &[
+                (b"fmt ", fmt_pcm(1, 1, 48_000, 16)),
+                (b"data", data.clone())
+            ],
+            None,
+            &[9, 9]
+        ))
+        .is_err());
         // A metadata chunk FLAC wouldn't keep.
-        assert!(check(raw_wav(&[(b"fmt ", fmt_pcm(1, 1, 48_000, 16)), (b"LIST", vec![0; 4]), (b"data", data.clone())], None, &[])).is_err());
+        assert!(check(raw_wav(
+            &[
+                (b"fmt ", fmt_pcm(1, 1, 48_000, 16)),
+                (b"LIST", vec![0; 4]),
+                (b"data", data.clone())
+            ],
+            None,
+            &[]
+        ))
+        .is_err());
         // 24-bit, float, and 8-bit audio.
-        assert!(check(raw_wav(&[(b"fmt ", fmt_pcm(1, 1, 48_000, 24)), (b"data", vec![0; 6])], None, &[])).is_err());
-        assert!(check(raw_wav(&[(b"fmt ", fmt_pcm(3, 1, 48_000, 32)), (b"data", vec![0; 8])], None, &[])).is_err());
-        assert!(check(raw_wav(&[(b"fmt ", fmt_pcm(1, 1, 48_000, 8)), (b"data", vec![0; 8])], None, &[])).is_err());
+        assert!(check(raw_wav(
+            &[(b"fmt ", fmt_pcm(1, 1, 48_000, 24)), (b"data", vec![0; 6])],
+            None,
+            &[]
+        ))
+        .is_err());
+        assert!(check(raw_wav(
+            &[(b"fmt ", fmt_pcm(3, 1, 48_000, 32)), (b"data", vec![0; 8])],
+            None,
+            &[]
+        ))
+        .is_err());
+        assert!(check(raw_wav(
+            &[(b"fmt ", fmt_pcm(1, 1, 48_000, 8)), (b"data", vec![0; 8])],
+            None,
+            &[]
+        ))
+        .is_err());
         // Half a sample frame.
-        assert!(check(raw_wav(&[(b"fmt ", fmt_pcm(1, 2, 48_000, 16)), (b"data", vec![0; 6])], None, &[])).is_err());
+        assert!(check(raw_wav(
+            &[(b"fmt ", fmt_pcm(1, 2, 48_000, 16)), (b"data", vec![0; 6])],
+            None,
+            &[]
+        ))
+        .is_err());
         // Not a WAV at all.
         assert!(check(b"fLaC\0\0\0\0\0\0\0\0".to_vec()).is_err());
     }
@@ -740,7 +806,10 @@ pub(crate) mod tests {
         write_wav(&wav, &s, 2, 44_100);
         encode_pcm16_wav_to_flac(&wav, &flac, &mut go()).unwrap();
         let mut r = FlacSamples::open(&flac).unwrap();
-        assert_eq!((r.sample_rate(), r.channels(), r.frames()), (44_100, 2, (s.len() / 2) as u64));
+        assert_eq!(
+            (r.sample_rate(), r.channels(), r.frames()),
+            (44_100, 2, (s.len() / 2) as u64)
+        );
         let mut all = Vec::new();
         // odd read sizes cross block boundaries
         while r.read_frames(1000, &mut all).unwrap() > 0 {}

@@ -44,7 +44,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     id: "files",
     title: "Your files and privacy",
     keywords:
-      "folder data location storage search index backfill disk encryption bitlocker filevault delete audio after retention delete all my data wipe erase privacy keep local",
+      "folder data location storage space size recordings videos compress compression flac lossless search index backfill disk encryption bitlocker filevault delete audio after retention delete all my data wipe erase privacy keep local",
   },
   {
     id: "apps",

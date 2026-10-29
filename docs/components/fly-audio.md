@@ -15,7 +15,10 @@ This crate defines the `AudioCapture` / `CaptureSession` traits and the one real
 - `crates/fly-audio/src/win_volume.rs` — **Windows only.** Default render endpoint volume scalar and mute flag over COM.
 - `crates/fly-audio/src/tap_messages.rs` — platform-neutral text for the macOS TCC problems (`BUNDLE_ID`, `PRIVACY_PANE`, the `tccutil` command, the silence banner), so CI can test it on every OS.
 - `crates/fly-audio/src/null.rs` — `NullAudioCapture`: a no-op backend. No code uses it, including tests.
-- `crates/fly-audio/src/mix.rs` — WAV read/write, linear resample, `normalize_peak`, `mix_tracks`, `write_mixdown` (16 kHz), `write_playback_mix`.
+- `crates/fly-audio/src/mix.rs` — WAV read/write, linear resample, `normalize_peak`, `mix_tracks`, `write_mixdown` (16 kHz), `write_playback_mix`, and `read_audio_mono` (WAV or FLAC, same f32 samples).
+- `crates/fly-audio/src/flac.rs` — recording storage v2: `inspect_pcm16_wav` (accepts only the layout capture writes), `encode_pcm16_wav_to_flac` (streaming flacenc, STREAMINFO back-patched, fsync), `verify_flac_matches_wav` (claxon decode, every sample + count + MD5), a streaming FLAC reader. See [app-audio-store](app-audio-store.md).
+- `crates/fly-audio/src/derive.rs` — `MonoFile` (WAV/FLAC as `read_wav_mono` reads them, streamed), a streaming copy of `resample_linear`, `regenerate` (mixdown / playback mix, byte-identical to `write_mixdown` / `write_playback_mix`), `matches_stored`.
+- `crates/fly-audio/examples/flac_bench.rs` — FLAC size/speed and derived-file bit-identity on copies of real meetings.
 - `crates/fly-audio/src/vad.rs` — adaptive energy VAD (`detect_speech_spans`), `stitch_spans`, `map_to_original`.
 - `crates/fly-audio/examples/capture_smoke.rs` — manual hardware smoke test: records ~4 s with a pause, then prints per-channel RMS. CI compiles it (clippy `--all-targets`) but never runs it.
 
@@ -27,7 +30,8 @@ This crate defines the `AudioCapture` / `CaptureSession` traits and the one real
 | Types | `AudioError`, `Result`, `AudioDevice`, `CaptureConfig`, `CaptureState`, `CaptureOutput` (`lib.rs:24-77`) | app-recording |
 | Consent probe | `SystemAudioPreflight` (serde `{"verdict", "detail"}`), `preflight_system_audio(duration_ms)` (`lib.rs:95-129`) | `recording.rs:341-351` |
 | Backends | `cpal_backend::CpalAudioCapture` (the only impl wired, at `state.rs:85`); `null::NullAudioCapture` (unused) | app composition root |
-| Mix | `MIX_SAMPLE_RATE`, `read_wav_mono`, `resample_linear`, `normalize_peak`, `mix_tracks`, `write_wav_mono_16`, `write_mixdown`, `write_playback_mix` (`mix.rs`) | fly-asr `whisper_cpp.rs`, `groq.rs`; `pipeline.rs`, `import_commands.rs`, `gpu.rs`, `live.rs` |
+| Mix | `MIX_SAMPLE_RATE`, `read_wav_mono`, `read_audio_mono`, `resample_linear`, `normalize_peak`, `mix_tracks`, `write_wav_mono_16`, `write_mixdown`, `write_playback_mix` (`mix.rs`) | fly-asr `whisper_cpp.rs`, `groq.rs`; `pipeline.rs` (`read_audio_mono`), `import_commands.rs`, `gpu.rs` (`read_audio_mono`), `live.rs` |
+| Lossless storage | `flac::{inspect_pcm16_wav, encode_pcm16_wav_to_flac, verify_flac_matches_wav, is_flac, FlacError, PcmWavInfo, EncodeOutcome}`; `derive::{DerivedKind, MonoFile, regenerate, matches_stored}` | `src-tauri/src/audio_store.rs`, `pipeline.rs` (via audio_store) |
 | VAD | `VadConfig`, `SpeechSpan`, `detect_speech_spans`, `StitchMap`, `stitch_spans`, `map_to_original` (`vad.rs`) | fly-asr `whisper_cpp.rs`, `groq.rs`, `checkpoint.rs`; `gpu.rs` |
 | TCC text | `tap_messages::{BUNDLE_ID, PRIVACY_PANE, tccutil_reset_command, silence_warning_text}` | `coreaudio_tap.rs:167`; the frontend copies the text (`recordingBar.ts`, `devMock.ts`) |
 | crate-internal | `Clock`, `SharedWriter` (shared by all three loopback backends), `TapRecorder`, `TapHealth`, `PulseRecorder` | — |
@@ -78,7 +82,7 @@ None.
 
 ## Dependencies
 - **Inbound:** `src-tauri` (`state.rs` chooses `CpalAudioCapture`; `recording.rs`, `live.rs`, `pipeline.rs`, `import_commands.rs`, `gpu.rs`), and fly-asr (`whisper_cpp.rs`, `groq.rs`, `checkpoint.rs` for `mix` and `vad`).
-- **Outbound:** `cpal`, `hound`, `serde`, `thiserror`, `tracing`, plus the per-OS deps above. `fly-core` is declared (`Cargo.toml:8`) but unused.
+- **Outbound:** `cpal`, `hound`, `flacenc` (pure-Rust FLAC encoder, default features off: single-threaded), `claxon` (independent FLAC decoder used to verify), `md-5` (STREAMINFO digest), `serde`, `thiserror`, `tracing`, plus the per-OS deps above. `fly-core` is declared (`Cargo.toml:8`) but unused.
 
 ## Invariants
 - **The UI and domain see only the trait.** The impl is chosen once, in `src-tauri` (ARCHITECTURE.md "The golden rule"; `lib.rs:1-6`; `state.rs:20-21,85`).
@@ -99,6 +103,8 @@ None.
 | unit | `crates/fly-audio/src/mix.rs` | 8 | resample, normalize, mix, mixdown, playback mix |
 | unit | `crates/fly-audio/src/vad.rs` | 8 | adaptive threshold, padding/merge, click rejection, stitch/map |
 | unit | `crates/fly-audio/src/tap_messages.rs` | 2 | `tccutil` command, stale-grant banner text |
+| unit | `crates/fly-audio/src/flac.rs` | 7 | lossless round trips, verification catches any difference, interrupted encode, strict WAV layout |
+| unit | `crates/fly-audio/src/derive.rs` | 5 | streaming resample and regenerated mixes byte-identical to the in-memory code, from WAV and FLAC sources |
 | integration (CI) | `src-tauri/tests/scheduling.rs` | 1 relevant | a fake `CaptureSession` in `AppState.recording` defers the queue (trait shape only) |
 | manual | `crates/fly-audio/examples/capture_smoke.rs`; `docs/TESTING.md` (M2, M11) | — | real capture and mute warning, read by a person |
 
@@ -115,5 +121,6 @@ None.
 - **Warning text:** change `cpal_backend.rs` / `tap_messages.rs`, `frontend/src/recordingBar.ts` (classifier) and `devMock.ts` (`MOCK_REC_WARNINGS`) together.
 - **File names:** the `.mic.wav` / `.system.wav` suffixes plus `base_name: "recording"` are hard-coded in `live.rs:190,196`. fly-storage itself stores whatever paths `RecordingRef` carries, but its tests and fixtures assume `recording.*.wav`. Keep them in step.
 - **`SystemAudioPreflight`:** update the serde test, `frontend/src/types.ts`, the verdict check in `App.tsx`, and the `preflight_system_audio` case in `devMock.ts`.
+- **`mix.rs` arithmetic is now a storage format.** Compressed recordings drop their stored mixdown/playback mix because `derive.rs` rebuilds them byte-identically; change `read_wav_mono`, `resample_linear`, `mix_tracks` or the quantizer and `derive.rs` together (its tests compare the two).
 - **`mixed.wav` format** feeds every ASR engine. Don't change its rate or channel count without re-running the ignored `pipeline_e2e` / accuracy harness.
 - **macOS:** a tap from an unsigned or re-signed build records zeros. Test with a signed build and remember stale TCC grants (`tap_messages.rs:1-8`).

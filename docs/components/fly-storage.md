@@ -27,6 +27,7 @@ The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) 
 - `crates/fly-storage/src/templates.rs` — Enhance templates + built-in seeds.
 - `crates/fly-storage/src/privacy.rs` — Keep local, participants notified, retention, `erase_all_content`.
 - `crates/fly-storage/src/recovery.rs` — manifest v2, `note.json`, self-heal, portability backfill.
+- `crates/fly-storage/src/recording_store.rs` — recording storage v2 hooks: in-memory folder leases (renames skip a leased meeting), `meetings_with_stored_audio`, `replace_meeting_recording` (manifest first, then `recording_json`). See [app-audio-store](app-audio-store.md).
 - `crates/fly-storage/tests/storage_safety.rs`, `crates/fly-storage/tests/migration_v2.rs` — integration tests.
 
 ## Surface area
@@ -44,6 +45,7 @@ The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) 
 | Attachments | `add_attachment`, `add_attachment_in_place`, `remove_attachment`, `attachment_abs_path` |
 | Settings / templates | `get_setting`, `set_setting`, `delete_setting`, `delete_settings_with_prefix`; `list_templates`, `get_template`, `upsert_template`, `delete_template`, `seed_builtin_templates` |
 | Privacy | `get_meeting_privacy` + `MeetingPrivacy`, `meeting_keep_local`, `note_keep_local` (both fail closed), `set_note_keep_local`, `set_folder_keep_local`, `local_only_folders`, `keep_local_folder_ids` / `_note_ids` / `_meeting_ids`, `pending_embedding_chunks_shareable`, `embedding_backlog_shareable`, `set_participants_notified`, `audio_retention_days`, `set_audio_retention_days`, `retention_candidates`, `meetings_with_audio`, `delete_meeting_audio` + `AudioPurge`, `erase_all_content` + `EraseOutcome`, `AUDIO_RETENTION_SETTING`, `RETENTION_CHOICES` |
+| Recording storage v2 | `lease_meeting_folder`, `release_meeting_folder`, `meeting_folder_leased`, `meetings_with_stored_audio`, `replace_meeting_recording` |
 | Recovery / portability | `self_heal_recordings` + `HealReport`, `stash_recording_manifest`, `RecordingManifest`, `PortableNote`, `write_recording_manifest`, `write_note_mirror` (not re-exported at root), `MANIFEST_VERSION` (2), `RECORDING_MANIFEST`, `NOTE_MIRROR` |
 | Paths / files | `rename_with_retry`; `safe_path::{is_plain_name, contained}`; `naming::{sanitize_title, disk_label, strip_date_prefix, unique_path}`; `scratch::{scratch_root, meeting_scratch_dir, prepare_meeting_scratch, SCRATCH_DIR, LIVE_TMP_DIR}`, `Storage::scratch_dir` |
 
@@ -138,7 +140,8 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 - Raw transcript `json` is never overwritten by polish; a new transcription must clear the cleaned variant (`transcripts.rs:96-129`).
 - Retention deletes media only (extension allow-list, plain files, symlinks not followed), keeps transcripts/notes/manifest, stamps `audio_deleted_at` only when nothing failed, and requires both `ended_at` and file mtimes past the cutoff (`privacy.rs:44-47`, `479-582`).
 - FTS input is always sanitized (each token quoted, last token prefix-starred) (`search.rs:155-174`). DECISIONS.md M1 "FTS5 MATCH input is sanitized".
-- Meeting folders are found through `recording_json`, never derived from titles; a running transcription blocks the folder rename (`meetings.rs:293-302`). DECISIONS.md "Title-edit policy".
+- Meeting folders are found through `recording_json`, never derived from titles; a running transcription, or a folder lease (recording compression), blocks the folder rename (`meetings.rs:293-310`). DECISIONS.md "Title-edit policy".
+- Manifest recording paths may be `.flac` (recording storage v2). The schema is still v2; `mixed_path`/`playback_path` may be `null` when they regenerate from the sources. `replace_meeting_recording` writes the manifest before the row, so a manifest never names files the caller is about to delete.
 - Scratch is keyed by meeting id, outside the meeting folder; old in-folder scratch is deleted only for finished meetings and only with exact pipeline names in the pipeline's WAV format (`scratch.rs:179-258`, `289-336`).
 
 ## Tests

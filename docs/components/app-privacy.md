@@ -7,7 +7,9 @@
 The command surface for the app's privacy controls: per-note and per-folder **Keep local** flags (read/write only; enforcement lives in `build_provider`, the pipeline's Groq gate and the embedding worker), the **participants notified** record and recording-notice clipboard helper, **audio retention** (a background sweep plus an explicit sweep from Settings), **Delete all my data** (in-place DB erase, immediate content-folder delete, keychain wipe, and a restart-time wipe of the rest), and a best-effort **disk-encryption** probe for the Settings banner.
 
 ## Files it owns
-- `src-tauri/src/privacy.rs` — the 12 commands, retention worker, `ImportGuard`, delete-all (marker, instance lock, startup wipe, report), disk-encryption probe, 16 unit tests.
+- `src-tauri/src/privacy.rs` — the 12 commands, retention worker, `ImportGuard` (+ `imports_in_flight()`, which also pauses recording compression), delete-all (marker, instance lock, startup wipe, report), disk-encryption probe, 16 unit tests.
+
+Recording storage v2 ([app-audio-store](app-audio-store.md)) interplay: the retention sweep treats the meeting the compression job holds as busy (like a running pipeline); compressed files keep their WAV's modified time, so retention ages them the same; `.flac` was already a media extension. `delete_all_data` halts the compression job (and waits for it to let go of its folder) before wiping.
 
 ## Surface area
 ### Public API
