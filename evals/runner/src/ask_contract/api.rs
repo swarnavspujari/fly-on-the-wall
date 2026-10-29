@@ -289,7 +289,7 @@ pub fn request_tokens(req: &ConverseRequest) -> u32 {
                     estimate_tokens(name) + estimate_tokens(&input.to_string())
                 }
                 ContentBlock::ToolResult { content, .. } => estimate_tokens(content),
-                ContentBlock::Opaque { .. } => 0,
+                ContentBlock::Opaque { raw, .. } => estimate_tokens(&raw.to_string()),
             };
         }
     }

@@ -167,8 +167,12 @@ impl Thresholds {
             ("local_bench".into(), &t.local_bench.gates),
         ];
         if let Some(r) = &t.retrieval.real_embedder {
-            if !r.embedder.starts_with("ollama:") {
-                bail!("retrieval.real_embedder.embedder must be ollama:<model>");
+            // The release gates measure the app's own embedder.
+            let app = format!("ollama:{}", fly_core::embed_prompt::EMBED_MODEL);
+            if r.embedder != app {
+                bail!(
+                    "retrieval.real_embedder.embedder must be {app} (the app's embedder, fly_core::embed_prompt::EMBED_MODEL)"
+                );
             }
             all_gates.push(("retrieval.real_embedder".into(), &r.gates));
         }

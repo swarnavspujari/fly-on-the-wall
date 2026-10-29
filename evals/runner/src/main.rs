@@ -28,6 +28,29 @@ use serde_json::json;
 
 const USAGE: &str = "usage: cargo run -p fly-evals -- --suite <retrieval|ask_contract|local_bench|ci|all> [--strict | --gate <strict|security|quality>] [--embedder <hashed-bow-v1|ollama:MODEL>] [--json]";
 
+/// The real-embedder run's model digest differs from the committed
+/// baseline's (a re-pulled or different model under the same tag).
+fn digest_mismatch(dir: &std::path::Path, result: &SuiteResult) -> Option<String> {
+    let digest = |v: &serde_json::Value| {
+        v.pointer("/config/embedder/digest")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let now = digest(&json!(result.info))?;
+    let base: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("baselines").join("retrieval_real.json")).ok()?,
+    )
+    .ok()?;
+    let then = digest(base.get("info")?)?;
+    (now != then).then(|| {
+        format!(
+            "the embedding model's digest ({}) differs from the baseline's ({}); compare its numbers with care",
+            &now[..now.len().min(12)],
+            &then[..then.len().min(12)]
+        )
+    })
+}
+
 fn main() -> ExitCode {
     let mut suite: Option<String> = None;
     let mut gating = Gating::Strict;
@@ -145,13 +168,30 @@ fn main() -> ExitCode {
                     .clone()
                     .filter(|_| real_requested)
                     .unwrap_or(real.embedder.clone());
-                let result = match Embedder::from_spec(&spec) {
-                    Ok(e) => retrieval::run(&dir, &e, "retrieval_real"),
-                    Err(Unavailable(why)) => SuiteResult::not_run(
+                // A release run measures the app's embedder, nothing else.
+                let result = if gating == Gating::Strict && spec != real.embedder {
+                    SuiteResult::failed(
                         "retrieval_real",
-                        format!("skipped: {why}. A release (--strict) needs this run."),
-                    ),
+                        format!(
+                            "--strict gates the app's embedder ({}); --embedder {spec} can only run in --gate security|quality",
+                            real.embedder
+                        ),
+                    )
+                } else {
+                    match Embedder::from_spec(&spec) {
+                        Ok(e) => retrieval::run(&dir, &e, "retrieval_real"),
+                        Err(Unavailable(why)) => SuiteResult::not_run(
+                            "retrieval_real",
+                            format!("skipped: {why}. A release (--strict) needs this run."),
+                        ),
+                    }
                 };
+                let mut result = result;
+                // Same tag, different weights? Say so next to the numbers.
+                if let Some(warning) = digest_mismatch(&dir, &result) {
+                    eprintln!("fly-evals: warning: {warning}");
+                    result.info.insert("digest_warning".into(), json!(warning));
+                }
                 (cfg, result)
             }
             "ask_contract" => (

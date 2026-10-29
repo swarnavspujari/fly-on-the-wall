@@ -32,6 +32,8 @@
 #   expect         robustness only: answer | not_found | model_failed |
 #                  contained (no crash, nothing invalid shown as sourced);
 #                  defaults to the gold expectation
+#   failure        with model_failed: empty_reply | truncated | provider |
+#                  budget_exhausted | tool_protocol
 
 [auto]
 tiers = ["S", "M", "C"]
@@ -349,6 +351,7 @@ provider = "local"
 tier = "S"
 kind = "robustness"
 expect = "model_failed"
+failure = "truncated"
 
 [[scenario]]
 id = "robust-provider-error-then-answer"
@@ -366,6 +369,7 @@ provider = "cloud"
 tier = "S"
 kind = "robustness"
 expect = "model_failed"
+failure = "provider"
 
 [[scenario]]
 id = "robust-provider-auth"
@@ -375,6 +379,7 @@ provider = "cloud"
 tier = "S"
 kind = "robustness"
 expect = "model_failed"
+failure = "provider"
 
 [[scenario]]
 id = "robust-empty-reply"
@@ -384,6 +389,7 @@ provider = "local"
 tier = "S"
 kind = "robustness"
 expect = "model_failed"
+failure = "empty_reply"
 
 # An empty local reply is a failure, never a correct "not found".
 [[scenario]]
@@ -394,6 +400,7 @@ provider = "local"
 tier = "S"
 kind = "robustness"
 expect = "model_failed"
+failure = "empty_reply"
 
 [[scenario]]
 id = "robust-empty-after-tool"
@@ -403,6 +410,7 @@ provider = "local"
 tier = "M"
 kind = "robustness"
 expect = "model_failed"
+failure = "empty_reply"
 
 # --- robustness: citation syntax local models write --------------------------
 

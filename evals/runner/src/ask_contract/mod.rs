@@ -96,6 +96,34 @@ struct ScenarioDef {
     /// Robustness: the outcome expected instead of the gold one.
     #[serde(default)]
     expect: Option<ExpectDef>,
+    /// With `expect = "model_failed"`: which failure.
+    #[serde(default)]
+    failure: Option<FailureKind>,
+}
+
+/// The kind of model failure a robustness script expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    EmptyReply,
+    Truncated,
+    /// Any provider error kind.
+    Provider,
+    BudgetExhausted,
+    ToolProtocol,
+}
+
+impl FailureKind {
+    pub fn matches(self, f: ModelFailure) -> bool {
+        matches!(
+            (self, f),
+            (FailureKind::EmptyReply, ModelFailure::EmptyReply)
+                | (FailureKind::Truncated, ModelFailure::Truncated)
+                | (FailureKind::Provider, ModelFailure::Provider(_))
+                | (FailureKind::BudgetExhausted, ModelFailure::BudgetExhausted)
+                | (FailureKind::ToolProtocol, ModelFailure::ToolProtocol)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -114,8 +142,9 @@ pub enum Expect {
     Answer(Vec<Requirement>),
     /// "Not found", with zero citations.
     NotFound,
-    /// A typed model failure, with nothing shown as sourced.
-    ModelFailed,
+    /// A typed model failure (of this kind, when given), with nothing
+    /// shown as sourced.
+    ModelFailed(Option<FailureKind>),
     /// Anything but a crash or a sourced invalid citation.
     Contained,
     /// Red team: only the guards apply.
@@ -362,9 +391,14 @@ impl Contract {
                     _ => bail!("{}: expect = answer needs an answerable gold id", def.id),
                 },
                 Some(ExpectDef::NotFound) => Expect::NotFound,
-                Some(ExpectDef::ModelFailed) => Expect::ModelFailed,
+                Some(ExpectDef::ModelFailed) => Expect::ModelFailed(def.failure),
                 Some(ExpectDef::Contained) => Expect::Contained,
             };
+            ensure!(
+                def.failure.is_none() || def.expect == Some(ExpectDef::ModelFailed),
+                "{}: failure needs expect = \"model_failed\"",
+                def.id
+            );
             match def.kind {
                 ScenarioKind::RedTeam => ensure!(
                     matches!(expect, Expect::Ungraded),

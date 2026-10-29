@@ -278,6 +278,13 @@ pub struct LeakNeedles {
 }
 
 impl LeakNeedles {
+    /// Needles given directly (scanner tests).
+    pub fn of(needles: Vec<String>) -> Self {
+        Self {
+            needles: needles.into_iter().map(|n| n.to_lowercase()).collect(),
+        }
+    }
+
     pub fn new(corpus: &Corpus, db: &Db) -> Self {
         let mut needles = corpus.canaries();
         for m in corpus.keep_local_meetings() {

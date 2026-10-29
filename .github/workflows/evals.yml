@@ -17,7 +17,9 @@ name: Evals
 # metadata), the workspace manifests, the agent hook or this file.
 #
 # Before running, it checks the scorer can't be swapped or edited from
-# outside evals/ (this file and evals/ are locked by evals-guard.yml):
+# outside evals/ (this file and evals/ are protected paths: changing them
+# needs the user's approval, and once the hard lock is on, evals-guard.yml
+# fails any change the user hasn't re-hashed):
 #   * no rust-toolchain file and no .cargo/config anywhere (checked before
 #     any cargo command: a toolchain file can point cargo at any binary);
 #   * every package in fly-evals' dependency graph is one of its five path

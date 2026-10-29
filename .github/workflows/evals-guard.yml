@@ -232,6 +232,13 @@ jobs:
             # The hard lock is off until the user sets the variable; the
             # permission rule (CLAUDE.md) and the CI tripwires apply meanwhile.
             echo "::notice title=Eval lock::Lock not enabled: EVALS_LOCK_SHA256 is unset, so this check only reports the hash ($hash). Setting the variable turns the hard lock on."
+            if [ -n "$changed" ]; then
+              # Visible on the PR, not only in the summary. File names come
+              # from the PR: % is escaped and newlines become spaces, so
+              # they stay one annotation's text.
+              files=$(printf '%s' "$changed" | sed 's/%/%25/g' | tr '\n\r' '  ')
+              echo "::warning title=Eval files changed::This PR changes protected eval files; that needs the user's approval (CLAUDE.md): $files"
+            fi
             {
               echo
               echo "**Lock not enabled.** \`EVALS_LOCK_SHA256\` is unset, so this check passes and only reports the hash. To turn the hard lock on, set the variable to a reviewed hash and require this check (evals/README.md, \"Turning the hard lock on\")."

@@ -97,6 +97,8 @@ pub struct Segment {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    /// The polished transcript's text for this segment, when it differs.
+    pub cleaned: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +156,7 @@ impl Corpus {
                     start_ms,
                     end_ms: end_ms.max(start_ms + 500),
                     text: text.clone(),
+                    cleaned: m.cleaned.get(id).cloned(),
                 };
                 if segments.insert(id.clone(), seg).is_some() {
                     bail!("segment id {id} appears twice");

@@ -276,12 +276,21 @@ fn meeting_in_scope(req: &AskRequest<'_>, meeting_id: &str) -> bool {
     }
 }
 
+/// Whole lines up to the observation limit: a `[seg:ID]` line is sent with
+/// all of its text or not at all.
 fn truncate(text: &str) -> String {
     if text.chars().count() <= MAX_OBSERVATION {
-        text.to_string()
-    } else {
-        text.chars().take(MAX_OBSERVATION).collect::<String>() + "\n…"
+        return text.to_string();
     }
+    let mut out = String::new();
+    for line in text.lines() {
+        if out.chars().count() + line.chars().count() + 1 > MAX_OBSERVATION {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out + "…"
 }
 
 /// One model call through the stream API, with display frames.
@@ -697,6 +706,11 @@ impl AskHarness for StrictProbe {
                 .sentences
                 .iter()
                 .all(|s| s.status != SentenceStatus::Sourced);
+        // The stream ends on the answer as displayed.
+        if !not_found && !answer.display_frames.is_empty() {
+            let shown: Vec<&str> = answer.sentences.iter().map(|s| s.text.as_str()).collect();
+            answer.display_frames.push(shown.join(" "));
+        }
         finish(
             answer,
             log,
@@ -740,6 +754,7 @@ impl AskHarness for NaiveProbe {
         let mut proposals = Vec::new();
         let mut text = String::new();
         let mut log = json!({ "question": req.question });
+        let mut trace = vec![format!("Searched for {}", req.question)];
         for _ in 0..20 {
             let resp = match req.provider.converse(request.clone()).await {
                 Ok(r) => r,
@@ -760,6 +775,10 @@ impl AskHarness for NaiveProbe {
             request.messages.push(resp.to_message());
             let mut results = Vec::new();
             for (id, name, input) in uses {
+                // Echoes the model's query into the trace as is.
+                if let Some(q) = input.get("query").and_then(Value::as_str) {
+                    trace.push(format!("Searched for {q}"));
+                }
                 let content = if PROPOSAL_TOOLS.contains(&name.as_str()) {
                     // "Helpfully" applies the proposal.
                     if let Ok(meetings) = req.storage.list_meetings(None, 1) {
@@ -816,7 +835,7 @@ impl AskHarness for NaiveProbe {
                 segment_ids: vec![],
                 label: text.clone(),
             }],
-            trace: vec![format!("Searched for {}", req.question)],
+            trace,
             sentences,
             proposals,
             display_frames: vec![text.clone()],
