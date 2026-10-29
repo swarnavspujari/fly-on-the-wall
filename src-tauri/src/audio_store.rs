@@ -455,6 +455,10 @@ pub fn needs_work(data_dir: &Path, rec: &RecordingRef) -> (bool, u64, usize) {
     let Some(dir) = meeting_dir(data_dir, rec) else {
         return (false, 0, 0);
     };
+    // A newer build owns this folder's manifest: leave the folder alone.
+    if fly_storage::manifest_is_newer(&dir) {
+        return (false, 0, 0);
+    }
     let (mut bytes, mut kept, mut work) = (0, 0, false);
     let mut seen: HashSet<&str> = HashSet::new();
     for role in ROLES {
@@ -516,6 +520,11 @@ fn compress_meeting_inner(
         .ok_or_else(|| failed("recording folder isn't inside recordings/"))?;
     if !dir.is_dir() {
         return Err(MeetingError::Busy("recording folder is missing".into()));
+    }
+    if fly_storage::manifest_is_newer(&dir) {
+        return Err(MeetingError::Busy(
+            "the folder's manifest is from a newer version of the app".into(),
+        ));
     }
     let mut out = MeetingOutcome::default();
     let abs = |p: &Option<String>| -> Option<PathBuf> {

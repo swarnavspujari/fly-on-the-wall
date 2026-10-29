@@ -557,6 +557,12 @@ fn a_keep_local_toggle_mid_compress_cant_leave_a_stale_manifest() {
     );
     assert!(m.file("recording.mic.flac").exists() && !m.file("recording.mic.wav").exists());
     assert!(m.storage.lock().unwrap().meeting_keep_local(&m.id));
+    // Manifest v3 carries the toggle too, and the version never drops.
+    assert_eq!(manifest["keep_local"], serde_json::Value::Bool(true));
+    assert_eq!(
+        manifest["version"],
+        u64::from(fly_storage::MANIFEST_VERSION)
+    );
     // A toggle after the commit rewrites it from the row again: still FLAC.
     m.storage
         .lock()
@@ -567,6 +573,22 @@ fn a_keep_local_toggle_mid_compress_cant_leave_a_stale_manifest() {
         serde_json::from_str(&std::fs::read_to_string(m.file("recording.manifest.json")).unwrap())
             .unwrap();
     assert_eq!(after["recording"]["mic_path"], rec.mic_path.unwrap());
+    assert_eq!(after["keep_local"], serde_json::Value::Bool(false));
+}
+
+#[test]
+fn a_folder_whose_manifest_is_from_a_newer_build_is_left_alone() {
+    let m = setup(Layout::TwoChannel);
+    let future = r#"{"version": 99, "meeting_id": "x", "note_id": "y", "ended_at": "2026-01-01T00:00:00Z", "recording": {"mic_path": null, "system_path": null, "mixed_path": null, "duration_ms": 0}}"#;
+    std::fs::write(m.file("recording.manifest.json"), future).unwrap();
+    let before = names(&m.folder());
+    assert!(!needs_work(&m.data_dir, &m.rec()).0);
+    assert!(matches!(m.compress(), Err(MeetingError::Busy(_))));
+    assert_eq!(names(&m.folder()), before);
+    assert_eq!(
+        std::fs::read_to_string(m.file("recording.manifest.json")).unwrap(),
+        future
+    );
 }
 
 #[test]

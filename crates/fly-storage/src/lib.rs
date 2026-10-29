@@ -53,6 +53,7 @@ pub use notes::NoteSummary;
 pub use privacy::{
     AudioPurge, EraseOutcome, MeetingPrivacy, AUDIO_RETENTION_SETTING, RETENTION_CHOICES,
 };
+pub use recording_store::manifest_is_newer;
 pub use recovery::{
     HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR,
     NOTE_MIRROR_VERSION, RECORDING_MANIFEST,
