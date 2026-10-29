@@ -1,6 +1,6 @@
 # Ask (`ui-ask`)
 
-> Layer: frontend feature. Described as of spec v2.5 PR 3.4 (the Ask UI), built against the Ask harness ([fly-ask](fly-ask.md), PR 3.3, #111) and the connectors beta ([ui-connectors](ui-connectors.md), #113). References are to functions and components, not line numbers.
+> Layer: frontend feature. Described as of spec v2.5 PR 3.4 (the Ask UI), built against the Ask harness ([fly-ask](fly-ask.md), PR 3.3, #111) and the connectors beta ([ui-connectors](ui-connectors.md), #113, merged). References are to functions and components, not line numbers.
 > In flight: the backend asks listed under **Known gaps** (`cancel_ask`, `trace.connectors_off_keep_local`, the connectors wiring with `turn_id` = the ask id). The UI already calls or reads each of them and degrades quietly while they're missing.
 
 ## Purpose
@@ -154,7 +154,7 @@ None. Runs on always sends `api_key: null`. Keys are entered in Settings.
 - `CLAUDE_MODELS` vs `ANTHROPIC_MODELS` vs the Rust model ids: no test ties them together.
 - No test of the Editor's `openAskSource` / `pendingZoom` wiring or App's `openSourceAt` (the AskPanel tests stop at `onOpenSource`); checked by hand in the dev mock.
 - `Editor.ask.test.tsx` "the dock lets clicks through" checks Tailwind class strings (jsdom applies no CSS).
-- Not tested in the real app (only vitest and the dev mock): it needs #111 (and #113 for connector cards).
+- Not tested in the real app (only vitest and the dev mock): it needs #111.
 
 ## Changing it safely
 - Run `npm --prefix frontend test`, lint, prettier and `tsc`.
