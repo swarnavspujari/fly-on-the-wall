@@ -96,7 +96,7 @@ export interface PlaybackSource {
 /** The background "Compress recordings" job (storage:compress event). */
 export interface CompressStatus {
   state: "waiting" | "working" | "paused" | "done" | "stopped" | "";
-  paused_for: "recording" | "transcribing" | "importing" | null;
+  paused_for: "recording" | "transcribing" | "ai" | null;
   meetings_total: number;
   meetings_done: number;
   /** Of the finished ones, this pass: left for a later pass (in use, just
@@ -119,7 +119,7 @@ export type VideoJobKind = "audio_only" | "shrink_screen";
 export interface VideoJobStatus {
   kind: VideoJobKind | null;
   state: "idle" | "working" | "paused" | "done" | "stopped";
-  paused_for: "recording" | "transcribing" | "importing" | null;
+  paused_for: "recording" | "transcribing" | "ai" | null;
   files_total: number;
   files_done: number;
   /** Left as they were (no audio, already compact, a check failed). */
@@ -543,6 +543,15 @@ export interface SweepReport {
   meetings_failed: number;
   /** Why a background sweep held back, if it did. */
   held: string | null;
+}
+
+/** `library_status` and the `library:upgrade` event (src-tauri startup.rs).
+ *  `done` / `total` are progress units — a fraction, not meetings; both are 0
+ *  until the upgrade's first report. */
+export interface LibraryStatus {
+  phase: "ready" | "upgrading" | "failed";
+  done: number;
+  total: number;
 }
 
 export interface DiskEncryption {

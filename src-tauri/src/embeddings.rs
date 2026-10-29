@@ -7,32 +7,32 @@
 //! the managed Ollama runtime the first time indexing runs, with progress on
 //! the same `model:progress` channel as every other model download.
 //!
+//! Scheduling: the worker steps aside while a recording (live captions), a
+//! transcription or its polish, or a foreground AI request (Ask, Enhance)
+//! runs; embeds the most recently written chunks first; and rests after each
+//! batch for as long as it took, so a large backlog never hogs the machine
+//! (see [`yield_reason`], [`rest_after`]).
+//!
 //! Degradation contract: everything here is best-effort. No Ollama installed,
 //! server down, model missing — the worker backs off and retries, chunk rows
 //! simply stay pending, and search silently falls back to FTS-only. Nothing
 //! in this module ever blocks the UI or fails a user action.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
+use fly_storage::Storage;
 use serde::Deserialize;
 use tauri::Manager;
 
 use crate::ollama;
-use crate::state::AppState;
+use crate::state::{AppState, BackgroundYield};
 
 /// The model and its prompts live in fly-core so the retrieval eval
 /// (evals/runner) embeds exactly what the app does. Its similarity floor,
 /// used by fly-context's Ask search, lives in fly-storage
 /// (`embeddings::similarity_floor`).
 pub use fly_core::embed_prompt::{doc_prompt, query_prompt, EMBED_MODEL};
-
-/// Chunks per `/api/embed` call. Small enough to keep each request quick on
-/// CPU, large enough to amortize HTTP overhead across a backfill.
-const BATCH_SIZE: usize = 16;
-/// Idle poll: a missed nudge only delays indexing by this much.
-const IDLE_POLL: Duration = Duration::from_secs(30);
-/// Backoff after an embed/availability failure (Ollama down, pull failed).
-const RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// POST /api/embed. Returns one vector per input, in order.
 pub async fn embed_raw(root: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>, String> {
@@ -130,100 +130,669 @@ async fn ensure_ready(app: &tauri::AppHandle) -> Result<String, String> {
     Ok(root)
 }
 
+/// Chunks per `/api/embed` call. Small enough to keep each request quick on
+/// CPU (and to let a search's query embedding in soon), large enough to
+/// amortize HTTP overhead across a backfill.
+const BATCH_SIZE: usize = 16;
+/// Idle poll: a missed nudge only delays indexing by this much.
+const IDLE_POLL: Duration = Duration::from_secs(30);
+/// Backoff after an embed/availability failure (Ollama down, pull failed).
+const RETRY_DELAY: Duration = Duration::from_secs(60);
+/// While the worker yields (recording, transcription, a foreground AI
+/// request), it checks back this often.
+const YIELD_POLL: Duration = Duration::from_secs(5);
+/// While a batch is in flight, how often the worker checks whether it
+/// should step aside (and abandon the batch).
+const IN_FLIGHT_CHECK: Duration = Duration::from_millis(500);
+/// Pacing: after a batch that took `t`, rest `t × REST_RATIO` (at least
+/// `MIN_REST`), so a large backlog — the one-time re-embed after the v3
+/// upgrade, or a model change — takes at most about half of what the
+/// embedding runtime could do, and never runs back to back.
+const REST_RATIO: u32 = 1;
+const MIN_REST: Duration = Duration::from_millis(250);
+/// Notes/transcripts re-chunked per storage-lock hold in the startup pass.
+const BACKFILL_OWNERS_PER_LOCK: usize = 8;
+/// After a content write wakes the worker, embedding waits until writes
+/// pause this long: autosave fires every few hundred ms while the user
+/// types, and every save re-chunks the note, so embedding at once would
+/// re-embed the same note again and again.
+const SETTLE: Duration = Duration::from_secs(2);
+/// ...but no longer than this, so a note typed into without a pause is
+/// still indexed while it's being written.
+const SETTLE_MAX: Duration = Duration::from_secs(20);
+
+/// Why the worker shouldn't embed right now, if it shouldn't: the shared
+/// background rule ([`AppState::background_yield_reason`]).
+pub(crate) fn yield_reason(state: &AppState) -> Option<BackgroundYield> {
+    state.background_yield_reason()
+}
+
+/// How long to rest after a batch that took `took`.
+pub(crate) fn rest_after(took: Duration) -> Duration {
+    (took * REST_RATIO).max(MIN_REST)
+}
+
+/// Wait until `notify` (content writes) stays quiet for `quiet`, or until
+/// `max` has passed.
+pub(crate) async fn settle(notify: &tokio::sync::Notify, quiet: Duration, max: Duration) {
+    let deadline = tokio::time::Instant::now() + max;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero()
+            || tokio::time::timeout(quiet.min(left), notify.notified())
+                .await
+                .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Rest `rest` after a batch. A content write may cut a rest short (fresh
+/// content then waits for writes to settle, not for the backlog), but only
+/// every other rest: the rest right after a batch a write started is served
+/// in full, so steady writes (autosave while typing) can't run batches back
+/// to back. Returns whether the next rest may be cut short.
+pub(crate) async fn rest_between_batches(
+    notify: &tokio::sync::Notify,
+    rest: Duration,
+    may_cut: bool,
+    settle_quiet: Duration,
+    settle_max: Duration,
+) -> bool {
+    if !may_cut {
+        tokio::time::sleep(rest).await;
+        return true;
+    }
+    match tokio::time::timeout(rest, notify.notified()).await {
+        Ok(()) => {
+            settle(notify, settle_quiet, settle_max).await;
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+/// Something that turns document prompts into vectors (Ollama in the app,
+/// a fake in tests).
+pub(crate) trait Embedder {
+    fn embed(
+        &self,
+        inputs: Vec<String>,
+    ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>, String>> + Send;
+}
+
+struct Ollama {
+    root: String,
+}
+
+impl Embedder for Ollama {
+    async fn embed(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+        embed_raw(&self.root, &inputs).await
+    }
+}
+
+/// One batch: read the newest pending chunks (lock held only for the read),
+/// embed them with no lock held, store what still matches (lock held only
+/// for the write). `shareable_only`: the embedder is off this machine, so
+/// keep-local chunks never go to it. Returns how many vectors were stored
+/// (`Ok(0)` with nothing pending).
+pub(crate) async fn embed_next_batch<E: Embedder>(
+    storage: &Mutex<Storage>,
+    embedder: &E,
+    shareable_only: bool,
+    size: usize,
+) -> Result<usize, String> {
+    let batch = {
+        let storage = storage.lock().unwrap();
+        if shareable_only {
+            storage.pending_embedding_chunks_shareable(EMBED_MODEL, size)
+        } else {
+            storage.pending_embedding_chunks(EMBED_MODEL, size)
+        }
+    }
+    .map_err(|e| e.to_string())?;
+    if batch.is_empty() {
+        return Ok(0);
+    }
+    let inputs: Vec<String> = batch
+        .iter()
+        .map(|c| doc_prompt(&c.title, &c.text))
+        .collect();
+    let vectors = embedder.embed(inputs).await?;
+    if vectors.len() != batch.len() {
+        return Err(format!(
+            "embedder returned {} vectors for {} chunks",
+            vectors.len(),
+            batch.len()
+        ));
+    }
+    let rows: Vec<(fly_storage::PendingChunk, Vec<f32>)> = batch.into_iter().zip(vectors).collect();
+    storage
+        .lock()
+        .unwrap()
+        .store_pending_embeddings(EMBED_MODEL, &rows)
+        .map_err(|e| e.to_string())
+}
+
+/// [`embed_next_batch`], abandoned as soon as `should_yield` says so (polled
+/// every [`IN_FLIGHT_CHECK`]): a recording that starts while a slow batch is
+/// in flight gets the machine back at once instead of after the batch. The
+/// storage lock is never held while the batch awaits, so dropping it leaves
+/// nothing behind: its chunks simply stay pending. `None` = abandoned.
+pub(crate) async fn embed_batch_unless<E: Embedder>(
+    storage: &Mutex<Storage>,
+    embedder: &E,
+    shareable_only: bool,
+    size: usize,
+    should_yield: impl Fn() -> bool,
+) -> Option<Result<usize, String>> {
+    let batch = embed_next_batch(storage, embedder, shareable_only, size);
+    tokio::pin!(batch);
+    loop {
+        tokio::select! {
+            done = &mut batch => return Some(done),
+            _ = tokio::time::sleep(IN_FLIGHT_CHECK) => {
+                if should_yield() {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// The startup chunk pass, a few owners per storage-lock hold, so commands
+/// and the recording path never wait behind a whole library's re-chunk.
+/// Oldest owners first ([`Storage::chunk_owners`]), so the newest content's
+/// re-written chunks head the newest-first embedding queue. Between groups
+/// it waits while `should_yield` says background work should step aside.
+fn backfill_chunks(
+    storage: &Mutex<Storage>,
+    should_yield: impl Fn() -> bool,
+) -> Result<usize, String> {
+    let owners = storage
+        .lock()
+        .unwrap()
+        .chunk_owners()
+        .map_err(|e| e.to_string())?;
+    for group in owners.chunks(BACKFILL_OWNERS_PER_LOCK) {
+        while should_yield() {
+            std::thread::sleep(IN_FLIGHT_CHECK);
+        }
+        let storage = storage.lock().unwrap();
+        for owner in group {
+            if let Err(e) = storage.sync_owner_chunks(owner) {
+                tracing::warn!(?owner, error = %e, "chunk backfill skipped an owner");
+            }
+        }
+        drop(storage);
+        std::thread::yield_now();
+    }
+    Ok(owners.len())
+}
+
 /// Spawn the background indexer (called once at app setup).
 ///
-/// Flow: chunk-backfill existing content once (pure string work, off the UI
-/// thread), then loop forever — embed pending chunks in small batches while
-/// there's a backlog, otherwise sleep until nudged (content write) or the
-/// idle poll fires. The storage lock is held only around the short DB reads/
-/// writes, never across an HTTP call.
+/// Flow: chunk-backfill existing content once (pure string work, on a
+/// blocking thread, a few owners per lock hold), then loop forever: step
+/// aside while recording, transcribing or serving a foreground AI request;
+/// otherwise embed pending chunks newest first, in small batches with a
+/// rest after each; with no backlog, sleep until nudged (content write) or
+/// the idle poll fires. The storage lock is held only around short DB
+/// reads/writes, never across an HTTP call.
 pub fn spawn(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        // One-time chunk backfill for pre-feature content.
         {
-            let state = app.state::<AppState>();
-            let backfilled = {
-                let storage = state.storage.lock().unwrap();
-                storage.backfill_embedding_chunks()
-            };
-            match backfilled {
-                Ok(n) => tracing::debug!(owners = n, "embedding chunk backfill done"),
-                Err(e) => tracing::warn!(error = %e, "embedding chunk backfill failed"),
+            let handle = app.clone();
+            let done = tauri::async_runtime::spawn_blocking(move || {
+                let state = handle.state::<AppState>();
+                backfill_chunks(&state.storage, || state.background_should_yield())
+            })
+            .await;
+            match done {
+                Ok(Ok(n)) => tracing::debug!(owners = n, "embedding chunk backfill done"),
+                Ok(Err(e)) => tracing::warn!(error = %e, "embedding chunk backfill failed"),
+                Err(e) => tracing::warn!(error = %e, "embedding chunk backfill panicked"),
             }
         }
 
+        let mut yielded: Option<BackgroundYield> = None;
+        let mut rest_may_be_cut = true;
         loop {
             let state = app.state::<AppState>();
+            if let Some(reason) = yield_reason(&state) {
+                if yielded != Some(reason) {
+                    tracing::info!(?reason, "embedding index paused");
+                    yielded = Some(reason);
+                }
+                let _ = tokio::time::timeout(YIELD_POLL, state.embed_notify.notified()).await;
+                continue;
+            }
+            if yielded.take().is_some() {
+                tracing::info!("embedding index resumed");
+            }
             // An Ollama on another machine must never receive keep-local
             // notes or transcripts: index only the shareable queue then.
-            // (Backlog only decides whether to wake up; the batch below
+            // (This check only decides whether to wake up; the batch below
             // re-derives the filter from the URL it actually sends to.)
             let remote = !crate::llm_commands::is_loopback_url(&ollama::root_url(&state));
-            let backlog = {
+            let pending = {
                 let storage = state.storage.lock().unwrap();
                 if remote {
-                    storage.embedding_backlog_shareable(EMBED_MODEL)
+                    storage.has_pending_embeddings_shareable(EMBED_MODEL)
                 } else {
-                    storage.embedding_backlog(EMBED_MODEL)
+                    storage.has_pending_embeddings(EMBED_MODEL)
                 }
-                .unwrap_or(0)
+                .unwrap_or(false)
             };
-            if backlog == 0 {
-                let _ = tokio::time::timeout(IDLE_POLL, state.embed_notify.notified()).await;
+            if !pending {
+                let nudged = tokio::time::timeout(IDLE_POLL, state.embed_notify.notified())
+                    .await
+                    .is_ok();
+                if nudged {
+                    // A content write: let a burst of them (autosave) end.
+                    settle(&state.embed_notify, SETTLE, SETTLE_MAX).await;
+                }
                 continue;
             }
 
             let root = match ensure_ready(&app).await {
                 Ok(root) => root,
                 Err(e) => {
-                    tracing::debug!(error = %e, backlog, "embedding index paused (FTS-only until Ollama is available)");
+                    tracing::debug!(error = %e, "embedding index paused (FTS-only until Ollama is available)");
                     let _ = tokio::time::timeout(RETRY_DELAY, state.embed_notify.notified()).await;
                     continue;
                 }
             };
 
+            // Readiness can take a while (a server spawn, a model pull):
+            // check again right before sending.
+            if yield_reason(&state).is_some() {
+                continue;
+            }
             // Decide the filter from the SAME url the batch is sent to: the
             // setting may have changed since the backlog check above.
             let send_remote = !crate::llm_commands::is_loopback_url(&root);
-            let batch = {
-                let storage = state.storage.lock().unwrap();
-                if send_remote {
-                    storage.pending_embedding_chunks_shareable(EMBED_MODEL, BATCH_SIZE)
-                } else {
-                    storage.pending_embedding_chunks(EMBED_MODEL, BATCH_SIZE)
+            let started = std::time::Instant::now();
+            let outcome = embed_batch_unless(
+                &state.storage,
+                &Ollama { root },
+                send_remote,
+                BATCH_SIZE,
+                || yield_reason(&state).is_some(),
+            )
+            .await;
+            match outcome {
+                None => tracing::info!("embedding batch abandoned to step aside"),
+                Some(Ok(0)) => {}
+                Some(Ok(n)) => {
+                    tracing::debug!(embedded = n, "embedded chunk batch");
+                    // A content write (a note edit, a finished transcription)
+                    // may end the rest early: the next batch takes the
+                    // newest chunks, so fresh content doesn't wait for the
+                    // backlog. Only every other rest, so writes can't defeat
+                    // the pacing.
+                    rest_may_be_cut = rest_between_batches(
+                        &state.embed_notify,
+                        rest_after(started.elapsed()),
+                        rest_may_be_cut,
+                        SETTLE,
+                        SETTLE_MAX,
+                    )
+                    .await;
                 }
-                .unwrap_or_default()
-            };
-            if batch.is_empty() {
-                continue;
-            }
-            let inputs: Vec<String> = batch
-                .iter()
-                .map(|c| doc_prompt(&c.title, &c.text))
-                .collect();
-            match embed_raw(&root, &inputs).await {
-                Ok(vectors) => {
-                    let rows: Vec<(i64, Vec<f32>)> =
-                        batch.iter().map(|c| c.id).zip(vectors).collect();
-                    let stored = {
-                        let storage = state.storage.lock().unwrap();
-                        storage.store_chunk_embeddings(EMBED_MODEL, &rows)
-                    };
-                    match stored {
-                        Ok(()) => {
-                            tracing::debug!(embedded = rows.len(), backlog, "embedded chunk batch")
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "storing embeddings failed");
-                            tokio::time::sleep(RETRY_DELAY).await;
-                        }
-                    }
-                }
-                Err(e) => {
+                Some(Err(e)) => {
                     tracing::warn!(error = %e, "embedding batch failed, backing off");
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fly_core::{Speaker, Transcript, TranscriptSegment};
+
+    /// A write the fake runs while it "embeds".
+    type During<'a> = Box<dyn Fn(&Storage) + Send + Sync + 'a>;
+
+    /// Records what it was asked to embed; asserts the storage lock is free
+    /// while it works; can run a write mid-embed.
+    struct Fake<'a> {
+        storage: &'a Mutex<Storage>,
+        seen: Mutex<Vec<String>>,
+        during: Option<During<'a>>,
+    }
+
+    impl<'a> Fake<'a> {
+        fn new(storage: &'a Mutex<Storage>) -> Self {
+            Self {
+                storage,
+                seen: Mutex::new(Vec::new()),
+                during: None,
+            }
+        }
+    }
+
+    impl Embedder for Fake<'_> {
+        async fn embed(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+            let storage = self
+                .storage
+                .try_lock()
+                .expect("the storage lock is never held across an embed");
+            if let Some(f) = &self.during {
+                f(&storage);
+            }
+            drop(storage);
+            self.seen.lock().unwrap().extend(inputs.iter().cloned());
+            Ok(inputs.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    fn storage() -> (tempfile::TempDir, Mutex<Storage>) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Storage::open(dir.path()).unwrap();
+        (dir, Mutex::new(s))
+    }
+
+    fn meeting(s: &Storage, title: &str, line: &str) {
+        let note = s.create_note(title, None).unwrap();
+        let m = s.create_meeting(title, &note.id, &[]).unwrap();
+        s.save_transcript(&Transcript {
+            meeting_id: m.id.clone(),
+            language: Some("en".into()),
+            engine: "test".into(),
+            segments: vec![TranscriptSegment {
+                id: format!("{title}-0"),
+                speaker_key: "spk_0".into(),
+                start_ms: 0,
+                end_ms: 1000,
+                text: line.into(),
+                words: vec![],
+            }],
+            speakers: vec![Speaker {
+                key: "spk_0".into(),
+                label: "Speaker 1".into(),
+            }],
+        })
+        .unwrap();
+    }
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        tauri::async_runtime::block_on(f)
+    }
+
+    #[test]
+    fn new_content_is_embedded_before_the_backlog_and_the_lock_is_free() {
+        let (_dir, storage) = storage();
+        {
+            let s = storage.lock().unwrap();
+            for i in 0..5 {
+                meeting(&s, &format!("Backlog {i}"), "an older discussion");
+            }
+            meeting(&s, "Just recorded", "the meeting that just ended");
+        }
+        let fake = Fake::new(&storage);
+        assert_eq!(run(embed_next_batch(&storage, &fake, false, 1)), Ok(1));
+        assert!(
+            fake.seen.lock().unwrap()[0].contains("Just recorded"),
+            "{:?}",
+            fake.seen.lock().unwrap()
+        );
+        while run(embed_next_batch(&storage, &fake, false, 2)).unwrap() > 0 {}
+        assert_eq!(
+            storage
+                .lock()
+                .unwrap()
+                .embedding_backlog(EMBED_MODEL)
+                .unwrap(),
+            0
+        );
+        assert_eq!(fake.seen.lock().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn a_chunk_rewritten_while_embedding_stays_pending() {
+        let (_dir, storage) = storage();
+        let note_id = {
+            let s = storage.lock().unwrap();
+            let n = s.create_note("Draft", None).unwrap();
+            s.update_note_scratchpad(&n.id, "first version").unwrap();
+            n.id
+        };
+        let mut fake = Fake::new(&storage);
+        let id = note_id.clone();
+        fake.during = Some(Box::new(move |s: &Storage| {
+            s.update_note_scratchpad(&id, "second version").unwrap();
+        }));
+        // The vector of "first version" must not land on the new row.
+        assert_eq!(run(embed_next_batch(&storage, &fake, false, 8)), Ok(0));
+        let s = storage.lock().unwrap();
+        let pending = s.pending_embedding_chunks(EMBED_MODEL, 8).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].text.contains("second version"));
+    }
+
+    #[test]
+    fn startup_pass_chunks_every_owner() {
+        let (_dir, storage) = storage();
+        {
+            let s = storage.lock().unwrap();
+            for i in 0..(BACKFILL_OWNERS_PER_LOCK * 2 + 1) {
+                meeting(&s, &format!("M{i}"), "words to index");
+            }
+            let pending = s.pending_embedding_chunks(EMBED_MODEL, 1000).unwrap();
+            assert!(!pending.is_empty());
+        }
+        // Owners listed: 17 notes (empty, no chunks) + 17 transcripts.
+        assert_eq!(
+            backfill_chunks(&storage, || false),
+            Ok((BACKFILL_OWNERS_PER_LOCK * 2 + 1) * 2)
+        );
+        // Idempotent: nothing becomes pending twice.
+        let before = storage
+            .lock()
+            .unwrap()
+            .embedding_backlog(EMBED_MODEL)
+            .unwrap();
+        backfill_chunks(&storage, || false).unwrap();
+        assert_eq!(
+            storage
+                .lock()
+                .unwrap()
+                .embedding_backlog(EMBED_MODEL)
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn the_startup_pass_waits_while_background_work_should_yield() {
+        let (_dir, storage) = storage();
+        meeting(&storage.lock().unwrap(), "M", "words to index");
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        // Busy for the first two checks (a recording, say), then free.
+        let busy = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2;
+        let started = std::time::Instant::now();
+        assert_eq!(backfill_chunks(&storage, busy), Ok(2));
+        assert!(asked.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+        assert!(started.elapsed() >= IN_FLIGHT_CHECK * 2);
+    }
+
+    #[test]
+    fn a_remote_embedder_gets_only_shareable_chunks() {
+        let (_dir, storage) = storage();
+        {
+            let s = storage.lock().unwrap();
+            meeting(&s, "Shared standup", "the shareable line");
+            let note = s.create_note("Private review", None).unwrap();
+            let m = s.create_meeting("Private review", &note.id, &[]).unwrap();
+            s.save_transcript(&Transcript {
+                meeting_id: m.id.clone(),
+                language: Some("en".into()),
+                engine: "test".into(),
+                segments: vec![TranscriptSegment {
+                    id: "p-0".into(),
+                    speaker_key: "spk_0".into(),
+                    start_ms: 0,
+                    end_ms: 1000,
+                    text: "the keep local line".into(),
+                    words: vec![],
+                }],
+                speakers: vec![],
+            })
+            .unwrap();
+            s.set_note_keep_local(&note.id, true).unwrap();
+        }
+        let fake = Fake::new(&storage);
+        assert_eq!(run(embed_next_batch(&storage, &fake, true, 10)), Ok(1));
+        let seen = fake.seen.lock().unwrap().clone();
+        assert!(seen.iter().all(|t| !t.contains("keep local")), "{seen:?}");
+        assert!(seen.iter().any(|t| t.contains("shareable")), "{seen:?}");
+        // The keep-local chunk stays pending (for a local embedder).
+        let s = storage.lock().unwrap();
+        assert!(!s.has_pending_embeddings_shareable(EMBED_MODEL).unwrap());
+        assert!(s.has_pending_embeddings(EMBED_MODEL).unwrap());
+        assert_eq!(s.embedding_backlog(EMBED_MODEL).unwrap(), 1);
+    }
+
+    #[test]
+    fn writes_settle_before_embedding_and_cannot_cut_every_rest() {
+        let ms = Duration::from_millis;
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        run(async {
+            // Writes every 30 ms for 300 ms, then quiet: settle returns once
+            // they pause for the quiet period (not before the burst ends).
+            let n = notify.clone();
+            let burst = tokio::spawn(async move {
+                for _ in 0..10 {
+                    n.notify_one();
+                    tokio::time::sleep(ms(30)).await;
+                }
+            });
+            let t = tokio::time::Instant::now();
+            settle(&notify, ms(150), ms(5_000)).await;
+            assert!(t.elapsed() >= ms(300), "{:?}", t.elapsed());
+            assert!(t.elapsed() < ms(2_000), "{:?}", t.elapsed());
+            burst.await.unwrap();
+
+            // Steady writes never settle: the cap ends the wait.
+            let n = notify.clone();
+            let steady = tokio::spawn(async move {
+                for _ in 0..40 {
+                    n.notify_one();
+                    tokio::time::sleep(ms(20)).await;
+                }
+            });
+            let t = tokio::time::Instant::now();
+            settle(&notify, ms(150), ms(300)).await;
+            assert!(t.elapsed() < ms(700), "{:?}", t.elapsed());
+            steady.await.unwrap();
+
+            // A write cuts a rest short once; the next rest is served in full.
+            notify.notify_one();
+            let t = tokio::time::Instant::now();
+            let may_cut = rest_between_batches(&notify, ms(2_000), true, ms(10), ms(50)).await;
+            assert!(!may_cut);
+            assert!(t.elapsed() < ms(1_000), "{:?}", t.elapsed());
+            notify.notify_one();
+            let t = tokio::time::Instant::now();
+            let may_cut = rest_between_batches(&notify, ms(300), may_cut, ms(10), ms(50)).await;
+            assert!(may_cut);
+            assert!(t.elapsed() >= ms(300), "{:?}", t.elapsed());
+        });
+    }
+
+    #[test]
+    fn yields_to_transcription_and_foreground_ai() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        assert_eq!(yield_reason(&state), None);
+        // A queued job is only waiting.
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .insert("m1".into(), crate::scheduler::WAITING_STAGE.into());
+        assert_eq!(yield_reason(&state), None);
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .insert("m1".into(), "polishing".into());
+        assert_eq!(yield_reason(&state), Some(BackgroundYield::Transcription));
+        assert!(state.background_should_yield());
+        state.pipeline_stage.lock().unwrap().clear();
+        {
+            let _ask = state.foreground_ai();
+            let _enhance = state.foreground_ai();
+            assert_eq!(yield_reason(&state), Some(BackgroundYield::ForegroundAi));
+        }
+        assert_eq!(yield_reason(&state), None, "guards release on drop");
+        assert!(!state.background_should_yield());
+    }
+
+    /// Takes its time, like Ollama on a busy CPU.
+    struct Slow;
+
+    impl Embedder for Slow {
+        async fn embed(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok(inputs.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    #[test]
+    fn an_in_flight_batch_is_abandoned_when_a_recording_starts() {
+        let (_dir, storage) = storage();
+        meeting(&storage.lock().unwrap(), "Backlog", "older words");
+        let started = std::time::Instant::now();
+        let recording = std::sync::atomic::AtomicBool::new(false);
+        let outcome = run(async {
+            let flip = async {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                recording.store(true, std::sync::atomic::Ordering::SeqCst);
+            };
+            let batch = embed_batch_unless(&storage, &Slow, false, 8, || {
+                recording.load(std::sync::atomic::Ordering::SeqCst)
+            });
+            tokio::join!(flip, batch).1
+        });
+        assert_eq!(outcome, None, "abandoned");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        // Nothing was stored; the chunk is still pending.
+        assert_eq!(
+            storage
+                .lock()
+                .unwrap()
+                .embedding_backlog(EMBED_MODEL)
+                .unwrap(),
+            1
+        );
+        // Without a reason to yield, the batch completes.
+        let done = run(embed_batch_unless(
+            &storage,
+            &Fake::new(&storage),
+            false,
+            8,
+            || false,
+        ));
+        assert_eq!(done, Some(Ok(1)));
+    }
+
+    #[test]
+    fn rest_scales_with_the_batch() {
+        assert_eq!(rest_after(Duration::from_millis(10)), MIN_REST);
+        assert_eq!(rest_after(Duration::from_secs(2)), Duration::from_secs(2));
+    }
 }

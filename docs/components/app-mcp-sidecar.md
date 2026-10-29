@@ -25,7 +25,7 @@ None beyond the command. Nothing else in `src-tauri` calls `mcp_config`.
 |---|---|---|---|
 | `mcp_config` | none | `Result<String, String>` — pretty JSON `{"mcpServers":{"flyonthewall":{"command":"<app dir>/flyonthewall-mcp[.exe]","args":[]}}}` | `ui-settings` (`SettingsModal.tsx:375` on open; rendered at `SettingsModal.tsx:2136-2212`), via `api.mcpConfig` (`api.ts:94`) |
 
-How the command builds the path: `std::env::current_exe()`'s parent joined with `flyonthewall-mcp.exe` on Windows, `flyonthewall-mcp` elsewhere (`commands.rs:629-638`). It passes no `--data-dir`, so the server uses its own default, `dirs::data_dir()/FlyOnTheWall` (`crates/fly-mcp/src/main.rs:9-11`), the same rule the app uses (`src-tauri/src/state.rs:116-121`).
+How the command builds the path: `std::env::current_exe()`'s parent joined with `flyonthewall-mcp.exe` on Windows, `flyonthewall-mcp` elsewhere (`commands.rs:629-638`). It passes no `--data-dir`, so the server uses its own default, `dirs::data_dir()/FlyOnTheWall` (`crates/fly-mcp/src/main.rs:9-11`), the same rule the app uses (`src-tauri/src/state.rs:135-140`).
 
 What Settings shows (Settings › Other AI apps, `SettingsModal.tsx:2136-2212`):
 - **Claude Desktop:** steps (Settings › Developer › Edit Config; the macOS config path), the raw snippet with a copy button, and "Fly on the Wall never edits Claude's files itself."

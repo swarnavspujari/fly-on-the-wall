@@ -742,10 +742,10 @@ pub fn screen_recordings(state: &AppState) -> Vec<Candidate> {
 // The job
 // ---------------------------------------------------------------------------
 
-/// Same yield rule as recording compression (one place to swap for the
-/// shared predicate later).
+/// The shared background rule (#112), named as Settings shows it. Asked
+/// between files and on every ffmpeg poll (`POLL`) while one runs.
 fn busy(state: &AppState) -> Option<&'static str> {
-    crate::audio_store::busy_reason(state)
+    crate::audio_store::paused_for(state)
 }
 
 async fn ensure_tools<R: tauri::Runtime>(

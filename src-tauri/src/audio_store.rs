@@ -33,10 +33,13 @@
 //! meeting or its audio was deleted while the job worked, the FLACs it made
 //! are removed again instead of committed.
 //!
-//! The job yields while anything else needs the machine (a recording, a
-//! transcription, re-diarize or polish, a media import; see `busy_reason`):
-//! it abandons the step in flight (temp file deleted, WAVs untouched),
-//! waits, and takes the meeting again, reusing FLACs it already verified.
+//! The job follows the shared background rule
+//! ([`AppState::background_yield_reason`], like the embedding worker): it
+//! asks before each meeting and every [`IN_FLIGHT_CHECK`] while a file is
+//! encoded or verified. When something needs the machine (a recording, a
+//! transcription stage, a foreground AI request) it abandons the step in
+//! flight (temp file deleted, WAVs untouched), waits, and takes the meeting
+//! again, reusing FLACs it already verified.
 //!
 //! Lock order: `storage`, then `pipeline_stage` or this module's own
 //! locks. Never take `recording` or `screen` while holding `storage`:
@@ -53,7 +56,7 @@ use fly_core::RecordingRef;
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 
-use crate::state::AppState;
+use crate::state::{AppState, BackgroundYield};
 
 /// Event carrying [`CompressStatus`] whenever the job's state changes.
 pub const COMPRESS_EVENT: &str = "storage:compress";
@@ -128,7 +131,8 @@ pub fn regenerate_mixdown_for_asr(
 pub struct CompressStatus {
     /// `waiting` (not started yet), `working`, `paused`, `done`, `stopped`.
     pub state: String,
-    /// Why it's paused: `recording`, `transcribing`, `importing`.
+    /// Why it's paused: `recording`, `transcribing`, `ai` (a foreground AI
+    /// request: Ask, Enhance, polish, item extraction).
     pub paused_for: Option<String>,
     /// Meetings in this pass that had something to compress, and how many
     /// of them are finished.
@@ -267,28 +271,18 @@ pub fn resume(state: &AppState) {
     state.audio_store.nudge();
 }
 
-/// Why the job should pause, if it should. The one place the yield rule
-/// lives: an interim copy of `AppState::background_should_yield()` (coming
-/// with the search-indexing work: a recording, live captions, or any
-/// pipeline stage but "waiting"; a merely queued job doesn't count), plus a
-/// media import, which copies and converts files.
-pub(crate) fn busy_reason(state: &AppState) -> Option<&'static str> {
-    if crate::scheduler::recording_active(state) {
-        return Some("recording");
-    }
-    if state
-        .pipeline_stage
-        .lock()
-        .unwrap()
-        .values()
-        .any(|stage| stage != crate::scheduler::WAITING_STAGE)
-    {
-        return Some("transcribing");
-    }
-    if crate::privacy::imports_in_flight() {
-        return Some("importing");
-    }
-    None
+/// While a file is encoded or verified, how often the job asks the shared
+/// rule whether to step aside (the embedding worker's cadence).
+const IN_FLIGHT_CHECK: Duration = Duration::from_millis(500);
+
+/// Why the job is paused, as Settings names it: the shared background rule
+/// ([`AppState::background_yield_reason`]). The video job uses it too.
+pub(crate) fn paused_for(state: &AppState) -> Option<&'static str> {
+    state.background_yield_reason().map(|why| match why {
+        BackgroundYield::Recording => "recording",
+        BackgroundYield::Transcription => "transcribing",
+        BackgroundYield::ForegroundAi => "ai",
+    })
 }
 
 fn emit(app: &tauri::AppHandle, store: &StoreState, f: impl FnOnce(&mut CompressStatus)) {
@@ -1228,7 +1222,7 @@ fn compress_one_now(
     // Something else needs the machine (or this meeting was cancelled):
     // abandon the step in flight. Its temp file goes, the WAVs are
     // untouched, FLACs already verified stay for the retry to reuse.
-    let mut checkpoint = || -> bool { !store.cancelled(id) && busy_reason(state).is_none() };
+    let mut checkpoint = in_flight_check(state, id);
     let mut on_file_done = |bytes: u64| emit(app, store, |s| s.bytes_done += bytes);
     let mut ctx = MeetingCtx {
         data_dir: &state.data_dir,
@@ -1242,6 +1236,27 @@ fn compress_one_now(
     compress_meeting(&mut ctx, id).map(Some)
 }
 
+/// The checkpoint the encoder and verifier call every few ms while a file
+/// is in flight: `false` at once when this meeting is cancelled or the job
+/// halted, and when the shared rule says yield. The rule itself is asked at
+/// most every [`IN_FLIGHT_CHECK`] (its last answer stands in between).
+fn in_flight_check<'a>(state: &'a AppState, id: &'a str) -> impl FnMut() -> bool + 'a {
+    let mut last: Option<(Instant, bool)> = None;
+    move || {
+        if state.audio_store.cancelled(id) {
+            return false;
+        }
+        if let Some((at, go)) = last {
+            if at.elapsed() < IN_FLIGHT_CHECK {
+                return go;
+            }
+        }
+        let go = !state.background_should_yield();
+        last = Some((Instant::now(), go));
+        go
+    }
+}
+
 /// Block (status `paused`) while something else needs the machine. `false`
 /// when the job must stop instead (halt, or this meeting was cancelled).
 fn wait_until_idle(app: &tauri::AppHandle, state: &AppState, id: &str) -> bool {
@@ -1251,7 +1266,7 @@ fn wait_until_idle(app: &tauri::AppHandle, state: &AppState, id: &str) -> bool {
         if store.cancelled(id) {
             return false;
         }
-        match busy_reason(state) {
+        match paused_for(state) {
             None => {
                 if paused {
                     emit(app, store, |s| {
@@ -1602,6 +1617,46 @@ mod tests {
             *state.audio_store.wake.0.lock().unwrap(),
             "woken for a pass"
         );
+    }
+
+    /// The shared rule (#112) decides; it's asked at most every
+    /// IN_FLIGHT_CHECK while a file is in flight, a cancel stops at once.
+    #[test]
+    fn the_in_flight_check_follows_the_shared_rule_every_half_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        let mut go = in_flight_check(&state, "m1");
+        assert!(go());
+        assert_eq!(paused_for(&state), None);
+        let ai = state.foreground_ai();
+        assert_eq!(paused_for(&state), Some("ai"));
+        assert!(go(), "the last answer stands inside the window");
+        std::thread::sleep(IN_FLIGHT_CHECK + Duration::from_millis(100));
+        assert!(!go(), "asked again: a foreground AI request runs");
+        drop(ai);
+        assert!(!go(), "still the last answer");
+        std::thread::sleep(IN_FLIGHT_CHECK + Duration::from_millis(100));
+        assert!(go());
+        // a pipeline stage (not a queued "waiting" job) also yields
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .insert("m2".into(), crate::scheduler::WAITING_STAGE.into());
+        assert_eq!(paused_for(&state), None);
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .insert("m2".into(), "transcribing".into());
+        assert_eq!(paused_for(&state), Some("transcribing"));
+        state.pipeline_stage.lock().unwrap().clear();
+        state.audio_store.cancel.lock().unwrap().insert("m1".into());
+        assert!(!go(), "a cancel doesn't wait for the window");
     }
 
     #[test]

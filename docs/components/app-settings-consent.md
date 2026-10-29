@@ -39,7 +39,7 @@ The cross-cutting store of non-secret settings: the generic `get_app_setting` / 
 5. `build_provider` reads the same row (`llm_commands.rs:602`) and refuses without it ([app-llm](app-llm.md#build_provider-what-runs-in-order-llm_commandsrs569-653)).
 6. Background AI-pass refusals for missing consent or a missing API key (`is_consent_refusal` / `is_missing_key`) land in `consent_skipped` (`record_consent_skip`, called at `scheduler.rs:404` and `extraction.rs:317`). After each AI pass, `scheduler::ai_pass` emits the whole list as `llm:consent-skips` (`scheduler.rs:229`).
 7. The notice (`useConsentSkips`, `CloudConsent.tsx`) catches up with `consent_skipped_meetings` at mount and then follows the event. While the saved cloud provider has no key it offers "Add a key", which opens Settings at the key field (`initialFocus: "llm-key"`); otherwise "Run" asks for consent if needed, then calls `retry_consent_skipped`. That empties the list, drops meetings that are transcribing or whose last transcription failed (`scheduler.rs:263-280`), and re-runs `ai_pass` for the rest in the background. Every re-run goes through `build_provider` again, and a re-run that still has no key puts the meeting back on the list.
-8. At startup, once per data dir, `reset_unseen_cloud_consent` deletes every `consent.cloud_llm.*` row recorded before v2.4. Those rows were written while the old async `window.confirm` made every prompt count as yes. The flag `migration.cloud_consent_reset_v2_4` records that the reset ran (`llm_commands.rs:72-119`, `lib.rs:115`). Consents given since v2.4 are kept.
+8. At startup, once per data dir, `reset_unseen_cloud_consent` deletes every `consent.cloud_llm.*` row recorded before v2.4. Those rows were written while the old async `window.confirm` made every prompt count as yes. The flag `migration.cloud_consent_reset_v2_4` records that the reset ran (`llm_commands.rs:72-119`, `startup.rs:193`). Consents given since v2.4 are kept.
 
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
@@ -67,7 +67,7 @@ devMock mirrors all seven (`devMock.ts:1252-1269,1335-1340,1365-1380`). Drift:
 Not emitted: re-extraction after re-diarize/revert (`asr_commands.rs:158-163`) can add to `consent_skipped` without an event.
 
 ### Settings keys
-The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly-storage/src/lib.rs:484-487`). "Delete all my data" erases every row (`crates/fly-storage/src/privacy.rs:375`). Webview-settable means `is_webview_writable_setting_key` accepts it, so any webview script can read and write it. Webview-readable keys (`is_webview_setting_key`) are the same set plus `consent.cloud_llm.*`.
+The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly-storage/src/lib.rs:620-623`). "Delete all my data" erases every row (`crates/fly-storage/src/privacy.rs:375`). Webview-settable means `is_webview_writable_setting_key` accepts it, so any webview script can read and write it. Webview-readable keys (`is_webview_setting_key`) are the same set plus `consent.cloud_llm.*`.
 
 | Key (or prefix) | Owner | Reader(s) | Writer(s) | Webview-settable? |
 |---|---|---|---|---|
@@ -126,7 +126,7 @@ None. The consent dialog is an OS dialog shown in-process (Windows TaskDialog, m
 | `openai_api_key`, `anthropic_api_key`, `nim_api_key` | `get_llm_settings` reads them only to report `has_key` (`llm_commands.rs:1109-1111`). `set_llm_settings` sets or deletes them (`llm_commands.rs:1189-1201`). Keys never return to the webview. |
 
 ## Dependencies
-- **Inbound:** frontend (`api.ts:95-96,173-187`); `scheduler.rs` (`ai_pass`, `retry_consent_skipped`, `take_consent_rerun`); `extraction.rs:317` and `scheduler.rs:404` (`record_consent_skip`); `lib.rs:111-117,210-211,248-253`.
+- **Inbound:** frontend (`api.ts:95-96,173-187`); `scheduler.rs` (`ai_pass`, `retry_consent_skipped`, `take_consent_rerun`); `extraction.rs:317` and `scheduler.rs:404` (`record_consent_skip`); `startup.rs:187-195`, `lib.rs:122-123,160-165`.
 - **Outbound:** [fly-storage](fly-storage.md) `settings.rs`, [fly-secrets](fly-secrets.md), [app-pipeline](app-pipeline.md) (`scheduler::retry_consent_skipped`, `ai_pass`), [app-llm](app-llm.md) (`PROVIDERS`, `provider_vendor`, `secret_key_for`, `validate_base_url`); the `rfd` crate for the native dialog (the same version and features tauri-plugin-dialog already builds, desktop targets only), and Tauri's `AppHandle` (main thread, main window as the dialog's parent).
 
 ## Invariants
