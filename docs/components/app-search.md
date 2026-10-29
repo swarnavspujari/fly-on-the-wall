@@ -39,9 +39,19 @@ Measured on the eval gold set (63 questions; a hit = a note of the meeting holdi
 #### Cost at library size
 A synthetic library of 1,016 meetings (34,990 chunks, 768-d vectors), minimum of 5 runs per query, 21 questions, on a shared and busy dev machine (treat as relative):
 
-COST_TABLE
+| Path (p50 / p95, ms) | main `ccca11b` | this change |
+|---|---|---|
+| `search_passages`, hybrid | 2,465 / 3,922 | 672 / 1,074 |
+| `search_passages`, keyword only | 181 / 764 (it found nothing for most questions, so did little work) | 532 / 1,159 |
+| `vector_search`, 200 hits | 1,835 / 3,170 | 106 / 355 |
+| Search UI (`search_split` + vector + fuse) | 1,978 / 3,288 | 133 / 319 |
 
-What's left: every search still scores every in-scope vector (fine at this size; an ANN index is the next step past ~100k chunks), still runs one ids-only SQL pass over the chunks to apply the filters, and `search_passages` still parses the transcripts it returns windows from. The vector cache is dropped by any database write, so a search right after an edit pays the rebuild once.
+Where the time went on main: the vector scan read every 3 KB vector (and walked its overflow pages just to check `model`) per query, and keyword statistics read each matching segment's row. Now vectors come from an in-memory cache and visibility is decided per note and meeting.
+
+What's left:
+- **The cache rebuild.** Any database write drops the vector cache, so the first search after a write re-reads every vector (about 1-3 s at 35k chunks on this machine; ~0.1-0.3 s for a few hundred meetings). During a bulk re-embed, when the worker writes every few seconds, searches pay it about as often as main paid its scan.
+- **Transcript parsing.** The keyword pass parses up to 40 transcripts per query (most of the remaining keyword-only time); caching parsed windows is the next cut.
+- **Brute force.** Every in-scope vector is still scored (~35k dot products); an ANN index is the step past ~100k chunks.
 
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
