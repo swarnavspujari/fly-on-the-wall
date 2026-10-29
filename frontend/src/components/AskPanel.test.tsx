@@ -3,7 +3,19 @@ import { act, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { LlmSettings } from "../types";
+import type { AskReply, LlmSettings } from "../types";
+
+/** An `ask_meeting` reply with this text (one unsourced sentence). */
+const reply = (text: string, onDevice = true): AskReply => ({
+  status: "answered",
+  text,
+  sentences: [{ text, citations: [], status: "unsourced" }],
+  sources: [],
+  proposals: [],
+  refusals: [],
+  trace_lines: [],
+  on_device: onDevice,
+});
 import { AskComposer, AskSheet, useAskChat } from "./AskPanel";
 import { ConfirmProvider } from "./confirm";
 import { answerConsent, consentRequest, holdConsentRequests } from "./cloudConsentTesting";
@@ -201,7 +213,7 @@ describe("Ask composer and sheet", () => {
   });
 
   it("keeps the quick prompts, and a prompt asks the meeting", async () => {
-    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue("Two decisions.");
+    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue(reply("Two decisions."));
     render(<Harness noteId="n1" />);
     await openSheet();
     for (const q of [
@@ -226,7 +238,7 @@ describe("Ask composer and sheet", () => {
   });
 
   it("Enter sends; Shift+Enter adds a line", async () => {
-    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue("ok");
+    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue(reply("ok"));
     render(<Harness noteId="n1" />);
     await openSheet();
     type("first line");
@@ -241,7 +253,7 @@ describe("Ask composer and sheet", () => {
   });
 
   it("sends once, however fast you press Enter", async () => {
-    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue("ok");
+    const ask = vi.spyOn(api, "askMeeting").mockResolvedValue(reply("ok"));
     render(<Harness noteId="n1" />);
     await openSheet();
     type("Summary?");
@@ -259,7 +271,7 @@ describe("Ask composer and sheet", () => {
   });
 
   it("writes nothing until you click Insert into note", async () => {
-    vi.spyOn(api, "askMeeting").mockResolvedValue("Send the SOW today.");
+    vi.spyOn(api, "askMeeting").mockResolvedValue(reply("Send the SOW today."));
     const onInsert = vi.fn();
     render(<Harness noteId="n1" onInsert={onInsert} />);
     await openSheet();
@@ -280,7 +292,7 @@ describe("Ask composer and sheet", () => {
       .mockRejectedValueOnce(
         'this note is set to "Keep local", so it isn\'t sent to anthropic. Switch the AI provider to Ollama (runs on this device) in Settings, or turn off Keep local for this note',
       )
-      .mockResolvedValueOnce("It's in the transcript.");
+      .mockResolvedValueOnce(reply("It's in the transcript."));
     render(<Harness noteId="n1" />);
     await openSheet();
     type("What did legal ask for?");
@@ -314,7 +326,7 @@ describe("Ask composer and sheet", () => {
     const ask = vi
       .spyOn(api, "askMeeting")
       .mockRejectedValueOnce(CONSENT_REFUSED)
-      .mockResolvedValueOnce("Answer after consent.");
+      .mockResolvedValueOnce(reply("Answer after consent."));
     render(<Harness noteId="n1" />);
     await openSheet();
     type("Status?");
@@ -340,14 +352,14 @@ describe("Ask composer and sheet", () => {
   });
 
   it("drops a reply that lands after you switch notes", async () => {
-    let resolve!: (s: string) => void;
+    let resolve!: (r: AskReply) => void;
     vi.spyOn(api, "askMeeting").mockReturnValue(new Promise((r) => (resolve = r)));
     const { rerender } = render(<Harness noteId="n1" />);
     await openSheet();
     type("Summary?");
     key(input(), "Enter");
     rerender(<Harness noteId="n2" />);
-    await act(async () => resolve("Answer for n1"));
+    await act(async () => resolve(reply("Answer for n1")));
     await flush();
     expect(host!.textContent).not.toContain("Answer for n1");
     expect(input().value).toBe("");

@@ -14,6 +14,8 @@ import type {
   MeetingSeed,
   AppInfo,
   AskMessage,
+  AskReply,
+  MeetingItem,
   Attendee,
   AudioDevice,
   CalendarSettingsUpdate,
@@ -166,8 +168,18 @@ export const api = {
     invoke<Note>("enhance_note", { noteId, templateId }),
   editNoteBlock: (noteId: string, blockId: string, markdown: string) =>
     invoke<Note>("edit_note_block", { noteId, blockId, markdown }),
+  // The Ask harness: a validated answer (sentences with citations and
+  // sourced/unsourced/flagged status, sources, proposals, trace). Scope
+  // defaults to the note; `askId` streams "ask:event" (stage, sources,
+  // sanitized frames) for that id.
   askMeeting: (noteId: string, history: AskMessage[]) =>
-    invoke<string>("ask_meeting", { noteId, history }),
+    invoke<AskReply>("ask_meeting", { noteId, history }),
+  // Approved Ask results. Each validates again: links removed, citations
+  // kept only if they belong to that note / meeting.
+  insertAskAnswer: (noteId: string, markdown: string, segmentIds: string[]) =>
+    invoke<Note>("insert_ask_answer", { noteId, markdown, segmentIds }),
+  addActionItem: (meetingId: string, text: string, owner: string | null, segmentIds: string[]) =>
+    invoke<MeetingItem>("add_action_item", { meetingId, text, owner, segmentIds }),
   listTemplates: () => invoke<Template[]>("list_templates"),
   saveTemplate: (template: Template) => invoke<void>("save_template", { template }),
   deleteTemplate: (id: string) => invoke<void>("delete_template", { id }),
