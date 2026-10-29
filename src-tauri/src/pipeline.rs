@@ -163,9 +163,9 @@ pub async fn run_with(
         }
     }
     emit_stage(state, on_stage, meeting_id, "starting", None);
-    // A cancel request left over from an earlier run of this meeting must
-    // not kill this fresh one; requests arriving from here on stick.
-    state.cancel_requests.lock().unwrap().remove(meeting_id);
+    // A pending cancel is NOT cleared here: this may be an automatic retry
+    // of a run the user just cancelled. Stale requests are dropped when the
+    // user queues the meeting again (`scheduler::enqueue`).
 
     let (recording, hint, data_dir, keep_local) = {
         let storage = state.storage.lock().unwrap();
@@ -529,8 +529,8 @@ pub async fn run_with(
     };
 
     // Cooperative cancellation: the delete/cancel commands drop this meeting
-    // id into `cancel_requests` (cleared at the start of this run); engines
-    // poll it between batches — checkpoints make the abort cheap.
+    // id into `cancel_requests` (cleared when the meeting is queued afresh);
+    // engines poll it between batches — checkpoints make the abort cheap.
     let cancelled = || state.cancel_requests.lock().unwrap().contains(meeting_id);
 
     if per_channel {
@@ -1443,7 +1443,12 @@ fn restore_parked_recording(data_dir: &Path, rec: &fly_core::RecordingRef) -> bo
     let Some(rel) = fly_storage::recording_dir_rel(rec) else {
         return false;
     };
-    let expected = data_dir.join(&rel);
+    // Only ever `recordings/<folder>`, a plain name inside the data dir.
+    let Some(expected) = fly_storage::contained_recordings_dir(data_dir, &rel)
+        .filter(|p| p.parent() == Some(data_dir.join("recordings").as_path()))
+    else {
+        return false;
+    };
     let Some(name) = expected.file_name() else {
         return false;
     };
@@ -1566,6 +1571,35 @@ mod tests {
         assert!(!parked.exists());
         // already restored → nothing left to do
         assert!(!restore_parked_recording(dir.path(), &rec));
+    }
+
+    /// Only a plain `recordings/<folder>` is ever restored: a recording path
+    /// that points anywhere else moves nothing.
+    #[test]
+    fn parked_restore_only_targets_a_recordings_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let parked = dir.path().join("recordings/_unlinked/x");
+        std::fs::create_dir_all(&parked).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let abs = outside.path().join("x").join("a.wav");
+        for path in [
+            "recordings/../x/a.wav".to_string(),
+            "x/a.wav".to_string(),
+            "recordings/sub/x/a.wav".to_string(),
+            abs.to_string_lossy().into_owned(),
+        ] {
+            let rec = fly_core::RecordingRef {
+                mic_path: Some(path.clone()),
+                system_path: None,
+                mixed_path: None,
+                playback_path: None,
+                duration_ms: 1000,
+            };
+            assert!(!restore_parked_recording(dir.path(), &rec), "{path}");
+            assert!(parked.is_dir(), "{path}");
+        }
+        assert!(!dir.path().join("x").exists());
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[test]

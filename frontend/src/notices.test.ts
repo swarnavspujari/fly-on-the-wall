@@ -38,6 +38,14 @@ describe("consentSkipsCopy", () => {
     expect(c.action).toBe("Review and allow");
   });
 
+  it("a missing API key comes first and points to Settings", () => {
+    const c = consentSkipsCopy(2, "OpenAI", "OpenAI");
+    expect(c.cause).toBe(
+      "There's no API key for OpenAI yet, so 2 meetings kept the raw transcript and got no action items. Add one in Settings › Ask and Enhance, then run them.",
+    );
+    expect(c.action).toBe("Add a key");
+  });
+
   it("once nobody needs to allow anything, it only offers to run them", () => {
     const c = consentSkipsCopy(1, null);
     expect(c.cause).toBe(

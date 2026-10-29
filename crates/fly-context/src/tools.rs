@@ -58,7 +58,7 @@ pub struct ToolDef {
 
 /// Build both schema forms from `(name, type, description, required)`
 /// property specs.
-fn def(
+pub(crate) fn def(
     name: &'static str,
     description: &'static str,
     props: Vec<(&'static str, Value, &'static str, bool)>,
@@ -110,10 +110,10 @@ fn nullable(mut p: Value) -> Value {
     p
 }
 
-fn string() -> Value {
+pub(crate) fn string() -> Value {
     json!({"type": "string"})
 }
-fn integer() -> Value {
+pub(crate) fn integer() -> Value {
     json!({"type": "integer"})
 }
 fn boolean() -> Value {
@@ -406,7 +406,11 @@ pub struct GetItemsArgs {
 }
 
 /// `YYYY-MM-DD` (start or end of that UTC day) or RFC 3339.
-fn parse_when(field: &str, s: &Option<String>, end_of_day: bool) -> Result<Option<DateTime<Utc>>> {
+pub(crate) fn parse_when(
+    field: &str,
+    s: &Option<String>,
+    end_of_day: bool,
+) -> Result<Option<DateTime<Utc>>> {
     let Some(s) = s.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -425,11 +429,11 @@ fn parse_when(field: &str, s: &Option<String>, end_of_day: bool) -> Result<Optio
     Ok(Some(t.and_utc()))
 }
 
-fn clamp(v: Option<u32>, default: u32, min: u32, max: u32) -> usize {
+pub(crate) fn clamp(v: Option<u32>, default: u32, min: u32, max: u32) -> usize {
     v.unwrap_or(default).clamp(min, max) as usize
 }
 
-fn non_empty(s: &Option<String>) -> Option<&str> {
+pub(crate) fn non_empty(s: &Option<String>) -> Option<&str> {
     s.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
@@ -580,7 +584,7 @@ struct Loaded {
     windows: Vec<Window>,
 }
 
-fn segment_view(t: &Transcript, i: usize) -> SegmentView {
+pub(crate) fn segment_view(t: &Transcript, i: usize) -> SegmentView {
     let s = &t.segments[i];
     SegmentView {
         id: s.id.clone(),
@@ -1147,7 +1151,7 @@ fn flat_prefix(snippet: &str) -> String {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-fn parse_args<T: serde::de::DeserializeOwned>(tool: &str, args: &Value) -> Result<T> {
+pub(crate) fn parse_args<T: serde::de::DeserializeOwned>(tool: &str, args: &Value) -> Result<T> {
     // Strict-mode callers send `null` for absent optionals; a model with no
     // arguments may send nothing at all.
     let args = if args.is_null() {
@@ -1159,7 +1163,7 @@ fn parse_args<T: serde::de::DeserializeOwned>(tool: &str, args: &Value) -> Resul
         .map_err(|e| ContextError::InvalidArgs(format!("bad arguments for {tool}: {e}")))
 }
 
-fn output<T: Serialize>(value: &T, text: String) -> Result<ToolOutput> {
+pub(crate) fn output<T: Serialize>(value: &T, text: String) -> Result<ToolOutput> {
     Ok(ToolOutput {
         json: serde_json::to_value(value).map_err(|e| ContextError::InvalidArgs(e.to_string()))?,
         text,

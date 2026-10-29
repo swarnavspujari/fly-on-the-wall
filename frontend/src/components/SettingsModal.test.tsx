@@ -320,6 +320,40 @@ describe("Settings overlay", () => {
     await choose(runsOn, "anthropic");
   });
 
+  it("moving a provider to another server asks for consent again, naming the server", async () => {
+    await open();
+    const runsOn = $<HTMLSelectElement>('select[aria-label="Runs on"]')!;
+    nextConsent(true);
+    await choose(runsOn, "openai");
+    expect(await api.getAppSetting("consent.cloud_llm.openai")).toBe("true");
+    await click($('[aria-labelledby="settings-h-ai"] .fly-sgroup-more'));
+    await type(
+      $<HTMLInputElement>('input[aria-label="Base URL"]')!,
+      "https://proxy.example:8443/v1",
+    );
+    await type($<HTMLInputElement>("input[type=password]")!, "sk-qa-placeholder");
+    const asked = consentDialog.mock.calls.length;
+    nextConsent(false);
+    await click(byText("button", "Save"));
+    expect(consentDialog.mock.calls.length).toBe(asked + 1);
+    expect(consentText()).toContain(
+      "sent to the server at proxy.example:8443 (your custom OpenAI endpoint) for processing",
+    );
+    expect(await api.getAppSetting("consent.cloud_llm.openai")).toBeNull();
+    expect(host!.textContent).toContain("Nothing is sent to the new server until you allow it");
+
+    // Test asks again; a yes records it for the new server
+    nextConsent(true);
+    await click(byText("button", "Test"));
+    expect(await api.getAppSetting("consent.cloud_llm.openai")).toBe("true");
+
+    // restore the mock's OpenAI entry and provider
+    await act(async () => {
+      await api.setLlmSettings({ provider: "openai", model: null, base_url: null, api_key: "" });
+    });
+    await choose(runsOn, "anthropic");
+  });
+
   it("deleting a local model asks first, and Cancel keeps it", async () => {
     const del = vi.spyOn(api, "ollamaDelete");
     await open();
@@ -370,6 +404,16 @@ describe("Settings overlay", () => {
     const row = $("#settings-row-groq")!;
     expect(row.className).toContain("fly-settings-flash");
     expect(row.textContent).toContain("Groq, then this computer");
+  });
+
+  it("deep link 'llm-key' lands on Ask and Enhance with the key field focused", async () => {
+    await open({ initialFocus: "llm-key" });
+    const row = $("#settings-row-llm")!;
+    expect(row.className).toContain("fly-settings-flash");
+    expect(row.textContent).toContain("Runs on");
+    const key = row.querySelector<HTMLInputElement>("input[type=password]");
+    expect(key).not.toBeNull();
+    expect(document.activeElement).toBe(key);
   });
 
   it("switching Made on back to this computer drops a typed Groq key", async () => {
@@ -585,7 +629,8 @@ describe("Settings › asking again for cloud consent", () => {
     vi.spyOn(api, "pendingBackfillCount").mockResolvedValue(3);
     const backfill = vi.spyOn(api, "backfillMeetingItems");
     await open();
-    const index = () => $$("button").find((b) => b.textContent?.startsWith("Index ")) ?? null;
+    const index = () =>
+      $$("button").find((b) => b.textContent?.startsWith("Extract from ")) ?? null;
     nextConsent(false);
     await click(index());
     expect(consentText()).toContain("Use Anthropic for Ask and Enhance?");
@@ -600,23 +645,25 @@ describe("Settings › asking again for cloud consent", () => {
     expect(backfill).toHaveBeenCalledTimes(1);
   });
 
-  it("says why when every meeting failed to index", async () => {
+  it("says why when every meeting failed to extract", async () => {
     vi.spyOn(api, "pendingBackfillCount").mockResolvedValue(3);
     vi.spyOn(api, "backfillMeetingItems").mockResolvedValue({
       processed: 3,
       extracted: 0,
       failed: 3,
-      first_error: "no API key stored for anthropic — add one in Settings",
+      first_error: "No API key for Anthropic yet. Add one in Settings › Ask and Enhance.",
     });
     await open();
-    await click($$("button").find((b) => b.textContent?.startsWith("Index ")) ?? null);
-    const status = $$("[role=status]").find((p) => p.textContent?.startsWith("Couldn't index"))!;
+    await click($$("button").find((b) => b.textContent?.startsWith("Extract from ")) ?? null);
+    const status = $$("[role=status]").find((p) => p.textContent?.startsWith("Couldn't extract"))!;
     // plain words first; the backend's own text muted under them
     expect(status.firstChild?.textContent).toBe(
-      "Couldn't index any of the 3 meetings. Check Ask and Enhance in Settings, then try again.",
+      "Couldn't extract from any of the 3 meetings. Check Ask and Enhance in Settings, then try again.",
     );
     const detail = status.querySelector(".text-text-3")!;
-    expect(detail.textContent).toBe("no API key stored for anthropic — add one in Settings");
+    expect(detail.textContent).toBe(
+      "No API key for Anthropic yet. Add one in Settings › Ask and Enhance.",
+    );
   });
 });
 

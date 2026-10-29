@@ -19,7 +19,7 @@ Three layers:
 | Layer | Where | Components |
 |---|---|---|
 | **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 10 `ui-*` docs |
-| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 105 Tauri commands) | 15 `app-*` docs |
+| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 107 Tauri commands) | 15 `app-*` docs |
 | **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 11 `fly-*` docs |
 
 ## Index
@@ -33,7 +33,7 @@ Three layers:
 | [fly-asr](fly-asr.md) | `TranscriptionEngine`: the whisper.cpp sidecar (CPU/Vulkan), Groq cloud ASR, retries and checkpoints. |
 | [fly-diarize](fly-diarize.md) | Local speaker diarization: sherpa-onnx embeddings, fbank, VBx clustering, refinement. Always local. |
 | [fly-llm](fly-llm.md) | `LLMProvider` trait plus Anthropic and OpenAI-compatible (Ollama, custom) providers, streaming, JSON repair, the dormant tool loop, the mock, and golden request bodies. |
-| [fly-context](fly-context.md) | Dormant (no app caller yet): the retrieval and tool layer for the agentic Ask, with a fail-closed keep-local filter. |
+| [fly-context](fly-context.md) | The read-only retrieval, tool and memory layer for AI readers, with a fail-closed keep-local filter. It backs the MCP server's context layer and passage search, and agentic Ask (the harness is next). |
 | [fly-calendar](fly-calendar.md) | `CalendarProvider`: Google and Microsoft Graph over OAuth, plus meeting-link parsing. |
 | [fly-capture-screen](fly-capture-screen.md) | `ScreenRecorder`: Windows Graphics Capture, ffmpeg, window listing. |
 | [fly-storage](fly-storage.md) | SQLite index (FTS5, vectors, migrations) plus the user-owned files on disk: atomic mirrors, manifests, self-heal, path containment, scratch, erase. |
@@ -83,7 +83,7 @@ Three layers:
 flowchart LR
   app["fly-app<br/>(src-tauri)"]
   mcp["fly-mcp<br/>(sidecar binary)"]
-  ctx["fly-context<br/>(dormant)"]
+  ctx["fly-context"]
   core["fly-core"]
   audio["fly-audio"]
   asr["fly-asr"]
@@ -103,11 +103,11 @@ flowchart LR
   llm --> core
   sto --> core
   ctx --> core & sto
-  mcp --> core & sto
+  mcp --> core & ctx & sto
 ```
 
 - `fly-core` and `fly-secrets` depend on no other workspace crate.
-- `fly-app` depends on neither `fly-mcp` (it ships as a separate binary, see [app-mcp-sidecar](app-mcp-sidecar.md)) nor `fly-context` (dormant until the Ask harness wires it).
+- `fly-app` depends on neither `fly-mcp` (it ships as a separate binary, see [app-mcp-sidecar](app-mcp-sidecar.md)) nor `fly-context`. `fly-mcp` uses fly-context for its context layer and passage search, and the Ask harness wires it into the app.
 - Network-capable crates (`reqwest`): `fly-asr`, `fly-llm`, `fly-calendar`, and `fly-app`. **`fly-mcp`, `fly-storage`, `fly-core` and `fly-context` have no HTTP client.** This is what keeps spec §2 "the MCP binary never holds keys or calls a cloud LLM" true today. The [boundary rules](#how-to-enforce-boundaries-cheaply) propose checking it mechanically.
 
 ### Component map (main edges)
@@ -274,7 +274,7 @@ The rules on this page are **proposals**. This PR changes no code.
    - fly-storage removes the scratch root, which is outside the data folder, and knows the pipeline's and import's scratch file names. The app deletes content folders and finishes the wipe at the next start.
    - Containment checks are applied per call site rather than where paths are built.
 8. **Parallel implementations:**
-   - two AI-context layers: fly-mcp's own briefing and the dormant fly-context;
+   - (resolved by the memory PR: fly-mcp's briefing now runs on `fly_context::memory`, the same code as Ask);
    - two transcript chunkers: fly-context and fly-storage, kept in step only by a test;
    - two processes that write transcript mirrors: the app, and the MCP server's `set_speaker_label`.
 9. **Policy lives outside the crate that sends the bytes.** fly-llm's provider fields are `pub`. "The Anthropic host is fixed" is true only because `build_provider` never sets that field.

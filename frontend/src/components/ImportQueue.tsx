@@ -30,6 +30,9 @@ interface Props {
   onRetry: () => void;
   /** Stop the running transcription (finished batches stay checkpointed). */
   onCancel: () => void;
+  /** The queue changed by hand (a file removed, a drag finished): the files
+   *  before and after, top to bottom. */
+  onFilesChange?: (before: ImportFile[], after: ImportFile[]) => void;
 }
 
 /** Header copy per running stage (import-flow wording, not the transcript
@@ -55,6 +58,7 @@ export default function ImportQueue({
   onTranscribe,
   onRetry,
   onCancel,
+  onFilesChange,
 }: Props) {
   const [files, setFiles] = useState<ImportFile[]>(staged.files);
   const [clicked, setClicked] = useState(false);
@@ -116,7 +120,13 @@ export default function ImportQueue({
     onTranscribe(files.filter((f) => !f.error).map((f) => f.id));
   };
 
-  const removeFile = (id: string) => setFiles((fs) => fs.filter((f) => f.id !== id));
+  const removeFile = (id: string) => {
+    const next = files.filter((f) => f.id !== id);
+    setFiles(next);
+    onFilesChange?.(files, next);
+  };
+  // The order when a drag started, to report the change when it ends.
+  const dragFrom = useRef<ImportFile[] | null>(null);
 
   const onDragOverRow = (i: number) => {
     const from = dragIdx.current;
@@ -249,10 +259,13 @@ export default function ImportQueue({
               draggable={idle && !bad}
               onDragStart={(e) => {
                 dragIdx.current = i;
+                dragFrom.current = files;
                 e.dataTransfer.effectAllowed = "move";
               }}
               onDragEnd={() => {
                 dragIdx.current = null;
+                if (dragFrom.current) onFilesChange?.(dragFrom.current, files);
+                dragFrom.current = null;
               }}
               onDragOver={(e) => {
                 e.preventDefault();
