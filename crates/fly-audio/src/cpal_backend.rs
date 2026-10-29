@@ -646,6 +646,34 @@ struct GapTracker {
     last_backlog_high_ns: Option<i128>,
 }
 
+/// Now on the QPC clock, ns — the clock WASAPI capture timestamps use.
+/// User-mode and wait-free, so fine in a callback.
+#[cfg(target_os = "windows")]
+fn qpc_now_ns(freq: i64) -> i128 {
+    use windows::Win32::System::Performance::QueryPerformanceCounter;
+    let mut count = 0i64;
+    let _ = unsafe { QueryPerformanceCounter(&mut count) };
+    count as i128 * 1_000_000_000 / freq.max(1) as i128
+}
+
+#[cfg(target_os = "windows")]
+fn qpc_frequency() -> i64 {
+    use windows::Win32::System::Performance::QueryPerformanceFrequency;
+    let mut freq = 0i64;
+    let _ = unsafe { QueryPerformanceFrequency(&mut freq) };
+    freq
+}
+
+#[cfg(not(target_os = "windows"))]
+fn qpc_now_ns(_freq: i64) -> i128 {
+    0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn qpc_frequency() -> i64 {
+    1
+}
+
 /// How long after a near-full buffer a loss is still blamed on this app.
 const BACKLOG_BLAME_NS: i128 = 1_000_000_000;
 /// A backlog above this is implausible (a bad timestamp), not measured.
@@ -718,6 +746,7 @@ fn build_stream(
     let rate: u32 = stream_config.sample_rate;
     let (producer, sink) = sink::channel(path.to_path_buf(), rate)?;
     let stats = sink.stats();
+    let qpf = qpc_frequency();
 
     macro_rules! build_for {
         ($t:ty) => {{
@@ -769,9 +798,8 @@ fn build_stream(
                             gaps.next_capture_ns = None;
                         }
                         // backlog: how long this packet sat in the OS buffer
-                        // (`callback` is the device position's QPC time)
-                        let backlog = cb - cap;
-                        if cb > 0 && (0..BACKLOG_SANE_NS).contains(&backlog) {
+                        let backlog = qpc_now_ns(qpf) - cap;
+                        if (0..BACKLOG_SANE_NS).contains(&backlog) {
                             producer
                                 .stats()
                                 .max_backlog_us

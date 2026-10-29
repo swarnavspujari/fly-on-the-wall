@@ -22,6 +22,8 @@ windows = { version = "0.62", features = [
   "Win32_System_Com",
   # AvSetMmThreadCharacteristicsW: real-time (MMCSS) capture threads
   "Win32_System_Threading",
+  # QueryPerformanceCounter: capture backlog on the WASAPI timestamp clock
+  "Win32_System_Performance",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
