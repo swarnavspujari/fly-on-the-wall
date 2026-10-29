@@ -832,6 +832,9 @@ fn perform_delete_all(
         .map_err(|e| format!("couldn't start deleting (data folder not writable): {e}"))?;
 
     let mut report = WipeReport::default();
+    // Connector keychain entries are named after connector ids, which live in
+    // the database: list them before the database is emptied.
+    let connector_keys = crate::connectors::stored_secret_keys(&state.storage.lock().unwrap());
     // The storage lock covers only the database work, never file deletes.
     let erased = state
         .storage
@@ -844,6 +847,12 @@ fn perform_delete_all(
     report.removed = files.removed;
     report.failed = files.failed;
     report.secrets_failed = delete_owned_secrets(&[state.secrets.as_ref(), legacy_secrets]);
+    for key in &connector_keys {
+        if let Err(e) = state.secrets.delete(key) {
+            tracing::warn!(key, error = %e, "could not delete a connector keychain entry");
+            report.secrets_failed.push(key.clone());
+        }
+    }
     report.restart_required = true;
     Ok(report)
 }
@@ -1294,9 +1303,36 @@ mod tests {
         let state = AppState::init_with(dir.path().to_path_buf(), secrets.clone()).unwrap();
         let legacy = MemorySecretStore::default();
         legacy.set(fly_secrets::keys::OPENAI_API_KEY, "sk").unwrap();
+        // A connector with tokens and a stdio variable in the keychain.
+        let mut connectors = fly_mcp_client::Registry::default();
+        let connector = connectors
+            .add_approved(
+                fly_mcp_client::ServerConfig {
+                    name: "Docs".into(),
+                    transport: fly_mcp_client::TransportConfig::Stdio {
+                        command: "docs-mcp".into(),
+                        args: vec![],
+                        env_names: vec!["DOCS_TOKEN".into()],
+                    },
+                    auth: fly_mcp_client::AuthConfig::None,
+                },
+                0,
+            )
+            .unwrap();
+        let connector_keys = [
+            format!("connector.{connector}.access"),
+            format!("connector.{connector}.access.0"),
+            format!("connector.{connector}.refresh"),
+            format!("connector.{connector}.env.DOCS_TOKEN"),
+        ];
+        for k in &connector_keys {
+            secrets.set(k, "secret").unwrap();
+        }
         {
             let s = state.storage.lock().unwrap();
             s.create_note("Confidential", None).unwrap();
+            s.set_setting(crate::connectors::REGISTRY_KEY, &connectors.to_json())
+                .unwrap();
         }
         std::fs::create_dir_all(dir.path().join("recordings/m")).unwrap();
         std::fs::write(dir.path().join("recordings/m/a.wav"), b"x").unwrap();
@@ -1308,6 +1344,9 @@ mod tests {
         assert!(report.clean(), "{report:?}");
         assert!(report.secrets_failed.is_empty());
         assert_eq!(secrets.get(fly_secrets::keys::GROQ_API_KEY).unwrap(), None);
+        for k in &connector_keys {
+            assert_eq!(secrets.get(k).unwrap(), None, "{k} survived delete-all");
+        }
         assert_eq!(legacy.get(fly_secrets::keys::OPENAI_API_KEY).unwrap(), None);
         assert!(!dir.path().join("recordings").exists());
         let marker: WipeMarker =

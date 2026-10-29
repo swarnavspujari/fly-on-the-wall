@@ -99,9 +99,12 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 | `privacy.audio_retention_days` | app-privacy | `crates/fly-storage/src/privacy.rs:451` | `crates/fly-storage/src/privacy.rs:460-462` (choices only) | no |
 | `privacy.retention_last_sweep` | app-privacy | `privacy.rs:187` | `privacy.rs:225` | no |
 | `privacy.retention_held` | app-privacy | `privacy.rs:316` | `privacy.rs:215`; deleted 183, 223 | no |
+| `connectors.registry` | app-connectors | `connectors.rs` (`SettingsStore::load`) | `connectors.rs` (`SettingsStore::save`), only from connector commands; trust grants only after a native-dialog yes | no |
+| `connectors.call_log` | app-connectors | `connectors.rs` (`connector_call_log`) | `connectors.rs` (calls, `clear_connector_call_log`) | no |
+| `ui.beta.connectors` | ui-connectors | `connectors.rs` (`beta_enabled`: shows the feature, lets `turn_for_ask` offer tools; grants nothing); `ConnectorsSection.tsx` | `ConnectorsSection.tsx` | yes |
 | `privacy.last_wipe_report` | app-privacy | `privacy.rs:311` | `privacy.rs:775`; deleted 375 | no |
 
-Any other key under `consent.`, `capture.` or `ui.` (except `consent.cloud_llm.*`) can also be created by the webview. Today no backend code reads one.
+Any other key under `consent.`, `capture.` or `ui.` (except `consent.cloud_llm.*`) can also be created by the webview. Backend code reads one of them, `ui.beta.connectors`, as a show/hide switch only: what connectors may do is decided by native-dialog approvals stored in `connectors.*`.
 
 ### Database
 | Table | Columns | Read / write |

@@ -1,6 +1,6 @@
 # Threat model
 
-Last reviewed: 2026-10-28. Review it again when a release adds a new data flow, such as a cloud service, an IPC command that touches files, or a new import format.
+Last reviewed: 2026-10-29 (connectors beta added). Review it again when a release adds a new data flow, such as a cloud service, an IPC command that touches files, or a new import format.
 
 ## What we protect
 
@@ -8,7 +8,7 @@ Last reviewed: 2026-10-28. Review it again when a release adds a new data flow, 
 |---|---|---|
 | Meeting audio | `recordings/` in the data folder | Highest: verbatim, includes other people |
 | Transcripts and notes | `flyonthewall.db` (SQLite), `notes/`, `transcripts/` mirrors | High |
-| API keys and OAuth tokens | OS keychain (`fly-secrets`) | High: billable, and they unlock calendars |
+| API keys and OAuth tokens | OS keychain (`fly-secrets`) | High: billable, and they unlock calendars and connected services |
 | Updater signing key | GitHub Actions secret, release environment only | Critical: it can push code to every install |
 | Integrity of user files outside the data folder | the user's disk | High |
 
@@ -24,12 +24,16 @@ Last reviewed: 2026-10-28. Review it again when a release adds a new data flow, 
                     └──▶ Webview UI (semi-trusted: renders untrusted content)
                                │
             MCP client (Claude Desktop, etc.) ◀── flyonthewall-mcp (read + one label write)
+
+ Ask agent ──(confirm card, user clicks Run)──▶ connector MCP servers (beta, user-added;
+                                                 untrusted in both directions)
 ```
 
 - **Speech is attacker-controlled.** Anyone in a meeting can say text that ends up in a transcript and then in an LLM prompt (prompt injection). The same goes for calendar titles and descriptions.
 - **AI output is untrusted.** It is rendered as Markdown in the webview.
 - **Imported recording folders are untrusted.** This includes `manifest.json` and `note.json` copied in from another machine.
 - **The webview is semi-trusted.** It renders the content above, so the backend must not trust IPC arguments blindly.
+- **Connector servers are untrusted.** A server the user added (beta) can return any text, change its tools after approval, or ask the client for things. With connectors, the Ask agent combines private data, attacker-controllable input and an outbound channel, so every call needs the user's click.
 - **Same-user malware is out of scope.** Anything running as the user can read the data folder and the keychain. We rely on OS full-disk encryption (BitLocker / FileVault) for data at rest.
 
 ## Threats and mitigations
@@ -49,6 +53,10 @@ Last reviewed: 2026-10-28. Review it again when a release adds a new data flow, 
 | T11 | Deleted meetings recoverable from the DB file | Atomic deletes, and SQLite `secure_delete=ON`. | Mitigated. Audio files rely on FDE. |
 | T12 | Recording without other participants' consent (two-party-consent laws) | First-run notice. A non-blocking "Let participants know" strip at record start (copy a chat notice, tick "Participants notified", stored on the meeting). | Mitigated; the user stays responsible for consent. |
 | T13 | Data recoverable from a stolen or lost laptop | Relies on OS full-disk encryption; Settings → Privacy warns when BitLocker / FileVault is clearly off. Optional audio retention (delete recordings after 7–365 days) and "Delete all my data" (data folder + keychain entries) limit what's there to find. | Accepted risk; documented. |
+| T14 | Prompt injection (in speech, notes or a connector result) makes the Ask agent send meeting content out through a connector | Connectors are a beta, off by default. No connector tools on small local models, or when a turn's scope includes Keep-local notes (a tripwire also stops calls if such content appears mid-turn). Every call shows a confirm card with the exact arguments, which the user can edit, and runs only on a click; a call to a tool that may change data also needs a yes in a native dialog that shows the final arguments. Once a connector result is in the turn, no further connector call can be proposed in it. Per-turn call budgets. | Mitigated; the user decides each call. |
+| T15 | A connector server injects instructions through tool descriptions or results, or changes a tool after approval | Tool definitions are pinned by hash; a changed or vanished tool is turned off and its diff shown for review, and the model only ever sees the pinned definition. Hidden characters are removed from descriptions, and schemas containing hidden or over-long text are refused. Results keep text only, must match a declared output schema, are size-capped and wrapped in a fence that marks them as data. Server annotations can only make a tool stricter; tools are treated as writes until the user marks them read-only. The client declares no sampling, roots or elicitation and refuses such requests. | Mitigated |
+| T16 | A connector config or OAuth discovery reaches internal services (SSRF, DNS rebinding, metadata endpoints) | https only. Private, loopback, link-local and reserved addresses are refused in URLs, in DNS answers and at every redirect hop; discovered OAuth endpoints are checked before use; the MCP transport follows no redirects. Sign-in happens in the user's browser with PKCE and a one-shot loopback listener. | Mitigated. Through a system proxy, the proxy resolves names, so only the URL checks apply. |
+| T17 | Connector trust is granted without the user: a webview script or the model adds a server, turns tools on, marks them read-only or accepts a changed tool | Connector state lives in backend-only settings that the webview can't write. Every trust grant happens in the backend after a yes in a native dialog; approvals are bound to a hash of the exact server config. The model can't reach configuration at all. Connector tokens live in the keychain (access and refresh tokens stored separately), and removing a connector or "Delete all my data" deletes them. Local connector programs start without a shell and with a cleared environment. | Mitigated. The beta switch itself is a UI preference: it shows the feature but grants nothing. |
 
 ## Incident response
 

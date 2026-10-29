@@ -5,6 +5,7 @@ mod asr_commands;
 mod calendar_commands;
 mod calendar_defaults;
 mod commands;
+pub mod connectors;
 pub mod embeddings;
 pub mod extraction;
 pub mod gpu;
@@ -117,6 +118,8 @@ pub fn run() {
             }
             privacy::spawn_disk_encryption_check(app_state.data_dir.clone());
             app.manage(app_state);
+            // Connectors (beta): backend-only registry + confirm-card approver.
+            connectors::init(app.handle());
             // Warm the hardware cache off the startup path: detection shells
             // out to nvidia-smi and must never sit in front of first paint.
             {
@@ -285,6 +288,20 @@ pub fn run() {
             privacy::dismiss_wipe_report,
             privacy::delete_all_data,
             privacy::disk_encryption_status,
+            connectors::connectors_overview,
+            connectors::add_connector,
+            connectors::remove_connector,
+            connectors::sync_connector_tools,
+            connectors::save_connector_tools,
+            connectors::accept_connector_tool_change,
+            connectors::sign_in_connector,
+            connectors::sign_out_connector,
+            connectors::set_connector_env,
+            connectors::connector_call_log,
+            connectors::clear_connector_call_log,
+            connectors::pending_connector_calls,
+            connectors::decide_connector_call,
+            connectors::test_connector_tool,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fly on the Wall")
@@ -292,6 +309,8 @@ pub fn run() {
             // The managed `ollama serve` child must not outlive the app.
             if let tauri::RunEvent::Exit = event {
                 ollama::shutdown(&app.state::<state::AppState>());
+                // Stdio connector programs stop with the app.
+                connectors::shutdown(app);
             }
         });
 }

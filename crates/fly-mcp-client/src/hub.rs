@@ -668,6 +668,11 @@ struct LogExtra {
     args_edited: bool,
 }
 
+/// A transport error for the local log: cleaned and short.
+fn short_err(e: &SessionError) -> String {
+    crate::sanitize::clean_capped(&e.to_string(), 300)
+}
+
 fn schema_errors(errs: Vec<String>) -> String {
     format!(
         "The arguments don't match the tool's input schema: {}. Fix them and call again.",
@@ -727,8 +732,14 @@ impl ExternalTools for ConnectorTurn {
         let conn = match self.hub.connection(&entry).await {
             Ok(c) => c,
             Err(e) => {
+                // Error text can carry the server's words: the model gets a
+                // fixed message; details stay in the local log.
+                tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector unreachable");
                 self.log(&route, CallOutcome::Failed, None, LogExtra::default());
-                return Err(format!("Couldn't reach {}: {e}.", route.server_name));
+                return Err(format!(
+                    "Couldn't reach {} right now. Answer without it.",
+                    route.server_name
+                ));
             }
         };
         match self.verify_live(&route, &conn).await {
@@ -737,8 +748,9 @@ impl ExternalTools for ConnectorTurn {
             Err(e) => {
                 self.hub.drop_connection(&route.server_id).await;
                 self.log(&route, CallOutcome::Failed, None, LogExtra::default());
+                tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector tool check failed");
                 return Err(format!(
-                    "Couldn't check {}'s tools: {e}.",
+                    "Couldn't check {}'s tools right now. Answer without it.",
                     route.server_name
                 ));
             }
@@ -795,19 +807,21 @@ impl ExternalTools for ConnectorTurn {
                         ..Default::default()
                     },
                 );
-                // Transport errors can carry server text: fence them too.
-                let r = fence::render(
-                    &route.server_name,
-                    &route.tool,
-                    &fence::ToolResult {
-                        blocks: vec![fence::ResultBlock::Text(e.to_string())],
-                        structured: None,
-                        is_error: true,
-                    },
-                    None,
-                    self.opts.max_result_chars.min(500),
-                );
-                Err(r.text)
+                // Transport errors can carry the server's words: the model
+                // gets a fixed message; details stay in the local log.
+                tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector call failed");
+                Err(format!(
+                    "The call to {} failed ({}). Answer without it.",
+                    route.server_name,
+                    match e {
+                        SessionError::Timeout => "it took too long",
+                        SessionError::AuthRequired => "sign in again in Settings",
+                        SessionError::Unsupported(_) => {
+                            "the service asked for something FOTW doesn't support"
+                        }
+                        _ => "connection or protocol error",
+                    }
+                ))
             }
             Ok(res) => {
                 let r = fence::render(

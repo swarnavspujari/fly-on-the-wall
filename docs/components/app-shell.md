@@ -75,7 +75,7 @@ In `setup` (`lib.rs:68-180`): `AppState::init` (on failure: error dialog, `exit(
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
-| (Tauri) `RunEvent::Exit` | Listens (`lib.rs:291-296`) | — | Calls `ollama::shutdown` only |
+| (Tauri) `RunEvent::Exit` | Listens (`lib.rs`) | — | Calls `ollama::shutdown` and `connectors::shutdown` (stops stdio connector programs) |
 
 ### Settings keys
 None read or written directly. Startup calls `llm_commands::migrate_anthropic_model`, `reset_unseen_cloud_consent` and `privacy::record_pending_wipe` (`lib.rs:111-117`), which own their keys (see [app-settings-consent](app-settings-consent.md), [app-llm](app-llm.md), [app-privacy](app-privacy.md)).
@@ -135,7 +135,7 @@ Startup itself makes no requests. Background workers started here (embeddings �
 - The nav-guard tests call `is_app_url` only. Nothing checks the plugin is registered (`lib.rs:66`), that `on_navigation` returns `false`, that `localhost:1420` is refused in release builds (tests compile with `debug_assertions`), or what happens to new-window requests. `asset:` URLs are allowed unconditionally (`nav_guard.rs:17`), so on macOS/Linux an HTML file under `attachments/` could load in the app window if a link ever got past the frontend guard (inferred).
 - The log-hygiene test is lexical. It passes today while `crates/fly-calendar/src/msgraph.rs:236` logs a calendar id (`cal.id`, the ban list has `cal_id`) and `crates/fly-capture-screen/src/lib.rs:73` logs an error that can embed a window title. It can't see user content inside `{e}` errors. Rotation, the 5-file cap and the panic hook are untested.
 - **Deleted secrets come back (inferred).** The legacy keychain copy runs on every launch and fills any missing key, so for a pre-rebrand user a disconnected calendar or a removed API key is restored at the next start. The test pins "fills missing" and has no "stays deleted" case.
-- **Exit doesn't stop captures.** `RunEvent::Exit` only stops Ollama; an audio or screen capture running at quit isn't stopped or finalized here (inferred; untested).
+- **Exit doesn't stop captures.** `RunEvent::Exit` only stops Ollama and stdio connector programs; an audio or screen capture running at quit isn't stopped or finalized here (inferred; untested).
 - No test checks that `lib.rs` registers every command `api.ts` calls (or the reverse).
 - `ping` has no UI caller.
 

@@ -1300,6 +1300,7 @@ dependencies = [
  "fly-core",
  "fly-diarize",
  "fly-llm",
+ "fly-mcp-client",
  "fly-secrets",
  "fly-storage",
  "futures-util",
