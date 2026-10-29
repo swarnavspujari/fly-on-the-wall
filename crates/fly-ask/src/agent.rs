@@ -17,8 +17,9 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use fly_context::{
-    render, Context, GetEventArgs, GetItemsArgs, GetNoteArgs, ListMeetingsArgs, PassageSource,
-    QueryVector, ReadSegmentsArgs, SearchPassagesArgs, SegmentView,
+    render, Context, GetBriefingArgs, GetEventArgs, GetItemsArgs, GetNoteArgs, ListMeetingsArgs,
+    OpenItemsArgs, PassageSource, QueryVector, ReadSegmentsArgs, SearchPassagesArgs, SegmentView,
+    WhatsChangedArgs,
 };
 use fly_llm::ToolSpec;
 use fly_storage::Storage;
@@ -30,7 +31,7 @@ use crate::evidence::{self, Evidence, SegmentInfo};
 use crate::proposals::{self, Proposal, ProposalRefusal};
 use crate::scope::Resolved;
 use crate::store::StoreAccess;
-use crate::text::{defuse_markers, take_markers};
+use crate::text::defuse_markers;
 use crate::QueryEmbedder;
 
 const OUTSIDE_SCOPE: &str = "That is outside the meetings this question is about.";
@@ -162,14 +163,38 @@ impl<S: StoreAccess, E: QueryEmbedder> ToolState<'_, S, E> {
     }
 
     /// Register the segments whose markers made it into `observation`.
+    /// Register what `observation` really shows: marker and whole text.
     fn register(&self, observation: &str, found: &[SegmentInfo]) {
-        let (_, ids) = take_markers(observation);
         let mut ev = self.evidence.lock().unwrap_or_else(|p| p.into_inner());
-        for id in ids {
-            if let Some(info) = found.iter().find(|f| f.id == id) {
-                ev.insert(info.clone());
-            }
-        }
+        ev.add_shown(observation, found.iter().cloned());
+    }
+
+    /// The scope's meeting ids, for the memory tools' `*_in` (`None` = all
+    /// visible).
+    fn scope_slice(&self) -> Option<Vec<String>> {
+        (self.resolved.kind != crate::scope::ScopeKind::All).then(|| {
+            self.resolved
+                .meetings
+                .iter()
+                .map(|m| m.id.clone())
+                .collect()
+        })
+    }
+
+    fn shown_of(rendered: render::Rendered) -> (String, Vec<SegmentInfo>) {
+        let found = rendered
+            .shown
+            .iter()
+            .map(|c| {
+                evidence::info(
+                    &c.segment,
+                    &c.meeting_id,
+                    &c.meeting_title,
+                    Some(c.started_at),
+                )
+            })
+            .collect();
+        (rendered.text, found)
     }
 
     fn finish(&self, text: String, found: Vec<SegmentInfo>) -> Result<String, String> {
@@ -366,6 +391,35 @@ impl<S: StoreAccess, E: QueryEmbedder> ToolState<'_, S, E> {
                     }
                 }
                 self.finish(render::items(&l), found)
+            }
+            // The memory tools (#108): scoped before their caps, filtered
+            // to the scope again, rendered with exactly the lines they show.
+            fly_context::memory::GET_BRIEFING => {
+                let a: GetBriefingArgs = args(name, input)?;
+                let scope = self.scope_slice();
+                let mut b = ctx.get_briefing_in(&a, scope.as_deref()).map_err(e)?;
+                b.retain_meetings(|m| self.resolved.allows_meeting(m));
+                let (text, found) =
+                    Self::shown_of(render::briefing_rendered(&b, self.observation_chars));
+                self.finish(text, found)
+            }
+            fly_context::memory::OPEN_ITEMS => {
+                let a: OpenItemsArgs = args(name, input)?;
+                let scope = self.scope_slice();
+                let mut o = ctx.open_items_in(&a, scope.as_deref()).map_err(e)?;
+                o.retain_meetings(|m| self.resolved.allows_meeting(m));
+                let (text, found) =
+                    Self::shown_of(render::open_items_rendered(&o, self.observation_chars));
+                self.finish(text, found)
+            }
+            fly_context::memory::WHATS_CHANGED => {
+                let a: WhatsChangedArgs = args(name, input)?;
+                let scope = self.scope_slice();
+                let mut b = ctx.whats_changed_in(&a, scope.as_deref()).map_err(e)?;
+                b.retain_meetings(|m| self.resolved.allows_meeting(m));
+                let (text, found) =
+                    Self::shown_of(render::briefing_rendered(&b, self.observation_chars));
+                self.finish(text, found)
             }
             _ => Err(format!(
                 "There is no tool named {:?}.",

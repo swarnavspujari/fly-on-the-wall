@@ -299,11 +299,12 @@ fn failure_of(e: &LlmError) -> Failure {
     Failure { kind, message }
 }
 
-struct Run {
+struct Run<'a> {
     log: RunLog,
     trace: Trace,
     started: Instant,
     on_device: bool,
+    events: Option<EventSink<'a>>,
 }
 
 struct Outcome {
@@ -330,7 +331,7 @@ impl Outcome {
     }
 }
 
-impl Run {
+impl Run<'_> {
     fn done(mut self, o: Outcome) -> AskAnswer {
         self.log.status = o.status;
         self.log.failure = o.failure.as_ref().map(|f| f.kind);
@@ -357,6 +358,17 @@ impl Run {
             AnswerStatus::Cancelled | AnswerStatus::ModelFailed => String::new(),
             AnswerStatus::Answered | AnswerStatus::Unverified => join(&o.sentences),
         };
+        // The last frame is the answer as displayed (turn 0: validated, with
+        // citations in `sentences`), never the model's raw text.
+        if !text.is_empty() {
+            events::emit(
+                self.events,
+                AskEvent::Frame {
+                    turn: 0,
+                    text: text.clone(),
+                },
+            );
+        }
         AskAnswer {
             status: o.status,
             text,
@@ -469,6 +481,7 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
         },
         started,
         on_device: env.on_device,
+        events: env.events,
     };
     run.log.history_turns = input.history.len() as u32;
     let cancelled = || env.cancel.is_some_and(|c| c.load(Ordering::Relaxed));
@@ -942,6 +955,7 @@ fn requery<S: StoreAccess, E: QueryEmbedder>(
                     budget: tier::Budget {
                         context_chars: budget.context_chars / 2,
                         item_chars: 0,
+                        memory_chars: 0,
                         note_chars: 0,
                         max_note_passages: 0,
                         ..budget

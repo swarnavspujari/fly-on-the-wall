@@ -23,8 +23,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use fly_context::passages::{lexical_score, query_terms};
 use fly_context::{
-    Context, GetItemsArgs, GetNoteArgs, NoteKind, Passage, PassageSource, QueryVector,
-    SearchPassagesArgs, SegmentView,
+    Context, GetItemsArgs, GetNoteArgs, MemoryPrefetch, NoteKind, Passage, PassageSource,
+    QueryVector, SearchPassagesArgs, SegmentView,
 };
 use fly_core::{ItemKind, MeetingItem};
 use fly_storage::Storage;
@@ -225,6 +225,8 @@ pub struct PrefetchStats {
     pub context_chars: u32,
     pub router_fallback: bool,
     pub items_fallback: bool,
+    /// Facts in a memory briefing (a person or a recurring meeting).
+    pub memory_facts: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -647,10 +649,43 @@ pub fn prefetch(
         transcript_text.push('\n');
     }
 
+    // --- memory: a person or a recurring meeting (deterministic) ----------
+    let mut memory_text = String::new();
+    if b.memory_chars > 0 {
+        let opts = MemoryPrefetch {
+            meetings: (r.kind != crate::scope::ScopeKind::All)
+                .then(|| r.meetings.iter().map(|m| m.id.clone()).collect()),
+            people: input.hints.people.clone(),
+            since: input.hints.since,
+            until: input.hints.until,
+            max_facts: 0,
+            max_meetings: 0,
+        };
+        if let Some(mut brief) = ctx.memory_prefetch(input.question, &opts)? {
+            brief.retain_meetings(|m| r.allows_meeting(m));
+            if !brief.facts.is_empty() {
+                let rendered = fly_context::render::briefing_rendered(&brief, b.memory_chars);
+                for c in rendered.shown {
+                    if !shown.iter().any(|x| x.id == c.segment.id) {
+                        shown.push(evidence::info(
+                            &c.segment,
+                            &c.meeting_id,
+                            &c.meeting_title,
+                            Some(c.started_at),
+                        ));
+                    }
+                }
+                memory_text = rendered.text;
+                stats.memory_facts = brief.facts.len() as u32;
+            }
+        }
+    }
+
     // --- extracted items -------------------------------------------------
     let mut items_text = String::new();
     let narrow = !r.wide;
-    if input.hints.items.is_some() || narrow {
+    // A briefing already lists the facts (with their source lines).
+    if memory_text.is_empty() && (input.hints.items.is_some() || narrow) {
         let intent = input.hints.items;
         // Items of the scope's meetings (a folder too), when that fits one
         // query; otherwise everything visible, filtered to the scope below.
@@ -692,17 +727,33 @@ pub fn prefetch(
                 continue;
             }
             let title = titles.get(&item.meeting_id).cloned().unwrap_or_default();
-            let line = evidence::render_item(&item, &title);
-            if used_items + line.len() > b.item_chars {
-                break;
-            }
-            used_items += line.len() + 1;
             let segs = seg_cache
                 .entry(item.meeting_id.clone())
                 .or_insert_with(|| segments_of(s, &item.meeting_id));
+            // An item is a paraphrase: its source lines go under it (unless
+            // already shown above), so a citation of them is checked against
+            // words the model actually read.
+            let mut block = evidence::render_item(&item, &title);
+            block.push('\n');
+            let mut sources = Vec::new();
+            for id in &item.segment_ids {
+                if let Some(seg) = segs.get(id) {
+                    if !shown.iter().any(|x| x.id == *id)
+                        && !sources.iter().any(|x: &&SegmentView| x.id == *id)
+                    {
+                        block.push_str("  ");
+                        block.push_str(&evidence::segment_line(seg));
+                        block.push('\n');
+                        sources.push(seg);
+                    }
+                }
+            }
+            if used_items + block.len() > b.item_chars {
+                break;
+            }
+            used_items += block.len();
             register_item(&item, segs, &title, r, &mut shown);
-            items_text.push_str(&line);
-            items_text.push('\n');
+            items_text.push_str(&block);
             stats.items += 1;
         }
     }
@@ -749,6 +800,11 @@ pub fn prefetch(
         context.push_str(&transcript_text);
         context.push_str("</meeting_transcript>\n");
     }
+    if !memory_text.is_empty() {
+        context.push_str("\n<meeting_metadata>\n");
+        context.push_str(&memory_text);
+        context.push_str("</meeting_metadata>\n");
+    }
     if !items_text.is_empty() {
         context.push_str(
             "\n<meeting_metadata>\nExtracted from these meetings (each cites its source lines):\n",
@@ -762,15 +818,9 @@ pub fn prefetch(
         context.push_str("</user_notes>\n");
     }
 
-    // Exactly what was shown counts as retrieved.
-    let (_, ids) = crate::text::take_markers(&context);
-    let ids: HashSet<String> = ids.into_iter().collect();
+    // Exactly what was shown counts as retrieved: marker and whole text.
     let mut ev = Evidence::default();
-    for info in shown {
-        if ids.contains(&info.id) {
-            ev.insert(info);
-        }
-    }
+    ev.add_shown(&context, shown);
     stats.segments = ev.len() as u32;
     stats.context_chars = context.len() as u32;
     Ok(Prefetch {

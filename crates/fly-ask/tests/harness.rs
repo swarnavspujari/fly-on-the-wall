@@ -761,3 +761,83 @@ async fn links_and_images_never_render() {
         assert!(!s.label.contains("http"), "{}", s.label);
     }
 }
+
+#[tokio::test]
+async fn frames_never_show_markers_and_the_last_one_is_the_answer() {
+    let f = fx();
+    let seen = std::sync::Mutex::new(Vec::new());
+    let sink = |e: fly_ask::AskEvent| seen.lock().unwrap().push(e);
+    // A fake id streams first; the validated answer drops it.
+    let m = Model::new(
+        true,
+        vec![ChatResponse::text_reply(
+            "Ines asked for $8,400 [seg:a01]. It was later raised [seg:a99].",
+        )],
+    );
+    let a = ask(
+        AskEnv {
+            store: &f.s,
+            provider: &m,
+            on_device: true,
+            tier: Tier::S,
+            limits: None,
+            embedder: Some(&Bow),
+            events: Some(&sink),
+            cancel: None,
+        },
+        AskInput {
+            question: "What budget did Ines ask for?",
+            history: &[],
+            scope: AskScope::Meeting(f.launch.clone()),
+            now: now(),
+        },
+    )
+    .await;
+    assert_eq!(a.status, AnswerStatus::Answered);
+    let frames: Vec<(u32, String)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            fly_ask::AskEvent::Frame { turn, text } => Some((*turn, text.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        frames.iter().all(|(_, t)| !t.contains("[seg")),
+        "{frames:?}"
+    );
+    let (turn, last) = frames.last().unwrap();
+    assert_eq!(*turn, 0, "the validated answer comes last");
+    assert_eq!(last, &a.text);
+}
+
+#[tokio::test]
+async fn an_items_source_lines_are_shown_so_citing_it_is_valid() {
+    let f = fx();
+    // Wide scope: the item's line (a03) must be shown under the item for
+    // a citation of it to count.
+    let m = Model::new(
+        true,
+        vec![ChatResponse::text_reply(
+            "Marcus Webb updates the countdown banner by Friday [seg:a03].",
+        )],
+    );
+    let a = run(
+        &f,
+        &m,
+        true,
+        Tier::S,
+        AskScope::All,
+        "What are the open action items?",
+        &[],
+    )
+    .await;
+    let sent = sent_text(&m.requests());
+    assert!(
+        sent.contains("[seg:a03]") && sent.contains("countdown banner on the pricing page"),
+        "{sent}"
+    );
+    assert_eq!(a.status, AnswerStatus::Answered, "{a:?}");
+    assert_eq!(a.sentences[0].status, SentenceStatus::Sourced);
+}

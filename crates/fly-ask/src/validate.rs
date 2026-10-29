@@ -122,12 +122,20 @@ pub fn validate(reply: &str, ev: &Evidence) -> Validated {
     for raw in text::sentences(&clean) {
         let (display, removed) = text::strip_links(&raw.display);
         out.stats.links_removed += removed as u32;
+        // A bare bracketed id the model was shown (`[m07-14]`) cites too.
+        let (display, bare) = text::take_bare_ids(&display, |id| ev.contains(id));
         let display = display.trim().to_string();
         if display.chars().all(|c| !c.is_alphanumeric()) {
             continue;
         }
+        let mut markers = raw.markers.clone();
+        for id in bare {
+            if !markers.contains(&id) {
+                markers.push(id);
+            }
+        }
         let (valid, invalid): (Vec<String>, Vec<String>) =
-            raw.markers.iter().cloned().partition(|id| ev.contains(id));
+            markers.into_iter().partition(|id| ev.contains(id));
         out.stats.invalid_citations += invalid.len() as u32;
         let mut flags = Vec::new();
         if !invalid.is_empty() {

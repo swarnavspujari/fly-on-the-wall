@@ -168,30 +168,107 @@ pub fn strip_links(text: &str) -> (String, usize) {
         s.replace_range(start..close, if image { "" } else { &label });
         removed += 1;
     }
-    let mut words = Vec::new();
-    for w in s.split(' ') {
-        let l = w.to_lowercase();
-        if [
-            "http://",
-            "https://",
-            "www.",
-            "data:",
-            "javascript:",
-            "mailto:",
-            "<a",
-            "<img",
-            "</a",
-            "](",
-        ]
-        .iter()
-        .any(|p| l.contains(p))
-        {
-            removed += 1;
-            continue;
+    // Then every word that could still render, load or link, line by line.
+    let mut lines = Vec::new();
+    for line in s.split('\n') {
+        let mut words = Vec::new();
+        for w in line.split(' ') {
+            if renders(w) {
+                removed += 1;
+                continue;
+            }
+            words.push(w);
         }
-        words.push(w);
+        lines.push(words.join(" "));
     }
-    (tidy_spaces(&words.join(" ")), removed)
+    let mut out = tidy_spaces(&lines.join("\n"));
+    // Belt and braces: anything a word filter missed (a pattern spanning a
+    // space) loses the character that makes it work.
+    for (pat, safe) in [("<a ", "‹a "), ("]: ", "] : ")] {
+        if out.to_lowercase().contains(pat) {
+            removed += 1;
+            out = replace_ci(&out, pat, safe);
+        }
+    }
+    (out, removed)
+}
+
+/// Substrings that make text render as a link, image or embed: Markdown
+/// inline and reference links, HTML that loads or links, URL schemes.
+const RENDERS: &[&str] = &[
+    "](",
+    "][",
+    "<a>",
+    "<a",
+    "</a",
+    "<img",
+    "<iframe",
+    "<svg",
+    "<object",
+    "<embed",
+    "<video",
+    "<audio",
+    "<source",
+    "<link",
+    "<base",
+    "<form",
+    "<image",
+    "<script",
+    "<style",
+    "<meta",
+    "src=",
+    "href=",
+    "srcset=",
+    "action=",
+    "http://",
+    "https://",
+    "ftp://",
+    "file://",
+    "www.",
+    "data:",
+    "javascript:",
+    "vbscript:",
+    "mailto:",
+];
+
+/// One word that would render as (part of) a link, image or embed.
+fn renders(word: &str) -> bool {
+    let l = word.to_lowercase();
+    if RENDERS.iter().any(|p| l.contains(p)) {
+        return true;
+    }
+    // A reference definition `[1]:` or a footnote link `[the brief][1]`.
+    if l.ends_with("]:") {
+        return true;
+    }
+    // Protocol-relative `//host.tld/...`.
+    l.match_indices("//").any(|(i, _)| {
+        let rest = &l[i + 2..];
+        rest.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            && rest
+                .split(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\''))
+                .next()
+                .is_some_and(|host| host.contains('.'))
+    })
+}
+
+/// Case-insensitive replace of an ASCII pattern.
+fn replace_ci(s: &str, pat: &str, with: &str) -> String {
+    let lower = s.to_lowercase();
+    if lower.len() != s.len() {
+        return s.replace(pat, with);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while let Some(j) = lower[i..].find(pat) {
+        out.push_str(&s[i..i + j]);
+        out.push_str(with);
+        i += j + pat.len();
+    }
+    out.push_str(&s[i..]);
+    out
 }
 
 /// Leading list/heading syntax of a line: `- `, `* `, `• `, `1. `, `2) `,
@@ -340,7 +417,74 @@ pub fn sentences(answer: &str) -> Vec<RawSentence> {
             });
         }
     }
+    attach_trailers(out)
+}
+
+/// "Sources: [seg:a] [seg:b]" after an answer: its markers cite the
+/// sentences before it that cite nothing, and the trailer itself isn't a
+/// sentence.
+fn attach_trailers(sentences: Vec<RawSentence>) -> Vec<RawSentence> {
+    let is_trailer = |s: &RawSentence| {
+        let t = s
+            .claim_text
+            .trim()
+            .trim_end_matches(':')
+            .trim()
+            .trim_matches(|c: char| c == '*' || c == '_')
+            .to_lowercase();
+        !s.markers.is_empty()
+            && [
+                "source",
+                "sources",
+                "reference",
+                "references",
+                "citation",
+                "citations",
+                "cited",
+            ]
+            .contains(&t.as_str())
+    };
+    let mut out: Vec<RawSentence> = Vec::new();
+    for s in sentences {
+        if is_trailer(&s) && !out.is_empty() {
+            for prev in out.iter_mut().filter(|p| p.markers.is_empty()) {
+                prev.markers = s.markers.clone();
+            }
+            continue;
+        }
+        out.push(s);
+    }
     out
+}
+
+/// Bracketed bare ids (`[m07-14]`) that `known` accepts — a citation
+/// without the `seg:` prefix — plus the text with them removed. Brackets
+/// holding anything else (`[1]`, `[sic]`) stay.
+pub fn take_bare_ids(text: &str, known: impl Fn(&str) -> bool) -> (String, Vec<String>) {
+    let mut out = String::with_capacity(text.len());
+    let mut ids = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find('[') {
+        let after = &rest[i + 1..];
+        let hit = after.find(']').and_then(|j| {
+            let inner = after[..j].trim();
+            let parts: Vec<&str> = inner.split([',', ';']).map(str::trim).collect();
+            (!inner.is_empty() && parts.iter().all(|p| known(p))).then_some((j, parts))
+        });
+        match hit {
+            Some((j, parts)) => {
+                out.push_str(&rest[..i]);
+                ids.extend(parts.into_iter().map(str::to_string));
+                rest = &after[j + 1..];
+            }
+            None => {
+                out.push_str(&rest[..=i]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    (tidy_spaces(&out), dedup(ids))
 }
 
 /// Phrases a model uses to say the meetings don't answer the question.
@@ -447,6 +591,97 @@ mod tests {
         assert!(s.contains("pilot"));
         assert_eq!(n, 3);
         assert_eq!(strip_links("no links here").1, 0);
+    }
+
+    /// What a renderer would turn into a link, image or embed (an
+    /// independent list, checked against everything `strip_links` returns).
+    fn renders_anything(text: &str) -> bool {
+        let l = text.to_lowercase();
+        [
+            "](",
+            "][",
+            "]: ",
+            "<a ",
+            "<a>",
+            "<img",
+            "<iframe",
+            "<svg",
+            "<object",
+            "<embed",
+            "<video",
+            "<audio",
+            "<source",
+            "<link",
+            "<base",
+            "<form",
+            "src=",
+            "href=",
+            "srcset=",
+            "http://",
+            "https://",
+            "ftp://",
+            "file://",
+            "www.",
+            "data:",
+            "javascript:",
+            "vbscript:",
+        ]
+        .iter()
+        .any(|p| l.contains(p))
+            || l.match_indices("//").any(|(i, _)| {
+                let rest = &l[i + 2..];
+                rest.chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+                    && rest
+                        .split(char::is_whitespace)
+                        .next()
+                        .is_some_and(|h| h.contains('.'))
+            })
+    }
+
+    #[test]
+    fn every_link_form_is_removed() {
+        for t in [
+            "Offline mode is the top ask. See [the brief][1].\n\n[1]: //docs.example.invalid/brief",
+            "SMS reminders came up (img src=https://img.example.invalid/t.png).",
+            "Offline mode. <svg onload=go()><image href=\"",
+            "Offline mode. <iframe src=\"",
+            "Offline mode. ![status](htt",
+            "See <a href=x>here</a> or ftp://files.example.invalid and file://c/x",
+            "Visit www.example.invalid, data:text/html,hi or javascript:go() / vbscript:x",
+            "Protocol relative //cdn.example.invalid/p.png here",
+            "<object data=x> <embed src=x> <video> <audio> <source> <link> <base> <form action=x>",
+        ] {
+            let (s, n) = strip_links(t);
+            assert!(
+                !renders_anything(&s),
+                "left something in {s:?} (from {t:?})"
+            );
+            assert!(n > 0, "{t}");
+        }
+        // Ordinary text survives.
+        let (s, n) = strip_links("Ratio 3/4 and dates 10/27, a [note] and e.g. 1.5.");
+        assert_eq!(
+            (s.as_str(), n),
+            ("Ratio 3/4 and dates 10/27, a [note] and e.g. 1.5.", 0)
+        );
+    }
+
+    #[test]
+    fn sources_trailers_and_bare_ids_cite() {
+        let s = sentences(
+            "They keep their price for twelve months. Then the new tiers apply.\n\nSources: [seg:m07-16]",
+        );
+        assert_eq!(s.len(), 2);
+        assert!(s.iter().all(|x| x.markers == vec!["m07-16"]));
+        let known = |id: &str| id == "m07-14" || id == "m07-15";
+        let (t, ids) = take_bare_ids(
+            "Greta sends it by Tuesday [m07-14]. See [1] and [m07-15, m07-14].",
+            known,
+        );
+        assert_eq!(ids, vec!["m07-14", "m07-15"]);
+        assert_eq!(t, "Greta sends it by Tuesday. See [1] and.");
     }
 
     #[test]

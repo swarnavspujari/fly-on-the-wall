@@ -105,8 +105,18 @@ fn looks_truncated(sent_tokens: u32, evaluated: Option<u32>) -> bool {
 }
 
 /// What the UI may show of a reply in progress.
+///
+/// No citation markers: they aren't validated yet (a model may write ids it
+/// was never shown, or half an id mid-stream). The validated answer, with
+/// its citations, arrives as the final frame (`turn` 0).
 pub fn frame(raw: &str) -> String {
     let t = crate::text::strip_reasoning(raw);
+    let t = crate::text::take_markers(&t).0;
+    // A marker still being written ("… [seg:m09-1") isn't one yet.
+    let t = match t.rfind("[seg") {
+        Some(i) if !t[i..].contains(']') => t[..i].trim_end().to_string(),
+        _ => t,
+    };
     crate::text::strip_links(&t).0
 }
 

@@ -58,6 +58,8 @@ pub struct Budget {
     pub context_chars: usize,
     /// Extracted items in the prefetch, in chars.
     pub item_chars: usize,
+    /// A memory briefing (a person or a recurring meeting), in chars.
+    pub memory_chars: usize,
     /// The user's own notes (scratchpad) in the prefetch, in chars.
     pub note_chars: usize,
     /// Longest single excerpt, in chars (spec §4.2a #10: clipped passages
@@ -127,6 +129,7 @@ impl Tier {
             max_request_tokens: l.request_tokens,
             context_chars: context_chars.min(cap_chars),
             item_chars,
+            memory_chars: item_chars + item_chars / 2,
             note_chars,
             passage_clip_chars: clip,
             max_note_passages: notes,

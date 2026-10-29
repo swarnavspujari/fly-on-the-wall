@@ -145,6 +145,21 @@ impl Evidence {
         &self.order
     }
 
+    /// Add each of `found` that `sent` (one request's text) really showed:
+    /// its `[seg:ID]` marker AND its whole text (whitespace-collapsed). A
+    /// clipped line, or an id quoted without its words, doesn't count — the
+    /// model can only cite what it read.
+    pub fn add_shown(&mut self, sent: &str, found: impl IntoIterator<Item = SegmentInfo>) {
+        let hay = collapse(sent);
+        for info in found {
+            let marker = format!("[seg:{}]", info.id);
+            let words = collapse(&info.text);
+            if !words.is_empty() && hay.contains(&marker) && hay.contains(&words) {
+                self.insert(info);
+            }
+        }
+    }
+
     /// Register a passage's lines.
     pub fn add_passage(&mut self, p: &Passage) {
         let Some(mid) = &p.meeting_id else { return };
@@ -171,6 +186,11 @@ pub fn info(
         end_ms: s.end_ms,
         text: s.text.clone(),
     }
+}
+
+/// Whitespace runs as one space.
+pub fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Meeting content as it may appear in a prompt.
