@@ -52,10 +52,13 @@ import {
   providerLabel,
   providerVendor,
   qualityHelper,
+  serverChangeNeedsKey,
+  serverChanged,
   type AsrDraft,
   type MadeOn,
   type Quality,
   type SectionId,
+  type SettingsFocus,
 } from "../settingsModel";
 
 interface Props {
@@ -66,7 +69,7 @@ interface Props {
   /** Deep-link from the transcribe error: "engine" opens Transcripts › More
    *  options scrolled to "Models on this computer"; "groq" scrolls to the
    *  "Made on" row, where Groq is one click away. */
-  initialFocus?: "engine" | "groq" | null;
+  initialFocus?: SettingsFocus | null;
   onClose: () => void;
 }
 
@@ -117,6 +120,11 @@ const CALENDAR_NAMES: Record<string, string> = {
 
 const MONO_KEY: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: "12px" };
 const SMALL: CSSProperties = { margin: 0, fontSize: 12, lineHeight: 1.5 };
+
+/** After a save that moved a cloud provider to another server, when the
+ *  consent dialog for that server was declined. */
+const NEW_SERVER_NOT_ALLOWED =
+  "Saved. Nothing is sent to the new server until you allow it (Test asks again).";
 const MONO_SMALL: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 11 };
 const LIST_ROW =
   "flex items-center justify-between gap-3 border-t border-line-2 py-2 first:border-t-0";
@@ -301,7 +309,7 @@ export default function SettingsModal({
   const [advOpen, setAdvOpen] = useState<Partial<Record<SectionId, boolean>>>(() => ({
     transcripts: initialFocus === "engine",
   }));
-  const [flash, setFlash] = useState<"engine" | "groq" | null>(null);
+  const [flash, setFlash] = useState<SettingsFocus | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const spyLock = useRef(0);
@@ -417,16 +425,22 @@ export default function SettingsModal({
   // Deep link: once settings have loaded (the target row is rendered),
   // bring it into view a single time — not on every later refresh.
   useEffect(() => {
-    if (!initialFocus || !settings || didFocusRef.current) return;
+    const keyRow = initialFocus === "llm-key";
+    if (!initialFocus || !(keyRow ? llm : settings) || didFocusRef.current) return;
     didFocusRef.current = true;
     const el = scrollRef.current?.querySelector<HTMLElement>(
-      initialFocus === "groq" ? "#settings-row-groq" : "#settings-row-engine",
+      keyRow
+        ? "#settings-row-llm"
+        : initialFocus === "groq"
+          ? "#settings-row-groq"
+          : "#settings-row-engine",
     );
     spyLock.current = Date.now();
-    setActive("transcripts");
+    setActive(keyRow ? "ai" : "transcripts");
     setFlash(initialFocus);
     el?.scrollIntoView({ block: "center" });
-  }, [initialFocus, settings]);
+    if (keyRow) el?.querySelector<HTMLInputElement>('input[type="password"]')?.focus();
+  }, [initialFocus, settings, llm]);
 
   const visible = matchSections(query);
   const visibleIds = new Set(visible.map((s) => s.id));
@@ -569,7 +583,7 @@ export default function SettingsModal({
         r.processed === 0
           ? "All meetings are already extracted."
           : allFailed
-            ? `Couldn't index ${r.processed === 1 ? "the meeting" : `any of the ${r.processed} meetings`}. ` +
+            ? `Couldn't extract from ${r.processed === 1 ? "the meeting" : `any of the ${r.processed} meetings`}. ` +
               "Check Ask and Enhance in Settings, then try again."
             : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
               (r.failed ? `, ${r.failed} failed` : "") +
@@ -698,6 +712,13 @@ export default function SettingsModal({
       });
   };
 
+  /** Whether the Base URL being saved points the provider at another server
+   *  than the saved one (the backend then asks for consent again). */
+  const movedServer = () => {
+    const saved = llm?.providers.find((p) => p.id === llmProvider);
+    return !!saved && !saved.is_local && serverChanged(llmProvider, saved.base_url, llmBaseUrl);
+  };
+
   const saveLlm = async () => {
     if (!(await confirmCloudProvider(llmProvider))) {
       setLlmTest("Not saved. Cloud processing wasn't confirmed.");
@@ -709,6 +730,7 @@ export default function SettingsModal({
     // guided swap (llm state is reloaded below).
     const ollamaInfo = llm?.providers.find((p) => p.id === "ollama");
     const prevModel = (ollamaInfo?.model ?? ollamaInfo?.default_model ?? "").trim() || null;
+    const moved = movedServer();
     try {
       await api.setLlmSettings({
         provider: llmProvider,
@@ -719,6 +741,10 @@ export default function SettingsModal({
       setLlmKey("");
       await loadLlm();
       setLlmTest("Saved.");
+      // A new server clears the provider's consent: ask now, naming it.
+      if (moved && !(await confirmCloudProvider(llmProvider))) {
+        setLlmTest(NEW_SERVER_NOT_ALLOWED);
+      }
       // Guided swap: a just-saved Ollama model that isn't installed would
       // fail at first use — offer the pull (with progress) right here.
       if (llmProvider === "ollama") {
@@ -780,6 +806,7 @@ export default function SettingsModal({
     if (!(await confirmCloudProvider(llmProvider))) return;
     setLlmBusy(true);
     setLlmTest("Testing…");
+    const moved = movedServer();
     try {
       await api.setLlmSettings({
         provider: llmProvider,
@@ -788,6 +815,11 @@ export default function SettingsModal({
         api_key: llmKey ? llmKey : null,
       });
       setLlmKey("");
+      if (moved && !(await confirmCloudProvider(llmProvider))) {
+        setLlmTest(NEW_SERVER_NOT_ALLOWED);
+        await loadLlm();
+        return;
+      }
       setLlmTest(await api.testLlmConnection());
       await loadLlm();
     } catch (e) {
@@ -1591,6 +1623,20 @@ export default function SettingsModal({
                                 onChange={(e) => setLlmBaseUrl(e.target.value)}
                               />
                             </div>
+                            {provider &&
+                              serverChangeNeedsKey(
+                                provider.id,
+                                provider.has_key,
+                                provider.base_url,
+                                llmBaseUrl,
+                              ) &&
+                              !llmKey && (
+                                <p className="mt-2 text-warning-text" style={SMALL}>
+                                  Your saved key only goes to the server it was entered for. To use
+                                  this one, enter the {providerVendor(provider.id)} API key again,
+                                  then save.
+                                </p>
+                              )}
                             <div className="mt-2 flex items-center gap-2">
                               <Button
                                 variant="primary"
@@ -1652,6 +1698,8 @@ export default function SettingsModal({
                       }
                     >
                       <SettingsRow
+                        id="settings-row-llm"
+                        className={flash === "llm-key" ? "fly-settings-flash" : undefined}
                         title="Runs on"
                         badge={
                           providerCloud && (
@@ -2109,10 +2157,10 @@ export default function SettingsModal({
                           {backfillBusy
                             ? "Extracting…"
                             : backfillPending === 0
-                              ? "All meetings indexed"
+                              ? "All meetings extracted"
                               : backfillPending === null
-                                ? "Index older meetings"
-                                : `Index ${backfillPending} meeting${backfillPending === 1 ? "" : "s"}`}
+                                ? "Extract from older meetings"
+                                : `Extract from ${backfillPending} meeting${backfillPending === 1 ? "" : "s"}`}
                         </Button>
                       }
                     >

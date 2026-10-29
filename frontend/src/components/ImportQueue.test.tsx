@@ -41,7 +41,11 @@ async function flush() {
 
 async function mount(
   s: ImportStaged,
-  over: { pipelineError?: string | null; onRetry?: () => void } = {},
+  over: {
+    pipelineError?: string | null;
+    onRetry?: () => void;
+    onFilesChange?: (before: ImportFile[], after: ImportFile[]) => void;
+  } = {},
 ) {
   const onTranscribe = vi.fn();
   host = document.createElement("div");
@@ -57,6 +61,7 @@ async function mount(
         onTranscribe={onTranscribe}
         onRetry={over.onRetry ?? (() => {})}
         onCancel={() => {}}
+        onFilesChange={over.onFilesChange}
       />,
     ),
   );
@@ -107,6 +112,19 @@ describe("ImportQueue per-file failures", () => {
     );
     await click(button("Transcribe 2 files"));
     expect(onTranscribe).toHaveBeenCalledWith(["a", "c"]);
+  });
+
+  it("removing a failed file reports the queue before and after (the title follows)", async () => {
+    const onFilesChange = vi.fn();
+    // the first file failed to convert, so it can be removed
+    await mount(staged([file("a", { convert_error: CAUSE }), file("b"), file("c")]), {
+      onFilesChange,
+    });
+    await click(host!.querySelector('button[aria-label="Remove a.mp4"]'));
+    expect(onFilesChange).toHaveBeenCalledTimes(1);
+    const [before, after] = onFilesChange.mock.calls[0] as [ImportFile[], ImportFile[]];
+    expect(before.map((f) => f.id)).toEqual(["a", "b", "c"]);
+    expect(after.map((f) => f.id)).toEqual(["b", "c"]);
   });
 
   it("a failed file can be removed from the queue", async () => {

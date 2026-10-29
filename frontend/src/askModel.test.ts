@@ -22,7 +22,11 @@ describe("describeAskError", () => {
       "openai",
       "OpenAI isn't confirmed yet",
     ],
-    ["no API key stored for nim — add one in Settings", "nim", "No API key for NVIDIA"],
+    [
+      "No API key for NVIDIA yet. Add one in Settings › Ask and Enhance.",
+      "nim",
+      "No API key for NVIDIA",
+    ],
     [
       "authentication failed — check the API key",
       "anthropic",
