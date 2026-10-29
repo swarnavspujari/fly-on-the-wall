@@ -34,11 +34,15 @@
                                      can't convert screen-walkthrough.mp4:
                                      that row shows its cause, the others
                                      convert; "Retry failed file" succeeds
-     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "none"
+     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "lost" | "none"
                                    → with fotwMockRecording, the capture's
                                      warnings are the exact backend sentence
                                      for that case (recording bar chips;
-                                     "worst": two warnings + a 1 h timer)
+                                     "worst": two warnings + a 1 h timer;
+                                     "lost": audio lost on both sides)
+     fotwMockAudioLost = "1"       → Stop emits recording:audio_lost (1.2 s
+                                     mic, 0.4 s system): the "Part of the last
+                                     recording is missing" notice
      fotwMockNoAttendees = "1"     → Record starts with no attendees, as with
                                      no calendar event (speaker card, typed)
      fotwMockConsentReset = "1"    → no cloud consent recorded (as after the

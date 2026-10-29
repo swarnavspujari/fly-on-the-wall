@@ -1,7 +1,7 @@
 # Recording bar and live pane (`ui-recording-bar`)
 
 > Layer: frontend feature. Described at main `82b7edf` (v2.4.0).
-> In flight: None.
+> In flight: recording resilience (branch `claude/recording-resilience-09f112`): the "Audio lost" chip below.
 
 ## Purpose
 The one-row bar pinned above every view while audio is recording: indicator and timer, the note's title, the You / Others health chips built from the backend's capture warnings, the recording notice (copy, "Participants notified", start-of-recording reminder), Pause/Resume and Stop. Also the live, rough transcript pane shown in the recording note's Transcript view.
@@ -17,21 +17,22 @@ The one-row bar pinned above every view while audio is recording: indicator and 
 |---|---|---|
 | `RecordingBar` (default) | `RecordingBar.tsx:329` | Props: `status: RecordingStatus`, `noteTitle`, `screenActive?`, `screenSource?`, `onPause`, `onResume`, `onStop`, `onOpenNote`, `onOpenPrivacySettings?`. Renders nothing unless `status.active` (`:344`). |
 | `fmtElapsed(ms)` | `RecordingBar.tsx:32-40` | `m:ss` or `h:mm:ss`; also used by `LivePane`. |
-| `classifyWarning(text)` | `recordingBar.ts:35-49` | → `{side, label, text, privacyPane}`. |
+| `classifyWarning(text)` | `recordingBar.ts` | → `{side, label, text, privacyPane}`. |
 | `healthChips(warnings, paused)` | `recordingBar.ts:64-76` | Always two chips, You first. No warning: You = `unmonitored`, Others = `ok` (both `paused` while paused). With warnings: `"Others · <first label> +N"`. |
 | `REMIND_NOTICE_KEY`, `remindNoticeOn` | `recordingBar.ts:9-14` | `ui.recording.remind_notice`; on unless the stored value is `"false"`. |
 | `MACOS_PRIVACY_PANE` | `recordingBar.ts:18` | `"Screen & System Audio Recording"`, a copy of `PRIVACY_PANE` (`crates/fly-audio/src/tap_messages.rs:15`). |
 | `LivePane` (default) | `LivePane.tsx:23` | Prop: `meetingId`. Mounted by the Editor while this note records (`Editor.tsx:1442-1446`). |
 
-**Warning classifier.** Every warning the backend sends today concerns the Others (system audio) side. Labels are tested in this order (`recordingBar.ts:36-47`):
+**Warning classifier.** Most warnings concern the Others (system audio) side; lost audio names its side. Labels are tested in this order (`recordingBar.ts` `classifyWarning`):
 
 | Chip label | Matched by | Backend sentence | Rust source | When |
 |---|---|---|---|---|
 | Blocked by macOS (+ "Open Settings") | contains `Screen & System Audio Recording`, or `recording only silence` | "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, … Open System Settings → Privacy & Security → Screen & System Audio Recording …" | `crates/fly-audio/src/tap_messages.rs:15`, `:25-35`; raised by `coreaudio_tap.rs:154-167` through `CaptureHealth` (`cpal_backend.rs:153-158`) | macOS, re-checked every poll |
+| Audio lost (You side if it says `microphone`, else Others) | `was lost` | "Your microphone has gaps: 1.2 s was lost because the computer was too busy (most recently at 12:34). The rest is still recording — closing heavy apps can help." / "The other participants' audio has gaps: …" | `crates/fly-audio/src/cpal_backend.rs` `lost_audio_warning`, raised by `CaptureHealth::warnings` once a channel lost ≥ 50 ms (ring overflow or WASAPI capture-timestamp gap); stays for the rest of the recording | Any OS (device-level gaps: Windows only), every poll |
 | Not recorded | `couldn't start` (ASCII apostrophe) | "System audio capture couldn't start (<cause>) — only your microphone is being recorded, so the other participants won't be in this recording." | `crates/fly-audio/src/cpal_backend.rs:359-362` | Any OS, set once at start |
 | Volume at 0% | `volume is at 0%` | "System volume is at 0% — the other participants' audio will record as silence. Raise your system volume." | `cpal_backend.rs:84-88` | Windows only (`cfg`), every poll |
 | Output muted | `muted` | "System output is muted — the other participants' audio will record as silence. Unmute your speakers." | `cpal_backend.rs:77-82` | Windows only, every poll |
-| Check your mic (You side) | `microphone` but not `only your microphone` | none today: this branch is unreachable with current backend text | — | — |
+| Check your mic (You side) | `microphone` but not `only your microphone` | none today: lost-audio sentences match "Audio lost" first | — | — |
 | Check audio | anything else | — | — | — |
 
 The backend lists startup ("session") warnings before the per-poll ones (`src-tauri/src/recording.rs:47-58`), so the chip names the loopback failure first.
@@ -54,7 +55,7 @@ The bar has no Tauri events of its own: `status` comes from App's 1 s poll, so a
 | Key (or prefix) | Read / write | Webview-settable? (`is_webview_setting_key`) | Meaning |
 |---|---|---|---|
 | `ui.recording.remind_notice` | R `RecordingBar.tsx:62` (written by `RemindNoticeRow`, [ui-notices](ui-notices.md)) | yes (`ui.`) | Show the "Let participants know" reminder at start |
-| devMock toggles | — | n/a | `fotwMockRecording`, `fotwMockRecWarning` (`none` / `muted` / `volume` / `loopback` / `macos` / `worst`), `fotwMockTapDenied`, `fotwMockNoAttendees` |
+| devMock toggles | — | n/a | `fotwMockRecording`, `fotwMockRecWarning` (`none` / `muted` / `volume` / `loopback` / `macos` / `worst` / `lost`), `fotwMockTapDenied`, `fotwMockNoAttendees`, `fotwMockAudioLost` (Stop emits `recording:audio_lost`, shown by [ui-notices](ui-notices.md)) |
 
 ### Database
 None directly. "Participants notified" is stored per meeting behind `get_meeting_privacy` / `set_participants_notified` (see [app-privacy](app-privacy.md)).
@@ -81,10 +82,10 @@ None.
 - Nothing in the bar gates the capture; the notice controls are advice (THREAT_MODEL T12; `RecordingBar.tsx:42-45`).
 - The reminder is on unless explicitly turned off; an unreadable setting or privacy row means "remind" (`recordingBar.ts:11-14`, `RecordingBar.tsx:59-71`). Ticking "Participants notified" closes it.
 - The reminder never takes focus and only closes on Esc from inside it; closing moves focus to the notice button (`RecordingBar.tsx:251-273`, `:345-350`).
-- The You chip never claims the mic is fine: nothing measures it yet (`recordingBar.ts:5-6`, `:69-71`).
+- The You chip never claims the mic is fine: its level isn't measured yet (`recordingBar.ts:5-6`). It does turn to "Audio lost" when the capture dropped mic audio.
 - A warning's popover is an Esc layer with dialog focus; if the warning clears while it's open, focus returns to the chip (`RecordingBar.tsx:146-155`).
 - "Open Settings" appears only for a warning naming the macOS privacy pane and only when App passes the handler (macOS) (`RecordingBar.tsx:231`, `App.tsx:988-992`).
-- The classifier keys on backend sentences. Neither side has a test that pins them: no Rust test covers the `cpal_backend.rs` strings, and the `tap_messages.rs` test checks `PRIVACY_PANE` against its own constant.
+- The classifier keys on backend sentences. Only the lost-audio sentence is pinned on both sides (`lost_audio_warning_matches_the_recording_bar_classifier` in Rust, `MIC_LOST`/`SYSTEM_LOST` in `recordingBar.test.ts`); the mute / volume / loopback strings have no Rust test, and the `tap_messages.rs` test checks `PRIVACY_PANE` against its own constant.
 - The Stop label reads "Transcribe when I stop" from `get_asr_settings`, re-read on hover and focus (`RecordingBar.tsx:103-128`, `:462-472`); App decides whether to transcribe from its own copy, refreshed when Settings closes (`App.tsx:217-226`, `:725`).
 - The live pane catches up on a status emitted before it mounted, keeps at most 200 segments sorted by start, and ignores other meetings (`LivePane.tsx:28-57`).
 
@@ -92,7 +93,7 @@ None.
 | Kind | File | Tests | Covers |
 |---|---|---|---|
 | vitest (jsdom, devMock backend) | `frontend/src/components/RecordingBar.test.tsx` | 17 | One-row bar, Stop label, chips and popovers, focus return, notice copy, notified state, reminder rules, Pause/Resume |
-| vitest (node) | `frontend/src/recordingBar.test.ts` | 13 | Classifier labels, chip tones, remind default |
+| vitest (node) | `frontend/src/recordingBar.test.ts` | 15 | Classifier labels (incl. lost audio on each side), chip tones, remind default |
 | vitest (jsdom, devMock) | `frontend/src/App.test.tsx` | 1 (mounts `LivePane` while recording) | Only with a `scrollIntoView` stub; nothing asserted about the pane |
 
 **Known gaps:**

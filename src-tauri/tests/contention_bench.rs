@@ -8,8 +8,9 @@
 //! - `embed`: a full re-embed: batches of 16 chunks through the app's
 //!   `embeddings::embed_raw` against the local Ollama, back to back;
 //! - `asr`: a queued transcription: the real `pipeline::run_with`
-//!   (whisper.cpp + VAD + sherpa diarization, CPU) over an ~18 min meeting,
-//!   restarted whenever it finishes;
+//!   (whisper.cpp + VAD + sherpa diarization, CPU) over a ~4 min meeting,
+//!   restarted whenever it finishes (so diarization runs during the
+//!   recording too, and a cancel at the end lands within one meeting);
 //! - `ask`: an Ask every 30 s through the shipped prompt
 //!   (`llm_commands::build_ask_system`) and the Ollama provider;
 //! - `disk`: ~150 MB/s of file writes with periodic fsync on the same volume;
@@ -115,13 +116,13 @@ fn git_sha() -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
-/// An ~18 min two-voice meeting for the ASR load: the committed TTS fixture
+/// A ~4 min two-voice meeting for the ASR load: the committed TTS fixture
 /// repeated. Built once into the scratch dir.
 fn long_meeting_wav(dir: &Path) -> (PathBuf, u64) {
-    let out = dir.join("long-meeting.wav");
+    let out = dir.join("queued-meeting.wav");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/meeting-fixture.wav");
     let (one, rate) = fly_audio::mix::read_wav_mono(&fixture).expect("fixture wav");
-    let reps = 40;
+    let reps = 9;
     let duration_ms = one.len() as u64 * reps * 1000 / rate as u64;
     if !out.exists() {
         let mut all = Vec::with_capacity(one.len() * reps as usize);
@@ -675,12 +676,18 @@ fn contention_bench() {
     if let Some(id) = asr_meeting.lock().unwrap().clone() {
         state.cancel_requests.lock().unwrap().insert(id);
     }
+    // Sidecars aren't killed when their future is dropped, so let every load
+    // finish its current unit (the pipeline honours the cancel between
+    // batches; a ~4 min meeting bounds that) — never leave a whisper running
+    // into the next measurement — then shut the runtime down without waiting
+    // on anything stuck.
     rt.block_on(async {
-        let _ = tokio::time::timeout(Duration::from_secs(60), live_task).await;
+        let _ = tokio::time::timeout(Duration::from_secs(120), live_task).await;
         for t in tasks {
-            let _ = tokio::time::timeout(Duration::from_secs(120), t).await;
+            let _ = tokio::time::timeout(Duration::from_secs(420), t).await;
         }
     });
+    rt.shutdown_timeout(Duration::from_secs(5));
     for t in threads {
         let _ = t.join();
     }
