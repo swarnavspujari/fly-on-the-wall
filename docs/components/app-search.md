@@ -16,7 +16,7 @@ Search-as-you-type over notes and transcripts. `search` is SQLite FTS5: a keywor
 
 | Item | Line | Used by |
 |---|---|---|
-| `EMBED_MODEL` = `fly_storage::embeddings::EMBEDDINGGEMMA` (`"embeddinggemma:300m"`; its similarity floor lives with it in fly-storage) | 25 | worker, `search_semantic`, `tests/search_eval.rs` |
+| `EMBED_MODEL`, `doc_prompt`, `query_prompt`, re-exported from `fly_core::embed_prompt` (`"embeddinggemma:300m"`, shared with the retrieval eval; `fly_storage::embeddings::EMBEDDINGGEMMA` is the same tag, and its similarity floor lives in fly-storage) | 25 | worker, `search_semantic`, `tests/search_eval.rs` |
 | `doc_prompt(title, text)` → `"title: {title} \| text: {text}"`; `query_prompt(q)` → `"task: search result \| query: {q}"` | 37-46 | worker, `embed_query`, `search_eval` |
 | `embed_raw(root, &[String]) -> Result<Vec<Vec<f32>>, String>`: `POST {root}/api/embed`, 300 s timeout, count-checked | 49-77 | worker, `embed_query`, `search_eval` |
 | `embed_query(&AppState, q) -> Option<Vec<f32>>`: only if `GET {root}/api/version` answers; never spawns a server or pulls | 83-96 | `search_semantic` |

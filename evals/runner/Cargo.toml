@@ -1,0 +1,37 @@
+[package]
+name = "fly-evals"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Fly on the Wall system evals: retrieval, Ask contract and local benchmarks (immutable to AI agents; see evals/README.md)"
+
+# The scorer. It reads the fixtures and thresholds next to it (evals/) and
+# talks to the app only through public crate APIs. It never constructs a
+# real LLM provider (build_provider stays the only constructor): the Ask
+# contract runs against a request-recording mock.
+#
+# Dependencies are pinned here, not inherited from the root
+# [workspace.dependencies], so the root manifest (which the eval lock
+# doesn't cover) can't redirect what the scorer links. evals.yml also checks
+# that every package in this crate's graph is one of the five path crates
+# below or comes from crates.io.
+[dependencies]
+fly-core = { path = "../../crates/fly-core" }
+fly-storage = { path = "../../crates/fly-storage" }
+fly-context = { path = "../../crates/fly-context" }
+fly-llm = { path = "../../crates/fly-llm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "time"] }
+# The real-embedder retrieval mode talks to Ollama (already in the graph via fly-llm).
+reqwest = { version = "0.13", features = ["json"] }
+toml = "1"
+tempfile = "3"
+futures-util = "0.3"
+sha2 = "0.10"
+# Read-only look at the settings table (corpus.rs); same version as fly-storage.
+rusqlite = { version = "0.40", features = ["bundled"] }

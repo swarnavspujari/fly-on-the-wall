@@ -1,0 +1,14 @@
+{
+  "why": "Attributes Elena's action item to Marcus.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Marcus is sending the Harrowgate redlines by Monday [seg:m05-14]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

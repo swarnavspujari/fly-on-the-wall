@@ -105,8 +105,9 @@ pub struct VectorResults {
     pub best_score: Option<f32>,
 }
 
-/// The app's embedding model (EmbeddingGemma 300M via Ollama).
-pub const EMBEDDINGGEMMA: &str = "embeddinggemma:300m";
+/// The app's embedding model (EmbeddingGemma 300M via Ollama): the same tag
+/// as `fly_core::embed_prompt::EMBED_MODEL`, which the app and the eval use.
+pub const EMBEDDINGGEMMA: &str = fly_core::embed_prompt::EMBED_MODEL;
 
 /// Cosine below which a chunk embedded by `model` isn't a match. With no
 /// floor every query "finds" the nearest chunks however unrelated, so a

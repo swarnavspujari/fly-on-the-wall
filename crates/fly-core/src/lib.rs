@@ -6,6 +6,7 @@
 
 pub mod align;
 pub mod crosstalk;
+pub mod embed_prompt;
 pub mod enhance;
 pub mod model;
 pub mod prompt_profile;

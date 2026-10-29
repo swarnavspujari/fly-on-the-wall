@@ -1,0 +1,44 @@
+{
+  "id": "m09",
+  "title": "Board prep: Q3 numbers",
+  "started_at": "2026-10-05T17:00:00Z",
+  "folder": null,
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Sam Achterberg", "email": "sam@quillmark.example" },
+    { "name": "Greta Holm", "email": "greta@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Sam Achterberg", "spk_1": "Greta Holm" },
+  "scratchpad": "me: Atlas slide (date, pricing, webinar list)",
+  "segments": [
+    ["m09-01", "spk_0", "0:05", "Board meeting is Friday. Greta, let's start with the headline numbers."],
+    ["m09-02", "spk_1", "0:11", "Q3 closed well. We grew about eleven percent over the quarter."],
+    ["m09-03", "spk_1", "0:17", "Annual recurring revenue at the end of September is three point two million."],
+    ["m09-04", "spk_0", "0:24", "And retention?"],
+    ["m09-05", "spk_1", "0:26", "Net revenue retention is one hundred and eight percent, mostly from seat expansion."],
+    ["m09-06", "spk_0", "0:33", "What's the runway at current burn?"],
+    ["m09-07", "spk_1", "0:36", "Twenty two months, without counting the Q4 hires."],
+    ["m09-08", "mic", "0:42", "We should be clear about the Q4 hiring plan, the board will ask."],
+    ["m09-09", "spk_0", "0:47", "What's the number?"],
+    ["m09-10", "mic", "0:49", "Six hires. Four in engineering and two in support."],
+    ["m09-11", "spk_0", "0:54", "Fine, that's what we present. Six hires, and the runway with them is still over eighteen months?"],
+    ["m09-12", "spk_1", "1:01", "Nineteen months with all six. I'll show both numbers."],
+    ["m09-13", "spk_1", "1:06", "I'll finalize the deck by Thursday morning."],
+    ["m09-14", "spk_0", "1:10", "Maya, can you do one slide on the Atlas launch?"],
+    ["m09-15", "mic", "1:13", "Yes, launch date, pricing and the first customers on the webinar list."]
+  ],
+  "items": [
+    { "kind": "figure", "text": "ARR at the end of Q3: $3.2M", "segments": ["m09-03"] },
+    { "kind": "figure", "text": "Net revenue retention: 108%", "segments": ["m09-05"] },
+    { "kind": "figure", "text": "Runway: 22 months before Q4 hires, 19 months with all six", "segments": ["m09-07", "m09-12"] },
+    { "kind": "decision", "text": "Present a Q4 plan of six hires: four engineering, two support", "segments": ["m09-10", "m09-11"] },
+    { "kind": "action_item", "text": "Finalize the board deck by Thursday morning", "owner": "Greta Holm", "segments": ["m09-13"] },
+    { "kind": "action_item", "text": "Prepare one slide on the Atlas launch", "owner": "You", "segments": ["m09-14", "m09-15"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Q3 numbers:** About 11% growth over the quarter, ARR of $3.2M at the end of September, and net revenue retention of 108%, mostly from seat expansion.", "sources": ["m09-02", "m09-03", "m09-05"] },
+    { "markdown": "**Runway and hiring:** 22 months at current burn without the Q4 hires, 19 months with all six. The board gets a Q4 plan of six hires: four in engineering and two in support.", "sources": ["m09-07", "m09-10", "m09-11", "m09-12"] },
+    { "markdown": "**Prep for Friday's board meeting:** Greta finalizes the deck by Thursday morning. You prepare one Atlas launch slide: launch date, pricing and the first customers on the webinar list.", "sources": ["m09-01", "m09-13", "m09-14", "m09-15"] }
+  ]
+}

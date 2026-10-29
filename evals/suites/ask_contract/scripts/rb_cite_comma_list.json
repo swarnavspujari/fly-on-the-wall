@@ -1,0 +1,14 @@
+{
+  "why": "Several ids in one bracket.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Starter is nineteen dollars per technician per month [seg:m07-04, seg:m07-07]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}
