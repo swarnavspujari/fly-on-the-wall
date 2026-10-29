@@ -1,7 +1,7 @@
 # Recording storage v2 (`app-audio-store`)
 
-> Layer: backend feature (src-tauri). Added on top of main `ccca11b` (v2.4.0+).
-> In flight: this is the change itself (recording storage v2, spec §4.6 / v2.5 row 4.z, made lossless). The search-indexing session may add a shared "background work should yield" signal; `busy_reason` here should switch to it.
+> Layer: backend feature (src-tauri). Added on top of main after #105 (manifest v3).
+> In flight: this is the change itself (recording storage v2, spec §4.6 / v2.5 row 4.z, made lossless). PR #112 adds `AppState::background_should_yield()`; `busy_reason` is its interim copy and becomes a one-line call once #112 merges.
 
 ## Purpose
 Finished recordings are kept as **lossless FLAC** instead of WAV, and the two derived files capture writes (the 16 kHz ASR mixdown and the native-rate playback mix) are no longer stored when they can be rebuilt bit-identically. A low-priority background job ("Compress recordings") does this on every install, for old meetings and for each new one once its transcript is final. Every reader accepts WAV or FLAC, so nothing about playback, re-transcription, re-diarization or portability changes. This module also owns picking (or rebuilding) the file the editor's player streams, and the Settings › Storage report.
@@ -25,7 +25,7 @@ Every recording file, who writes it and who reads it, before and after storage v
 | `recording.mixed.wav` | capture at stop (16 kHz mix of both channels); media import (`import_commands.rs`: the joined 16 kHz track of all imported files) | pipeline single-track path (mic-only captures, imports); re-diarize single-track path; GPU sample (third choice); player (second fallback); Editor "Show in folder" | capture: **dropped** when it regenerates bit-identically from the FLAC sources (`mixed_path: null`), else → `.flac`. Import: no sources, so it **is** a source → `recording.mixed.flac` |
 | `recording.playback.wav` | capture at stop, only with both channels (mic-only: `playback_path` points at the mic file) | the player only (and "open in your player") | **dropped** when it regenerates bit-identically (`playback_path: null`), else → `.flac`. Mic-only: `playback_path` follows the mic to `recording.mic.flac` |
 | imported originals (`<user's name>.mp4/.m4a/.wav…`) | `import_stage` copies | the import's conversion step (ffmpeg), the user | untouched (they're the user's files; videos are reported in Settings) |
-| `recording.manifest.json` | stop (stash), edits (refresh), startup backfill | self-heal / portability | rewritten at commit, **before** `recording_json`, so it never names deleted files. Same v2 schema; only paths change |
+| `recording.manifest.json` | stop (stash), edits (refresh), startup backfill | self-heal / portability | rewritten at commit, **before** `recording_json`, so it never names deleted files. Built from the rows like every rewrite (manifest v3: Keep local and the folder flags included); compression adds no field and never lowers the version (a folder whose manifest is newer is left alone); Keep local only ever stays on |
 | `<scratch>/<meeting id>/{mic,system,track,rediarize}.16k.wav`, `*.asrpart.json` | pipeline / re-diarize | ASR engines, diarizer | unchanged (always WAV, machine-local, deleted after a successful run) |
 | `<scratch>/<meeting id>/mixdown.16k.wav` | **new**: `regenerate_mixdown_for_asr` (single-track run of a compressed recording) | pipeline `prep`, re-diarize | deleted with the other intermediates |
 | `<scratch>/<meeting id>/playback.wav` | **new**: `prepare_playback(build: true)`: the rebuilt mix of a compressed two-channel recording, or any FLAC the player would otherwise stream (mic-only, import, a kept mix) decoded to WAV with `flac::decode_to_wav` | the player (the asset scope allows this one file) | a cache: newest-first, up to 1.5 GB in total; goes with the meeting's scratch (purge, retention, delete-all, startup sweep) |
@@ -80,7 +80,7 @@ None. The job runs on its own thread (`fotw-compress`), in Windows background mo
 None.
 
 ## The commit protocol (per meeting)
-1. Take the folder lease (renames skip the folder) after checking: no transcription queued/running for it, no pipeline stage, not being recorded, audio not deleted, playback not opened in the last 30 minutes.
+1. Take the folder lease (renames skip the folder) after checking: no transcription queued/running for it, no pipeline stage for it, not being recorded, audio not retention-deleted, playback not opened in the last 30 minutes, folder manifest not from a newer build.
 2. For each source (and each derived file that can't be dropped): encode to `.<name>.compressing.flac`, `fsync`, verify with claxon (format, sample count, every sample, STREAMINFO MD5), copy the WAV's modified time (retention ages audio by it), rename into place. A `.flac` already there from an interrupted run is reused only if it verifies.
 3. For `mixed` and `playback`: `matches_stored` rebuilds them from the FLAC sources (what will be kept) and compares every sample, the rate and the length. Equal → drop; else convert.
 4. Under the storage lock: re-run the step-1 checks and confirm `recording_json` is unchanged; write the manifest, then `recording_json`; delete the replaced WAVs (still under the lock, so no reader can pick up an old path in between).
@@ -89,11 +89,15 @@ None.
 Every step before 4 can be interrupted (kill, cancel, a busy machine) without changing anything a reader sees.
 
 ## Old builds (v2.4 and earlier) on a compressed meeting
-Checked against `main`'s code (see Tests). Nothing is deleted or corrupted:
-- The manifest stays schema v2 (no version bump), so old heal/backfill parse it; rebasing is by file name, so `.flac` paths survive heal; backfill never replaces existing values.
-- Retention and "Delete all my data" already treat `.flac` as audio.
-- Re-transcribe / re-analyze fail with an error from `read_wav_mono` (not a WAV), are retried three times and parked as failed; the existing transcript is kept. A mic-only or import meeting fails the same way.
-- The player gets `playback_path: null` and `mixed_path: null`, falls back to `mic_path` (FLAC plays in WebView2 and WKWebView), so it plays the microphone channel only.
+Recorded run (2026-10-29): the `v2.4.0` tag built in debug with a temporary scratch data-dir override, on five meetings compressed by this build (no real data; synthetic TTS audio). Nothing was lost or corrupted:
+- **Startup backfill** only added the missing `note.json` files; every manifest, FLAC and transcript mirror was byte-identical afterwards.
+- **Self-heal** resurrected a compressed folder the database didn't know, with the `.flac` paths and `null` mixdown/playback, transcript restored.
+- **Re-transcribe** failed cleanly ("Ill-formed WAVE file: no RIFF tag found" from `read_wav_mono`), was retried 3 times, parked as failed; the existing transcript was untouched.
+- **Audio retention** (30 days, a 40-day-old meeting): deleted the two FLACs, kept manifest and transcripts, stamped `audio_deleted_at`.
+- **Delete note** removed the meeting and its folder.
+- The player: v2.4 falls back to `mic_path`, so it plays the microphone channel only (a FLAC; WebView2 and WKWebView decode it, webkit2gtk only with GStreamer's flac plugin).
+
+That run used schema-v2 manifests. With manifest v3 (#105) an older build's backfill leaves the file alone entirely (`version` > its own), and its heal still parses it (unknown fields are ignored).
 
 ## Dependencies
 - **Inbound:** `lib.rs` (spawn, commands), `scheduler.rs` (nudge), `pipeline.rs` (mixdown regeneration), `commands.rs` (`delete_note`), `privacy.rs` (retention busy set, delete-all halt), `state.rs`.
@@ -104,7 +108,7 @@ Checked against `main`'s code (see Tests). Nothing is deleted or corrupted:
 - **Nothing is ever converted from a WAV that isn't in the layout capture writes** (`inspect_pcm16_wav`): an unfinalized header, extra chunks, trailing bytes, other bit depths stay WAV.
 - **The manifest is written before `recording_json`, and both before any delete.**
 - **Readers stay bit-identical:** `read_audio_mono(flac)` returns the same f32 bits as `read_wav_mono(wav)`, and the regenerated mixdown/playback mix are byte-identical to what capture wrote (unit tests and the corpus e2e).
-- **Recording and transcription win:** the job pauses in place while anything records, transcribes or imports, and never commits under a running pipeline for that meeting.
+- **Recording and transcription win:** while anything records (live captions included), transcribes, re-diarizes, polishes or imports (`busy_reason`; a merely queued job doesn't count), the job abandons the step in flight (temp deleted, WAVs untouched), waits, and retries the meeting, reusing FLACs it already verified. A meeting whose own transcription is queued or running is never committed (its transcript isn't final).
 - **Audio deleted by retention never comes back:** the commit re-checks `audio_deleted_at`; retention skips the meeting the job holds.
 - **Capture is untouched:** recording still writes WAV (crash safety), owned by app-recording / fly-audio.
 - **The webview never decodes FLAC.** `prepare_playback` streams stored WAVs as they are and routes every FLAC through the scratch cache (exact decode or rebuilt mix), so playback doesn't depend on WebView2 / WKWebView / webkit2gtk (+ GStreamer's flac plugin) codec support.
@@ -113,12 +117,13 @@ Checked against `main`'s code (see Tests). Nothing is deleted or corrupted:
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| unit | `crates/fly-audio/src/flac.rs` | 7 | round trips (mono/stereo/4 ch, 8–48 kHz, empty), verify catches a flipped bit / truncation / a 1-LSB WAV change / an extra sample, interrupted encode, the strict WAV layout check |
+| unit | `crates/fly-audio/src/flac.rs` | 8 | round trips (mono/stereo/4 ch, 8–48 kHz, empty), verify catches a flipped bit / truncation / a 1-LSB WAV change / an extra sample, interrupted encode, the strict WAV layout check |
 | unit | `crates/fly-audio/src/derive.rs` | 5 | streaming resampler = `resample_linear` bit for bit (10 rate pairs), `MonoFile` = `read_wav_mono` for WAV and FLAC, regenerated mixdown/playback byte-identical to capture's for 8 channel layouts, from FLAC sources too, mismatch detection |
-| unit | `crates/fly-storage/src/recording_store.rs` | 4 | manifest-then-row commit, refusing another folder, a leased folder isn't renamed, the stored-audio list |
-| integration (CI) | `src-tauri/tests/compress_recordings.rs` | 11 | every layout (two-channel, mic-only, import, foreign mixdown, unfinalized WAV), readers and ASR input bytes identical, mtime kept, stop mid-encode, refused commit, damaged FLAC rebuilt, leftovers re-proven, stray temp, **a child process aborted at every checkpoint and killed at wall-clock points** |
+| unit | `crates/fly-storage/src/recording_store.rs` | 6 | manifest-then-row commit (v3 payload, Keep local never turned off, a newer manifest refused), refusing another folder, a leased folder isn't renamed, the stored-audio list |
+| unit | `src-tauri/src/audio_store.rs` | 2 | the player never gets a FLAC (every layout's playback plan), twin/temp names, the storage-v2 test |
+| integration (CI) | `src-tauri/tests/compress_recordings.rs` | 15 | every layout (two-channel, mic-only, import, foreign mixdown, unfinalized WAV), readers and ASR input bytes identical, mtime kept, stop mid-encode, refused commit, damaged FLAC rebuilt, leftovers re-proven, stray temp, hard failure leaves no extra copy, unreadable stored mix kept, Keep local toggled mid-compress, newer-build manifest left alone, **a child process aborted at every checkpoint and killed at wall-clock points** |
 | ignored e2e | `src-tauri/tests/compress_e2e.rs` | 1 | the real whisper + sherpa pipeline and re-diarize on WAV vs compressed: identical transcripts (text, timings, words, speakers) |
-| vitest | `frontend/src/storageModel.test.ts`, `components/StorageRows.test.tsx` | 11 | Settings copy per job state, video report, notice due/dismiss |
+| vitest | `frontend/src/storageModel.test.ts`, `components/StorageRows.test.tsx`, `components/Editor.playback.test.tsx` | 13 | Settings copy per job state, video report, notice due/dismiss |
 
 ## Changing it safely
 - Never delete a recording file without a same-run proof (see Invariants); add a test to `compress_recordings.rs` for any new layout.
