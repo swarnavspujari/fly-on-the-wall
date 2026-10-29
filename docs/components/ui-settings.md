@@ -10,7 +10,7 @@ The full-window Settings overlay: seven sections (Recording, Transcripts, Ask an
 - `frontend/src/components/SettingsModal.tsx` — the overlay (2,328 lines: every section, the LLM / Ollama / calendar / template / MCP / update state).
 - `frontend/src/settingsModel.ts` — pure helpers: sections and search, scroll-spy, the ASR draft ⇄ payload, data tiles, provider labels, MCP snippet parsing.
 - `frontend/src/components/PrivacySection.tsx` — disk-encryption notice, audio retention, "Delete all my data".
-- `frontend/src/components/StorageRows.tsx` + `frontend/src/storageModel.ts` — the Recordings and Videos size rows with the background compression's live status (`storage_report`, `storage:compress`); report only, no controls.
+- `frontend/src/components/StorageRows.tsx` + `frontend/src/storageModel.ts` — the Recordings row (size + background compression status, `storage:compress`) and the two opt-in video rows (Imported videos: Keep video / Audio only; Screen recordings: Shrink…, with progress and Stop from `storage:videos`).
 - `frontend/src/privacy.ts` — pure privacy helpers and constants (shared with the editor's Keep-local chip and the restart screen).
 - Used here, owned elsewhere: `RemindNoticeRow.tsx` (`ui-recording-bar` key), `RestartRequired.tsx` (`ui-app-shell`), `CloudConsent.tsx` / `confirm.tsx` ([ui-confirm-consent](ui-confirm-consent.md)).
 
@@ -49,7 +49,9 @@ The full-window Settings overlay: seven sections (Recording, Transcripts, Ask an
 | Calendars › More | Your own OAuth app Save | `set_calendar_settings` (client secret only when typed) | none | `:833-846`, `:2030-2068` |
 | Files and privacy | Disk-encryption Dismiss | `set_app_setting("ui.privacy.disk_encryption_banner_dismissed")` | none | `PrivacySection.tsx:160-172` |
 | Files and privacy | Show folder | `reveal_data_dir` | none | `SettingsModal.tsx:2093` |
-| Files and privacy | Recordings / Videos rows (read only) | `storage_report`; listens to `storage:compress` | none | `StorageRows.tsx` |
+| Files and privacy | Recordings row (read only) | `storage_report`; listens to `storage:compress` | none | `StorageRows.tsx` |
+| Files and privacy | Imported videos: Keep video / Audio only | `set_import_video_policy` (Audio only also starts the job); Stop → `cancel_video_job` | in-app confirm, danger tone, for Audio only | `StorageRows.tsx` |
+| Files and privacy | Screen recordings: Shrink… | `estimate_screen_shrink`, then `start_video_job("shrink_screen")`; Stop → `cancel_video_job` | in-app confirm with the estimate | `StorageRows.tsx` |
 | Files and privacy | Search index (Extract from N meetings) | consent → `backfill_meeting_items`; all failed → "Couldn't extract from …" with the backend's first error under it | `useCloudConsent` | `:555-589`, `:2107` |
 | Files and privacy | Delete audio after | `preview_audio_retention`, then `set_audio_retention(days \| null)`; a change that deletes now shows a confirm card first | in-card confirm | `PrivacySection.tsx:66-105`, `:182-237` |
 | Files and privacy | Delete all… | `delete_all_data(includeModels, "delete everything")`, then `localStorage.clear()` and a `fotw:restart-required` event | checkbox + typed phrase; disabled while recording | `PrivacySection.tsx:107-130`, `:249-341` |

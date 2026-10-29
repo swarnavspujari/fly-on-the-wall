@@ -100,6 +100,7 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 | `privacy.retention_last_sweep` | app-privacy | `privacy.rs:187` | `privacy.rs:225` | no |
 | `privacy.retention_held` | app-privacy | `privacy.rs:316` | `privacy.rs:215`; deleted 183, 223 | no |
 | `storage.compress.saved_bytes` | app-audio-store | `audio_store.rs` (`spawn`, `run_pass`) | `audio_store.rs` (`run_pass`) | no |
+| `storage.import_video` | app-audio-store | `video_store.rs` (`import_policy`) | `video_store.rs` (`set_import_video_policy`) | no |
 | `storage.compress.notice` | app-audio-store | `audio_store.rs` (`run_pass`) | `audio_store.rs` (`run_pass` → `pending`, `dismiss_compress_notice` → `shown`) | no |
 | `privacy.last_wipe_report` | app-privacy | `privacy.rs:311` | `privacy.rs:775`; deleted 375 | no |
 

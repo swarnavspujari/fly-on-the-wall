@@ -14,6 +14,7 @@ The user's requirement is "compress without losing anything". The spec's earlier
 - `crates/fly-audio/src/derive.rs`: streaming, bit-identical regeneration of the mixdown and the playback mix; `matches_stored`. See [fly-audio](fly-audio.md).
 - `crates/fly-storage/src/recording_store.rs`: folder leases, `meetings_with_stored_audio`, `replace_meeting_recording` (manifest, then row). See [fly-storage](fly-storage.md).
 - `crates/fly-audio/examples/flac_bench.rs`: size/speed/bit-exactness on copies of real meetings.
+- `src-tauri/src/video_store.rs`: the opt-in video choices (see [Videos](#videos-opt-in)): 4 commands, the job thread, ffmpeg/ffprobe runs that can be stopped, the checks.
 
 ## The file map
 Every recording file, who writes it and who reads it, before and after storage v2.
@@ -50,19 +51,25 @@ Not readers of audio: the MCP server (database and transcript mirrors only), `ex
 | `prepare_playback` | `meeting_id: String, build: bool` (stored WAV → its path; FLAC or a dropped mix → `needs_build` until rebuilt into the cache) | `Result<Option<PlaybackSource { path: Option<String>, needs_build: bool }>, String>` (absolute path; `None` = no audio) | `ui-editor` (`Editor.tsx`, on note open with `build: false`; on Play with `build: true`), via `api.preparePlayback` |
 | `storage_report` | none | `Result<StorageReport, String>` (audio, WAV part, imported videos, screen recordings, other attachments, `compress: CompressStatus`) | `ui-settings` (`StorageRows.tsx`), `ui-notices` (`CompressNotice.tsx`), via `api.storageReport` |
 | `dismiss_compress_notice` | none | `Result<(), String>` | `ui-notices` (`CompressNotice.tsx`), via `api.dismissCompressNotice` |
+| `start_video_job` | `kind: "audio_only" \| "shrink_screen"` | `Result<VideoJobStatus, String>` (errors when a job is running or ffmpeg can't be had) | `ui-settings` (`StorageRows.tsx`, after the Shrink confirmation), via `api.startVideoJob` |
+| `cancel_video_job` | none | `Result<(), String>` | `ui-settings` (`StorageRows.tsx` Stop), via `api.cancelVideoJob` |
+| `set_import_video_policy` | `policy: "keep" \| "audio_only"` | `Result<VideoJobStatus, String>`; `audio_only` also starts the job for the videos already imported | `ui-settings` (`StorageRows.tsx`, after its confirmation), via `api.setImportVideoPolicy` |
+| `estimate_screen_shrink` | none | `Result<Option<ShrinkEstimate { files, bytes, bytes_after }>, String>` (a 30 s sample of the largest recording, encoded into scratch) | `ui-settings` (`StorageRows.tsx` Shrink…), via `api.estimateScreenShrink` |
 
-devMock mirrors all three (`devMock.ts`, flags `fotwMockCompress` = `working`/`paused`/`done`, `fotwMockCompressNotice`, `fotwMockCompressed`).
+devMock mirrors all seven (`devMock.ts`, flags `fotwMockCompress` = `working`/`paused`/`done`, `fotwMockCompressNotice`, `fotwMockCompressed`, `fotwMockVideoJob` = `working`/`paused`/`done`).
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
 | `storage:compress` | emits whenever the job's status changes | `CompressStatus { state, paused_for, meetings_total, meetings_done, bytes_total, bytes_done, saved_bytes, kept_files, notice_pending, last_error }` | `StorageRows.tsx`, `CompressNotice.tsx` |
+| `storage:videos` | emits whenever the video job's status changes | `VideoJobStatus { kind, state, paused_for, files_total, files_done, files_skipped, bytes_saved, last_error, import_policy }` | `StorageRows.tsx` |
 
 ### Settings keys
 | Key | Read / write | Webview-settable? | Meaning |
 |---|---|---|---|
 | `storage.compress.saved_bytes` | R/W (job) | no (`storage.` isn't an allowed prefix) | bytes freed so far, across runs |
 | `storage.compress.notice` | R/W (job, `dismiss_compress_notice`) | no | `pending` once a pass freed space; `shown` after dismissal (the notice never returns) |
+| `storage.import_video` | R (video job, scheduler hook), W (`set_import_video_policy`) | no | `keep` (default) or `audio_only`: an imported video keeps only its audio once its import is transcribed |
 
 ### Database
 `meetings.recording_json` (rewritten at commit through `replace_meeting_recording`); reads `transcription_jobs` (skip queued/running), `meetings.audio_deleted_at` (skip retention-deleted audio), `settings`.
@@ -71,10 +78,12 @@ devMock mirrors all three (`devMock.ts`, flags `fotwMockCompress` = `working`/`p
 See the file map. Temp files are `.<name>.compressing.flac` in the meeting folder (media extension on purpose: retention and delete-all treat a stray one as audio); a later pass deletes strays first.
 
 ### Network egress
-None. Encoding and decoding are in-process, pure Rust; no ffmpeg download.
+Recording compression: none (in-process, pure Rust). The opt-in video choices use the ffmpeg sidecar, which is downloaded on first use (GitHub, pinned + hashed, [app-models-gpu](app-models-gpu.md)) only when the user starts one and it isn't installed yet.
 
 ### External processes
-None. The job runs on its own thread (`fotw-compress`), in Windows background mode (`THREAD_MODE_BACKGROUND_BEGIN`: low CPU and I/O priority).
+Recording compression: none. Its job runs on its own thread (`fotw-compress`), in Windows background mode (`THREAD_MODE_BACKGROUND_BEGIN`: low CPU and I/O priority).
+
+The video job (thread `fotw-videos`, same background mode) runs `ffmpeg` and `ffprobe` (beside the sidecar ffmpeg, else PATH) at below-normal priority, with paths passed as separate arguments (no shell) and always absolute (never parsed as options).
 
 ### Secrets and keychain entries
 None.
@@ -98,6 +107,16 @@ Recorded run (2026-10-29): the `v2.4.0` tag built in debug with a temporary scra
 - The player: v2.4 falls back to `mic_path`, so it plays the microphone channel only (a FLAC; WebView2 and WKWebView decode it, webkit2gtk only with GStreamer's flac plugin).
 
 That run used schema-v2 manifests. With manifest v3 (#105) an older build's backfill leaves the file alone entirely (`version` > its own), and its heal still parses it (unknown fields are ignored).
+
+## Videos (opt-in)
+Nothing lossless shrinks video, so videos are never touched unless the user chooses to (Settings › Your files and privacy). Both choices ask first (in-app confirm) and run on the `fotw-videos` thread, one job at a time, with the same yield rule as compression: while anything records, transcribes or imports, the ffmpeg run in flight is killed (its temp file deleted, the original untouched) and the file starts again later.
+
+| Choice | What happens | Proof before the original goes |
+|---|---|---|
+| **Imported videos: Audio only** (`set_import_video_policy("audio_only")`; later imports follow once transcribed, via the scheduler hook) | every audio track is copied out of the app's video copy in the meeting folder with `-c copy` (no re-encode) into a container that holds the codec unchanged (AAC/ALAC → `.m4a`, MP3 → `.mp3`, Opus/Vorbis → `.ogg`, FLAC → `.flac`, else `.mka`); attachments pointing at the video are repointed (`Storage::repoint_attachments`); the video copy and its poster go. The meeting's transcription track (`recording.mixed.flac`) is unaffected. The user's original file, wherever it was imported from, is never touched. | `framemd5` of the original's audio packets equals the new file's, packet for packet (size + hash; timestamps may be rescaled). A proven audio file left by an earlier run is reused, never duplicated. |
+| **Screen recordings: Shrink** (`estimate_screen_shrink`, confirm, `start_video_job("shrink_screen")`) | x264 `-preset slow -crf 18`, `yuv420p`, `-fps_mode passthrough`, audio `-c copy`, `+faststart`, tagged `comment=fotw:visually-lossless-v1` so it's never re-encoded twice; replaces the file in place (same name, so posters still match), modified time kept | decodes end to end with no error; same number of video frames; same duration (±1 % / 0.5 s); audio packets identical (`framemd5`); SSIM (all planes, whole video) ≥ 0.98; at least 10 % smaller (else it's "already compact" and left alone) |
+
+Skipped files (no audio track, already shrunk, already compact, a failed check) are counted and kept as they were. Retention treats the meeting the job works in as busy; Delete note stops the job if it's on one of that note's files; "Delete all my data" stops it first.
 
 ## Dependencies
 - **Inbound:** `lib.rs` (spawn, commands), `scheduler.rs` (nudge), `pipeline.rs` (mixdown regeneration), `commands.rs` (`delete_note`), `privacy.rs` (retention busy set, delete-all halt), `state.rs`.
@@ -123,7 +142,10 @@ That run used schema-v2 manifests. With manifest v3 (#105) an older build's back
 | unit | `src-tauri/src/audio_store.rs` | 2 | the player never gets a FLAC (every layout's playback plan), twin/temp names, the storage-v2 test |
 | integration (CI) | `src-tauri/tests/compress_recordings.rs` | 15 | every layout (two-channel, mic-only, import, foreign mixdown, unfinalized WAV), readers and ASR input bytes identical, mtime kept, stop mid-encode, refused commit, damaged FLAC rebuilt, leftovers re-proven, stray temp, hard failure leaves no extra copy, unreadable stored mix kept, Keep local toggled mid-compress, newer-build manifest left alone, **a child process aborted at every checkpoint and killed at wall-clock points** |
 | ignored e2e | `src-tauri/tests/compress_e2e.rs` | 1 | the real whisper + sherpa pipeline and re-diarize on WAV vs compressed: identical transcripts (text, timings, words, speakers) |
-| vitest | `frontend/src/storageModel.test.ts`, `components/StorageRows.test.tsx`, `components/Editor.playback.test.tsx` | 13 | Settings copy per job state, video report, notice due/dismiss |
+| integration (CI; skips without ffmpeg) | `src-tauri/tests/video_store.rs` | 3 | audio copied out packet for packet (AAC → m4a, Opus → ogg), reused not duplicated, no-audio skipped, stop leaves nothing; a CBR screen capture shrinks > 10 % with audio packets and mtime kept, never twice, a small file untouched, stop leaves the original; audio-only deletes only the app's copy and its poster |
+| unit | `src-tauri/src/video_store.rs` | 4 | ffprobe JSON, container per codec, packet hashes ignore timestamps, SSIM summary |
+| unit | `crates/fly-storage/src/recording_store.rs` (`repoint_attachments`) | 1 | a video attachment moves to its audio file (name, MIME), others untouched |
+| vitest | `frontend/src/storageModel.test.ts`, `components/StorageRows.test.tsx`, `components/Editor.playback.test.tsx` | 21 | Settings copy per job state, video rows and confirmations (cancel changes nothing), Shrink estimates then starts, Stop, notice due/dismiss |
 
 ## Changing it safely
 - Never delete a recording file without a same-run proof (see Invariants); add a test to `compress_recordings.rs` for any new layout.
