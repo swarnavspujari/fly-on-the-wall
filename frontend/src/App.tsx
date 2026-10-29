@@ -47,7 +47,6 @@ import RestartRequired from "./components/RestartRequired";
 import Home from "./components/Home";
 import GlobalAsk from "./components/GlobalAsk";
 import { openAsk, useAskChat } from "./components/AskPanel";
-import { useInlineAskTurns } from "./components/AskConnectors";
 import UndoToast from "./components/UndoToast";
 import { useUpdater } from "./updater";
 
@@ -523,8 +522,6 @@ export default function App() {
   // Ask over every meeting (Home). Lives here so its thread survives
   // opening one of its sources and coming back; never saved.
   const globalAsk = useAskChat(null);
-  // Ask turns showing their connector cards in the answer sheet.
-  const inlineAskTurns = useInlineAskTurns();
 
   // An Ask source in another note: open that note at the cited lines (the
   // editor applies the zoom once the note and that recording are loaded).
@@ -1194,7 +1191,7 @@ export default function App() {
       />
       {/* Every proposed connector call waits here for Run / Don't run,
           wherever you are (including over Settings). */}
-      <ConnectorCallStack hideTurnIds={inlineAskTurns} />
+      <ConnectorCallStack />
       {deletion.pending.length > 0 && (
         <UndoToast
           titles={deletion.pending.map((i) => i.title)}
