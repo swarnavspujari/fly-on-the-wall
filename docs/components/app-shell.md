@@ -88,7 +88,7 @@ In `setup` (`lib.rs:69-92`), after the two plugins: `startup::upgrade_pending()`
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
 | `library:upgrade` | Emits (`startup.rs:64-67`, from `open_in_background` only) | `LibraryStatus` (same shape as `library_status`) on every throttled progress report (about every 100 ms), then once `ready` or `failed` | `ui-app-shell` (`LibraryGate.tsx`, listens before it calls `library_status`) |
-| (Tauri) `RunEvent::Exit` | Listens (`lib.rs:202-211`) | — | Calls `ollama::shutdown` only, and only when `AppState` exists (`try_state`) |
+| (Tauri) `RunEvent::Exit` | Listens (`lib.rs`) | — | Calls `ollama::shutdown` (only when `AppState` exists, `try_state`) and `connectors::shutdown` (stops stdio connector programs; nothing to do before startup finishes) |
 
 ### Settings keys
 None read or written directly. Startup calls `llm_commands::migrate_anthropic_model`, `reset_unseen_cloud_consent` and `privacy::record_pending_wipe` (`startup.rs:187-195`), which own their keys (see [app-settings-consent](app-settings-consent.md), [app-llm](app-llm.md), [app-privacy](app-privacy.md)).
@@ -151,7 +151,7 @@ Startup itself makes no requests. Background workers started here (embeddings �
 - The nav-guard tests call `is_app_url` only. Nothing checks the plugin is registered (`lib.rs:66`), that `on_navigation` returns `false`, that `localhost:1420` is refused in release builds (tests compile with `debug_assertions`), or what happens to new-window requests. `asset:` URLs are allowed unconditionally (`nav_guard.rs:17`), so on macOS/Linux an HTML file under `attachments/` could load in the app window if a link ever got past the frontend guard (inferred).
 - The log-hygiene test is lexical. It passes today while `crates/fly-calendar/src/msgraph.rs:236` logs a calendar id (`cal.id`, the ban list has `cal_id`) and `crates/fly-capture-screen/src/lib.rs:73` logs an error that can embed a window title. It can't see user content inside `{e}` errors. Rotation, the 5-file cap and the panic hook are untested.
 - **Deleted secrets come back (inferred).** The legacy keychain copy runs on every launch and fills any missing key, so for a pre-rebrand user a disconnected calendar or a removed API key is restored at the next start. The test pins "fills missing" and has no "stays deleted" case.
-- **Exit doesn't stop captures.** `RunEvent::Exit` only stops Ollama; an audio or screen capture running at quit isn't stopped or finalized here (inferred; untested).
+- **Exit doesn't stop captures.** `RunEvent::Exit` only stops Ollama and stdio connector programs; an audio or screen capture running at quit isn't stopped or finalized here (inferred; untested).
 - No test checks that `lib.rs` registers every command `api.ts` calls (or the reverse).
 - `ping` has no UI caller.
 - **The background open path has no automated test** (it needs a Tauri runtime). The pieces are covered: the peek and the progress stream in `crates/fly-storage/tests/migration_v3.rs`, and the gate in `frontend/src/components/LibraryGate.test.tsx`. The end-to-end path was checked by hand against a synthetic v2 library.

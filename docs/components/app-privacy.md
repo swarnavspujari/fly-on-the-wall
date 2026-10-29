@@ -99,7 +99,7 @@ Through [fly-storage](fly-storage.md) only:
 The result (including `unknown`) is cached for the session under a mutex held across the probe (`privacy.rs:1042-1053`). `copy_recording_notice` writes the system clipboard through `tauri-plugin-clipboard-manager` (`privacy.rs:123-129`).
 
 ### Secrets and keychain entries
-`delete_all_data` deletes `keys::ALL` + `google_oauth_client_secret` (7 accounts) from `com.flyonthewall.app` (`state.secrets`) and from the legacy `com.looma.notetaker` service (`privacy.rs:526-546`, `808`, `846`). Failures are listed in `WipeReport.secrets_failed`. See [fly-secrets](fly-secrets.md).
+`delete_all_data` deletes `keys::ALL` + `google_oauth_client_secret` (7 accounts) from `com.flyonthewall.app` (`state.secrets`) and from the legacy `com.looma.notetaker` service (`privacy.rs:526-546`, `808`, `846`). It also deletes every connector's keychain entries (`connector.<id>.*`, tokens, their chunks, stdio variables and headers, and the `connector.index` list): `delete_all_data` first closes every connector connection (`connectors::close_all`), then `perform_delete_all` reads the key names with `connectors::stored_secret_keys` before the database is emptied — from the registry, from connector ids still readable in a registry that no longer parses, and from the keychain's own connector index ([app-connectors](app-connectors.md)). Failures are listed in `WipeReport.secrets_failed`. See [fly-secrets](fly-secrets.md).
 
 ## Dependencies
 - **Inbound:** `lib.rs` (startup order, registration), `import_commands.rs` (`ImportGuard`); the UI components above.
@@ -135,7 +135,7 @@ The result (including `unknown`) is cached for the session under a mutex held ac
 ## Changing it safely
 - Run `cargo test -p fly-app privacy` and `cargo test -p fly-storage`; `npm --prefix frontend test` for `privacy.test.ts` / Settings tests.
 - A new command: register in `lib.rs`, wrap in `frontend/src/api.ts`, mirror in `devMock.ts` (spec §2 item 4), and add a row here.
-- Any new secret must be added to `fly_secrets::keys::ALL` (or `owned_secret_keys`) so delete-all removes it.
+- Any new secret must be added to `fly_secrets::keys::ALL` (or `owned_secret_keys`) so delete-all removes it. Per-connector secrets are found through the connector registry and the keychain's connector index instead (`connectors::stored_secret_keys`), so they must be listed before `erase_all_content` runs.
 - Any new file location outside `<data_dir>` must be removed by delete-all explicitly and reported in `WipeReport`.
 - Keep `startup` ahead of `logging::init` and `AppState::init` in `lib.rs`; never let the marker age check or the instance lock be bypassed — a stale marker must never delete data created later.
 - Retention changes must keep the double-age check (`ended_at` and file mtimes) and the bulk/clock guards; never make retention settable through `set_app_setting`.

@@ -61,7 +61,7 @@ const llm = (provider: string): LlmSettings => ({
 });
 
 describe("section search", () => {
-  it("lists all seven sections in order for an empty query", () => {
+  it("lists all eight sections in order for an empty query", () => {
     expect(matchSections("  ").map((s) => s.id)).toEqual([
       "recording",
       "transcripts",
@@ -69,13 +69,16 @@ describe("section search", () => {
       "calendars",
       "files",
       "apps",
+      "connectors",
       "general",
     ]);
-    expect(SETTINGS_SECTIONS).toHaveLength(7);
+    expect(SETTINGS_SECTIONS).toHaveLength(8);
   });
 
   it("matches titles and keywords, case-insensitively", () => {
-    expect(matchSections("mcp").map((s) => s.id)).toEqual(["apps"]);
+    expect(matchSections("mcp").map((s) => s.id)).toEqual(["apps", "connectors"]);
+    expect(matchSections("always allow").map((s) => s.id)).toEqual(["connectors"]);
+    expect(matchSections("beta").map((s) => s.id)).toEqual(["connectors"]);
     expect(matchSections("GROQ").map((s) => s.id)).toEqual(["transcripts"]);
     expect(matchSections("dark").map((s) => s.id)).toEqual(["general"]);
     expect(matchSections("templates").map((s) => s.id)).toEqual(["ai"]);
