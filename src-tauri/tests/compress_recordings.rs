@@ -363,8 +363,19 @@ fn a_wav_capture_never_finalized_is_left_alone() {
     bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
     bytes[40..44].copy_from_slice(&0u32.to_le_bytes());
     std::fs::write(&mic, &bytes).unwrap();
+    assert_eq!(
+        needs_work(&m.data_dir, &m.rec()).2,
+        1,
+        "counted before the run"
+    );
     let out = m.compress().unwrap();
     assert_eq!(out.kept.len(), 1, "{:?}", out.kept);
+    let after = needs_work(&m.data_dir, &m.rec());
+    assert_eq!(
+        (after.0, after.2),
+        (false, 1),
+        "nothing left to do, one file stays WAV"
+    );
     assert_eq!(std::fs::read(&mic).unwrap(), bytes, "untouched");
     let rec = m.rec();
     assert!(rec.mic_path.unwrap().ends_with("recording.mic.wav"));
@@ -468,6 +479,94 @@ fn wavs_left_after_a_commit_are_deleted_only_once_re_proven() {
     assert!(!m.file("recording.mixed.wav").exists());
     assert!(!m.file("recording.playback.wav").exists());
     assert_eq!(std::fs::read(m.file("recording.system.wav")).unwrap(), odd);
+}
+
+#[test]
+fn a_hard_failure_before_the_commit_leaves_no_extra_copy() {
+    let m = setup(Layout::TwoChannel);
+    // The system FLAC's path is taken by a folder: its conversion fails
+    // after the mic FLAC was already put in place.
+    std::fs::create_dir(m.file("recording.system.flac")).unwrap();
+    let err = m.compress().unwrap_err();
+    assert!(matches!(err, MeetingError::Failed(_)), "{err:?}");
+    assert!(
+        !m.file("recording.mic.flac").exists(),
+        "uncommitted FLAC removed"
+    );
+    assert!(m.file("recording.mic.wav").exists());
+    assert!(m.rec().mic_path.unwrap().ends_with(".wav"), "row untouched");
+    std::fs::remove_dir(m.file("recording.system.flac")).unwrap();
+    m.compress().unwrap();
+    assert!(is_storage_v2(&m.rec()));
+}
+
+#[test]
+fn an_unreadable_stored_mix_stays_as_it_is() {
+    let m = setup(Layout::TwoChannel);
+    std::fs::write(m.file("recording.mixed.wav"), b"RIFF\0\0\0\0WAVEjunk").unwrap();
+    let out = m.compress().unwrap();
+    assert_eq!(out.kept.len(), 1, "{:?}", out.kept);
+    let rec = m.rec();
+    assert!(rec.mixed_path.unwrap().ends_with("recording.mixed.wav"));
+    assert!(m.file("recording.mixed.wav").exists());
+    assert!(rec.mic_path.unwrap().ends_with(".flac"));
+    assert!(!needs_work(&m.data_dir, &m.rec()).0, "no retry loop");
+}
+
+#[test]
+fn a_keep_local_toggle_mid_compress_cant_leave_a_stale_manifest() {
+    let m = setup(Layout::TwoChannel);
+    let note_id = m
+        .storage
+        .lock()
+        .unwrap()
+        .get_meeting(&m.id)
+        .unwrap()
+        .note_id;
+    // Toggle Keep local while the job is mid-file (it doesn't hold the
+    // storage lock there). Any manifest rewrite this triggers is built from
+    // the row, which still names the WAVs: still true at that moment.
+    let mut toggled = false;
+    let mut checkpoint = || {
+        if !toggled {
+            toggled = true;
+            m.storage
+                .lock()
+                .unwrap()
+                .set_note_keep_local(&note_id, true)
+                .unwrap();
+        }
+        true
+    };
+    m.compress_with(&mut checkpoint, &|_| Ok(())).unwrap();
+    assert!(toggled);
+    let rec = m.rec();
+    assert!(is_storage_v2(&rec));
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(m.file("recording.manifest.json")).unwrap())
+            .unwrap();
+    // The commit wrote the manifest from the row under the same lock that
+    // serializes the toggle: it names the files that exist now.
+    assert_eq!(
+        manifest["recording"]["mic_path"],
+        rec.mic_path.clone().unwrap()
+    );
+    assert_eq!(
+        manifest["recording"]["playback_path"],
+        serde_json::Value::Null
+    );
+    assert!(m.file("recording.mic.flac").exists() && !m.file("recording.mic.wav").exists());
+    assert!(m.storage.lock().unwrap().meeting_keep_local(&m.id));
+    // A toggle after the commit rewrites it from the row again: still FLAC.
+    m.storage
+        .lock()
+        .unwrap()
+        .set_note_keep_local(&note_id, false)
+        .unwrap();
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(m.file("recording.manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(after["recording"]["mic_path"], rec.mic_path.unwrap());
 }
 
 #[test]

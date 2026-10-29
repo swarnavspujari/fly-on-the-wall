@@ -28,7 +28,7 @@ Every recording file, who writes it and who reads it, before and after storage v
 | `recording.manifest.json` | stop (stash), edits (refresh), startup backfill | self-heal / portability | rewritten at commit, **before** `recording_json`, so it never names deleted files. Same v2 schema; only paths change |
 | `<scratch>/<meeting id>/{mic,system,track,rediarize}.16k.wav`, `*.asrpart.json` | pipeline / re-diarize | ASR engines, diarizer | unchanged (always WAV, machine-local, deleted after a successful run) |
 | `<scratch>/<meeting id>/mixdown.16k.wav` | **new**: `regenerate_mixdown_for_asr` (single-track run of a compressed recording) | pipeline `prep`, re-diarize | deleted with the other intermediates |
-| `<scratch>/<meeting id>/playback.wav` | **new**: `prepare_playback(build: true)` | the player (the asset scope allows this one file) | a cache: newest-first, up to 1.5 GB in total; goes with the meeting's scratch (purge, retention, delete-all, startup sweep) |
+| `<scratch>/<meeting id>/playback.wav` | **new**: `prepare_playback(build: true)`: the rebuilt mix of a compressed two-channel recording, or any FLAC the player would otherwise stream (mic-only, import, a kept mix) decoded to WAV with `flac::decode_to_wav` | the player (the asset scope allows this one file) | a cache: newest-first, up to 1.5 GB in total; goes with the meeting's scratch (purge, retention, delete-all, startup sweep) |
 | `attachments/<note>/screen-*.mp4` (+ `.jpg` poster) | screen recording | the video lightbox | untouched (reported in Settings) |
 
 Not readers of audio: the MCP server (database and transcript mirrors only), `export_note` / `export_transcript_vtt` (text), search and embeddings.
@@ -47,7 +47,7 @@ Not readers of audio: the MCP server (database and transcript mirrors only), `ex
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
 |---|---|---|---|
-| `prepare_playback` | `meeting_id: String, build: bool` | `Result<Option<PlaybackSource { path: Option<String>, needs_build: bool }>, String>` (absolute path; `None` = no audio) | `ui-editor` (`Editor.tsx`, on note open with `build: false`; on Play with `build: true`), via `api.preparePlayback` |
+| `prepare_playback` | `meeting_id: String, build: bool` (stored WAV → its path; FLAC or a dropped mix → `needs_build` until rebuilt into the cache) | `Result<Option<PlaybackSource { path: Option<String>, needs_build: bool }>, String>` (absolute path; `None` = no audio) | `ui-editor` (`Editor.tsx`, on note open with `build: false`; on Play with `build: true`), via `api.preparePlayback` |
 | `storage_report` | none | `Result<StorageReport, String>` (audio, WAV part, imported videos, screen recordings, other attachments, `compress: CompressStatus`) | `ui-settings` (`StorageRows.tsx`), `ui-notices` (`CompressNotice.tsx`), via `api.storageReport` |
 | `dismiss_compress_notice` | none | `Result<(), String>` | `ui-notices` (`CompressNotice.tsx`), via `api.dismissCompressNotice` |
 
@@ -107,6 +107,8 @@ Checked against `main`'s code (see Tests). Nothing is deleted or corrupted:
 - **Recording and transcription win:** the job pauses in place while anything records, transcribes or imports, and never commits under a running pipeline for that meeting.
 - **Audio deleted by retention never comes back:** the commit re-checks `audio_deleted_at`; retention skips the meeting the job holds.
 - **Capture is untouched:** recording still writes WAV (crash safety), owned by app-recording / fly-audio.
+- **The webview never decodes FLAC.** `prepare_playback` streams stored WAVs as they are and routes every FLAC through the scratch cache (exact decode or rebuilt mix), so playback doesn't depend on WebView2 / WKWebView / webkit2gtk (+ GStreamer's flac plugin) codec support.
+- **No manifest writer races the commit.** Every manifest rewrite (title/date edits, Keep-local toggles, backfill, the commit) builds from the row while holding the storage lock, and the commit writes manifest, row and deletes in one hold of it: a rewrite before the commit names the WAVs (still there), one after names the FLACs.
 
 ## Tests
 | Kind | File | Tests | Covers |

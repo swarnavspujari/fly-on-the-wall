@@ -229,7 +229,9 @@ fn transcripts_and_diarization_are_identical_from_flac_and_wav() {
     let on_stage = |_: pipeline::PipelineProgress| {};
     let on_model = |_: fly_app_lib::models::ModelProgress| {};
     let rt = tokio::runtime::Runtime::new().unwrap();
-    for src in corpus() {
+    // FLYONTHEWALL_COMPRESS_E2E_ONLY=<substring of a corpus name> runs one case.
+    let only = std::env::var("FLYONTHEWALL_COMPRESS_E2E_ONLY").unwrap_or_default();
+    for src in corpus().into_iter().filter(|s| s.name.contains(&only)) {
         let (_a_dir, wav_state) = new_state(&real_data);
         let (_b_dir, flac_state) = new_state(&real_data);
         let wav_id = add_meeting(&wav_state, &src);
@@ -244,7 +246,8 @@ fn transcripts_and_diarization_are_identical_from_flac_and_wav() {
                 storage: &flac_state.storage,
                 on_file_done: &mut done,
             };
-            compress_meeting(&mut ctx, &flac_id).unwrap();
+            compress_meeting(&mut ctx, &flac_id)
+                .unwrap_or_else(|e| panic!("{}: compress failed: {e}", src.name));
         }
         let rec = flac_state
             .storage

@@ -426,6 +426,39 @@ pub fn verify_flac_matches_wav(
     Ok(frames)
 }
 
+/// Decode a 16-bit FLAC into a 16-bit PCM WAV with the same rate, channel
+/// count and samples (streamed). Used for playback, so the player never
+/// depends on the webview decoding FLAC (webkit2gtk needs a GStreamer
+/// plugin for it). Returns the number of samples per channel.
+pub fn decode_to_wav(flac: &Path, out: &Path) -> Result<u64> {
+    let mut src = FlacSamples::open(flac)?;
+    let spec = hound::WavSpec {
+        channels: src.channels() as u16,
+        sample_rate: src.sample_rate(),
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let enc = |e: hound::Error| FlacError::Encode(e.to_string());
+    let mut w = hound::WavWriter::create(out, spec).map_err(enc)?;
+    let mut buf = Vec::new();
+    let mut frames = 0u64;
+    loop {
+        buf.clear();
+        let n = src.read_frames(BLOCK_SIZE * 8, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let mut sw = w.get_i16_writer(buf.len() as u32);
+        for &v in &buf {
+            sw.write_sample(v as i16);
+        }
+        sw.flush().map_err(enc)?;
+        frames += n as u64;
+    }
+    w.finalize().map_err(enc)?;
+    Ok(frames)
+}
+
 /// Stream of interleaved 16-bit samples decoded from a FLAC file.
 pub(crate) struct FlacSamples {
     reader: claxon::FlacReader<BufReader<File>>,
@@ -795,6 +828,19 @@ pub(crate) mod tests {
         assert_eq!(inspect_pcm16_wav(&wav).unwrap().channels, 4);
         encode_pcm16_wav_to_flac(&wav, &flac, &mut go()).unwrap();
         verify_flac_matches_wav(&flac, &wav, &mut go()).unwrap();
+    }
+
+    #[test]
+    fn decode_to_wav_restores_the_original_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("a.wav");
+        let flac = dir.path().join("a.flac");
+        let back = dir.path().join("b.wav");
+        let s = test_signal(BLOCK_SIZE * 9 + 5, 2, 13);
+        write_wav(&wav, &s, 2, 44_100);
+        encode_pcm16_wav_to_flac(&wav, &flac, &mut go()).unwrap();
+        assert_eq!(decode_to_wav(&flac, &back).unwrap(), (s.len() / 2) as u64);
+        assert_eq!(std::fs::read(&back).unwrap(), std::fs::read(&wav).unwrap());
     }
 
     #[test]
