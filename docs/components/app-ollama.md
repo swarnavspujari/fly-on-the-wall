@@ -8,8 +8,8 @@ Runs the local LLM runtime for the default "ollama" provider (Enhance, Ask, poli
 
 ## Files it owns
 - `src-tauri/src/ollama.rs` — root URL, `server_alive`, `ensure_running` (spawn), `shutdown`, `ollama_status` / `ollama_pull` / `ollama_delete`, `pull_model` stream parser, 2 tests.
-- `src-tauri/src/state.rs:37-39`, `state.rs:94` — the `AppState.ollama: Mutex<Option<Child>>` field (the rest of `state.rs` belongs to [app-shell](app-shell.md)).
-- `src-tauri/src/lib.rs:257-259` (command registration) and `lib.rs:291-296` (the `RunEvent::Exit` hook that calls `shutdown`).
+- `src-tauri/src/state.rs:37-39`, `state.rs:113` — the `AppState.ollama: Mutex<Option<Child>>` field (the rest of `state.rs` belongs to [app-shell](app-shell.md)).
+- `src-tauri/src/lib.rs:169-171` (command registration) and `lib.rs:202-211` (the `RunEvent::Exit` hook that calls `shutdown`).
 
 ## Surface area
 ### Public API
@@ -74,7 +74,7 @@ devMock mirrors all three (`devMock.ts:1341-1364`) with drift: `can_install` is 
 |---|---|---|
 | `<data_dir>/bin/ollama/ollama[.exe] serve`, or `ollama serve` from PATH | `ensure_running` when nothing answers at `http://localhost:11434` and no custom URL is set (`ollama.rs:94-122`) | stdio nulled; `CREATE_NO_WINDOW` on Windows; only `OLLAMA_MODELS` is set, the rest of the environment (for example a global `OLLAMA_HOST`) is inherited (inferred risk: a different bind address or port makes the 30 s wait fail) |
 
-Lifecycle: the `Child` sits in `AppState.ollama`. `shutdown` kills and waits it on `RunEvent::Exit` (`lib.rs:291-296`). A child that died is reaped and respawned on the next `ensure_running` (`ollama.rs:97-102`). There is no Job Object (Windows), process group or parent-death signal, so the child **survives** any exit that skips `RunEvent::Exit`:
+Lifecycle: the `Child` sits in `AppState.ollama`. `shutdown` kills and waits it on `RunEvent::Exit` (`lib.rs:202-211`). A child that died is reaped and respawned on the next `ensure_running` (`ollama.rs:97-102`). There is no Job Object (Windows), process group or parent-death signal, so the child **survives** any exit that skips `RunEvent::Exit`:
 - a crash, Task Manager kill or power loss;
 - **every Windows auto-update**: tauri-plugin-updater 2.14.0 runs the NSIS installer and calls `std::process::exit(0)` after its `on_before_exit` hook, which only runs `AppHandle::cleanup_before_exit` (`tauri-plugin-updater-2.14.0/src/updater.rs:1009-1050`, `src/lib.rs:119-122`; `tauri-2.12.5/src/app.rs:1128-1140`). `RunEvent::Exit` never fires. The NSIS hook only kills `flyonthewall-mcp.exe`.
 
@@ -89,8 +89,8 @@ None. Ollama needs no key.
 
 ## Invariants
 - **A user-run server is never managed or stopped.** Spawn only when the default root is silent; a custom base URL is never managed; only the child we spawned is killed. Module doc `ollama.rs:1-5`; enforced at `ollama.rs:81-89`, `ollama.rs:136-142`.
-- **The managed child must not outlive the app.** `lib.rs:291-296` ("must not outlive the app"). Holds only for a clean exit (see the orphan cases above).
-- **Everything the app stores lives under `<data_dir>`**, including pulled models (`ollama.rs:21-23`; `state.rs:116-121` "spec §10").
+- **The managed child must not outlive the app.** `lib.rs:202-211` ("must not outlive the app"). Holds only for a clean exit (see the orphan cases above).
+- **Everything the app stores lives under `<data_dir>`**, including pulled models (`ollama.rs:21-23`; `state.rs:135-140` "spec §10").
 - **Ollama is installed on demand, never bundled.** DECISIONS.md 2026-07-02 ("Ollama is installed on demand, not bundled"); the 1.5 GB pin is opt-in (`models.rs:103-117`).
 - **Local by default.** DECISIONS.md 2026-07-01 ("Ollama is the default provider"). Remote Ollama hosts are handled by the callers' Keep-local rules (`embeddings.rs:166-172`, `llm_commands.rs:539`).
 - **Search never spawns a server or pulls on the query path** (`embeddings.rs:78-88`).

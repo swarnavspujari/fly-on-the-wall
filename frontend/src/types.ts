@@ -622,6 +622,15 @@ export interface SweepReport {
   held: string | null;
 }
 
+/** `library_status` and the `library:upgrade` event (src-tauri startup.rs).
+ *  `done` / `total` are progress units — a fraction, not meetings; both are 0
+ *  until the upgrade's first report. */
+export interface LibraryStatus {
+  phase: "ready" | "upgrading" | "failed";
+  done: number;
+  total: number;
+}
+
 export interface DiskEncryption {
   state: "on" | "off" | "unknown";
   method: "BitLocker" | "FileVault" | null;
@@ -640,4 +649,213 @@ export interface MeetingItem {
   segment_ids: string[];
   created_at: string;
   extracted_by: string;
+}
+
+/* ---- connectors (beta): MCP servers Ask and Enhance can call ---- */
+
+export type ConnectorPermission = "always_allow" | "needs_approval" | "blocked";
+
+/** A header (web) or setting (local). `value` null = secret, kept in the
+ *  keychain and never sent to the webview. */
+export interface ConnectorKV {
+  name: string;
+  value: string | null;
+}
+
+export type ConnectorTransport =
+  | { kind: "http"; url: string; headers: ConnectorKV[] }
+  | { kind: "stdio"; command: string; args: string[]; env: ConnectorKV[] };
+
+export type ConnectorAuth =
+  | { kind: "none" }
+  | { kind: "oauth"; scopes: string[]; clientId: string | null }
+  | { kind: "api_key" };
+
+export interface ConnectorConfig {
+  name: string;
+  transport: ConnectorTransport;
+  auth: ConnectorAuth;
+}
+
+/** Secret values bound for the keychain; "" or missing = keep what's stored.
+ *  Keys of `values` are secret header/setting names. */
+export interface ConnectorSecretsInput {
+  apiKey?: string | null;
+  clientSecret?: string | null;
+  values?: Record<string, string>;
+}
+
+export interface ConnectorInput {
+  config: ConnectorConfig;
+  secrets: ConnectorSecretsInput;
+}
+
+export interface ConnectorFieldChange {
+  field: string;
+  before: string;
+  after: string;
+}
+
+export type ConnectorToolStatus = "ok" | "changed" | "new" | "missing" | "unusable";
+
+export interface ConnectorTool {
+  name: string;
+  title: string | null;
+  description: string;
+  kind: "read" | "write";
+  /** False: the server didn't say whether it changes data (a change tool). */
+  labelled: boolean;
+  destructive: boolean;
+  permission: ConnectorPermission;
+  status: ConnectorToolStatus;
+  problem: string | null;
+  pinnedHash: string;
+  /** Pass back to approve a changed or new tool. */
+  reviewHash: string | null;
+  diff: ConnectorFieldChange[];
+  inputSchema: unknown;
+}
+
+export type ConnectorStatus =
+  | "connected"
+  | "needs_sign_in"
+  | "review"
+  | "could_not_start"
+  | "unreachable"
+  | "not_checked"
+  | "off"
+  | "not_approved";
+
+export interface Connector {
+  id: string;
+  name: string;
+  kind: "web" | "local";
+  transport: ConnectorTransport;
+  auth: ConnectorAuth;
+  /** Host (web) or "local program <file>" (local). */
+  destination: string;
+  /** Local: the command line, for "Will run: …". */
+  willRun: string | null;
+  approved: boolean;
+  enabled: boolean;
+  configHash: string;
+  status: ConnectorStatus;
+  /** Tools blocked until reviewed (changed or new). */
+  reviewCount: number;
+  /** null = no browser sign-in. */
+  signedIn: boolean | null;
+  secrets: {
+    apiKeySet: boolean;
+    clientSecretSet: boolean;
+    values: { name: string; set: boolean }[];
+  };
+  /** Unix seconds. */
+  lastSync: number | null;
+  tools: ConnectorTool[];
+}
+
+export interface ConnectorsOverview {
+  beta: boolean;
+  connectors: Connector[];
+}
+
+export interface ConnectorSaveResult {
+  /** False when the native dialog was declined. */
+  saved: boolean;
+  connector: Connector | null;
+  /** Saved, but a follow-up step (listing tools) failed. */
+  error: string | null;
+}
+
+export interface ConnectorDirectoryEntry {
+  id: string;
+  name: string;
+  vendor: string;
+  description: string;
+  url: string;
+  auth: "oauth" | "api_key" | "none";
+  keyLabel: string | null;
+}
+
+export interface ConnectorImportCandidate {
+  key: string;
+  name: string;
+  kind: "local" | "web";
+  command: string | null;
+  args: string[];
+  envNames: string[];
+  url: string | null;
+  headerNames: string[];
+}
+
+export interface ConnectorClaudeImport {
+  found: boolean;
+  candidates: ConnectorImportCandidate[];
+}
+
+export interface ConnectorPermissionChange {
+  tool: string;
+  permission: ConnectorPermission;
+}
+
+export type ConnectorCardAction = "deny" | "allow_once" | "always_allow";
+
+export interface ConnectorCallProposal {
+  proposalId: string;
+  turnId: string;
+  serverId: string;
+  serverName: string;
+  destination: string;
+  tool: string;
+  toolTitle: string | null;
+  kind: "read" | "write";
+  destructive: boolean;
+  args: Record<string, unknown>;
+  inputSchema: unknown;
+}
+
+/** ok:false + error:null = you said no in the native dialog (the card stays). */
+export interface ConnectorDecideResult {
+  ok: boolean;
+  error: string | null;
+}
+
+export type ConnectorCallOutcome = "ran" | "server_error" | "declined" | "refused" | "failed";
+
+export type ConnectorRefusal =
+  | "not_offered"
+  | "keep_local"
+  | "after_result"
+  | "budget"
+  | "invalid_arguments"
+  | "tool_changed"
+  | "not_approved"
+  | "timed_out";
+
+export interface ConnectorCallLogEntry {
+  /** Unix seconds. */
+  at: number;
+  serverId: string;
+  server: string;
+  tool: string;
+  kind: "read" | "write";
+  outcome: ConnectorCallOutcome;
+  /** Who allowed a call that ran: you on the card, or Always allow. */
+  approval: "user" | "automatic" | null;
+  refusal: ConnectorRefusal | null;
+  durationMs: number;
+  resultChars: number;
+  truncated: boolean;
+  schema: "none" | "valid" | "invalid";
+  argsEdited: boolean;
+}
+
+export interface ConnectorTestResult {
+  ok: boolean;
+  text: string;
+}
+
+export interface ConnectorSettled {
+  proposalId: string;
+  outcome: "ran" | "declined" | "withdrawn" | "timed_out";
 }

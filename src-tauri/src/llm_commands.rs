@@ -387,7 +387,10 @@ fn consent_buttons(prompt: &ConsentPrompt) -> rfd::MessageButtons {
 /// here (NSAlert gives Esc only to a "Cancel" button that isn't first), so
 /// one of the two buttons must be clicked.
 #[cfg(any(windows, target_os = "macos"))]
-async fn ask_consent_natively(app: &tauri::AppHandle, prompt: &ConsentPrompt) -> ConsentAnswer {
+pub(crate) async fn ask_consent_natively(
+    app: &tauri::AppHandle,
+    prompt: &ConsentPrompt,
+) -> ConsentAnswer {
     use tauri::Manager;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let shown = prompt.clone();
@@ -428,7 +431,10 @@ async fn ask_consent_natively(app: &tauri::AppHandle, prompt: &ConsentPrompt) ->
     target_os = "netbsd",
     target_os = "openbsd"
 ))]
-async fn ask_consent_natively(_app: &tauri::AppHandle, prompt: &ConsentPrompt) -> ConsentAnswer {
+pub(crate) async fn ask_consent_natively(
+    _app: &tauri::AppHandle,
+    prompt: &ConsentPrompt,
+) -> ConsentAnswer {
     let shown = prompt.clone();
     let asked = tauri::async_runtime::spawn_blocking(move || {
         let result = rfd::MessageDialog::new()
@@ -456,7 +462,10 @@ async fn ask_consent_natively(_app: &tauri::AppHandle, prompt: &ConsentPrompt) -
     target_os = "netbsd",
     target_os = "openbsd"
 )))]
-async fn ask_consent_natively(_app: &tauri::AppHandle, _prompt: &ConsentPrompt) -> ConsentAnswer {
+pub(crate) async fn ask_consent_natively(
+    _app: &tauri::AppHandle,
+    _prompt: &ConsentPrompt,
+) -> ConsentAnswer {
     ConsentAnswer::Decline
 }
 
@@ -716,6 +725,8 @@ pub async fn enhance_note(
     note_id: String,
     template_id: String,
 ) -> CmdResult<Note> {
+    // The embedding backlog steps aside while this runs.
+    let _foreground = state.foreground_ai();
     ensure_provider_ready(&state).await?;
     let provider = build_provider(&state, DataScope::Note(&note_id))?;
     let profile = profile_for(provider.model());
@@ -871,6 +882,8 @@ pub async fn polish_transcript(
 /// The polish pass itself, callable outside the command layer — the
 /// transcription scheduler chains it after every successful pipeline run.
 pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResult, String> {
+    // The embedding backlog steps aside while the model works.
+    let _model = state.foreground_ai();
     ensure_provider_ready(state).await?;
     let provider = build_provider(state, DataScope::Meeting(meeting_id))?;
     let raw = {
@@ -1021,6 +1034,8 @@ pub async fn ask_meeting(
     note_id: String,
     history: Vec<AskMessage>,
 ) -> CmdResult<String> {
+    // The embedding backlog steps aside while this runs.
+    let _foreground = state.foreground_ai();
     ensure_provider_ready(&state).await?;
     let provider = build_provider(&state, DataScope::Note(&note_id))?;
     let profile = profile_for(provider.model());

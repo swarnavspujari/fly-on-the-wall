@@ -147,5 +147,5 @@ None. fly-secrets is not a dependency (spec §2 item 5).
 - **Never add** fly-secrets, fly-llm, reqwest or any network crate (spec §2 item 5).
 - **Text output is a contract** for clients (`list_recent_text_is_pinned_and_omits_app_status`, `tests/context_golden.rs`). Change wording deliberately.
 - **Context-layer logic lives in fly-context** (`fly_context::memory`, shared with Ask). Change it there, then run both `cargo test -p fly-context` and `cargo test -p fly-mcp`; the golden pins catch any change to MCP replies. `context.rs` here is wording only.
-- **First-run fallback trap:** `Storage::open` from the MCP creates `<data_dir>`. The app's one-time pre-rebrand migration only moves a legacy dir when the new one doesn't exist yet (`src-tauri/src/state.rs:123-144`), so a server started before the app's first post-rebrand launch would strand that data (inferred; narrow window).
+- **First-run fallback trap:** `Storage::open` from the MCP creates `<data_dir>`. The app's one-time pre-rebrand migration only moves a legacy dir when the new one doesn't exist yet (`src-tauri/src/state.rs:186-201`), so a server started before the app's first post-rebrand launch would strand that data (inferred; narrow window).
 - When this crate's Keep-local behavior changes, update docs/THREAT_MODEL.md T10 and the Settings "What it can see" copy together.
