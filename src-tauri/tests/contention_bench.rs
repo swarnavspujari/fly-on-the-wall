@@ -40,11 +40,21 @@
 //! - `FOTW_BENCH_LABEL`  free text stored in the results (e.g. "before")
 //! - `FOTW_BENCH_ASK_EVERY_SECS` default 30
 //! - `FOTW_BENCH_DISK_MBPS`      disk-load write rate, default 50
+//! - `FOTW_BENCH_DISK_MAX_GB`    disk-load cap per run, default 30 (the load
+//!   stops writing there; 50 MB/s for 10 min is 30 GB)
 //! - `FOTW_BENCH_INDUCE_GAP_AT_SECS` (Windows) freeze the bench process
 //!   for `FOTW_BENCH_INDUCE_GAP_MS` (default 1000) at that point of the
 //!   recording — the tone keeps playing from a separate player process, so
 //!   the capture really loses audio and must report it
 //! - `FOTW_BENCH_KEEP_AUDIO` keep the recording under `<data>/rec/`
+//!
+//! Disk hygiene (the disk is shared with builds): the disk load writes one
+//! 512 MB file at a time, opened delete-on-close on Windows, so the OS removes
+//! it even if the run is killed. Everything else the run writes — the
+//! recording, queued-meeting copies, caption chunks, the player's files — is
+//! removed when the run ends (panics included) and again at the next start in
+//! case a run was killed. Kept on purpose: the downloaded engines/models and
+//! the small scratch database under `<data>/app`, and the results JSON.
 //!
 //! The evals runner's `local_bench` can call this test and read the JSON.
 
@@ -251,6 +261,57 @@ fn freeze_self(ms: u64) {
     }
 }
 
+/// A file for the disk load: on Windows FILE_FLAG_DELETE_ON_CLOSE, so the
+/// OS deletes it when the handle closes — also when the process is killed.
+fn open_scratch_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const DELETE: u32 = 0x0001_0000;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        o.access_mode(GENERIC_WRITE | DELETE)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
+    }
+    o.open(path)
+}
+
+/// Everything a run writes besides the model cache, the scratch database and
+/// the results: the disk load, caption chunks, the player's files, the
+/// queued-meeting copies and (unless kept) the recordings.
+fn remove_scratch(root: &Path, data_dir: &Path, recordings: bool) {
+    for sub in ["disk-load", "live-tmp", "player.stop", "player.json"] {
+        let p = root.join(sub);
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::remove_file(&p);
+    }
+    if recordings {
+        let _ = std::fs::remove_dir_all(root.join("rec"));
+    }
+    if let Ok(entries) = std::fs::read_dir(data_dir.join("recordings")) {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with("bench-") {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+}
+
+/// Runs [`remove_scratch`] when the bench ends, however it ends.
+struct ScratchGuard {
+    root: PathBuf,
+    data_dir: PathBuf,
+    recordings: bool,
+}
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        remove_scratch(&self.root, &self.data_dir, self.recordings);
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
@@ -284,6 +345,10 @@ fn contention_bench() {
     let want = |l: &str| loads.iter().any(|x| x == l);
     let ask_every: u64 = env_or("FOTW_BENCH_ASK_EVERY_SECS", "30").parse().unwrap();
     let disk_mbps: u64 = env_or("FOTW_BENCH_DISK_MBPS", "50").parse().unwrap();
+    let disk_max_mb: u64 = env_or("FOTW_BENCH_DISK_MAX_GB", "30")
+        .parse::<u64>()
+        .unwrap()
+        * 1024;
     let induce_at: Option<u64> = std::env::var("FOTW_BENCH_INDUCE_GAP_AT_SECS")
         .ok()
         .and_then(|v| v.parse().ok());
@@ -294,7 +359,16 @@ fn contention_bench() {
         &home.join("fotw-bench").to_string_lossy(),
     ));
     let data_dir = bench_root.join("app");
+    // whatever a killed earlier run left behind
+    let keep_audio = std::env::var("FOTW_BENCH_KEEP_AUDIO").is_ok();
+    remove_scratch(&bench_root, &data_dir, !keep_audio);
     std::fs::create_dir_all(&data_dir).unwrap();
+    // ...and whatever this one writes, however it ends (Drop runs on panic)
+    let _cleanup = ScratchGuard {
+        root: bench_root.clone(),
+        data_dir: data_dir.clone(),
+        recordings: !keep_audio,
+    };
     let started_utc = chrono::Utc::now();
     let out_path = PathBuf::from(env_or(
         "FOTW_BENCH_OUT",
@@ -532,16 +606,14 @@ fn contention_bench() {
             let buf = vec![0x5au8; 8 << 20];
             let target_mb_s = disk_mbps;
             let t0 = Instant::now();
-            let mut file_no = 0u64;
-            while !shared.stop.load(Ordering::Relaxed) {
-                let path = dir.join(format!("load-{}.bin", file_no % 2));
-                file_no += 1;
-                let Ok(mut f) = std::fs::File::create(&path) else {
+            let capped = |shared: &Shared| shared.disk_mb.load(Ordering::Relaxed) >= disk_max_mb;
+            while !shared.stop.load(Ordering::Relaxed) && !capped(&shared) {
+                // one 512 MB file at a time, gone as soon as it's closed
+                let Ok(mut f) = open_scratch_file(&dir.join("load.bin")) else {
                     break;
                 };
                 for k in 0..64 {
-                    // 512 MB per file
-                    if shared.stop.load(Ordering::Relaxed) {
+                    if shared.stop.load(Ordering::Relaxed) || capped(&shared) {
                         break;
                     }
                     if f.write_all(&buf).is_err() {
@@ -754,6 +826,7 @@ fn contention_bench() {
             "loads": loads,
             "ask_every_secs": ask_every,
             "disk_mbps": disk_mbps,
+            "disk_max_gb": disk_max_mb / 1024,
             "tone": tone,
             "asr": {"tier": "light", "model": LIVE_MODEL, "gpu": false,
                     "threads": fly_app_lib::pipeline::sidecar_threads()},
@@ -810,10 +883,8 @@ fn contention_bench() {
         results["ask"]["latency"], results["captions"]["lag"], results["load"]
     );
     eprintln!("results: {}", out_path.display());
-    // the recording itself is kept only on request (it's big)
-    if std::env::var("FOTW_BENCH_KEEP_AUDIO").is_err() {
-        let _ = std::fs::remove_dir_all(&rec_dir);
-    }
+    // the recording itself (kept only on request) and every other scratch
+    // file go when `_cleanup` drops, right after this
 }
 
 /// Re-analyse a kept system-channel WAV (`FOTW_BENCH_KEEP_AUDIO=1` keeps
