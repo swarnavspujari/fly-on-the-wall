@@ -873,3 +873,16 @@ fn a_recording_path_outside_its_folder_leaves_the_meeting_alone() {
     assert!(m.file("recording.mic.wav").exists());
     assert!(!m.file("recording.mic.flac").exists());
 }
+
+/// A meeting deleted after the pass was planned is gone, not "in use,
+/// later" and not a failure: there's nothing to come back to.
+#[test]
+fn a_meeting_deleted_before_its_turn_is_gone() {
+    let m = setup(Layout::TwoChannel);
+    m.storage.lock().unwrap().purge_meeting(&m.id).unwrap();
+    assert!(
+        matches!(m.compress(), Err(MeetingError::Gone(_))),
+        "{:?}",
+        m.compress()
+    );
+}
