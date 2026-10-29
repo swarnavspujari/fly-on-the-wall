@@ -690,6 +690,7 @@ fn usage_of(u: Option<&Value>) -> Usage {
         output_tokens: get("output_tokens"),
         cache_read_tokens: get("cache_read_input_tokens"),
         cache_write_tokens: get("cache_creation_input_tokens"),
+        context_fallback: false,
     }
 }
 

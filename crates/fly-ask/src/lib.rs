@@ -882,6 +882,21 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     run.log.validation = v.stats;
     let (proposals, refusals) = tool_results(&state);
 
+    // The server read less of the prompt than was sent: whatever came back
+    // was written without part of the evidence or the rules.
+    if metered.meter().truncation_suspected {
+        return run.done(Outcome {
+            proposals,
+            refusals,
+            ..Outcome::bare(
+                AnswerStatus::ModelFailed,
+                Some(Failure {
+                    kind: FailureKind::Truncated,
+                    message: "The model's context was too small for this question, so part of it was cut off before the model read it. Try a narrower question, or a model with a larger context window.".into(),
+                }),
+            )
+        });
+    }
     if truncated {
         return run.done(Outcome {
             proposals,

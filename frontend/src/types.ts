@@ -378,6 +378,9 @@ export interface AskReply {
   trace_lines: string[];
   /** Where the answering model ran (store it on the assistant turn). */
   on_device: boolean;
+  /** The id `insert_ask_answer` takes to insert this answer; null when no
+   *  sentence is sourced. */
+  insert_id: string | null;
 }
 
 export interface CalendarAttendee {

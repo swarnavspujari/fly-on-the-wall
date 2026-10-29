@@ -15,6 +15,7 @@ const reply = (text: string, onDevice = true): AskReply => ({
   refusals: [],
   trace_lines: [],
   on_device: onDevice,
+  insert_id: null,
 });
 import { AskComposer, AskSheet, useAskChat } from "./AskPanel";
 import { ConfirmProvider } from "./confirm";
@@ -284,6 +285,42 @@ describe("Ask composer and sheet", () => {
     expect(onInsert).toHaveBeenCalledWith("Send the SOW today.");
     expect(sheet()!.textContent).toContain("Inserted into your notes");
     expect(button("Insert into note")).toBeUndefined();
+  });
+
+  it("lists sentences no cited line backs, and what wasn't searched", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue({
+      ...reply("The kiln opens Monday. It costs a lot."),
+      sentences: [
+        { text: "The kiln opens Monday.", citations: ["s1"], status: "sourced" },
+        { text: "It costs a lot.", citations: [], status: "unsourced" },
+        { text: "Ilka runs it.", citations: ["s2"], status: "flagged" },
+      ],
+      trace_lines: ["Searched all your meetings", "1 kept-local meeting not searched"],
+    });
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("When does the kiln open?");
+    key(input(), "Enter");
+    await flush();
+    const check = sheet()!.querySelector('[data-testid="ask-answer-check"]')!;
+    expect(check.textContent).toContain("no cited line backs them");
+    expect(check.textContent).toContain("It costs a lot. (no source)");
+    expect(check.textContent).toContain("Ilka runs it. (doesn't match its source)");
+    expect(check.textContent).not.toContain("The kiln opens Monday.");
+    expect(check.textContent).toContain("1 kept-local meeting not searched");
+  });
+
+  it("shows no check under a fully sourced answer", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue({
+      ...reply("The kiln opens Monday."),
+      sentences: [{ text: "The kiln opens Monday.", citations: ["s1"], status: "sourced" }],
+    });
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("When does the kiln open?");
+    key(input(), "Enter");
+    await flush();
+    expect(sheet()!.querySelector('[data-testid="ask-answer-check"]')).toBeNull();
   });
 
   it("shows a human error naming the provider it went to, and retries", async () => {

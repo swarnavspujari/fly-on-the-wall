@@ -214,6 +214,11 @@ pub struct Usage {
     pub cache_read_tokens: Option<u32>,
     /// Prompt-cache writes (Anthropic).
     pub cache_write_tokens: Option<u32>,
+    /// The server ran with less context than the request asked for: an
+    /// Ollama runner failed with the sized `num_ctx` and the request went
+    /// again with the server's default, which may have cut the prompt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context_fallback: bool,
 }
 
 /// Sum two reports; a field stays `None` only when both are `None`.
@@ -232,6 +237,7 @@ impl std::ops::Add for Usage {
             output_tokens: sum(self.output_tokens, other.output_tokens),
             cache_read_tokens: sum(self.cache_read_tokens, other.cache_read_tokens),
             cache_write_tokens: sum(self.cache_write_tokens, other.cache_write_tokens),
+            context_fallback: self.context_fallback || other.context_fallback,
         }
     }
 }

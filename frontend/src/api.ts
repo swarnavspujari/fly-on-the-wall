@@ -174,12 +174,11 @@ export const api = {
   // sanitized frames) for that id.
   askMeeting: (noteId: string, history: AskMessage[]) =>
     invoke<AskReply>("ask_meeting", { noteId, history }),
-  // Approved Ask results. Each validates again: links removed, citations
-  // kept only if they belong to that note / meeting.
-  insertAskAnswer: (noteId: string, markdown: string, segmentIds: string[]) =>
-    invoke<Note>("insert_ask_answer", { noteId, markdown, segmentIds }),
-  addActionItem: (meetingId: string, text: string, owner: string | null, segmentIds: string[]) =>
-    invoke<MeetingItem>("add_action_item", { meetingId, text, owner, segmentIds }),
+  // Approve an Ask result by the id `askMeeting` returned (an answer's
+  // `insert_id`, or a proposal's `id`). The backend applies what it
+  // validated, validates it again, and a second click adds nothing.
+  insertAskAnswer: (proposalId: string) => invoke<Note>("insert_ask_answer", { proposalId }),
+  addActionItem: (proposalId: string) => invoke<MeetingItem>("add_action_item", { proposalId }),
   listTemplates: () => invoke<Template[]>("list_templates"),
   saveTemplate: (template: Template) => invoke<void>("save_template", { template }),
   deleteTemplate: (id: string) => invoke<void>("delete_template", { id }),

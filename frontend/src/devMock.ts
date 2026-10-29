@@ -964,15 +964,21 @@ const MOCK_VENDORS: Record<string, string> = {
 const MOCK_ASK_ANSWER =
   "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
 /** `ask_meeting`'s reply shape (the harness's answer), unsourced in the mock. */
-function mockAskReply(text: string) {
+/** Like the backend's approvals: what an answer's id may insert, once. */
+const mockApprovals = new Map<string, { noteId: string; markdown: string; applied: boolean }>();
+function mockAskReply(text: string, noteId = "n1") {
   const local = llmSettings.providers.find((p) => p.id === llmSettings.provider)?.is_local ?? true;
+  const insertId = `mock-insert-${mockApprovals.size + 1}`;
+  mockApprovals.set(insertId, { noteId, markdown: text, applied: false });
   return {
+    insert_id: insertId,
     status: "answered",
     text,
     sentences: text
       .split("\n")
       .filter((l) => l.trim())
-      .map((l) => ({ text: l, citations: [] as string[], status: "unsourced" })),
+      // Sourced, like a typical answer (the panel lists unsourced ones).
+      .map((l) => ({ text: l, citations: ["mock-seg"], status: "sourced" })),
     sources: [],
     proposals: [],
     refusals: [],
@@ -997,7 +1003,11 @@ function mockAsk(args: Record<string, unknown>): Promise<ReturnType<typeof mockA
       error = MOCK_ASK_ERRORS.no_key.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
   }
   return new Promise((resolve, reject) =>
-    setTimeout(() => (error ? reject(error) : resolve(mockAskReply(MOCK_ASK_ANSWER))), 700),
+    setTimeout(
+      () =>
+        error ? reject(error) : resolve(mockAskReply(MOCK_ASK_ANSWER, String(args.noteId ?? "n1"))),
+      700,
+    ),
   );
 }
 
@@ -1394,32 +1404,28 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "ask_meeting":
       return mockAsk(args);
     case "insert_ask_answer": {
-      // Like the backend: an AI block citing the given lines (links dropped).
-      const md = String(args.markdown ?? "")
-        .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
-        .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-        .trim();
-      if (!md) throw "nothing to insert";
-      blocks.push({
-        id: `ask-${blocks.length + 1}`,
-        origin: { kind: "ai", source_segment_ids: (args.segmentIds as string[]) ?? [] },
-        markdown: md,
-      });
-      return JSON.parse(JSON.stringify(note(String(args.noteId ?? "n1"))));
+      // Like the backend: only an id it handed out, applied once (links
+      // dropped); a second click returns the note unchanged.
+      const held = mockApprovals.get(String(args.proposalId));
+      if (!held) throw "This suggestion has expired. Ask again to get a fresh one.";
+      if (!held.applied) {
+        const md = held.markdown
+          .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+          .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+          .trim();
+        if (!md) throw "nothing to insert";
+        blocks.push({
+          id: `ask-${blocks.length + 1}`,
+          origin: { kind: "ai", source_segment_ids: [] },
+          markdown: md,
+        });
+        held.applied = true;
+      }
+      return JSON.parse(JSON.stringify(note(held.noteId)));
     }
     case "add_action_item":
-      return {
-        id: `item-${Date.now()}`,
-        meeting_id: String(args.meetingId),
-        kind: "action_item",
-        text: String(args.text),
-        owner: (args.owner as string | null) ?? null,
-        status: "open",
-        speaker_key: null,
-        segment_ids: (args.segmentIds as string[]) ?? [],
-        created_at: new Date().toISOString(),
-        extracted_by: "user:ask",
-      };
+      // The mock's answers carry no proposals, so no id is ever valid.
+      throw "This suggestion has expired. Ask again to get a fresh one.";
     case "test_llm_connection": {
       const refused = mockConsentRefusal();
       if (refused) throw refused;

@@ -13,7 +13,7 @@ import {
   Sparkles,
   TriangleAlert,
 } from "lucide-react";
-import type { AskMessage, LlmSettings } from "../types";
+import type { AskMessage, AskReply, LlmSettings } from "../types";
 import { api } from "../api";
 import {
   CLAUDE_MODELS,
@@ -69,6 +69,26 @@ export function useWideWindow(): boolean {
   return wide;
 }
 
+/** What the user should know about one answer that isn't in its text
+ *  (display only: never sent back as chat history). Until the citation UI
+ *  (3.4), sentences no cited line backs are listed under the answer. */
+export interface AnswerCheck {
+  /** Sentences that aren't sourced, with why. */
+  unverified: { text: string; why: "unsourced" | "flagged" }[];
+  /** Trace lines the user should see (Keep-local meetings not searched). */
+  notes: string[];
+}
+
+/** An answer's check, from `ask_meeting`'s reply. */
+export function answerCheck(reply: AskReply): AnswerCheck {
+  return {
+    unverified: reply.sentences
+      .filter((s) => s.status !== "sourced")
+      .map((s) => ({ text: s.text, why: s.status === "flagged" ? "flagged" : "unsourced" })),
+    notes: reply.trace_lines.filter((l) => /kept-local/i.test(l)),
+  };
+}
+
 export interface AskChat {
   history: AskMessage[];
   input: string;
@@ -79,6 +99,8 @@ export interface AskChat {
   error: { raw: string; question: string; provider: string } | null;
   /** Answers (by history index) already inserted into the note. */
   inserted: ReadonlySet<number>;
+  /** Each answer's check, by history index. */
+  checks: ReadonlyMap<number, AnswerCheck>;
   send: (text: string) => void;
   retry: () => void;
   dismissError: () => void;
@@ -97,6 +119,36 @@ export interface AskChat {
   announcement: string;
 }
 
+/** Under an answer: the sentences no cited line backs, and what wasn't
+ *  searched. Nothing when every sentence is sourced. */
+function AnswerCheckView({ check }: { check: AnswerCheck | undefined }) {
+  if (!check || (check.unverified.length === 0 && check.notes.length === 0)) return null;
+  return (
+    <div className="flex flex-col gap-1 text-[12.5px]" data-testid="ask-answer-check">
+      {check.unverified.length > 0 && (
+        <div style={{ color: "var(--warning-text)" }}>
+          <span className="font-semibold">Check these: no cited line backs them.</span>
+          <ul className="ml-4 mt-0.5 list-disc">
+            {check.unverified.map((u, k) => (
+              <li key={k}>
+                {u.text}{" "}
+                <span style={{ color: "var(--text-3)" }}>
+                  ({u.why === "flagged" ? "doesn't match its source" : "no source"})
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {check.notes.map((n, k) => (
+        <div key={k} style={{ color: "var(--text-3)" }}>
+          {n}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The composer's input, shared so the sheet can hand focus back to it. */
 export type AskInputRef = RefObject<HTMLTextAreaElement | null>;
 
@@ -108,6 +160,7 @@ export function useAskChat(noteId: string): AskChat {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AskChat["error"]>(null);
   const [inserted, setInserted] = useState<ReadonlySet<number>>(new Set());
+  const [checks, setChecks] = useState<ReadonlyMap<number, AnswerCheck>>(new Map());
   const [llm, setLlm] = useState<LlmSettings | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const sheetId = useId();
@@ -124,6 +177,7 @@ export function useAskChat(noteId: string): AskChat {
     setBusy(false);
     setError(null);
     setInserted(new Set());
+    setChecks(new Map());
     setAnnouncement("");
   }, [noteId]);
 
@@ -179,6 +233,7 @@ export function useAskChat(noteId: string): AskChat {
               citations: [...new Set(reply.sentences.flatMap((s) => s.citations))],
             },
           ]);
+          setChecks((c) => new Map(c).set(next.length, answerCheck(reply)));
           const n = next.filter((m) => m.role === "user").length;
           setAnnouncement(`Answer ${n} is ready.`);
         },
@@ -207,6 +262,7 @@ export function useAskChat(noteId: string): AskChat {
     busy,
     error,
     inserted,
+    checks,
     send,
     retry: () => {
       if (error) send(error.question);
@@ -705,6 +761,7 @@ export function AskSheet({
                 {m.content}
               </ReactMarkdown>
             </div>
+            <AnswerCheckView check={chat.checks.get(i)} />
             <div className="flex flex-wrap items-center gap-2">
               {chat.inserted.has(i) ? (
                 <span

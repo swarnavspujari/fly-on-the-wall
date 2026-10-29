@@ -79,6 +79,8 @@ pub struct Meter {
     pub first_token_ms: Option<u64>,
     pub model_ms: u64,
     pub truncation_suspected: bool,
+    /// The previous request's size (for the cache-aware truncation check).
+    pub last_request: u32,
     /// A call was forced to answer by a budget.
     pub budget_forced: bool,
     pub stops: Vec<StopReason>,
@@ -95,8 +97,10 @@ pub struct Metered<'a> {
     meter: Mutex<Meter>,
 }
 
-/// A first-call prompt this large whose evaluated token count is under
-/// 70% of what was sent was trimmed by the server.
+/// A prompt this large whose evaluated token count is under 70% of what
+/// was sent was trimmed by the server. On later rounds, Ollama doesn't
+/// count the prefix it already holds, so `sent_tokens` is what's new since
+/// the previous request (those can't be cached).
 fn looks_truncated(sent_tokens: u32, evaluated: Option<u32>) -> bool {
     match evaluated {
         Some(n) if sent_tokens >= 1_500 => n.saturating_mul(10) < sent_tokens.saturating_mul(7),
@@ -293,9 +297,22 @@ impl LLMProvider for Metered<'_> {
         let resp = result?;
         m.usage = m.usage + resp.usage;
         m.stops.push(resp.stop_reason);
-        if turn == 1 && self.inner.is_local() && looks_truncated(tokens, resp.usage.input_tokens) {
+        // Every round: a server that ran with less context than asked, or
+        // evaluated far fewer of the new prompt tokens than were sent.
+        let fresh = if turn == 1 {
+            tokens
+        } else {
+            tokens.saturating_sub(m.last_request)
+        };
+        m.last_request = tokens;
+        if resp.usage.context_fallback
+            || (self.inner.is_local() && looks_truncated(fresh, resp.usage.input_tokens))
+        {
             m.truncation_suspected = true;
-            tracing::warn!("ask: the server evaluated far fewer prompt tokens than were sent");
+            tracing::warn!(
+                turn,
+                "ask: the server read less of the prompt than was sent"
+            );
         }
         Ok(resp)
     }
@@ -339,6 +356,50 @@ mod tests {
             "small prompts aren't judged"
         );
         assert!(!looks_truncated(6_000, None), "no count, no claim");
+    }
+
+    fn reply_reading(tokens: u32, fallback: bool) -> ChatResponse {
+        let mut r = ChatResponse::text_reply("a");
+        r.usage.input_tokens = Some(tokens);
+        r.usage.context_fallback = fallback;
+        r
+    }
+
+    #[tokio::test]
+    async fn truncation_is_checked_every_round_against_what_is_new() {
+        let first = "x".repeat(8_000); // 2000 tokens
+        let more = "y".repeat(8_000); // 2000 more
+        let req1 = ConverseRequest {
+            messages: vec![Message::user(first.clone())],
+            ..Default::default()
+        };
+        let req2 = ConverseRequest {
+            messages: vec![Message::user(first), Message::user(more)],
+            ..Default::default()
+        };
+        // Round 2 reads only the new 2000 tokens (the rest is cached): fine.
+        let mock = MockLLMProvider::scripted(vec![
+            reply_reading(2_000, false),
+            reply_reading(1_990, false),
+        ]);
+        let m = Metered::new(&mock, None, None, budget(8, None, 40_000), Instant::now());
+        m.converse(req1.clone()).await.unwrap();
+        m.converse(req2.clone()).await.unwrap();
+        assert!(!m.meter().truncation_suspected);
+        // Round 2 reads far fewer than its new tokens: cut.
+        let mock =
+            MockLLMProvider::scripted(vec![reply_reading(2_000, false), reply_reading(400, false)]);
+        let m = Metered::new(&mock, None, None, budget(8, None, 40_000), Instant::now());
+        m.converse(req1.clone()).await.unwrap();
+        assert!(!m.meter().truncation_suspected);
+        m.converse(req2).await.unwrap();
+        assert!(m.meter().truncation_suspected, "a later round counts too");
+        // A reply from the server's default context is suspect, whatever
+        // it reports.
+        let mock = MockLLMProvider::scripted(vec![reply_reading(2_000, true)]);
+        let m = Metered::new(&mock, None, None, budget(8, None, 40_000), Instant::now());
+        m.converse(req1).await.unwrap();
+        assert!(m.meter().truncation_suspected);
     }
 
     #[test]

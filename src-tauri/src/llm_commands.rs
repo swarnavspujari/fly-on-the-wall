@@ -1105,15 +1105,40 @@ const ASK_RUN_LOG_MAX: u64 = 2_000_000;
 /// per answer (spec §4.2 step 7). Best effort: a write failure is logged,
 /// never shown.
 fn record_ask_run(state: &AppState, log: &fly_ask::RunLog) {
+    append_ask_log(
+        state,
+        ASK_RUN_LOG,
+        "ask-runs.1.jsonl",
+        log,
+        "the Ask run log",
+    );
+}
+
+/// Ask approvals' audit rows (ids, codes, time; spec §4.2a #5).
+const ASK_AUDIT_LOG: &str = "ask-approvals.jsonl";
+
+fn record_ask_audit(state: &AppState, row: &crate::ask_approvals::AuditRow) {
+    append_ask_log(
+        state,
+        ASK_AUDIT_LOG,
+        "ask-approvals.1.jsonl",
+        row,
+        "the Ask approvals log",
+    );
+}
+
+/// Append one JSON line to a log under `logs/`, rolling it at
+/// `ASK_RUN_LOG_MAX`.
+fn append_ask_log(state: &AppState, file: &str, rolled: &str, value: &impl Serialize, what: &str) {
     use std::io::Write as _;
     let dir = state.data_dir.join(crate::logging::LOGS_DIR);
-    let path = dir.join(ASK_RUN_LOG);
+    let path = dir.join(file);
     let result = (|| -> std::io::Result<()> {
         std::fs::create_dir_all(&dir)?;
         if std::fs::metadata(&path).is_ok_and(|m| m.len() > ASK_RUN_LOG_MAX) {
-            std::fs::rename(&path, dir.join("ask-runs.1.jsonl"))?;
+            std::fs::rename(&path, dir.join(rolled))?;
         }
-        let line = serde_json::to_string(log).map_err(std::io::Error::other)?;
+        let line = serde_json::to_string(value).map_err(std::io::Error::other)?;
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1121,7 +1146,7 @@ fn record_ask_run(state: &AppState, log: &fly_ask::RunLog) {
         writeln!(f, "{line}")
     })();
     if let Err(e) = result {
-        tracing::warn!(error = %e, "couldn't write the Ask run log");
+        tracing::warn!(error = %e, "couldn't write {what}");
     }
 }
 
@@ -1133,6 +1158,27 @@ pub struct AskReply {
     #[serde(flatten)]
     pub answer: fly_ask::AskAnswer,
     pub trace_lines: Vec<String>,
+    /// The id `insert_ask_answer` takes to insert this answer (an answer
+    /// with at least one sourced sentence).
+    pub insert_id: Option<String>,
+}
+
+/// An answer worth inserting: answered, with a sourced sentence. Its
+/// Markdown and the lines its sourced sentences cite.
+fn insertable(a: &fly_ask::AskAnswer) -> Option<(String, Vec<String>)> {
+    let sourced = |s: &&fly_ask::AnswerSentence| s.status == fly_ask::SentenceStatus::Sourced;
+    if a.status != fly_ask::AnswerStatus::Answered || !a.sentences.iter().any(|s| sourced(&s)) {
+        return None;
+    }
+    let mut ids: Vec<String> = Vec::new();
+    for s in a.sentences.iter().filter(sourced) {
+        for c in &s.citations {
+            if !ids.contains(c) {
+                ids.push(c.clone());
+            }
+        }
+    }
+    Some((a.text.clone(), ids))
 }
 
 /// Payload of the `ask:event` stream (only when the caller passes an
@@ -1209,7 +1255,7 @@ pub async fn ask_meeting(
 ) -> CmdResult<AskReply> {
     use tauri::Emitter as _;
     ensure_provider_ready(&state).await?;
-    let scope = scope.unwrap_or(fly_ask::AskScope::Note(note_id));
+    let scope = scope.unwrap_or_else(|| fly_ask::AskScope::Note(note_id.clone()));
     let data_scope = match &scope {
         fly_ask::AskScope::Note(id) => DataScope::Note(id),
         fly_ask::AskScope::Meeting(id) => DataScope::Meeting(id),
@@ -1261,135 +1307,60 @@ pub async fn ask_meeting(
             .map(|f| f.message)
             .unwrap_or_else(|| "The model didn't answer.".into())),
         fly_ask::AnswerStatus::Cancelled => Err("Ask was cancelled.".into()),
-        _ => Ok(AskReply {
-            trace_lines: answer.trace.lines(),
-            answer,
-        }),
-    }
-}
-
-/// Segment ids of a note's transcripts.
-fn note_segment_ids(
-    storage: &fly_storage::Storage,
-    note_id: &str,
-) -> Result<std::collections::HashSet<String>, String> {
-    let mut ids = std::collections::HashSet::new();
-    for m in storage
-        .meetings_for_note(note_id)
-        .map_err(|e| e.to_string())?
-    {
-        if let Some(t) = storage.get_transcript(&m.id).map_err(|e| e.to_string())? {
-            ids.extend(t.segments.into_iter().map(|s| s.id));
+        _ => {
+            // What the user may approve from this answer, held by id.
+            let now = chrono::Utc::now();
+            let approvals = &crate::ask_approvals::APPROVALS;
+            for p in &answer.proposals {
+                approvals.register_proposal(p, now);
+            }
+            let insert_id = insertable(&answer)
+                .map(|(md, ids)| approvals.register_answer(&note_id, &md, &ids, now));
+            Ok(AskReply {
+                trace_lines: answer.trace.lines(),
+                insert_id,
+                answer,
+            })
         }
     }
-    Ok(ids)
 }
 
-/// Longest AI block an Ask insert may add.
-const MAX_ASK_INSERT_CHARS: usize = 8_000;
-
-/// "Insert into note" for an Ask answer (or an approved `insert_into_note`
-/// proposal): appends an AI block citing its source lines (spec §3.5 #6).
-/// Validated again here: links removed, only segment ids of this note's own
-/// transcripts kept (citation locators are recorded by the block write).
+/// "Insert into note" for an Ask answer or an approved `insert_into_note`
+/// proposal, by the id `ask_meeting` returned (`insert_id`, or the
+/// proposal's `id`): appends that AI block, validated again (spec §3.5
+/// #6). Idempotent: a second click returns the note as the first left it.
 #[tauri::command]
-pub fn insert_ask_answer(
-    state: State<'_, AppState>,
-    note_id: String,
-    markdown: String,
-    segment_ids: Vec<String>,
-) -> CmdResult<Note> {
-    let markdown = fly_ask::text::strip_links(markdown.trim()).0;
-    if markdown.trim().is_empty() {
-        return Err("nothing to insert".into());
-    }
-    if markdown.chars().count() > MAX_ASK_INSERT_CHARS {
-        return Err("that answer is too long to insert".into());
-    }
+pub fn insert_ask_answer(state: State<'_, AppState>, proposal_id: String) -> CmdResult<Note> {
+    use crate::ask_approvals::{Applied, Kind, APPROVALS};
     let storage = state.storage.lock().unwrap();
-    let mut note = storage.get_note(&note_id).map_err(|e| e.to_string())?;
-    let known = note_segment_ids(&storage, &note_id)?;
-    let mut ids: Vec<String> = Vec::new();
-    for id in segment_ids {
-        if known.contains(&id) && !ids.contains(&id) {
-            ids.push(id);
-        }
+    let (result, row) = APPROVALS.approve(&storage, &proposal_id, Kind::Insert, chrono::Utc::now());
+    drop(storage);
+    record_ask_audit(&state, &row);
+    match result? {
+        Applied::Note(n) => Ok(n),
+        Applied::Item(_) => Err("That isn't this kind of suggestion.".into()),
     }
-    note.blocks.push(fly_core::NoteBlock::ai(markdown, ids));
-    storage
-        .update_note_blocks(&note_id, &note.blocks)
-        .map_err(|e| e.to_string())
 }
 
-/// Longest action item an Ask proposal may add.
-const MAX_ASK_ITEM_CHARS: usize = 400;
-
-/// Add an action item from an approved Ask `add_action_item` proposal.
-/// Validated again here: it must cite lines of this meeting; its owner is
-/// nobody, or a speaker or attendee of the meeting (never inferred). Kept
-/// across re-extraction (`extracted_by` = `user:ask`).
+/// Add the action item of an approved Ask `add_action_item` proposal, by
+/// its id: validated again (it cites lines of its meeting; the owner is
+/// nobody or a speaker or attendee, never inferred) and kept across
+/// re-extraction (`extracted_by` = `user:ask`). Idempotent.
 #[tauri::command]
 pub fn add_action_item(
     state: State<'_, AppState>,
-    meeting_id: String,
-    text: String,
-    owner: Option<String>,
-    segment_ids: Vec<String>,
+    proposal_id: String,
 ) -> CmdResult<fly_core::MeetingItem> {
-    let text = fly_ask::text::strip_links(text.trim()).0;
-    if text.trim().is_empty() {
-        return Err("the action item is empty".into());
-    }
-    if text.chars().count() > MAX_ASK_ITEM_CHARS {
-        return Err("that action item is too long".into());
-    }
+    use crate::ask_approvals::{Applied, Kind, APPROVALS};
     let storage = state.storage.lock().unwrap();
-    let meeting = storage
-        .get_meeting(&meeting_id)
-        .map_err(|e| e.to_string())?;
-    let transcript = storage
-        .get_transcript(&meeting.id)
-        .map_err(|e| e.to_string())?
-        .ok_or("this meeting has no transcript yet")?;
-    let mut ids: Vec<String> = Vec::new();
-    for id in segment_ids {
-        if transcript.segments.iter().any(|s| s.id == id) && !ids.contains(&id) {
-            ids.push(id);
-        }
+    let (result, row) =
+        APPROVALS.approve(&storage, &proposal_id, Kind::ActionItem, chrono::Utc::now());
+    drop(storage);
+    record_ask_audit(&state, &row);
+    match result? {
+        Applied::Item(i) => Ok(i),
+        Applied::Note(_) => Err("That isn't this kind of suggestion.".into()),
     }
-    let Some(first) = ids
-        .first()
-        .and_then(|id| transcript.segments.iter().find(|s| &s.id == id))
-    else {
-        return Err("an action item needs a source line from this meeting".into());
-    };
-    let owner = owner
-        .map(|o| o.trim().to_string())
-        .filter(|o| !o.is_empty());
-    if let Some(o) = &owner {
-        let known = transcript
-            .speakers
-            .iter()
-            .map(|s| s.label.as_str())
-            .chain(meeting.attendees.iter().map(|a| a.display_name()));
-        if !known.into_iter().any(|k| k.trim().eq_ignore_ascii_case(o)) {
-            return Err("the owner must be a speaker or attendee of this meeting".into());
-        }
-    }
-    let item = fly_core::MeetingItem {
-        id: fly_core::new_id(),
-        meeting_id: meeting.id.clone(),
-        kind: fly_core::ItemKind::ActionItem,
-        text,
-        owner,
-        status: Some("open".into()),
-        speaker_key: Some(first.speaker_key.clone()),
-        segment_ids: ids,
-        created_at: chrono::Utc::now(),
-        extracted_by: format!("{}ask", fly_storage::USER_ITEM_PREFIX),
-    };
-    storage.add_meeting_item(&item).map_err(|e| e.to_string())?;
-    Ok(item)
 }
 
 // ---------------------------------------------------------------------------

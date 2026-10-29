@@ -418,6 +418,29 @@ async fn citations_outside_the_retrieved_set_retry_once_then_show_flagged() {
 }
 
 #[tokio::test]
+async fn an_answer_from_a_cut_context_is_a_model_failure() {
+    let f = fx();
+    // Ollama ran it with its default context (the sized one crashed).
+    let mut r = ChatResponse::text_reply("Priya asked for $6,300 for the opening month [seg:a01].");
+    r.usage.context_fallback = true;
+    let m = Model::new(true, vec![r]);
+    let a = run(
+        &f,
+        &m,
+        true,
+        Tier::S,
+        AskScope::Meeting(f.launch.clone()),
+        "What budget did Priya ask for?",
+        &[],
+    )
+    .await;
+    assert_eq!(a.status, AnswerStatus::ModelFailed);
+    assert_eq!(a.failure.unwrap().kind, FailureKind::Truncated);
+    assert!(a.sentences.is_empty(), "nothing shown as an answer");
+    assert!(a.run_log.truncation_suspected);
+}
+
+#[tokio::test]
 async fn a_model_refusal_is_not_found_and_an_empty_reply_is_a_failure() {
     let f = fx();
     let m = Model::new(
