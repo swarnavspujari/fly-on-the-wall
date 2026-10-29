@@ -1147,6 +1147,7 @@ async fn after_a_connector_reply_nothing_more_is_proposed_or_called() {
     )
     .await;
     assert!(offered(&m.requests(), "mcp_docs__search"));
+    assert!(!a.trace.connectors_off_keep_local);
     assert!(a.proposals.is_empty(), "sealed: no proposal");
     assert!(a
         .refusals
@@ -1169,7 +1170,7 @@ async fn connectors_are_not_offered_on_a_keep_local_scope() {
             "It's the retention plan [seg:k01].",
         )],
     );
-    run_ext(
+    let a = run_ext(
         &f,
         &m,
         true,
@@ -1181,6 +1182,13 @@ async fn connectors_are_not_offered_on_a_keep_local_scope() {
     let reqs = m.requests();
     assert!(!reqs.is_empty());
     assert!(!offered(&reqs, "mcp_docs__search"));
+    // The user is told why.
+    assert!(a.trace.connectors_off_keep_local);
+    assert!(a
+        .trace
+        .lines()
+        .iter()
+        .any(|l| l.starts_with("Connectors were off")));
 }
 
 #[tokio::test]
@@ -1205,5 +1213,145 @@ async fn with_connectors_offered_the_turn_reads_without_keep_local_content() {
     assert!(
         !sent_text(&reqs).contains("CANARY-OSPREY"),
         "even on this device"
+    );
+}
+
+/// A scripted model whose user presses Stop as its first reply arrives.
+struct StopsAfterFirst {
+    inner: MockLLMProvider,
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for StopsAfterFirst {
+    fn id(&self) -> &'static str {
+        "anthropic"
+    }
+    fn model(&self) -> &str {
+        "test-model"
+    }
+    fn is_local(&self) -> bool {
+        false
+    }
+    async fn chat(&self, req: ChatRequest) -> fly_llm::Result<String> {
+        Ok(self.converse(req.into()).await?.text())
+    }
+    async fn test_connection(&self) -> fly_llm::Result<()> {
+        Ok(())
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    async fn converse(&self, req: ConverseRequest) -> fly_llm::Result<ChatResponse> {
+        let r = self.inner.converse(req).await;
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        r
+    }
+}
+
+/// A model that never starts answering (a long prompt read).
+struct Stalls;
+
+#[async_trait::async_trait]
+impl LLMProvider for Stalls {
+    fn id(&self) -> &'static str {
+        "ollama"
+    }
+    fn model(&self) -> &str {
+        "test-model"
+    }
+    fn is_local(&self) -> bool {
+        true
+    }
+    async fn chat(&self, _req: ChatRequest) -> fly_llm::Result<String> {
+        futures_util::future::pending().await
+    }
+    async fn test_connection(&self) -> fly_llm::Result<()> {
+        Ok(())
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
+    async fn converse(&self, _req: ConverseRequest) -> fly_llm::Result<ChatResponse> {
+        futures_util::future::pending().await
+    }
+}
+
+async fn run_cancellable(
+    f: &Fx,
+    m: &dyn LLMProvider,
+    tier: Tier,
+    cancel: &std::sync::atomic::AtomicBool,
+    q: &str,
+) -> fly_ask::AskAnswer {
+    ask(
+        AskEnv {
+            store: &f.s,
+            provider: m,
+            on_device: m.is_local(),
+            tier,
+            limits: None,
+            embedder: Some(&Bow),
+            events: None,
+            cancel: Some(cancel),
+            external: None,
+        },
+        AskInput {
+            question: q,
+            history: &[],
+            scope: AskScope::Meeting(f.launch.clone()),
+            now: now(),
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_stopped_ask_ends_cleanly_with_nothing_proposed() {
+    let f = fx();
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let m = StopsAfterFirst {
+        inner: MockLLMProvider::scripted(vec![
+            ChatResponse::tool_call(
+                "t1",
+                "add_action_item",
+                json!({"text": "Ewan repaints the lobby sign by Friday", "owner": "Ewan Doyle", "segment_ids": ["a03"]}),
+            ),
+            ChatResponse::text_reply("Ewan will repaint the lobby sign by Friday [seg:a03]."),
+        ]),
+        flag: flag.clone(),
+    };
+    let a = run_cancellable(&f, &m, Tier::C, &flag, "Who is repainting the lobby sign?").await;
+    assert_eq!(a.status, AnswerStatus::Cancelled);
+    assert!(a.proposals.is_empty(), "a stopped answer proposes nothing");
+    assert!(a.sentences.is_empty() && a.text.is_empty());
+    assert_eq!(m.inner.requests().len(), 1, "no call after Stop");
+    let log = serde_json::to_value(&a.run_log).unwrap();
+    assert_eq!(log["status"], "status_cancelled");
+}
+
+#[tokio::test]
+async fn stop_works_before_the_first_token() {
+    let f = fx();
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let later = flag.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        later.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let t = std::time::Instant::now();
+    let a = run_cancellable(
+        &f,
+        &Stalls,
+        Tier::S,
+        &flag,
+        "What budget did Priya ask for?",
+    )
+    .await;
+    assert_eq!(a.status, AnswerStatus::Cancelled);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
     );
 }

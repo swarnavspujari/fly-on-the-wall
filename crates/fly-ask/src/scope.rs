@@ -100,6 +100,18 @@ pub enum ScopeRefusal {
     Unchecked,
 }
 
+/// People the router knows (attendees, speaker labels, item owners) in
+/// what `vis` may see: the `@` suggestions.
+pub fn known_people(s: &Storage, vis: Visibility) -> Result<Vec<String>, ScopeRefusal> {
+    resolve(s, &AskScope::All, vis).map(|r| r.known.people)
+}
+
+/// The `@` suggestions for the user's own screen: everyone the router
+/// knows across the library (empty when it can't be read).
+pub fn people_for_suggestions(s: &Storage) -> Vec<String> {
+    known_people(s, Visibility::All).unwrap_or_default()
+}
+
 /// Whether the question's explicit scope (a note, a meeting, a folder)
 /// holds Keep-local content. Everything and a person aren't explicit. A
 /// failed lookup counts as Keep local.

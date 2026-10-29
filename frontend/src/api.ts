@@ -177,6 +177,12 @@ export const api = {
   // sanitized frames) for that id.
   askMeeting: (noteId: string, history: AskMessage[]) =>
     invoke<AskReply>("ask_meeting", { noteId, history }),
+  // Stop an answer that is still being written (the Ask sheet's Stop):
+  // the backend drops the request, proposes nothing, and askMeeting rejects
+  // with "Ask was cancelled.". An id that isn't running does nothing.
+  cancelAsk: (askId: string) => invoke<void>("cancel_ask", { askId }),
+  // The composer's `@` suggestions (people the router can match).
+  listAskPeople: () => invoke<string[]>("list_ask_people"),
   // Approve an Ask result by the id `askMeeting` returned (an answer's
   // `insert_id`, or a proposal's `id`). The backend applies what it
   // validated, validates it again, and a second click adds nothing.

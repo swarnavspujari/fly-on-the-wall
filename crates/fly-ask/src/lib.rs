@@ -169,6 +169,9 @@ pub struct Trace {
     pub floor_not_found: bool,
     /// A budget forced the final answer.
     pub budget_forced: bool,
+    /// Connectors were available but off for this question: its explicit
+    /// scope holds a Keep-local meeting.
+    pub connectors_off_keep_local: bool,
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -210,6 +213,9 @@ impl Trace {
                 "Looked further {}",
                 plural(self.tool_calls.len(), "time", "times")
             ));
+        }
+        if self.connectors_off_keep_local {
+            v.push("Connectors were off: this includes a Keep-local meeting".into());
         }
         if self.floor_not_found {
             v.push("Nothing in your meetings matched the question".into());
@@ -408,6 +414,25 @@ fn history_messages(history: &[Turn], on_device: bool) -> Vec<Message> {
     out
 }
 
+/// Each source with the note that holds its meeting.
+fn with_notes<S: StoreAccess>(
+    mut views: Vec<SourceView>,
+    resolved: &scope::Resolved,
+    store: &S,
+) -> Vec<SourceView> {
+    for v in &mut views {
+        v.note_id = match resolved.meeting(&v.meeting_id) {
+            Some(m) => m.note_id.clone(),
+            None => store.with(|s| {
+                s.get_meeting(&v.meeting_id)
+                    .map(|m| m.note_id)
+                    .unwrap_or_default()
+            }),
+        };
+    }
+    views
+}
+
 /// An earlier answer without a "(N kept-local meetings were not searched.)"
 /// note (answers from builds that appended it to the text): the count
 /// never reaches a model.
@@ -483,13 +508,14 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     // no Keep-local note (a failed lookup counts as Keep local). When they
     // are offered, the whole turn reads with Keep-local content excluded,
     // as for an off-device model.
-    let external = env
+    let offered = env
         .external
-        .filter(|x| tier.uses_tools() && !x.specs().is_empty())
-        .filter(|_| {
-            !env.store
-                .with(|s| scope::explicit_keep_local(s, &input.scope))
-        });
+        .filter(|x| tier.uses_tools() && !x.specs().is_empty());
+    let connectors_off_keep_local = offered.is_some()
+        && env
+            .store
+            .with(|s| scope::explicit_keep_local(s, &input.scope));
+    let external = offered.filter(|_| !connectors_off_keep_local);
     let vis = if env.on_device && external.is_none() {
         Visibility::All
     } else {
@@ -505,6 +531,7 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
         ),
         trace: Trace {
             tier: Some(tier),
+            connectors_off_keep_local,
             ..Default::default()
         },
         started,
@@ -635,7 +662,11 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     events::emit(
         env.events,
         AskEvent::Sources {
-            sources: evidence::source_views(&pf.evidence, pf.evidence.ids()),
+            sources: with_notes(
+                evidence::source_views(&pf.evidence, pf.evidence.ids()),
+                &resolved,
+                env.store,
+            ),
             kept_local_not_searched: resolved.kept_local_excluded,
         },
     );
@@ -731,7 +762,8 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
         input.now,
         pf.evidence.clone(),
     )
-    .with_external(external);
+    .with_external(external)
+    .with_cancel(env.cancel);
 
     let mut first = synthesize(&metered, &req, budget, &state).await;
     // One bounded retry of a transient provider failure.
@@ -796,7 +828,8 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
             }
             finish_meter(&mut run);
             if provider::is_cancel(&e) || cancelled() {
-                return failed(run, &state, AnswerStatus::Cancelled, None);
+                // A stopped answer proposes nothing.
+                return run.done(Outcome::bare(AnswerStatus::Cancelled, None));
             }
             return failed(run, &state, AnswerStatus::ModelFailed, Some(failure_of(&e)));
         }
@@ -906,7 +939,7 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
                     }
                     Err(e) if provider::is_cancel(&e) || cancelled() => {
                         finish_meter(&mut run);
-                        return failed(run, &state, AnswerStatus::Cancelled, None);
+                        return run.done(Outcome::bare(AnswerStatus::Cancelled, None));
                     }
                     Err(_) => {} // keep the first answer
                 }
@@ -915,6 +948,10 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     }
     finish_meter(&mut run);
     run.log.validation = v.stats;
+    // Stopped after the last call: nothing is shown or proposed.
+    if cancelled() {
+        return run.done(Outcome::bare(AnswerStatus::Cancelled, None));
+    }
     let (proposals, refusals) = tool_results(&state);
 
     // The server read less of the prompt than was sent: whatever came back
@@ -986,7 +1023,11 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     }
     run.done(Outcome {
         status,
-        sources: evidence::source_views(&evidence, &cited),
+        sources: with_notes(
+            evidence::source_views(&evidence, &cited),
+            &resolved,
+            env.store,
+        ),
         sentences: v.sentences,
         proposals,
         refusals,

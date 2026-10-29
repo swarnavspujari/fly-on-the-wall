@@ -47,6 +47,10 @@ pub struct SourceLine {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceView {
     pub meeting_id: String,
+    /// The note that holds the meeting (to open it, or an older recording
+    /// of another note).
+    #[serde(default)]
+    pub note_id: String,
     pub meeting_title: String,
     pub started_at: Option<DateTime<Utc>>,
     pub lines: Vec<SourceLine>,
@@ -90,6 +94,7 @@ pub fn source_views(ev: &Evidence, ids: &[String]) -> Vec<SourceView> {
                 );
                 out.push(SourceView {
                     meeting_id: s.meeting_id.clone(),
+                    note_id: String::new(),
                     meeting_title: title,
                     started_at: s.started_at,
                     lines: vec![line],

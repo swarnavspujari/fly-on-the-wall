@@ -1337,16 +1337,31 @@ pub fn build_ask_system(
 pub async fn ask_meeting(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    note_id: String,
+    note_id: Option<String>,
     history: Vec<AskMessage>,
     scope: Option<fly_ask::AskScope>,
     ask_id: Option<String>,
 ) -> CmdResult<AskReply> {
     use tauri::Emitter as _;
-    // The embedding backlog steps aside while this runs.
+    // The embedding backlog steps aside while this runs (streaming and
+    // tool rounds included); dropped on every return.
     let _foreground = state.foreground_ai();
+    // Stop (`cancel_ask`) for this run, until it returns.
+    let cancel = AskCancel::register(ask_id.as_deref());
+    // The note is only the default scope: Home asks with an explicit scope
+    // and no note ("" or none).
+    let note_id = note_id.filter(|n| !n.trim().is_empty());
+    let scope = match (scope, &note_id) {
+        (Some(s), _) => s,
+        (None, Some(n)) => fly_ask::AskScope::Note(n.clone()),
+        (None, None) => return Err("Ask needs a note or a scope to search.".into()),
+    };
+    // An answer can be inserted into the note being asked about.
+    let insert_note = note_id.clone().or(match &scope {
+        fly_ask::AskScope::Note(id) => Some(id.clone()),
+        _ => None,
+    });
     ensure_provider_ready(&state).await?;
-    let scope = scope.unwrap_or_else(|| fly_ask::AskScope::Note(note_id.clone()));
     let data_scope = match &scope {
         fly_ask::AskScope::Note(id) => DataScope::Note(id),
         fly_ask::AskScope::Meeting(id) => DataScope::Meeting(id),
@@ -1382,7 +1397,7 @@ pub async fn ask_meeting(
             limits: None,
             embedder: Some(&embedder),
             events: ask_id.as_ref().map(|_| &sink as fly_ask::EventSink<'_>),
-            cancel: None,
+            cancel: Some(cancel.flag()),
             external: external.as_deref(),
         },
         fly_ask::AskInput {
@@ -1407,8 +1422,9 @@ pub async fn ask_meeting(
             for p in &answer.proposals {
                 approvals.register_proposal(p, now);
             }
-            let insert_id = insertable(&answer)
-                .map(|(md, ids)| approvals.register_answer(&note_id, &md, &ids, now));
+            let insert_id = insert_note.as_deref().and_then(|n| {
+                insertable(&answer).map(|(md, ids)| approvals.register_answer(n, &md, &ids, now))
+            });
             Ok(AskReply {
                 trace_lines: answer.trace.lines(),
                 insert_id,
@@ -1416,6 +1432,81 @@ pub async fn ask_meeting(
             })
         }
     }
+}
+
+/// Running Asks' cancel flags, by the caller's `ask_id`.
+static ASK_CANCELS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Longest `ask_id` a Stop can address (the webview picks it).
+const MAX_ASK_ID_CHARS: usize = 128;
+
+/// One Ask's cancel flag, findable by its `ask_id` while it runs and
+/// forgotten when the run returns (any way it returns).
+struct AskCancel {
+    id: Option<String>,
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl AskCancel {
+    fn register(ask_id: Option<&str>) -> Self {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let id = ask_id
+            .filter(|id| !id.is_empty() && id.chars().count() <= MAX_ASK_ID_CHARS)
+            .map(str::to_string);
+        if let Some(id) = &id {
+            ASK_CANCELS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(id.clone(), flag.clone());
+        }
+        Self { id, flag }
+    }
+
+    fn flag(&self) -> &std::sync::atomic::AtomicBool {
+        &self.flag
+    }
+}
+
+impl Drop for AskCancel {
+    fn drop(&mut self) {
+        let Some(id) = &self.id else { return };
+        let mut map = ASK_CANCELS.lock().unwrap_or_else(|p| p.into_inner());
+        // Only this run's entry (a newer run may reuse the id).
+        if map
+            .get(id)
+            .is_some_and(|f| std::sync::Arc::ptr_eq(f, &self.flag))
+        {
+            map.remove(id);
+        }
+    }
+}
+
+/// Stop an Ask still running under `ask_id` (the Ask sheet's Stop). The
+/// harness stops at once, even while the model is still reading the
+/// prompt: the request is dropped, nothing is proposed, the run log records
+/// `status_cancelled` and `ask_meeting` returns "Ask was cancelled.". An
+/// id that isn't running (finished, or never started) does nothing.
+#[tauri::command]
+pub fn cancel_ask(ask_id: String) -> CmdResult<()> {
+    if let Some(flag) = ASK_CANCELS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&ask_id)
+    {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// The `@` suggestions for the Ask composer: everyone in the library the
+/// router can match (attendees, speaker labels, item owners). For the
+/// user's own screen; never sent to a model.
+#[tauri::command]
+pub fn list_ask_people(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    let storage = state.storage.lock().unwrap();
+    Ok(fly_ask::scope::people_for_suggestions(&storage))
 }
 
 /// "Insert into note" for an Ask answer or an approved `insert_into_note`
@@ -1745,6 +1836,33 @@ pub async fn test_llm_connection(state: State<'_, AppState>) -> CmdResult<String
 #[cfg(test)]
 mod security_tests {
     use super::{check_cloud_policy, validate_base_url};
+
+    #[test]
+    fn stop_reaches_only_a_running_ask() {
+        use super::{cancel_ask, AskCancel, ASK_CANCELS};
+        use std::sync::atomic::Ordering::Relaxed;
+        let held = |id: &str| ASK_CANCELS.lock().unwrap().contains_key(id);
+        let a = AskCancel::register(Some("ask-test-1"));
+        cancel_ask("ask-test-1".into()).unwrap();
+        assert!(a.flag().load(Relaxed));
+        drop(a);
+        assert!(!held("ask-test-1"), "forgotten when the run returns");
+        // Reused id: the older run's end leaves the newer one's flag.
+        let old = AskCancel::register(Some("ask-test-2"));
+        let new = AskCancel::register(Some("ask-test-2"));
+        drop(old);
+        cancel_ask("ask-test-2".into()).unwrap();
+        assert!(new.flag().load(Relaxed));
+        drop(new);
+        assert!(!held("ask-test-2"));
+        // No id, or an oversized one, isn't addressable.
+        let long = "x".repeat(200);
+        let _quiet = AskCancel::register(Some(&long));
+        assert!(!held(&long));
+        let anon = AskCancel::register(None);
+        cancel_ask(String::new()).unwrap();
+        assert!(!anon.flag().load(Relaxed));
+    }
 
     #[test]
     fn the_tool_smoke_cache_is_per_server_model_and_digest() {

@@ -344,6 +344,8 @@ export interface AskSourceLine {
 
 export interface AskSource {
   meeting_id: string;
+  /** The note that holds the meeting. */
+  note_id: string;
   meeting_title: string;
   started_at: string | null;
   lines: AskSourceLine[];

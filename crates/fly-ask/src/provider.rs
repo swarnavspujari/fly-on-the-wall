@@ -32,6 +32,33 @@ use crate::tier::Budget;
 
 /// The error text a cancelled call returns (never shown as a model error).
 pub const CANCELLED: &str = "Ask was cancelled.";
+
+/// How often a waiting call looks at the cancel flag.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// `f`, unless `cancel` is set first (checked every 100 ms): then `None`,
+/// and `f` is dropped, which abandons an HTTP request (Ollama stops
+/// generating when its client goes away). Needs a tokio runtime only when
+/// `cancel` is given.
+pub async fn until_cancelled<F: std::future::Future>(
+    cancel: Option<&AtomicBool>,
+    f: F,
+) -> Option<F::Output> {
+    let Some(flag) = cancel else {
+        return Some(f.await);
+    };
+    let watch = async {
+        while !flag.load(Ordering::Relaxed) {
+            tokio::time::sleep(CANCEL_POLL).await;
+        }
+    };
+    futures_util::pin_mut!(f);
+    futures_util::pin_mut!(watch);
+    match futures_util::future::select(f, watch).await {
+        futures_util::future::Either::Left((v, _)) => Some(v),
+        futures_util::future::Either::Right(_) => None,
+    }
+}
 /// The error text for a call past a budget cap.
 pub const OVER_BUDGET: &str = "Ask used up its budget.";
 
@@ -260,14 +287,19 @@ impl LLMProvider for Metered<'_> {
         emit(self.sink, AskEvent::TurnStart { turn });
         let t0 = Instant::now();
         let result: fly_llm::Result<ChatResponse> = async {
-            let mut stream = self.inner.chat_stream(req).await?;
+            let cancelled = || LlmError::Unavailable(CANCELLED.into());
+            let mut stream = until_cancelled(self.cancel, self.inner.chat_stream(req))
+                .await
+                .ok_or_else(cancelled)??;
             let mut acc = Accumulator::default();
             let mut text = String::new();
             let mut shown = 0usize;
-            while let Some(ev) = stream.next().await {
-                if self.cancelled() {
-                    return Err(LlmError::Unavailable(CANCELLED.into()));
-                }
+            // Each wait (the prompt read before the first token included)
+            // stops at a cancel request.
+            while let Some(ev) = until_cancelled(self.cancel, stream.next())
+                .await
+                .ok_or_else(cancelled)?
+            {
                 let ev = ev?;
                 if let StreamEvent::TextDelta { text: delta } = &ev {
                     if !delta.is_empty() {

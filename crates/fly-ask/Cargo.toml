@@ -25,7 +25,9 @@ async-trait.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+# Only its timer: a cancel request is noticed while a model is still
+# reading the prompt (no stream events yet).
+tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
 tempfile = "3"

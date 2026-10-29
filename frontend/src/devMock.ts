@@ -1449,6 +1449,11 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mcpSnippet;
     case "ask_meeting":
       return mockAsk(args);
+    case "cancel_ask":
+      // Like the backend: an id that isn't running does nothing.
+      return null;
+    case "list_ask_people":
+      return ["Dana Osei", "You"];
     case "insert_ask_answer": {
       // Like the backend: only an id it handed out, applied once (links
       // dropped); a second click returns the note unchanged.

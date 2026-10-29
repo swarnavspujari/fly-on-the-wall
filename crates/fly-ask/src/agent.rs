@@ -73,6 +73,8 @@ pub struct ToolState<'a, S, E> {
     pub searched: AtomicBool,
     /// Connector tools for this turn, if offered.
     pub external: Option<&'a dyn fly_llm::external_tools::ExternalTools>,
+    /// The Ask's cancel flag (a connector call may wait minutes).
+    pub cancel: Option<&'a std::sync::atomic::AtomicBool>,
 }
 
 fn args<T: DeserializeOwned>(tool: &str, v: &Value) -> Result<T, String> {
@@ -151,7 +153,14 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
             refusals: Mutex::new(Vec::new()),
             searched: AtomicBool::new(false),
             external: None,
+            cancel: None,
         }
+    }
+
+    /// Stop a connector call at the Ask's cancel request.
+    pub fn with_cancel(mut self, cancel: Option<&'t std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// Offer this turn's connector tools too.
@@ -250,7 +259,9 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
             if x.sealed() {
                 return Err(proposals::RefusalReason::Sealed.message().into());
             }
-            return x.call(&name, input).await;
+            return crate::provider::until_cancelled(self.cancel, x.call(&name, input))
+                .await
+                .unwrap_or_else(|| Err(crate::provider::CANCELLED.into()));
         }
         if name == fly_context::tools::SEARCH_PASSAGES {
             let mut a: SearchPassagesArgs = args(&name, &input)?;
