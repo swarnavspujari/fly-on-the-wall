@@ -23,6 +23,7 @@
 //!   (alternative runtime to the shipped parakeet-cli path).
 //! - `nemocpp-nemotron`  nemotron-speech-streaming-en q8_0 via NeMo-Speech.cpp
 //!   at 1.12 s right context (its offline/file path).
+//!
 //! The server-based ones live in bench_servers.rs.
 
 use std::path::{Path, PathBuf};
