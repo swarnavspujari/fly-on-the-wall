@@ -71,7 +71,8 @@ test("file tools: protected paths ask the user", () => {
   isAsk(edit("evals/thresholds.toml", "Write"));
   isAsk(edit(at("evals", "runner", "src", "main.rs")));
   isAsk(edit(at("evals", "fixtures", "m01.json"), "MultiEdit"));
-  isAsk(edit(at(".claude", "settings.json")));
+  // An edit whose result can't be worked out might unregister the hook.
+  isDeny(edit(at(".claude", "settings.json")), "an unreadable settings.json edit is denied");
   isAsk(edit(at(".claude", "settings.local.json"), "Write"), "settings.local.json can switch hooks off");
   isAsk(edit(at(".claude", "hooks", "protect-evals.mjs"), "Write"));
   isAsk(edit(at(".github", "workflows", "evals.yml")));
@@ -403,17 +404,44 @@ test("PowerShell: writes ask the user, reads allowed", () => {
 
 test("the guard itself: its own prompt, and unregistering it is denied", () => {
   const settings = at(".claude", "settings.json");
+  const real = JSON.stringify(
+    {
+      disableAllHooks: false,
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
+            hooks: [{ type: "command", command: 'node "${CLAUDE_PROJECT_DIR}/.claude/hooks/protect-evals.mjs"', timeout: 10 }],
+          },
+        ],
+      },
+    },
+    null,
+    2,
+  );
+  writeFileSync(settings, real);
   const tool = (tool_name, tool_input) => decide({ tool_name, cwd: root, tool_input }, env);
-  const registered = JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: "node protect-evals.mjs" }] }] } });
-  // Dropping the registration switches the hook off: denied.
-  isDeny(tool("Edit", { file_path: settings, old_string: '"command": "node \\"${CLAUDE_PROJECT_DIR}/.claude/hooks/protect-evals.mjs\\""', new_string: '"command": "true"' }));
-  isDeny(tool("Edit", { file_path: settings, old_string: '"PreToolUse": [', new_string: '"Disabled": [' }));
-  isDeny(tool("MultiEdit", { file_path: settings, edits: [{ old_string: '"hooks": {', new_string: '"x": {' }] }));
-  isDeny(tool("Write", { file_path: settings, content: "{}" }));
-  // Changing the guard otherwise is asked, with its own reason.
-  const keep = tool("Write", { file_path: settings, content: registered });
+  // The result is what counts, worked out and parsed.
+  isDeny(tool("Write", { file_path: settings, content: "{}" }), "no registration");
+  isDeny(tool("Write", { file_path: settings, content: real.replace("protect-evals.mjs", "noop.mjs") }), "another command");
+  isDeny(tool("Write", { file_path: settings, content: real.replace("|Bash", "") }), "a tool left out of the matcher");
+  isDeny(tool("Write", { file_path: settings, content: real + "," }), "unparseable");
+  isDeny(tool("Edit", { file_path: settings, old_string: "PowerShell", new_string: "Grep" }), "edited out of the matcher");
+  isDeny(tool("Edit", { file_path: settings, old_string: '"PreToolUse"', new_string: '"PostToolUse"' }), "moved to another event");
+  isDeny(tool("Edit", { file_path: settings, old_string: "not in the file", new_string: "x" }), "an edit that can't apply");
+  isDeny(
+    tool("MultiEdit", { file_path: settings, edits: [{ old_string: '"timeout": 10', new_string: '"timeout": 15' }, { old_string: '"hooks": {', new_string: '"x": {' }] }),
+    "a later edit drops it",
+  );
+  // A change that keeps the registration is asked, with its own reason.
+  const keep = tool("Edit", { file_path: settings, old_string: '"timeout": 10', new_string: '"timeout": 15' });
   isAsk(keep);
   assert.match(keep.reason, /Eval guard change/);
+  // (A rewrite that mentions disableAllHooks at all is denied by that rule,
+  // even with false; this one leaves the key out.)
+  const withoutSwitch = JSON.stringify({ hooks: JSON.parse(real).hooks });
+  isAsk(tool("Write", { file_path: settings, content: withoutSwitch.replace('"timeout":10', '"timeout":20') }));
+  isDeny(tool("Write", { file_path: settings, content: real }), "mentions disableAllHooks");
   assert.match(tool("Edit", { file_path: at(".claude", "hooks", "protect-evals.mjs"), old_string: "a", new_string: "b" }).reason, /Eval guard change/);
   assert.match(bash("rm .claude/hooks/protect-evals.mjs").reason, /Eval guard change/);
   // An ordinary eval edit isn't labeled a guard change.

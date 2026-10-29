@@ -83,17 +83,58 @@ const isGuardRel = (rel) => {
 const namesGuard = (command) =>
   /\.claude[\\/]+(hooks\b|settings(\.local)?\.json)/i.test(String(command ?? "").replace(/["']/g, ""));
 
-/** What keeps this hook registered in .claude/settings.json. */
-const REGISTRATION = ["protect-evals", "PreToolUse", '"hooks"'];
-/** A file-tool call that would drop the hook's registration from
- * .claude/settings.json: that switches the hook off, so it's denied. */
-function dropsRegistration(tool, ti) {
-  const lost = (before, after) =>
-    REGISTRATION.some((t) => String(before ?? "").includes(t) && !String(after ?? "").includes(t));
-  if (tool === "Write") return REGISTRATION.some((t) => !String(ti.content ?? "").includes(t));
-  if (tool === "Edit") return lost(ti.old_string, ti.new_string);
-  if (tool === "MultiEdit") return (ti.edits ?? []).some((e) => lost(e?.old_string, e?.new_string));
-  return false;
+/** How .claude/settings.json registers this hook. */
+const HOOK_COMMAND = 'node "${CLAUDE_PROJECT_DIR}/.claude/hooks/protect-evals.mjs"';
+const GUARDED_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"];
+
+/** Settings JSON that still registers this hook for every guarded tool
+ * (and doesn't switch hooks off). Unparseable means no. */
+function keepsRegistration(json) {
+  let v;
+  try {
+    v = JSON.parse(json);
+  } catch {
+    return false;
+  }
+  if (v?.disableAllHooks === true || !Array.isArray(v?.hooks?.PreToolUse)) return false;
+  return v.hooks.PreToolUse.some((e) => {
+    const tools = String(e?.matcher ?? "").split("|");
+    return (
+      GUARDED_TOOLS.every((t) => tools.includes(t)) &&
+      Array.isArray(e?.hooks) &&
+      e.hooks.some((h) => h?.type === "command" && h?.command === HOOK_COMMAND)
+    );
+  });
+}
+
+/** .claude/settings.json as a file-tool call would leave it: the Write
+ * content, or the Edit / MultiEdit applied to the current file. Null when
+ * it can't be worked out (the file is unreadable, or an edit's old text
+ * isn't there). */
+function settingsAfter(tool, ti, ctx) {
+  if (tool === "Write") return String(ti.content ?? "");
+  const base = ctx.cwd ? path.resolve(nativePath(ctx.cwd)) : process.cwd();
+  const current = safeRead(path.resolve(base, nativePath(String(ti.file_path ?? ""))));
+  if (current === null) return null;
+  const apply = (text, e) => {
+    const from = String(e?.old_string ?? "");
+    const to = String(e?.new_string ?? "");
+    if (text === null || !from || !text.includes(from)) return null;
+    if (e?.replace_all) return text.split(from).join(to);
+    const i = text.indexOf(from);
+    return text.slice(0, i) + to + text.slice(i + from.length);
+  };
+  if (tool === "Edit") return apply(current, ti);
+  if (tool === "MultiEdit") return (ti.edits ?? []).reduce(apply, current);
+  return null;
+}
+
+/** A file-tool call that would leave .claude/settings.json without this
+ * hook's registration: that switches the hook off, so it's denied. A
+ * result that can't be worked out or parsed counts as dropping it. */
+function dropsRegistration(tool, ti, ctx) {
+  const after = settingsAfter(tool, ti, ctx);
+  return after === null || !keepsRegistration(after);
 }
 /** A trust-root command or a hook switch: always denied. */
 const deny = (what) => ({ decision: "deny", reason: DENY_REASON.replace("%WHAT%", what) });
@@ -1007,7 +1048,7 @@ export function decide(input, env = process.env) {
   if (["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(tool)) {
     const target = protectedTarget(ti.file_path ?? ti.notebook_path, ctx);
     if (!target) return null;
-    if (fold(norm(target)) === fold(".claude/settings.json") && dropsRegistration(tool, ti)) {
+    if (fold(norm(target)) === fold(".claude/settings.json") && dropsRegistration(tool, ti, ctx)) {
       return deny("removing the eval hook's registration from .claude/settings.json (that switches it off)");
     }
     return isGuardRel(target) ? askGuard(`${target} is part of the eval guard`) : ask(`${target} is protected`);
