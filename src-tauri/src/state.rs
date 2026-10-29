@@ -55,6 +55,9 @@ pub struct AppState {
     /// Nudges the embedding worker after a content write (embeddings.rs).
     /// The worker also polls, so a missed nudge only delays indexing.
     pub embed_notify: tokio::sync::Notify,
+    /// Recording storage v2: the background "Compress recordings" job's
+    /// status and controls, plus playback regeneration (audio_store.rs).
+    pub audio_store: crate::audio_store::StoreState,
 }
 
 impl AppState {
@@ -96,6 +99,7 @@ impl AppState {
             consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
             consent_prompt: tokio::sync::Mutex::new(Default::default()),
             embed_notify: tokio::sync::Notify::new(),
+            audio_store: Default::default(),
         })
     }
 

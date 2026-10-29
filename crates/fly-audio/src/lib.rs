@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 mod coreaudio_tap;
 pub mod cpal_backend;
+pub mod derive;
+pub mod flac;
 pub mod mix;
 pub mod null;
 #[cfg(target_os = "linux")]

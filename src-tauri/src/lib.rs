@@ -2,6 +2,7 @@
 //! and wired to the UI. `fly-core` and the frontend never see an OS API.
 
 mod asr_commands;
+pub mod audio_store;
 mod calendar_commands;
 mod calendar_defaults;
 mod commands;
@@ -177,6 +178,9 @@ pub fn run() {
             embeddings::spawn(app.handle().clone());
             // Audio retention: shortly after startup, then daily.
             privacy::spawn_retention(app.handle().clone());
+            // Recording storage v2: losslessly compress finished recordings
+            // in the background (low priority, pauses for real work).
+            audio_store::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -223,6 +227,9 @@ pub fn run() {
             recording::preflight_system_audio,
             recording::open_privacy_settings,
             live::live_status,
+            audio_store::prepare_playback,
+            audio_store::storage_report,
+            audio_store::dismiss_compress_notice,
             asr_commands::transcribe_meeting,
             asr_commands::get_transcript,
             asr_commands::get_cleaned_transcript,

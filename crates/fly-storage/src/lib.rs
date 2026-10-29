@@ -33,6 +33,7 @@ pub mod naming;
 mod notes;
 pub mod privacy;
 mod recovery;
+mod recording_store;
 pub mod safe_path;
 pub mod scratch;
 mod search;
@@ -204,6 +205,10 @@ const EXPECTED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 pub struct Storage {
     conn: Connection,
     data_dir: PathBuf,
+    /// Meetings whose folder a background job is working inside (recording
+    /// compression). Folder renames skip them, like a running transcription.
+    /// In memory: a crash releases every lease.
+    folder_leases: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Storage {
@@ -228,6 +233,7 @@ impl Storage {
         let storage = Self {
             conn,
             data_dir: data_dir.to_path_buf(),
+            folder_leases: Default::default(),
         };
         storage.migrate()?;
         storage.seed_builtin_templates()?;
@@ -278,6 +284,7 @@ impl Storage {
         Ok(Self {
             conn,
             data_dir: data_dir.to_path_buf(),
+            folder_leases: Default::default(),
         })
     }
 

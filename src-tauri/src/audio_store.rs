@@ -1,0 +1,1218 @@
+//! Recording storage v2: finished recordings are kept as lossless FLAC.
+//!
+//! Capture writes WAV (crash-safe while recording; the capture path is
+//! unchanged). Once a meeting's transcript is final, a low-priority
+//! background job ("Compress recordings") re-stores it:
+//!
+//! | File | Role | After compression |
+//! |---|---|---|
+//! | `recording.mic.wav`, `recording.system.wav` | the sources | `.flac`, same rate and bit depth, verified sample for sample |
+//! | `recording.mixed.wav` | 16 kHz ASR mixdown, derived | dropped when it regenerates bit-identically from the sources, else `.flac` (imports: it IS the source) |
+//! | `recording.playback.wav` | native-rate mix, derived | same rule; a mic-only capture's playback is the mic file itself |
+//!
+//! Every reader accepts WAV or FLAC ([`fly_audio::mix::read_audio_mono`]).
+//! A recording whose sources are FLAC and whose mixdown/playback paths are
+//! absent is "storage v2": readers regenerate those on demand
+//! ([`regenerate_mixdown_for_asr`], [`prepare_playback`]), bit-identical to
+//! what capture wrote, so transcripts and diarization don't change.
+//!
+//! Commit protocol per meeting (crash-safe and resumable at every step):
+//! 1. encode to `.<name>.compressing.flac`, fsync, decode it again with an
+//!    independent decoder and compare every sample with the WAV, copy the
+//!    WAV's modified time (retention ages audio by it), rename into place;
+//! 2. prove each derived file regenerates bit-identically from the new FLACs
+//!    (else it is converted like a source);
+//! 3. under the storage lock, re-check nothing started using the meeting,
+//!    write the manifest, then `recording_json`
+//!    ([`fly_storage::Storage::replace_meeting_recording`]);
+//! 4. delete the old WAVs. A WAV left behind by a crash after step 3 is
+//!    deleted on a later pass, again only after re-verifying it.
+//!
+//! The job yields (pauses in place) while anything else needs the machine:
+//! a recording, a transcription or re-diarize, a media import.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use fly_audio::derive::DerivedKind;
+use fly_core::RecordingRef;
+use serde::Serialize;
+use tauri::{Emitter, Manager};
+
+use crate::state::AppState;
+
+/// Event carrying [`CompressStatus`] whenever the job's state changes.
+pub const COMPRESS_EVENT: &str = "storage:compress";
+/// Cumulative bytes freed by compression (internal; not webview-settable).
+pub const SAVED_BYTES_KEY: &str = "storage.compress.saved_bytes";
+/// `pending` once a pass has freed space and the one-time notice should
+/// show; `shown` after the user dismissed it.
+pub const NOTICE_KEY: &str = "storage.compress.notice";
+
+/// Wait after launch before the first pass (startup work, self-heal first).
+const START_DELAY: Duration = Duration::from_secs(120);
+/// Re-scan at least this often even without a nudge.
+const IDLE_RECHECK: Duration = Duration::from_secs(30 * 60);
+/// How often a paused job re-checks whether it may continue.
+const PAUSE_POLL: Duration = Duration::from_secs(2);
+/// A meeting whose playback was requested this recently is left alone: the
+/// player may be streaming a file compression would delete.
+const PLAYBACK_GRACE: Duration = Duration::from_secs(30 * 60);
+/// Regenerated playback mixes kept in scratch, newest first, up to this.
+const PLAYBACK_CACHE_BUDGET: u64 = 1536 * 1024 * 1024;
+/// File name of a regenerated playback mix inside a meeting's scratch dir.
+const PLAYBACK_CACHE_FILE: &str = "playback.wav";
+/// Temp-file infix: `.recording.mic.compressing.flac`. Keeps a media
+/// extension so retention and "Delete all my data" treat strays as audio.
+const TEMP_INFIX: &str = ".compressing";
+
+// ---------------------------------------------------------------------------
+// Reading a recording, WAV or FLAC
+// ---------------------------------------------------------------------------
+
+fn has_ext(p: &str, ext: &str) -> bool {
+    Path::new(p)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+}
+
+/// Storage v2: a source is FLAC, so absent derived files (the mixdown, the
+/// playback mix) regenerate from the sources instead of being stored.
+pub fn is_storage_v2(rec: &RecordingRef) -> bool {
+    [&rec.mic_path, &rec.system_path]
+        .into_iter()
+        .any(|p| p.as_deref().is_some_and(|p| has_ext(p, "flac")))
+}
+
+/// The single-track ASR/diarization input of a storage-v2 recording whose
+/// stored mixdown was dropped: regenerate it into `work_dir`, bit-identical
+/// to the `recording.mixed.wav` capture wrote. `Ok(None)` when the stored
+/// mixdown exists or the recording isn't storage v2, so callers keep their
+/// usual fallback order.
+pub fn regenerate_mixdown_for_asr(
+    rec: &RecordingRef,
+    mixed: Option<&Path>,
+    mic: Option<&Path>,
+    system: Option<&Path>,
+    work_dir: &Path,
+) -> Result<Option<PathBuf>, String> {
+    if mixed.is_some() || !is_storage_v2(rec) || (mic.is_none() && system.is_none()) {
+        return Ok(None);
+    }
+    let out = work_dir.join("mixdown.16k.wav");
+    fly_audio::derive::regenerate(DerivedKind::Mixdown, mic, system, &out, &mut || true)
+        .map_err(|e| format!("couldn't rebuild the recording's mixdown: {e}"))?;
+    Ok(Some(out))
+}
+
+// ---------------------------------------------------------------------------
+// Job state
+// ---------------------------------------------------------------------------
+
+/// What Settings › Storage shows about the job.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct CompressStatus {
+    /// `waiting` (not started yet), `working`, `paused`, `done`, `stopped`.
+    pub state: String,
+    /// Why it's paused: `recording`, `transcribing`, `importing`.
+    pub paused_for: Option<String>,
+    /// Meetings in this pass that had something to compress, and how many
+    /// of them are finished.
+    pub meetings_total: usize,
+    pub meetings_done: usize,
+    /// WAV bytes this pass will process, and how many it has.
+    pub bytes_total: u64,
+    pub bytes_done: u64,
+    /// Freed so far, across every pass.
+    pub saved_bytes: u64,
+    /// WAV files left as they are because they aren't in the layout capture
+    /// writes (e.g. a recording cut short by a crash). Never deleted.
+    pub kept_files: usize,
+    /// The one-time "recordings compressed" notice is due.
+    pub notice_pending: bool,
+    pub last_error: Option<String>,
+}
+
+/// Lives in [`AppState::audio_store`].
+#[derive(Default)]
+pub struct StoreState {
+    status: Mutex<CompressStatus>,
+    /// Meeting the job is working on.
+    current: Mutex<Option<String>>,
+    /// Meetings whose compression must stop (note deleted, playback opened).
+    cancel: Mutex<HashSet<String>>,
+    /// Stop for good ("Delete all my data" is about to run).
+    halted: AtomicBool,
+    wake: (Mutex<bool>, Condvar),
+    recent_playback: Mutex<HashMap<String, Instant>>,
+    /// One playback regeneration at a time.
+    playback_lock: tokio::sync::Mutex<()>,
+}
+
+impl StoreState {
+    /// Wake the job (a transcription finished).
+    pub fn nudge(&self) {
+        let (m, c) = &self.wake;
+        *m.lock().unwrap() = true;
+        c.notify_all();
+    }
+
+    fn sleep(&self, d: Duration) {
+        let (m, c) = &self.wake;
+        let g = m.lock().unwrap();
+        let (mut g, _) = c.wait_timeout_while(g, d, |woken| !*woken).unwrap();
+        *g = false;
+    }
+
+    fn cancelled(&self, id: &str) -> bool {
+        self.halted.load(Ordering::SeqCst) || self.cancel.lock().unwrap().contains(id)
+    }
+
+    pub fn status(&self) -> CompressStatus {
+        self.status.lock().unwrap().clone()
+    }
+
+    /// The meeting being compressed right now, if any.
+    pub fn current(&self) -> Option<String> {
+        self.current.lock().unwrap().clone()
+    }
+
+    fn recently_played(&self, id: &str) -> bool {
+        self.recent_playback
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|t| t.elapsed() < PLAYBACK_GRACE)
+    }
+}
+
+/// Stop compressing `meeting_id` and wait (up to `timeout`) until the job
+/// has let go of its folder. Used before a note's meetings are purged.
+pub fn stop_meeting(state: &AppState, meeting_id: &str, timeout: Duration) -> bool {
+    let store = &state.audio_store;
+    store.cancel.lock().unwrap().insert(meeting_id.to_string());
+    let deadline = Instant::now() + timeout;
+    while store.current().as_deref() == Some(meeting_id) {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// Stop the job for the rest of this run and wait until it's idle.
+pub fn halt(state: &AppState, timeout: Duration) -> bool {
+    let store = &state.audio_store;
+    store.halted.store(true, Ordering::SeqCst);
+    store.nudge();
+    let deadline = Instant::now() + timeout;
+    while store.current().is_some() {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// Why background work should wait, if it should.
+fn busy_reason(state: &AppState) -> Option<&'static str> {
+    if crate::scheduler::recording_active(state) {
+        return Some("recording");
+    }
+    if !state.pipeline_stage.lock().unwrap().is_empty() {
+        return Some("transcribing");
+    }
+    if crate::privacy::imports_in_flight() {
+        return Some("importing");
+    }
+    None
+}
+
+fn emit(app: &tauri::AppHandle, store: &StoreState, f: impl FnOnce(&mut CompressStatus)) {
+    let snapshot = {
+        let mut s = store.status.lock().unwrap();
+        let before = s.clone();
+        f(&mut s);
+        if *s == before {
+            return;
+        }
+        s.clone()
+    };
+    let _ = app.emit(COMPRESS_EVENT, snapshot);
+}
+
+// ---------------------------------------------------------------------------
+// One meeting
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Mic,
+    System,
+    Mixed,
+    Playback,
+}
+
+const ROLES: [Role; 4] = [Role::Mic, Role::System, Role::Mixed, Role::Playback];
+
+impl Role {
+    fn path(self, rec: &RecordingRef) -> &Option<String> {
+        match self {
+            Role::Mic => &rec.mic_path,
+            Role::System => &rec.system_path,
+            Role::Mixed => &rec.mixed_path,
+            Role::Playback => &rec.playback_path,
+        }
+    }
+
+    fn path_mut(self, rec: &mut RecordingRef) -> &mut Option<String> {
+        match self {
+            Role::Mic => &mut rec.mic_path,
+            Role::System => &mut rec.system_path,
+            Role::Mixed => &mut rec.mixed_path,
+            Role::Playback => &mut rec.playback_path,
+        }
+    }
+
+    fn derived(self) -> Option<DerivedKind> {
+        match self {
+            Role::Mic | Role::System => None,
+            Role::Mixed => Some(DerivedKind::Mixdown),
+            Role::Playback => Some(DerivedKind::Playback),
+        }
+    }
+
+    /// The name capture gives this role (`recording.<role>.wav`).
+    fn wav_name(self) -> &'static str {
+        match self {
+            Role::Mic => "recording.mic.wav",
+            Role::System => "recording.system.wav",
+            Role::Mixed => "recording.mixed.wav",
+            Role::Playback => "recording.playback.wav",
+        }
+    }
+}
+
+/// `a/b/recording.mic.wav` → `a/b/recording.mic.flac` (also for the
+/// data-dir-relative `/`-separated form).
+fn flac_twin(rel: &str) -> String {
+    let stem = rel.strip_suffix(".wav").or_else(|| rel.strip_suffix(".WAV"));
+    format!("{}.flac", stem.unwrap_or(rel))
+}
+
+fn temp_for(final_flac: &Path) -> PathBuf {
+    let name = final_flac
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = name.strip_suffix(".flac").unwrap_or(&name);
+    final_flac.with_file_name(format!(".{stem}{TEMP_INFIX}.flac"))
+}
+
+/// What compressing one meeting did.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct MeetingOutcome {
+    /// WAV bytes removed.
+    pub wav_bytes_removed: u64,
+    /// FLAC bytes added.
+    pub flac_bytes_added: u64,
+    /// WAV files left as they are (unsupported layout), with the reason.
+    pub kept: Vec<String>,
+    /// Bytes of WAV processed (for progress).
+    pub wav_bytes_seen: u64,
+}
+
+impl MeetingOutcome {
+    pub fn saved(&self) -> u64 {
+        self.wav_bytes_removed.saturating_sub(self.flac_bytes_added)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum MeetingError {
+    /// Something started using the meeting, or it changed underneath; try
+    /// again on a later pass. Nothing was deleted.
+    Busy(String),
+    /// Asked to stop (cancel, halt). Nothing was deleted.
+    Stopped,
+    Failed(String),
+}
+
+impl std::fmt::Display for MeetingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MeetingError::Busy(why) => write!(f, "busy: {why}"),
+            MeetingError::Stopped => write!(f, "stopped"),
+            MeetingError::Failed(why) => write!(f, "{why}"),
+        }
+    }
+}
+
+fn failed(e: impl std::fmt::Display) -> MeetingError {
+    MeetingError::Failed(e.to_string())
+}
+
+fn mtime(p: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+fn fsync_dir(_dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(_dir) {
+        let _ = d.sync_all();
+    }
+}
+
+/// Encode `wav` → verified `final_flac` (via the temp name). An existing
+/// `final_flac` (an interrupted earlier run renamed it but never committed)
+/// is reused only if it verifies against the WAV; otherwise it's rebuilt.
+fn convert_one(
+    wav: &Path,
+    final_flac: &Path,
+    checkpoint: &mut dyn FnMut() -> bool,
+) -> Result<u64, MeetingError> {
+    let stop = |e: fly_audio::flac::FlacError| match e {
+        fly_audio::flac::FlacError::Interrupted => MeetingError::Stopped,
+        e => failed(e),
+    };
+    if final_flac.exists() {
+        match fly_audio::flac::verify_flac_matches_wav(final_flac, wav, checkpoint) {
+            Ok(_) => return Ok(std::fs::metadata(final_flac).map_err(failed)?.len()),
+            Err(fly_audio::flac::FlacError::Interrupted) => return Err(MeetingError::Stopped),
+            Err(e) => {
+                tracing::warn!(error = %e, "compress: replacing a FLAC that doesn't match its WAV");
+                std::fs::remove_file(final_flac).map_err(failed)?;
+            }
+        }
+    }
+    let temp = temp_for(final_flac);
+    let result = (|| {
+        fly_audio::flac::encode_pcm16_wav_to_flac(wav, &temp, checkpoint).map_err(stop)?;
+        fly_audio::flac::verify_flac_matches_wav(&temp, wav, checkpoint).map_err(stop)?;
+        // Retention ages audio by file time: the FLAC inherits the WAV's.
+        if let Some(t) = mtime(wav) {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&temp)
+                .map_err(failed)?;
+            f.set_modified(t).map_err(failed)?;
+            f.sync_all().map_err(failed)?;
+        }
+        fly_storage::rename_with_retry(&temp, final_flac).map_err(failed)?;
+        if let Some(dir) = final_flac.parent() {
+            fsync_dir(dir);
+        }
+        std::fs::metadata(final_flac).map(|m| m.len()).map_err(failed)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Hooks the job gives one meeting's compression: may it continue (pauses
+/// inside), and the commit-time check run under the storage lock.
+pub struct MeetingCtx<'a> {
+    pub data_dir: &'a Path,
+    pub checkpoint: &'a mut dyn FnMut() -> bool,
+    /// `Err(reason)` when the meeting may not be committed right now.
+    pub may_commit: &'a dyn Fn(&fly_storage::Storage) -> Result<(), String>,
+    pub storage: &'a Mutex<fly_storage::Storage>,
+    pub on_file_done: &'a mut dyn FnMut(u64),
+}
+
+/// The meeting's folder (contained in `recordings/`).
+fn meeting_dir(data_dir: &Path, rec: &RecordingRef) -> Option<PathBuf> {
+    let rel = fly_storage::recording_dir_rel(rec)?;
+    fly_storage::contained_recordings_dir(data_dir, &rel)
+}
+
+/// Does this meeting have anything to compress or clean up? Cheap: reads
+/// directory entries and WAV headers only.
+pub fn needs_work(data_dir: &Path, rec: &RecordingRef) -> (bool, u64) {
+    let Some(dir) = meeting_dir(data_dir, rec) else {
+        return (false, 0);
+    };
+    let mut bytes = 0;
+    let mut work = false;
+    for role in ROLES {
+        if let Some(p) = role.path(rec).as_deref().filter(|p| has_ext(p, "wav")) {
+            let abs = data_dir.join(p);
+            if fly_audio::flac::inspect_pcm16_wav(&abs).is_ok() {
+                work = true;
+                bytes += std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+            }
+        } else if dir.join(role.wav_name()).exists() && is_storage_v2(rec) {
+            work = true; // a WAV left behind after an earlier commit
+        }
+    }
+    (work, bytes)
+}
+
+/// Compress one meeting (see the module docs for the protocol).
+pub fn compress_meeting(
+    ctx: &mut MeetingCtx<'_>,
+    meeting_id: &str,
+) -> Result<MeetingOutcome, MeetingError> {
+    let planned = {
+        let storage = ctx.storage.lock().unwrap();
+        storage
+            .get_meeting(meeting_id)
+            .map_err(failed)?
+            .recording
+            .ok_or_else(|| MeetingError::Busy("no recording".into()))?
+    };
+    let data_dir = ctx.data_dir;
+    let dir = meeting_dir(data_dir, &planned)
+        .ok_or_else(|| failed("recording folder isn't inside recordings/"))?;
+    if !dir.is_dir() {
+        return Err(MeetingError::Busy("recording folder is missing".into()));
+    }
+    let mut out = MeetingOutcome::default();
+    let abs = |p: &Option<String>| -> Option<PathBuf> {
+        p.as_ref().map(|r| data_dir.join(r)).filter(|p| p.exists())
+    };
+
+    // Strays from a run that died mid-encode.
+    for role in ROLES {
+        let stray = temp_for(&dir.join(flac_twin(role.wav_name())));
+        if stray.exists() {
+            let _ = std::fs::remove_file(&stray);
+        }
+    }
+
+    let mut next = planned.clone();
+    // (old WAV, proof it may go)
+    let mut to_delete: Vec<PathBuf> = Vec::new();
+
+    // 1. Sources → FLAC.
+    for role in [Role::Mic, Role::System] {
+        let Some(rel) = role.path(&planned).clone() else { continue };
+        if !has_ext(&rel, "wav") {
+            continue;
+        }
+        let Some(wav) = abs(&Some(rel.clone())) else { continue };
+        let size = std::fs::metadata(&wav).map(|m| m.len()).unwrap_or(0);
+        if let Err(e) = fly_audio::flac::inspect_pcm16_wav(&wav) {
+            out.kept.push(format!("{}: {e}", role.wav_name()));
+            continue;
+        }
+        let flac_rel = flac_twin(&rel);
+        let flac_bytes = convert_one(&wav, &data_dir.join(&flac_rel), ctx.checkpoint)?;
+        out.flac_bytes_added += flac_bytes;
+        out.wav_bytes_removed += size;
+        out.wav_bytes_seen += size;
+        (ctx.on_file_done)(size);
+        // A mic-only capture's playback IS the mic file.
+        for derived in [Role::Mixed, Role::Playback] {
+            if derived.path(&planned).as_deref() == Some(rel.as_str()) {
+                *derived.path_mut(&mut next) = Some(flac_rel.clone());
+            }
+        }
+        *role.path_mut(&mut next) = Some(flac_rel);
+        to_delete.push(wav);
+    }
+
+    // 2. Derived files: drop what regenerates bit-identically from the
+    //    sources as they'll be stored, convert the rest.
+    let mic_now = abs(&next.mic_path);
+    let sys_now = abs(&next.system_path);
+    for role in [Role::Mixed, Role::Playback] {
+        let Some(rel) = role.path(&planned).clone() else { continue };
+        if !has_ext(&rel, "wav") || role.path(&next).as_deref() != Some(rel.as_str()) {
+            continue; // not a WAV, or it followed a source above
+        }
+        let Some(wav) = abs(&Some(rel.clone())) else { continue };
+        let size = std::fs::metadata(&wav).map(|m| m.len()).unwrap_or(0);
+        let kind = role.derived().expect("derived role");
+        let sources_are_v2 = is_storage_v2(&next);
+        let regenerable = sources_are_v2
+            && (mic_now.is_some() || sys_now.is_some())
+            && fly_audio::derive::matches_stored(
+                kind,
+                mic_now.as_deref(),
+                sys_now.as_deref(),
+                &wav,
+                ctx.checkpoint,
+            )
+            .map_err(|e| {
+                if ctx_stopped(&e) {
+                    MeetingError::Stopped
+                } else {
+                    failed(e)
+                }
+            })?;
+        if regenerable {
+            *role.path_mut(&mut next) = None;
+            out.wav_bytes_removed += size;
+            out.wav_bytes_seen += size;
+            (ctx.on_file_done)(size);
+            to_delete.push(wav);
+            continue;
+        }
+        if let Err(e) = fly_audio::flac::inspect_pcm16_wav(&wav) {
+            out.kept.push(format!("{}: {e}", role.wav_name()));
+            continue;
+        }
+        let flac_rel = flac_twin(&rel);
+        let flac_bytes = convert_one(&wav, &data_dir.join(&flac_rel), ctx.checkpoint)?;
+        out.flac_bytes_added += flac_bytes;
+        out.wav_bytes_removed += size;
+        out.wav_bytes_seen += size;
+        (ctx.on_file_done)(size);
+        *role.path_mut(&mut next) = Some(flac_rel);
+        to_delete.push(wav);
+    }
+
+    // Leftover WAVs from a crash between an earlier commit and its deletes:
+    // re-prove each before it goes.
+    let mut leftovers: Vec<PathBuf> = Vec::new();
+    if is_storage_v2(&next) {
+        for role in ROLES {
+            let twin = dir.join(role.wav_name());
+            if !twin.exists() || to_delete.contains(&twin) {
+                continue;
+            }
+            // Still referenced (kept as WAV) → not a leftover.
+            if ROLES
+                .iter()
+                .any(|r| abs(r.path(&next)).as_deref() == Some(twin.as_path()))
+            {
+                continue;
+            }
+            let proven = match (role.derived(), abs(role.path(&next))) {
+                (None, Some(flac)) | (Some(_), Some(flac)) if has_ext(&flac.to_string_lossy(), "flac") => {
+                    matches!(
+                        fly_audio::flac::verify_flac_matches_wav(&flac, &twin, ctx.checkpoint),
+                        Ok(_)
+                    )
+                }
+                (Some(kind), None) => fly_audio::derive::matches_stored(
+                    kind,
+                    mic_now.as_deref(),
+                    sys_now.as_deref(),
+                    &twin,
+                    ctx.checkpoint,
+                )
+                .unwrap_or(false),
+                _ => false,
+            };
+            if !(ctx.checkpoint)() {
+                return Err(MeetingError::Stopped);
+            }
+            if proven {
+                leftovers.push(twin);
+            }
+        }
+    }
+
+    // 3. Commit (nothing to commit when only leftovers were found).
+    {
+        let storage = ctx.storage.lock().unwrap();
+        (ctx.may_commit)(&storage).map_err(MeetingError::Busy)?;
+        let current = storage
+            .get_meeting(meeting_id)
+            .map_err(failed)?
+            .recording;
+        if current.as_ref() != Some(&planned) {
+            return Err(MeetingError::Busy("the recording changed".into()));
+        }
+        if next != planned {
+            storage
+                .replace_meeting_recording(meeting_id, &next)
+                .map_err(failed)?;
+        }
+        // 4. Delete, still under the lock: no reader can pick up an old path
+        //    between the commit and the delete.
+        for wav in to_delete.iter().chain(&leftovers) {
+            let size = std::fs::metadata(wav).map(|m| m.len()).unwrap_or(0);
+            match std::fs::remove_file(wav) {
+                Ok(()) => {
+                    if leftovers.contains(wav) {
+                        out.wav_bytes_removed += size;
+                    }
+                }
+                Err(e) => {
+                    // Committed already; the next pass removes it after
+                    // re-verifying (leftover path). Not counted as saved.
+                    tracing::warn!(meeting_id, error = %e, "compress: couldn't delete a replaced WAV yet");
+                    if !leftovers.contains(wav) {
+                        out.wav_bytes_removed = out.wav_bytes_removed.saturating_sub(size);
+                    }
+                }
+            }
+        }
+    }
+    fsync_dir(&dir);
+    Ok(out)
+}
+
+fn ctx_stopped(e: &fly_audio::AudioError) -> bool {
+    matches!(e, fly_audio::AudioError::Backend(m) if m.contains("stopped before finishing"))
+}
+
+// ---------------------------------------------------------------------------
+// The background job
+// ---------------------------------------------------------------------------
+
+/// Lower this thread's CPU and I/O priority (Windows background mode).
+fn enter_background_priority() {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+        };
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+}
+
+/// Start the job (once, at app setup). It runs on its own low-priority
+/// thread: a first pass shortly after launch, then whenever a transcription
+/// finishes (nudge) or every [`IDLE_RECHECK`].
+pub fn spawn(app: tauri::AppHandle) {
+    {
+        let state = app.state::<AppState>();
+        let saved = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_setting(SAVED_BYTES_KEY)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut s = state.audio_store.status.lock().unwrap();
+        s.state = "waiting".into();
+        s.saved_bytes = saved;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("fotw-compress".into())
+        .spawn(move || {
+            enter_background_priority();
+            let state = app.state::<AppState>();
+            state.audio_store.sleep(START_DELAY);
+            loop {
+                if state.audio_store.halted.load(Ordering::SeqCst) {
+                    emit(&app, &state.audio_store, |s| s.state = "stopped".into());
+                    return;
+                }
+                run_pass(&app, &state);
+                state.audio_store.sleep(IDLE_RECHECK);
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "couldn't start the recording compression job");
+    }
+}
+
+fn run_pass(app: &tauri::AppHandle, state: &AppState) {
+    let store = &state.audio_store;
+    let ids = match state.storage.lock().unwrap().meetings_with_stored_audio() {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(error = %e, "compress: couldn't list meetings");
+            return;
+        }
+    };
+    // Plan: which meetings have work, and how many bytes.
+    let mut plan: Vec<(String, u64)> = Vec::new();
+    for id in ids {
+        let rec = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_meeting(&id)
+            .ok()
+            .and_then(|m| m.recording);
+        if let Some(rec) = rec {
+            let (work, bytes) = needs_work(&state.data_dir, &rec);
+            if work {
+                plan.push((id, bytes));
+            }
+        }
+    }
+    store.cancel.lock().unwrap().clear();
+    emit(app, store, |s| {
+        s.state = if plan.is_empty() { "done" } else { "working" }.into();
+        s.paused_for = None;
+        s.meetings_total = plan.len();
+        s.meetings_done = 0;
+        s.bytes_total = plan.iter().map(|(_, b)| b).sum();
+        s.bytes_done = 0;
+        s.kept_files = 0;
+    });
+    let mut pass_saved = 0u64;
+    for (id, _) in &plan {
+        if store.halted.load(Ordering::SeqCst) {
+            break;
+        }
+        match compress_one_now(app, state, id) {
+            Ok(Some(o)) => {
+                pass_saved += o.saved();
+                let total = {
+                    let storage = state.storage.lock().unwrap();
+                    let prev: u64 = storage
+                        .get_setting(SAVED_BYTES_KEY)
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let total = prev + o.saved();
+                    let _ = storage.set_setting(SAVED_BYTES_KEY, &total.to_string());
+                    total
+                };
+                tracing::info!(
+                    saved = o.saved(),
+                    kept = o.kept.len(),
+                    "compress: meeting stored losslessly"
+                );
+                for k in &o.kept {
+                    tracing::info!(file = %k, "compress: kept as WAV");
+                }
+                emit(app, store, |s| {
+                    s.saved_bytes = total;
+                    s.kept_files += o.kept.len();
+                    s.meetings_done += 1;
+                });
+            }
+            Ok(None) => emit(app, store, |s| s.meetings_done += 1),
+            Err(MeetingError::Busy(why)) => {
+                tracing::info!(why, "compress: meeting skipped for now");
+                emit(app, store, |s| s.meetings_done += 1);
+            }
+            Err(MeetingError::Stopped) => {
+                emit(app, store, |s| s.meetings_done += 1);
+            }
+            Err(MeetingError::Failed(e)) => {
+                tracing::warn!(error = %e, "compress: meeting failed (originals kept)");
+                emit(app, store, |s| {
+                    s.meetings_done += 1;
+                    s.last_error = Some(e.clone());
+                });
+            }
+        }
+    }
+    let notice = pass_saved > 0 && {
+        let storage = state.storage.lock().unwrap();
+        let seen = storage.get_setting(NOTICE_KEY).ok().flatten();
+        if seen.as_deref() == Some("shown") {
+            false
+        } else {
+            let _ = storage.set_setting(NOTICE_KEY, "pending");
+            true
+        }
+    };
+    emit(app, store, |s| {
+        s.state = if store.halted.load(Ordering::SeqCst) {
+            "stopped"
+        } else {
+            "done"
+        }
+        .into();
+        s.paused_for = None;
+        s.bytes_done = s.bytes_total;
+        if notice {
+            s.notice_pending = true;
+        }
+    });
+}
+
+/// Eligibility + lease + compress for one meeting. `Ok(None)` = skipped.
+fn compress_one_now(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    id: &str,
+) -> Result<Option<MeetingOutcome>, MeetingError> {
+    let store = &state.audio_store;
+    // Wait for the machine to be free before even starting.
+    if !wait_until_idle(app, state, id) {
+        return Err(MeetingError::Stopped);
+    }
+    let blocked = |storage: &fly_storage::Storage| -> Result<(), String> {
+        if store.cancelled(id) {
+            return Err("cancelled".into());
+        }
+        if store.recently_played(id) {
+            return Err("its recording was just played".into());
+        }
+        if state.pipeline_stage.lock().unwrap().contains_key(id) {
+            return Err("transcription running".into());
+        }
+        if state
+            .recording
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|r| r.meeting_id == id)
+        {
+            return Err("being recorded".into());
+        }
+        if storage
+            .transcription_job(id)
+            .map_err(|e| e.to_string())?
+            .is_some_and(|j| j.status == fly_storage::JOB_QUEUED || j.status == fly_storage::JOB_RUNNING)
+        {
+            return Err("transcription queued".into());
+        }
+        if storage
+            .get_meeting_privacy(id)
+            .map_err(|e| e.to_string())?
+            .audio_deleted_at
+            .is_some()
+        {
+            return Err("audio deleted".into());
+        }
+        Ok(())
+    };
+    {
+        let storage = state.storage.lock().unwrap();
+        blocked(&storage).map_err(MeetingError::Busy)?;
+        if !storage.lease_meeting_folder(id) {
+            return Err(MeetingError::Busy("folder in use".into()));
+        }
+    }
+    *store.current.lock().unwrap() = Some(id.to_string());
+    struct Release<'a>(&'a AppState, &'a str);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            *self.0.audio_store.current.lock().unwrap() = None;
+            self.0
+                .storage
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .release_meeting_folder(self.1);
+        }
+    }
+    let _release = Release(state, id);
+
+    let mut checkpoint = || -> bool {
+        if store.cancelled(id) {
+            return false;
+        }
+        wait_until_idle(app, state, id)
+    };
+    let mut on_file_done = |bytes: u64| emit(app, store, |s| s.bytes_done += bytes);
+    let mut ctx = MeetingCtx {
+        data_dir: &state.data_dir,
+        checkpoint: &mut checkpoint,
+        may_commit: &blocked,
+        storage: &state.storage,
+        on_file_done: &mut on_file_done,
+    };
+    compress_meeting(&mut ctx, id).map(Some)
+}
+
+/// Block (status `paused`) while something else needs the machine. `false`
+/// when the job must stop instead (halt, or this meeting was cancelled).
+fn wait_until_idle(app: &tauri::AppHandle, state: &AppState, id: &str) -> bool {
+    let store = &state.audio_store;
+    let mut paused = false;
+    loop {
+        if store.cancelled(id) {
+            return false;
+        }
+        match busy_reason(state) {
+            None => {
+                if paused {
+                    emit(app, store, |s| {
+                        s.state = "working".into();
+                        s.paused_for = None;
+                    });
+                }
+                return true;
+            }
+            Some(why) => {
+                if !paused {
+                    paused = true;
+                    emit(app, store, |s| {
+                        s.state = "paused".into();
+                        s.paused_for = Some(why.into());
+                    });
+                }
+                std::thread::sleep(PAUSE_POLL);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Playback
+// ---------------------------------------------------------------------------
+
+/// What the editor's player should load.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PlaybackSource {
+    /// Absolute path, for the asset protocol.
+    pub path: String,
+    /// Rebuilt from the sources (storage v2) rather than stored.
+    pub regenerated: bool,
+}
+
+/// Pick (or rebuild) the file to play. Stored files win; a storage-v2
+/// recording with both channels gets its playback mix regenerated into the
+/// meeting's scratch dir (a bounded cache, cleared with the meeting's other
+/// derived audio).
+fn playback_plan(data_dir: &Path, rec: &RecordingRef) -> (Option<PathBuf>, bool) {
+    let abs = |p: &Option<String>| p.as_ref().map(|r| data_dir.join(r)).filter(|p| p.exists());
+    if let Some(p) = abs(&rec.playback_path) {
+        return (Some(p), false);
+    }
+    let (mic, sys) = (abs(&rec.mic_path), abs(&rec.system_path));
+    if is_storage_v2(rec) && mic.is_some() && sys.is_some() {
+        return (None, true);
+    }
+    // Before storage v2, and lone channels: the old fallback order.
+    (abs(&rec.mixed_path).or(mic).or(sys), false)
+}
+
+fn evict_playback_cache(data_dir: &Path, keep: &Path) {
+    let root = fly_storage::scratch::scratch_root(data_dir);
+    let Ok(entries) = std::fs::read_dir(&root) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path().join(PLAYBACK_CACHE_FILE))
+        .filter_map(|p| {
+            let m = std::fs::metadata(&p).ok()?;
+            Some((m.modified().ok()?, m.len(), p))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut total = 0u64;
+    for (_, len, p) in files {
+        total += len;
+        if total > PLAYBACK_CACHE_BUDGET && p != keep {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// The file the player should stream for a meeting, regenerating the
+/// playback mix of a compressed two-channel recording when needed. `None`
+/// when the meeting has no audio left.
+#[tauri::command]
+pub async fn prepare_playback(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<Option<PlaybackSource>, String> {
+    let store = &state.audio_store;
+    store
+        .recent_playback
+        .lock()
+        .unwrap()
+        .insert(meeting_id.clone(), Instant::now());
+    // The player may stream a WAV the job is about to replace: stop it.
+    if store.current().as_deref() == Some(meeting_id.as_str()) {
+        store.cancel.lock().unwrap().insert(meeting_id.clone());
+    }
+    let rec = {
+        let storage = state.storage.lock().unwrap();
+        let m = storage.get_meeting(&meeting_id).map_err(|e| e.to_string())?;
+        match m.recording {
+            Some(r) => r,
+            None => return Ok(None),
+        }
+    };
+    let data_dir = state.data_dir.clone();
+    let (stored, regenerate) = playback_plan(&data_dir, &rec);
+    if let Some(p) = stored {
+        return Ok(Some(PlaybackSource {
+            path: p.to_string_lossy().into_owned(),
+            regenerated: false,
+        }));
+    }
+    if !regenerate {
+        return Ok(None);
+    }
+    let _one_at_a_time = store.playback_lock.lock().await;
+    let cache_dir = fly_storage::scratch::meeting_scratch_dir(&data_dir, &meeting_id);
+    let cache = cache_dir.join(PLAYBACK_CACHE_FILE);
+    let abs = |p: &Option<String>| p.as_ref().map(|r| data_dir.join(r));
+    let (mic, sys) = (abs(&rec.mic_path), abs(&rec.system_path));
+    let newest_source = [&mic, &sys]
+        .into_iter()
+        .flatten()
+        .filter_map(|p| mtime(p))
+        .max();
+    let fresh = std::fs::metadata(&cache).is_ok_and(|m| {
+        m.len() > 44 && m.modified().ok() >= newest_source
+    });
+    if !fresh {
+        let (cache_c, dir_c) = (cache.clone(), cache_dir.clone());
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            std::fs::create_dir_all(&dir_c).map_err(|e| e.to_string())?;
+            let part = dir_c.join("playback.part.wav");
+            fly_audio::derive::regenerate(
+                DerivedKind::Playback,
+                mic.as_deref(),
+                sys.as_deref(),
+                &part,
+                &mut || true,
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::rename(&part, &cache_c).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("couldn't prepare the recording for playback: {e}"))?;
+    } else {
+        // LRU: a hit counts as fresh use.
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&cache) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+    }
+    evict_playback_cache(&data_dir, &cache);
+    // Only this file joins the webview's asset scope (recordings/ and
+    // attachments/ are allowed at startup; scratch as a whole is not).
+    let _ = tauri::Manager::asset_protocol_scope(&app).allow_file(&cache);
+    Ok(Some(PlaybackSource {
+        path: cache.to_string_lossy().into_owned(),
+        regenerated: true,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Settings › Storage
+// ---------------------------------------------------------------------------
+
+const AUDIO_EXTS: &[&str] = &["wav", "flac", "mp3", "m4a", "aac", "ogg", "oga", "opus", "wma"];
+const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm", "avi"];
+
+/// Disk use of the data folder's media, by kind.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct StorageReport {
+    /// Meeting audio under `recordings/` (WAV + FLAC + imported audio).
+    pub audio_bytes: u64,
+    /// The part of `audio_bytes` still stored as uncompressed WAV.
+    pub wav_bytes: u64,
+    /// Videos copied in by media import (`recordings/`).
+    pub imported_video_bytes: u64,
+    pub imported_video_files: usize,
+    /// Screen recordings (`attachments/<note>/screen-*.mp4`).
+    pub screen_recording_bytes: u64,
+    pub screen_recording_files: usize,
+    /// Other attachments (files, other videos).
+    pub other_attachment_bytes: u64,
+    pub compress: CompressStatus,
+}
+
+fn ext_of(p: &Path) -> String {
+    p.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// Walk `recordings/` and `attachments/` (two levels: folder → files).
+pub fn measure(data_dir: &Path) -> StorageReport {
+    let mut r = StorageReport::default();
+    let files_in = |sub: &str| -> Vec<(PathBuf, u64)> {
+        let mut out = Vec::new();
+        let Ok(dirs) = std::fs::read_dir(data_dir.join(sub)) else {
+            return out;
+        };
+        for d in dirs.flatten() {
+            let Ok(ft) = d.file_type() else { continue };
+            if ft.is_file() {
+                if let Ok(m) = d.metadata() {
+                    out.push((d.path(), m.len()));
+                }
+                continue;
+            }
+            if !ft.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(d.path()) else { continue };
+            for f in files.flatten() {
+                if f.file_type().is_ok_and(|t| t.is_file()) {
+                    if let Ok(m) = f.metadata() {
+                        out.push((f.path(), m.len()));
+                    }
+                }
+            }
+        }
+        out
+    };
+    for (p, len) in files_in("recordings") {
+        let ext = ext_of(&p);
+        if AUDIO_EXTS.contains(&ext.as_str()) {
+            r.audio_bytes += len;
+            if ext == "wav" {
+                r.wav_bytes += len;
+            }
+        } else if VIDEO_EXTS.contains(&ext.as_str()) {
+            r.imported_video_bytes += len;
+            r.imported_video_files += 1;
+        }
+    }
+    for (p, len) in files_in("attachments") {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.starts_with("screen-") && VIDEO_EXTS.contains(&ext_of(&p).as_str()) {
+            r.screen_recording_bytes += len;
+            r.screen_recording_files += 1;
+        } else {
+            r.other_attachment_bytes += len;
+        }
+    }
+    r
+}
+
+/// Settings › Storage: sizes by kind plus the compression job's status.
+#[tauri::command]
+pub async fn storage_report(state: tauri::State<'_, AppState>) -> Result<StorageReport, String> {
+    let data_dir = state.data_dir.clone();
+    let mut report = tauri::async_runtime::spawn_blocking(move || measure(&data_dir))
+        .await
+        .map_err(|e| e.to_string())?;
+    report.compress = state.audio_store.status();
+    Ok(report)
+}
+
+/// The one-time "recordings compressed" notice was seen.
+#[tauri::command]
+pub fn dismiss_compress_notice(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .set_setting(NOTICE_KEY, "shown")
+        .map_err(|e| e.to_string())?;
+    state.audio_store.status.lock().unwrap().notice_pending = false;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn twins_and_temps() {
+        assert_eq!(
+            flac_twin("recordings/a b/recording.mic.wav"),
+            "recordings/a b/recording.mic.flac"
+        );
+        assert_eq!(
+            temp_for(Path::new("x/recording.mic.flac")),
+            Path::new("x/.recording.mic.compressing.flac")
+        );
+        let v2 = RecordingRef {
+            mic_path: Some("recordings/a/recording.mic.FLAC".into()),
+            system_path: None,
+            mixed_path: None,
+            playback_path: None,
+            duration_ms: 0,
+        };
+        assert!(is_storage_v2(&v2));
+        assert!(!is_storage_v2(&RecordingRef {
+            mic_path: Some("recordings/a/recording.mic.wav".into()),
+            ..v2
+        }));
+    }
+}

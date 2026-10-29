@@ -498,7 +498,8 @@ pub async fn run_with(
     let mut intermediates: Vec<PathBuf> = Vec::new();
     let prep = |src: &Path, name: &str| -> Result<PathBuf, String> {
         let dst = work_dir.join(name);
-        let (samples, rate) = fly_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
+        // WAV or (recording storage v2) FLAC: the same samples either way.
+        let (samples, rate) = fly_audio::mix::read_audio_mono(src).map_err(|e| e.to_string())?;
         let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
         fly_audio::mix::write_wav_mono_16(&dst, &resampled, 16_000).map_err(|e| e.to_string())?;
         Ok(dst)
@@ -638,8 +639,24 @@ pub async fn run_with(
         });
         collect_speakers(&mut speakers, &channels[1]);
     } else {
-        // single-track path (imports, mic-only recordings)
-        let src = mixed_wav.or(mic_wav).or(system_wav).expect("checked above");
+        // single-track path (imports, mic-only recordings). A compressed
+        // recording no longer stores its mixdown: rebuild it, bit-identical
+        // to the one capture wrote, so the ASR input doesn't change.
+        let regenerated = crate::audio_store::regenerate_mixdown_for_asr(
+            &recording,
+            mixed_wav.as_deref(),
+            mic_wav.as_deref(),
+            system_wav.as_deref(),
+            &work_dir,
+        )?;
+        if let Some(r) = &regenerated {
+            intermediates.push(r.clone());
+        }
+        let src = regenerated
+            .or(mixed_wav)
+            .or(mic_wav)
+            .or(system_wav)
+            .expect("checked above");
         let track_16k = prep(&src, "track.16k.wav")?;
         intermediates.push(track_16k.clone());
 
@@ -846,23 +863,44 @@ async fn re_diarize_inner(
         // Same channel strategy as the full pipeline: with both channels the
         // mic is a known speaker and only the system channel is diarized.
         let per_channel = mic_wav.is_some() && system_wav.is_some();
-        let (src, num_clusters) = if per_channel {
-            (system_wav.clone().unwrap(), hint.system_clusters())
-        } else {
-            let src = mixed_wav
-                .or(mic_wav)
-                .or(system_wav)
-                .ok_or_else(|| ERR_NO_RECORDING_FILES.to_string())?;
-            (src, hint.mixed_clusters())
-        };
+        if !per_channel && mic_wav.is_none() && system_wav.is_none() && mixed_wav.is_none() {
+            return Err(ERR_NO_RECORDING_FILES.to_string());
+        }
 
         emit_stage(state, on_stage, meeting_id, "preparing-audio", None);
         // scratch keyed by meeting id, like the full pipeline's
         let work_dir =
             fly_storage::scratch::prepare_meeting_scratch(&data_dir, meeting_id, None)
                 .map_err(|e| format!("couldn't create the transcription scratch folder: {e}"))?;
+        // A compressed recording's dropped mixdown is rebuilt bit-identically.
+        let regenerated = if per_channel {
+            None
+        } else {
+            crate::audio_store::regenerate_mixdown_for_asr(
+                &recording,
+                mixed_wav.as_deref(),
+                mic_wav.as_deref(),
+                system_wav.as_deref(),
+                &work_dir,
+            )?
+        };
+        let (src, num_clusters) = if per_channel {
+            (system_wav.clone().unwrap(), hint.system_clusters())
+        } else {
+            let src = regenerated
+                .clone()
+                .or(mixed_wav)
+                .or(mic_wav)
+                .or(system_wav)
+                .ok_or_else(|| ERR_NO_RECORDING_FILES.to_string())?;
+            (src, hint.mixed_clusters())
+        };
         let track_16k = work_dir.join("rediarize.16k.wav");
-        let (samples, rate) = fly_audio::mix::read_wav_mono(&src).map_err(|e| e.to_string())?;
+        let read = fly_audio::mix::read_audio_mono(&src).map_err(|e| e.to_string());
+        if let Some(r) = &regenerated {
+            let _ = std::fs::remove_file(r);
+        }
+        let (samples, rate) = read?;
         let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
         fly_audio::mix::write_wav_mono_16(&track_16k, &resampled, 16_000)
             .map_err(|e| e.to_string())?;

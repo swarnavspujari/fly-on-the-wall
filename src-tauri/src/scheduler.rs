@@ -170,7 +170,9 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                     // fresh transcript → new chunks for the semantic index
                     state.embed_notify.notify_one();
                     ai_pass(&app, &state, &on_stage, &meeting_id).await;
-                    emit_final(&on_stage, &meeting_id, None)
+                    emit_final(&on_stage, &meeting_id, None);
+                    // transcript final → its recording can be compressed
+                    state.audio_store.nudge();
                 }
                 Tick::Retrying {
                     meeting_id,

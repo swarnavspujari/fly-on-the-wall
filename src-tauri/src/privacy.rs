@@ -261,12 +261,14 @@ fn sweep_now(state: &AppState, explicit: bool) -> SweepReport {
     }
     // Transcribe, retranscribe and re-diarize all hold a pipeline_stage
     // entry while they read a meeting's audio.
+    // Recording compression holds one meeting's folder at a time.
     let busy_ids: Vec<String> = state
         .pipeline_stage
         .lock()
         .unwrap()
         .keys()
         .cloned()
+        .chain(state.audio_store.current())
         .collect();
     let storage = state.storage.lock().unwrap();
     sweep_retention(
@@ -398,6 +400,11 @@ impl Drop for ImportGuard {
     fn drop(&mut self) {
         IMPORTS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// Whether a media import is copying/converting files right now.
+pub(crate) fn imports_in_flight() -> bool {
+    IMPORTS_IN_FLIGHT.load(Ordering::SeqCst) > 0
 }
 
 /// Why the app is too busy to delete everything, if it is.
@@ -801,6 +808,13 @@ pub async fn delete_all_data(
         let state = app.state::<AppState>();
         if let Some(why) = busy_reason(&state) {
             return Err(format!("{why} — nothing was deleted"));
+        }
+        // Background compression works inside meeting folders: stop it for
+        // the rest of this run (the wipe restarts the app anyway).
+        if !crate::audio_store::halt(&state, Duration::from_secs(20)) {
+            return Err(
+                "recording compression didn't stop in time — nothing was deleted; try again".into(),
+            );
         }
         perform_delete_all(
             &state,
