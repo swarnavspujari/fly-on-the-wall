@@ -71,7 +71,7 @@ pub trait BrowserOpener: Send + Sync {
 
 fn http_url(entry: &ServerEntry) -> Result<(&str, &[String], Option<&str>), OAuthError> {
     match (&entry.config.transport, &entry.config.auth) {
-        (TransportConfig::Http { url }, AuthConfig::OAuth { scopes, client_id }) => {
+        (TransportConfig::Http { url, .. }, AuthConfig::OAuth { scopes, client_id }) => {
             Ok((url.as_str(), scopes.as_slice(), client_id.as_deref()))
         }
         _ => Err(OAuthError::NotOAuth),

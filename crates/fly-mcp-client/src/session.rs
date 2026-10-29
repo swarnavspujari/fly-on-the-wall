@@ -72,6 +72,11 @@ const INHERITED_ENV: &[&str] = &[
 pub enum SessionError {
     #[error("couldn't start the connector program: {0}")]
     Spawn(String),
+    #[error("couldn't find {0}")]
+    ProgramNotFound(String),
+    /// The program stopped right away; the end of its error output.
+    #[error("the program stopped right away")]
+    Exited(String),
     #[error("couldn't reach the server: {0}")]
     Connect(String),
     #[error("the server asked FOTW to sign in again")]
@@ -166,13 +171,55 @@ pub struct Connection {
     _child: Option<tokio::process::Child>,
 }
 
-/// Inputs for [`connect`] the configuration doesn't hold.
+/// Inputs for [`connect`] the configuration doesn't hold: resolved values.
 #[derive(Default)]
 pub struct ConnectOptions {
-    /// OAuth access token for an HTTP server.
-    pub access_token: Option<String>,
-    /// Values for the stdio connector's `env_names`, from the keychain.
+    /// Sent as `Authorization: Bearer …` (OAuth access token or API key).
+    pub bearer: Option<String>,
+    /// Extra request headers for a web connector (config values and secret
+    /// values from the keychain). Only names in the config are sent.
+    pub headers: Vec<(String, String)>,
+    /// Variables for a local connector (config values and secret values from
+    /// the keychain). Only names in the config are set.
     pub env: Vec<(String, String)>,
+}
+
+/// How much of a local program's error output is kept for "Show details".
+pub const STDERR_TAIL_BYTES: usize = 4096;
+
+/// Find a program the way a shell would: a path as given, otherwise each
+/// folder on PATH (with PATHEXT's extensions on Windows, so `npx` finds
+/// `npx.cmd`).
+pub fn resolve_program(command: &str) -> Result<std::path::PathBuf, SessionError> {
+    use std::path::{Path, PathBuf};
+    let given = Path::new(command);
+    if given.is_absolute() || command.contains(['/', '\\']) {
+        return if given.is_file() {
+            Ok(given.to_path_buf())
+        } else {
+            Err(SessionError::ProgramNotFound(command.to_string()))
+        };
+    }
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';')
+            .filter(|e| !e.is_empty())
+            .map(|e| e.to_ascii_lowercase())
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        for ext in &exts {
+            let candidate: PathBuf = dir.join(format!("{command}{ext}"));
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(SessionError::ProgramNotFound(command.to_string()))
 }
 
 pub async fn connect(
@@ -181,12 +228,9 @@ pub async fn connect(
     opts: ConnectOptions,
 ) -> Result<Connection, SessionError> {
     match &config.transport {
-        TransportConfig::Stdio {
-            command,
-            args,
-            env_names,
-        } => {
-            let mut cmd = tokio::process::Command::new(command);
+        TransportConfig::Stdio { command, args, env } => {
+            let program = resolve_program(command)?;
+            let mut cmd = tokio::process::Command::new(&program);
             cmd.args(args).env_clear();
             for name in INHERITED_ENV {
                 if let Some(v) = std::env::var_os(name) {
@@ -194,13 +238,13 @@ pub async fn connect(
                 }
             }
             for (k, v) in &opts.env {
-                if env_names.iter().any(|n| n == k) {
+                if env.iter().any(|e| &e.name == k) {
                     cmd.env(k, v);
                 }
             }
             cmd.stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true);
             #[cfg(windows)]
             {
@@ -218,19 +262,69 @@ pub async fn connect(
                 .stdin
                 .take()
                 .ok_or_else(|| SessionError::Spawn("no stdin".into()))?;
-            let mut conn = connect_io(stdout, stdin).await?;
-            conn._child = Some(child);
-            Ok(conn)
+            let tail = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+            if let Some(mut err) = child.stderr.take() {
+                let tail = tail.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = err.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        let mut t = tail.lock().unwrap();
+                        t.extend(&buf[..n]);
+                        while t.len() > STDERR_TAIL_BYTES {
+                            t.pop_front();
+                        }
+                    }
+                });
+            }
+            match connect_io(stdout, stdin).await {
+                Ok(mut conn) => {
+                    conn._child = Some(child);
+                    Ok(conn)
+                }
+                Err(e) => {
+                    // Let the program's last words arrive, then report them.
+                    let exited = tokio::time::timeout(Duration::from_millis(500), child.wait())
+                        .await
+                        .is_ok();
+                    let text = {
+                        let t = tail.lock().unwrap();
+                        let bytes: Vec<u8> = t.iter().copied().collect();
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    };
+                    if exited || !text.trim().is_empty() {
+                        Err(SessionError::Exited(text))
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
         }
-        TransportConfig::Http { url } => {
+        TransportConfig::Http { url, headers } => {
             let url = policy
                 .parse_and_check(url)
                 .map_err(|e| SessionError::Connect(e.to_string()))?;
             let client = guarded_client(policy, Redirects::Stop)
                 .map_err(|e| SessionError::Connect(e.to_string()))?;
+            let mut extra = std::collections::HashMap::new();
+            for (k, v) in &opts.headers {
+                if !headers.iter().any(|h| h.name.eq_ignore_ascii_case(k)) {
+                    continue;
+                }
+                let name = http::HeaderName::from_bytes(k.as_bytes())
+                    .map_err(|_| SessionError::Connect(format!("invalid header {k}")))?;
+                let mut value = http::HeaderValue::from_str(v)
+                    .map_err(|_| SessionError::Connect(format!("invalid value for {k}")))?;
+                value.set_sensitive(true);
+                extra.insert(name, value);
+            }
             let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str())
-                .max_sse_event_size(MAX_MESSAGE_BYTES);
-            if let Some(t) = opts.access_token {
+                .max_sse_event_size(MAX_MESSAGE_BYTES)
+                .custom_headers(extra);
+            if let Some(t) = opts.bearer {
                 cfg = cfg.auth_header(t);
             }
             let transport = StreamableHttpClientTransport::with_client(client, cfg);

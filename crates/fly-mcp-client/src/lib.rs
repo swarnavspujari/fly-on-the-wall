@@ -23,7 +23,9 @@
 //! by the model.
 
 pub mod canonical;
+pub mod claude_import;
 pub mod config;
+pub mod directory;
 pub mod fence;
 pub mod hub;
 pub mod netguard;
@@ -38,7 +40,10 @@ pub mod session;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
 
-pub use config::{AuthConfig, ServerConfig, TransportConfig};
-pub use hub::{CallApprover, CallProposal, ConnectorHub, ConnectorTurn, Decision, TurnOptions};
+pub use config::{AuthConfig, EnvConfig, HeaderConfig, ServerConfig, TransportConfig};
+pub use hub::{
+    CallApprover, CallProposal, ConnectorHub, ConnectorTurn, Decision, NewSecrets, TurnOptions,
+};
+pub use pin::Permission;
 pub use pin::ToolKind;
-pub use registry::{CallLogEntry, ConnectorStore, Registry, ServerEntry, ToolPermission};
+pub use registry::{CallLogEntry, ConnectorStore, PermissionChange, Registry, ServerEntry};

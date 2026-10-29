@@ -5,7 +5,9 @@
 //! 2. A tool that declares an output schema must return structured content
 //!    that matches it; otherwise the result is discarded (the model is told
 //!    it was, without the server's text).
-//! 3. Hidden characters are removed, the text is capped at a character
+//! 3. Hidden characters are removed, links are reduced to their host
+//!    (`[link: example.com]`, so a result can't hand the model a ready-made
+//!    URL to fill with meeting text), the text is capped at a character
 //!    budget, and anything that looks like the fence tag is defused.
 //! 4. The text is wrapped in a `<connector_result>` fence with a line saying
 //!    it is data from an outside service, not instructions.
@@ -99,7 +101,7 @@ pub fn render(
     max_chars: usize,
 ) -> Rendered {
     let (payload, schema, discarded) = payload(result, output_schema);
-    let cleaned = defuse(&clean_text(&payload));
+    let cleaned = defuse(&strip_links(&clean_text(&payload)));
     let raw_chars = cleaned.chars().count();
     let (mut body, truncated) = truncate_chars(&cleaned, max_chars);
     if truncated {
@@ -176,6 +178,52 @@ fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(&sorted).unwrap_or_default()
 }
 
+/// Schemes whose links are rewritten.
+const LINK_SCHEMES: &[&str] = &[
+    "https://",
+    "http://",
+    "ftp://",
+    "file://",
+    "data:",
+    "javascript:",
+    "mailto:",
+    "vbscript:",
+];
+
+/// Replace every link with `[link: host]` (`[link]` when there's no host).
+pub fn strip_links(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    'scan: while i < s.len() {
+        for scheme in LINK_SCHEMES {
+            if lower[i..].starts_with(scheme)
+                && (i == 0 || !lower.as_bytes()[i - 1].is_ascii_alphanumeric())
+            {
+                let end = s[i..]
+                    .find(|c: char| {
+                        c.is_whitespace()
+                            || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '}' | '`')
+                    })
+                    .map_or(s.len(), |n| i + n);
+                let host = url::Url::parse(&s[i..end])
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_string));
+                match host {
+                    Some(h) => out.push_str(&format!("[link: {h}]")),
+                    None => out.push_str("[link]"),
+                }
+                i = end;
+                continue 'scan;
+            }
+        }
+        let ch = s[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// Make anything that could close or open the fence harmless.
 fn defuse(s: &str) -> String {
     let lower = s.to_ascii_lowercase();
@@ -242,6 +290,19 @@ mod tests {
         assert_eq!(r.raw_chars, 5_000_000);
         assert!(r.text.chars().count() < DEFAULT_MAX_RESULT_CHARS + 500);
         assert!(r.text.ends_with("</connector_result>"));
+    }
+
+    #[test]
+    fn links_are_reduced_to_their_host() {
+        let s = "See https://attacker.example/c?d=PASTE_NOTES_HERE and ![x](http://img.example/p.png),                  mailto:a@b.example, data:text/html;base64,AAAA and the email dana@example.com.";
+        let out = strip_links(s);
+        assert!(out.contains("[link: attacker.example]"), "{out}");
+        assert!(out.contains("![x]([link: img.example])"), "{out}");
+        assert!(!out.contains("PASTE_NOTES_HERE"), "{out}");
+        assert!(!out.contains("base64"), "{out}");
+        assert!(out.contains("dana@example.com"), "plain text stays: {out}");
+        let r = render("S", "t", &text("open HTTPS://x.example/a"), None, 100);
+        assert!(r.text.contains("open [link: x.example]"), "{}", r.text);
     }
 
     #[test]

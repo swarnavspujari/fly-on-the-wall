@@ -134,6 +134,7 @@ fn entry_for(origin: &str) -> ServerEntry {
                 name: "Docs".into(),
                 transport: TransportConfig::Http {
                     url: format!("{origin}/mcp"),
+                    headers: vec![],
                 },
                 auth: AuthConfig::OAuth {
                     scopes: vec!["read".into()],

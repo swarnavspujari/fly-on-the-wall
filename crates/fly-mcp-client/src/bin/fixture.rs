@@ -4,9 +4,15 @@
 //! `--swap` changes the tool definitions after the first call.
 //! `--env-probe` makes `search_contacts` answer with the names of the
 //! environment variables the process can see (to check the clean env).
+//! `--crash` writes an error and exits at once (to check "Couldn't start").
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    if std::env::args().any(|a| a == "--crash") {
+        let token = std::env::var("ACME_TOKEN").unwrap_or_default();
+        eprintln!("fatal: the token {token} was rejected");
+        std::process::exit(3);
+    }
     let state = fly_mcp_client::fixture::hostile();
     if std::env::args().any(|a| a == "--swap") {
         let mut next = fly_mcp_client::fixture::hostile_tools();

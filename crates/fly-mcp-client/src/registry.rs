@@ -1,19 +1,19 @@
-//! The connectors the user added, their approvals and tool pins, and the
-//! call log. Persisted by the app through a [`ConnectorStore`] (a
+//! The connectors the user added, their approvals and tool permissions, and
+//! the call log. Persisted by the app through a [`ConnectorStore`] (a
 //! backend-only setting); the webview can't write it.
 
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{slug_for, ConfigError, ServerConfig};
+use crate::config::{slug_for, ConfigError, ServerConfig, TransportConfig};
 use crate::fence::SchemaCheck;
-use crate::pin::{ToolKind, ToolPin};
+use crate::pin::{Permission, ToolKind, ToolPin};
 
-pub const REGISTRY_VERSION: u32 = 1;
+pub const REGISTRY_VERSION: u32 = 2;
 pub const MAX_SERVERS: usize = 16;
 pub const MAX_LOG_ENTRIES: usize = 200;
-/// Chunks a long token may be split into (see `secrets`).
+/// Chunks a long secret may be split into (see `secrets`).
 pub const MAX_SECRET_CHUNKS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,6 +32,18 @@ impl Default for Registry {
     }
 }
 
+/// Why the last connection failed, as a code (never server text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectProblem {
+    NeedsSignIn,
+    /// A local program couldn't start or stopped right away.
+    CouldNotStart,
+    /// A local program wasn't found.
+    ProgramNotFound,
+    Unreachable,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerEntry {
     /// Random, stable id ("c" + 12 hex digits). Keys keychain entries.
@@ -43,16 +55,35 @@ pub struct ServerEntry {
     pub approved_hash: Option<String>,
     pub approved_at: Option<i64>,
     pub added_at: i64,
+    /// The connector's switch. Off: nothing is offered. Turning it on again
+    /// is a trust grant (native dialog).
+    #[serde(default = "yes")]
+    pub enabled: bool,
     #[serde(default)]
     pub tools: Vec<ToolPin>,
+    /// Tools have been listed since the approval; later new tools start
+    /// Blocked.
+    #[serde(default)]
+    pub baseline_done: bool,
     #[serde(default)]
     pub last_sync: Option<i64>,
+    #[serde(default)]
+    pub last_problem: Option<ConnectProblem>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl ServerEntry {
     /// Approved, and the approval is for exactly this configuration.
     pub fn is_approved(&self) -> bool {
         self.approved_hash.as_deref() == Some(self.config.hash().as_str())
+    }
+
+    /// Approved and switched on.
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.is_approved()
     }
 
     pub fn tool(&self, name: &str) -> Option<&ToolPin> {
@@ -127,8 +158,11 @@ impl Registry {
             approved_hash: Some(hash),
             approved_at: Some(now),
             added_at: now,
+            enabled: true,
             tools: Vec::new(),
+            baseline_done: false,
             last_sync: None,
+            last_problem: None,
         });
         Ok(id)
     }
@@ -145,21 +179,30 @@ impl Registry {
     }
 }
 
-/// Keychain key names for one connector. Tokens may be split into chunks
-/// (Windows caps an entry at ~1,280 characters), so every chunk name is
-/// listed.
+/// Keychain key names for one connector. Long values may be split into
+/// chunks (Windows caps an entry at ~1,280 characters), so every chunk name
+/// is listed.
 pub fn secret_keys_for(entry: &ServerEntry) -> Vec<String> {
     let mut keys = Vec::new();
-    for base in [
-        secret_key(&entry.id, SecretSlot::Access),
-        secret_key(&entry.id, SecretSlot::Refresh),
-        secret_key(&entry.id, SecretSlot::Client),
+    for slot in [
+        SecretSlot::Access,
+        SecretSlot::Refresh,
+        SecretSlot::Client,
+        SecretSlot::ApiKey,
     ] {
-        keys.push(base.clone());
+        let base = secret_key(&entry.id, slot);
         keys.extend((0..MAX_SECRET_CHUNKS).map(|i| format!("{base}.{i}")));
+        keys.push(base);
     }
-    if let crate::config::TransportConfig::Stdio { env_names, .. } = &entry.config.transport {
-        keys.extend(env_names.iter().map(|n| env_secret_key(&entry.id, n)));
+    match &entry.config.transport {
+        TransportConfig::Stdio { env, .. } => {
+            keys.extend(env.iter().map(|e| env_secret_key(&entry.id, &e.name)))
+        }
+        TransportConfig::Http { headers, .. } => keys.extend(
+            headers
+                .iter()
+                .map(|h| header_secret_key(&entry.id, &h.name)),
+        ),
     }
     keys
 }
@@ -170,8 +213,10 @@ pub enum SecretSlot {
     Access,
     /// Refresh token, stored on its own.
     Refresh,
-    /// Client secret from registration or the user.
+    /// OAuth client secret.
     Client,
+    /// API key or token sent as a bearer token.
+    ApiKey,
 }
 
 pub fn secret_key(server_id: &str, slot: SecretSlot) -> String {
@@ -179,6 +224,7 @@ pub fn secret_key(server_id: &str, slot: SecretSlot) -> String {
         SecretSlot::Access => "access",
         SecretSlot::Refresh => "refresh",
         SecretSlot::Client => "client",
+        SecretSlot::ApiKey => "apikey",
     };
     format!("connector.{server_id}.{s}")
 }
@@ -187,51 +233,51 @@ pub fn env_secret_key(server_id: &str, name: &str) -> String {
     format!("connector.{server_id}.env.{name}")
 }
 
-/// One requested tool permission (from the Settings form).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolPermission {
-    pub tool: String,
-    pub enabled: bool,
-    pub read_only: bool,
+pub fn header_secret_key(server_id: &str, name: &str) -> String {
+    format!("connector.{server_id}.header.{}", name.to_ascii_lowercase())
 }
 
-/// A permission change sorted into trust it grants and trust it removes.
+/// One requested permission (from Settings).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionChange {
+    pub tool: String,
+    pub permission: Permission,
+}
+
+/// Requested changes sorted into trust granted (loosen) and removed
+/// (tighten).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PermissionPlan {
-    /// Tools being turned on.
-    pub enable: Vec<String>,
-    /// Tools being marked read-only (calls are labelled reads).
-    pub mark_read_only: Vec<String>,
-    pub disable: Vec<String>,
-    pub unmark_read_only: Vec<String>,
+    pub loosen: Vec<PermissionChange>,
+    pub tighten: Vec<PermissionChange>,
 }
 
 impl PermissionPlan {
     pub fn grants_trust(&self) -> bool {
-        !self.enable.is_empty() || !self.mark_read_only.is_empty()
+        !self.loosen.is_empty()
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.grants_trust() && self.disable.is_empty() && self.unmark_read_only.is_empty()
+        self.loosen.is_empty() && self.tighten.is_empty()
     }
 }
 
-/// Check and classify requested changes. Refuses enabling a tool that's
-/// changed, missing or unusable, and marking read-only a tool the server
-/// says writes.
+/// Check and classify requested changes. A tool waiting for review, missing
+/// or unusable can only be tightened.
 pub fn plan_permissions(
     entry: &ServerEntry,
-    changes: &[ToolPermission],
+    changes: &[PermissionChange],
 ) -> Result<PermissionPlan, String> {
     let mut plan = PermissionPlan::default();
     for c in changes {
         let pin = entry
             .tool(&c.tool)
             .ok_or_else(|| format!("{} has no tool named {:?}.", entry.config.name, c.tool))?;
-        if c.enabled && !pin.enabled {
-            if pin.pending.is_some() {
-                return Err(format!("{} changed; review the change first.", pin.name));
+        if c.permission > pin.permission {
+            if pin.needs_review() {
+                return Err(format!("Review the change to {} first.", pin.name));
             }
             if pin.missing {
                 return Err(format!("{} is no longer offered by the server.", pin.name));
@@ -239,44 +285,40 @@ pub fn plan_permissions(
             if let Some(p) = &pin.definition.problem {
                 return Err(format!("{} can't be used: {p}", pin.name));
             }
-            plan.enable.push(pin.name.clone());
-        } else if !c.enabled && pin.enabled {
-            plan.disable.push(pin.name.clone());
-        }
-        if c.read_only && !pin.read_only {
-            if !pin.can_mark_read_only() {
-                return Err(format!(
-                    "The server says {} can change data, so it can't be marked read-only.",
-                    pin.name
-                ));
-            }
-            if pin.pending.is_some() {
-                return Err(format!("{} changed; review the change first.", pin.name));
-            }
-            plan.mark_read_only.push(pin.name.clone());
-        } else if !c.read_only && pin.read_only {
-            plan.unmark_read_only.push(pin.name.clone());
+            plan.loosen.push(c.clone());
+        } else if c.permission < pin.permission {
+            plan.tighten.push(c.clone());
         }
     }
     Ok(plan)
 }
 
-/// Apply a plan made by [`plan_permissions`] for the same entry.
-pub fn apply_permissions(entry: &mut ServerEntry, plan: &PermissionPlan) {
-    for pin in entry.tools.iter_mut() {
-        if plan.enable.contains(&pin.name) {
-            pin.enabled = true;
-        }
-        if plan.disable.contains(&pin.name) {
-            pin.enabled = false;
-        }
-        if plan.mark_read_only.contains(&pin.name) {
-            pin.read_only = true;
-        }
-        if plan.unmark_read_only.contains(&pin.name) {
-            pin.read_only = false;
+/// Apply the tightening half of a plan (no dialog needed).
+pub fn apply_tighten(entry: &mut ServerEntry, plan: &PermissionPlan) {
+    for c in &plan.tighten {
+        if let Some(pin) = entry.tool_mut(&c.tool) {
+            pin.permission = pin.permission.min(c.permission);
         }
     }
+}
+
+/// Apply the loosening half of a plan (after the user's yes).
+pub fn apply_loosen(entry: &mut ServerEntry, plan: &PermissionPlan) {
+    for c in &plan.loosen {
+        if let Some(pin) = entry.tool_mut(&c.tool) {
+            pin.permission = c.permission;
+        }
+    }
+}
+
+/// Who let a call run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Approval {
+    /// The user clicked on the card (and the native confirm, for a change).
+    User,
+    /// The tool is on Always allow.
+    Automatic,
 }
 
 /// How a proposed call ended.
@@ -292,7 +334,7 @@ pub enum CallOutcome {
     Failed,
 }
 
-/// Why FOTW refused a call before asking the user. Codes, never text.
+/// Why FOTW refused a call before running it. Codes, never text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalCode {
@@ -317,6 +359,8 @@ pub struct CallLogEntry {
     pub tool: String,
     pub kind: ToolKind,
     pub outcome: CallOutcome,
+    #[serde(default)]
+    pub approval: Option<Approval>,
     pub refusal: Option<RefusalCode>,
     pub duration_ms: u64,
     pub result_chars: usize,
@@ -380,7 +424,7 @@ pub fn append_log(store: &dyn ConnectorStore, entry: CallLogEntry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AuthConfig, TransportConfig};
+    use crate::config::{AuthConfig, EnvConfig, HeaderConfig};
     use crate::pin::{reconcile, LiveTool};
     use serde_json::json;
 
@@ -389,6 +433,7 @@ mod tests {
             name: name.into(),
             transport: TransportConfig::Http {
                 url: "https://mcp.example.com/mcp".into(),
+                headers: vec![],
             },
             auth: AuthConfig::None,
         }
@@ -399,13 +444,16 @@ mod tests {
         let mut r = Registry::default();
         let id = r.add_approved(cfg("Docs"), 1).unwrap();
         assert!(r.server(&id).unwrap().is_approved());
+        assert!(r.server(&id).unwrap().is_active());
         r.server_mut(&id).unwrap().config.transport = TransportConfig::Http {
             url: "https://evil.example.net/mcp".into(),
+            headers: vec![],
         };
         assert!(
             !r.server(&id).unwrap().is_approved(),
             "a changed config voids approval"
         );
+        assert!(!r.server(&id).unwrap().is_active());
     }
 
     #[test]
@@ -430,93 +478,119 @@ mod tests {
     }
 
     #[test]
-    fn secret_keys_cover_tokens_chunks_and_env() {
+    fn secret_keys_cover_tokens_chunks_keys_headers_and_env() {
         let mut r = Registry::default();
-        let id = r
+        let local = r
             .add_approved(
                 ServerConfig {
                     name: "Local".into(),
                     transport: TransportConfig::Stdio {
                         command: "srv".into(),
                         args: vec![],
-                        env_names: vec!["TOKEN".into()],
+                        env: vec![EnvConfig {
+                            name: "TOKEN".into(),
+                            value: None,
+                        }],
                     },
                     auth: AuthConfig::None,
                 },
                 1,
             )
             .unwrap();
+        let web = r
+            .add_approved(
+                ServerConfig {
+                    name: "Web".into(),
+                    transport: TransportConfig::Http {
+                        url: "https://mcp.example.com/mcp".into(),
+                        headers: vec![HeaderConfig {
+                            name: "X-Team-Key".into(),
+                            value: None,
+                        }],
+                    },
+                    auth: AuthConfig::ApiKey,
+                },
+                1,
+            )
+            .unwrap();
         let keys = r.secret_keys();
-        assert!(keys.contains(&format!("connector.{id}.access")));
-        assert!(keys.contains(&format!("connector.{id}.refresh.7")));
-        assert!(keys.contains(&format!("connector.{id}.client")));
-        assert!(keys.contains(&format!("connector.{id}.env.TOKEN")));
+        for k in [
+            format!("connector.{local}.access"),
+            format!("connector.{local}.refresh.7"),
+            format!("connector.{local}.env.TOKEN"),
+            format!("connector.{web}.apikey"),
+            format!("connector.{web}.apikey.0"),
+            format!("connector.{web}.header.x-team-key"),
+        ] {
+            assert!(keys.contains(&k), "{k}");
+        }
     }
 
     fn entry_with_tools() -> ServerEntry {
         let mut r = Registry::default();
         let id = r.add_approved(cfg("CRM"), 1).unwrap();
         let mut e = r.server(&id).unwrap().clone();
-        let mut writes = LiveTool {
-            name: "update".into(),
+        let find = LiveTool {
+            name: "find".into(),
             title: None,
-            description: Some("Update".into()),
+            description: Some("Find".into()),
             input_schema: json!({"type": "object"}),
             output_schema: None,
+            annotations: Some(json!({"readOnlyHint": true})),
+        };
+        let update = LiveTool {
+            name: "update".into(),
             annotations: Some(json!({"destructiveHint": true})),
+            ..find.clone()
         };
-        let reads = LiveTool {
-            name: "find".into(),
-            annotations: None,
-            ..writes.clone()
-        };
-        writes.name = "update".into();
-        reconcile(&mut e.tools, &[reads, writes], 1).unwrap();
+        reconcile(&mut e.tools, &[find, update], 1, true).unwrap();
         e
     }
 
     #[test]
-    fn permission_plans_separate_grants_from_removals() {
+    fn plans_separate_loosening_from_tightening() {
         let mut e = entry_with_tools();
         let plan = plan_permissions(
             &e,
-            &[ToolPermission {
-                tool: "find".into(),
-                enabled: true,
-                read_only: true,
-            }],
+            &[
+                PermissionChange {
+                    tool: "find".into(),
+                    permission: Permission::AlwaysAllow,
+                },
+                PermissionChange {
+                    tool: "update".into(),
+                    permission: Permission::Blocked,
+                },
+            ],
         )
         .unwrap();
         assert!(plan.grants_trust());
-        assert_eq!(plan.enable, vec!["find"]);
-        assert_eq!(plan.mark_read_only, vec!["find"]);
-        apply_permissions(&mut e, &plan);
-        let plan = plan_permissions(
-            &e,
-            &[ToolPermission {
-                tool: "find".into(),
-                enabled: false,
-                read_only: true,
-            }],
-        )
-        .unwrap();
-        assert!(!plan.grants_trust());
-        assert_eq!(plan.disable, vec!["find"]);
+        assert_eq!(plan.loosen[0].tool, "find");
+        assert_eq!(plan.tighten[0].tool, "update");
+        apply_tighten(&mut e, &plan);
+        assert_eq!(e.tool("update").unwrap().permission, Permission::Blocked);
+        assert_eq!(
+            e.tool("find").unwrap().permission,
+            Permission::NeedsApproval
+        );
+        apply_loosen(&mut e, &plan);
+        assert_eq!(e.tool("find").unwrap().permission, Permission::AlwaysAllow);
     }
 
     #[test]
-    fn destructive_tools_cannot_be_marked_read_only() {
-        let e = entry_with_tools();
+    fn tools_waiting_for_review_can_only_be_tightened() {
+        let mut e = entry_with_tools();
+        e.tool_mut("find").unwrap().permission = Permission::Blocked;
+        e.tool_mut("find").unwrap().unreviewed = true;
         let err = plan_permissions(
             &e,
-            &[ToolPermission {
-                tool: "update".into(),
-                enabled: true,
-                read_only: true,
+            &[PermissionChange {
+                tool: "find".into(),
+                permission: Permission::NeedsApproval,
             }],
         )
         .unwrap_err();
-        assert!(err.contains("can't be marked read-only"), "{err}");
+        assert!(err.contains("Review"), "{err}");
     }
 
     #[test]
@@ -532,6 +606,7 @@ mod tests {
                     tool: "find".into(),
                     kind: ToolKind::Read,
                     outcome: CallOutcome::Ran,
+                    approval: Some(Approval::User),
                     refusal: None,
                     duration_ms: 1,
                     result_chars: 1,

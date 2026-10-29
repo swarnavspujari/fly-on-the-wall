@@ -1312,7 +1312,10 @@ mod tests {
                     transport: fly_mcp_client::TransportConfig::Stdio {
                         command: "docs-mcp".into(),
                         args: vec![],
-                        env_names: vec!["DOCS_TOKEN".into()],
+                        env: vec![fly_mcp_client::EnvConfig {
+                            name: "DOCS_TOKEN".into(),
+                            value: None,
+                        }],
                     },
                     auth: fly_mcp_client::AuthConfig::None,
                 },

@@ -2,37 +2,47 @@
 //!
 //! * State lives in backend-only settings (`connectors.registry`,
 //!   `connectors.call_log`): `set_app_setting` refuses `connectors.*`, so a
-//!   script in the webview can't add a server, flip a permission or forge an
-//!   approval.
-//! * Everything that grants trust — adding a server (its approval is bound to
-//!   the config hash), turning tools on, marking them read-only, accepting a
-//!   changed tool definition — happens here after a yes in a native dialog
-//!   the webview can't draw or click (same pattern as cloud consent). Taking
-//!   trust away (remove, turn off, sign out) needs no dialog.
-//! * Proposed calls reach the webview as `connectors:proposal` events and
-//!   wait for `decide_connector_call`. Edited arguments are re-validated
-//!   here; a call to a tool that may change data also needs a yes in a
-//!   native dialog showing the final arguments.
+//!   script in the webview can't add a server, loosen a permission or forge
+//!   an approval.
+//! * Everything that grants trust — adding or editing a connector (its
+//!   approval is bound to the config hash), turning one back on, loosening a
+//!   tool's permission, approving a changed or new tool, sending a call to a
+//!   change tool — happens here after a yes in a native dialog the webview
+//!   can't draw or click (the pattern of cloud consent). Taking trust away
+//!   (turn off, block, remove, sign out) needs no dialog.
+//! * Calls on Needs approval reach the webview as `connectors:proposal`
+//!   events and wait for `decide_connector_call`. Edited arguments are
+//!   re-validated here; a change tool's call also needs the native confirm
+//!   showing the final arguments. "Always allow" from a card is offered only
+//!   for read-only tools.
+//! * Secret values (API keys, secret headers and settings) go straight to the
+//!   keychain and are never returned to the webview.
 //! * "Delete all my data" removes every connector keychain entry
 //!   ([`stored_secret_keys`]).
 //!
 //! The Ask harness gets a per-turn tool set from [`turn_for_ask`].
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use fly_llm::external_tools::ExternalTools;
+use fly_mcp_client::claude_import::{self, ImportCandidate};
 use fly_mcp_client::config::{AuthConfig, ServerConfig, TransportConfig};
-use fly_mcp_client::hub::{CallApprover, CallProposal, ConnectorHub, Decision, TurnOptions};
+use fly_mcp_client::directory::{self, DirectoryEntry};
+use fly_mcp_client::hub::{
+    args_problem, CallApprover, CallProposal, ConnectorHub, Decision, HubError, NewSecrets,
+    ProbeResult, TurnOptions,
+};
 use fly_mcp_client::oauth::BrowserOpener;
-use fly_mcp_client::pin::{self, model_tool_name, FieldChange, ToolKind};
+use fly_mcp_client::pin::{self, model_tool_name, FieldChange, Permission, ToolKind};
 use fly_mcp_client::registry::{
-    CallLogEntry, ConnectorStore, PermissionPlan, Registry, ServerEntry, ToolPermission,
+    CallLogEntry, ConnectProblem, ConnectorStore, PermissionChange, Registry, ServerEntry,
 };
 use fly_mcp_client::sanitize::clean_capped;
-use fly_mcp_client::secrets::KeychainCredentials;
+use fly_mcp_client::session::SessionError;
 use fly_storage::Storage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -47,8 +57,8 @@ type CmdResult<T> = Result<T, String>;
 pub const REGISTRY_KEY: &str = "connectors.registry";
 /// Backend-only setting holding the call log.
 pub const CALL_LOG_KEY: &str = "connectors.call_log";
-/// The beta flag (webview-writable UI preference; it only hides the feature,
-/// it grants nothing).
+/// The beta switch (a webview-writable UI preference: it shows the feature
+/// and lets Ask offer connector tools, but grants nothing by itself).
 pub const BETA_KEY: &str = "ui.beta.connectors";
 
 pub const EVENT_PROPOSAL: &str = "connectors:proposal";
@@ -57,8 +67,11 @@ pub const EVENT_CHANGED: &str = "connectors:changed";
 
 /// A card nobody answers is withdrawn after this long.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// Longest argument text shown in a native dialog.
-const DIALOG_ARGS_CHARS: usize = 1200;
+/// Longest argument text a native confirm shows. Longer arguments are
+/// refused rather than cut, so the dialog always shows what is sent.
+const DIALOG_ARGS_CHARS: usize = 3000;
+/// Longest program output shown under "Show details".
+const DETAILS_CHARS: usize = 1500;
 
 fn err_str<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -132,7 +145,7 @@ pub fn init(app: &AppHandle) {
     });
 }
 
-/// Close connector connections (stdio programs stop) on exit.
+/// Close connector connections (local programs stop) on exit.
 pub fn shutdown(app: &AppHandle) {
     if let Some(st) = app.try_state::<ConnectorsState>() {
         tauri::async_runtime::block_on(st.hub.close_all());
@@ -175,6 +188,206 @@ pub fn stored_secret_keys(storage: &Storage) -> Vec<String> {
     }
 }
 
+async fn ask(st: &ConnectorsState, app: &AppHandle, prompt: &ConsentPrompt) -> bool {
+    let _one = st.dialog.lock().await;
+    ask_consent_natively(app, prompt).await == ConsentAnswer::Allow
+}
+
+fn q(s: &str, max: usize) -> String {
+    format!("\"{}\"", clean_capped(s, max))
+}
+
+// ---------------------------------------------------------------------------
+// Native dialog copy (UX brief §8). The safe answer is always the default.
+// ---------------------------------------------------------------------------
+
+fn add_prompt(c: &ServerConfig, turning_on: bool) -> ConsentPrompt {
+    if let Some(run) = c.will_run() {
+        let mut body = format!(
+            "{} will run: {}\n\nIt has the same access to your files as you.",
+            q(&c.name, 60),
+            clean_capped(&run, 600)
+        );
+        let secrets = c.secret_names();
+        if !secrets.is_empty() {
+            body.push_str(&format!(
+                "\n\nIt gets these settings from your system keychain: {}.",
+                secrets.join(", ")
+            ));
+        }
+        body.push_str("\n\nOnly add programs you trust. Every tool starts as Needs approval.");
+        return ConsentPrompt {
+            title: if turning_on {
+                "Turn on a program on this computer?".into()
+            } else {
+                "Run a program on this computer?".into()
+            },
+            message: body,
+            allow: if turning_on { "Turn on" } else { "Run and add" }.into(),
+            decline: "Cancel".into(),
+        };
+    }
+    let mut body = format!(
+        "It can receive questions and meeting details you approve, sent to {}. Every tool starts \
+         as Needs approval.",
+        clean_capped(&c.destination(), 120)
+    );
+    if c.uses_oauth() {
+        body.push_str("\n\nYou'll sign in in your browser next.");
+    }
+    body.push_str("\n\nFly on the Wall hasn't checked this connector. Only add ones you trust.");
+    ConsentPrompt {
+        title: if turning_on {
+            format!("Turn on {}?", q(&c.name, 60))
+        } else {
+            format!("Add {} connector?", q(&c.name, 60))
+        },
+        message: body,
+        allow: if turning_on {
+            "Turn on"
+        } else {
+            "Add connector"
+        }
+        .into(),
+        decline: "Cancel".into(),
+    }
+}
+
+fn edit_prompt(c: &ServerConfig) -> ConsentPrompt {
+    let mut p = add_prompt(c, false);
+    p.title = format!("Save changes to {}?", q(&c.name, 60));
+    p.allow = "Save changes".into();
+    p
+}
+
+const SPEECH_WARNING: &str = "Something said in a meeting could steer the AI into using it.";
+
+fn loosen_prompt(entry: &ServerEntry, loosen: &[PermissionChange]) -> ConsentPrompt {
+    let name = clean_capped(&entry.config.name, 60);
+    let kind_of = |tool: &str| entry.tool(tool).map(pin::kind).unwrap_or(ToolKind::Write);
+    if let [one] = loosen {
+        let tool = q(&one.tool, 80);
+        return match one.permission {
+            Permission::AlwaysAllow => ConsentPrompt {
+                title: format!("Let the AI use {tool} without asking?"),
+                message: match kind_of(&one.tool) {
+                    ToolKind::Write => format!("This can change data in {name}. {SPEECH_WARNING}"),
+                    ToolKind::Read => format!(
+                        "The AI will send {name} what it chooses, without showing you first. \
+                         {SPEECH_WARNING}"
+                    ),
+                },
+                allow: "Always allow".into(),
+                decline: "Keep asking".into(),
+            },
+            _ => ConsentPrompt {
+                title: format!("Let the AI ask to use {tool}?"),
+                message: format!("You'll see each call to {name} before it's sent."),
+                allow: "Allow with approval".into(),
+                decline: "Keep blocked".into(),
+            },
+        };
+    }
+    let list = |p: Permission| {
+        loosen
+            .iter()
+            .filter(|c| c.permission == p)
+            .map(|c| clean_capped(&c.tool, 80))
+            .collect::<Vec<_>>()
+    };
+    let always = list(Permission::AlwaysAllow);
+    let ask = list(Permission::NeedsApproval);
+    let mut lines = Vec::new();
+    if !always.is_empty() {
+        lines.push(format!("Use without asking: {}", always.join(", ")));
+    }
+    if !ask.is_empty() {
+        lines.push(format!("Ask before each call: {}", ask.join(", ")));
+    }
+    if loosen
+        .iter()
+        .any(|c| c.permission == Permission::AlwaysAllow && kind_of(&c.tool) == ToolKind::Write)
+    {
+        lines.push(format!(
+            "Some of these can change data in {name}. {SPEECH_WARNING}"
+        ));
+    }
+    ConsentPrompt {
+        title: format!("Change permissions for {} tools in {name}?", loosen.len()),
+        message: lines.join("\n\n"),
+        allow: "Change permissions".into(),
+        decline: "Keep as is".into(),
+    }
+}
+
+fn review_prompt(entry: &ServerEntry, tool: &pin::ToolPin) -> ConsentPrompt {
+    let name = clean_capped(&entry.config.name, 60);
+    let (body, desc) = match &tool.pending {
+        Some(p) => {
+            let fields: Vec<String> = pin::diff(&tool.definition, &p.definition)
+                .into_iter()
+                .map(|c| c.field)
+                .collect();
+            (
+                format!(
+                    "{name} changed this tool since you approved it. Changed: {}.",
+                    if fields.is_empty() {
+                        "details".into()
+                    } else {
+                        fields.join(", ")
+                    }
+                ),
+                p.definition.description.clone(),
+            )
+        }
+        None => (
+            format!("{name} added this tool after you approved the connector."),
+            tool.definition.description.clone(),
+        ),
+    };
+    ConsentPrompt {
+        title: format!("Approve changes to {}?", q(&tool.name, 80)),
+        message: format!(
+            "{body}\n\nDescription:\n{}\n\nIt will be on Needs approval.",
+            clean_capped(&desc, 600)
+        ),
+        allow: "Approve".into(),
+        decline: "Keep blocked".into(),
+    }
+}
+
+/// The final arguments for a native confirm, or why they can't be shown in
+/// full.
+fn dialog_args(args: &Value) -> Result<String, String> {
+    let s = serde_json::to_string_pretty(args).map_err(err_str)?;
+    if s.chars().count() > DIALOG_ARGS_CHARS {
+        return Err(
+            "These details are too long to show in the confirm dialog. Shorten them and try again."
+                .into(),
+        );
+    }
+    Ok(s)
+}
+
+fn send_prompt(p: &CallProposal, args_text: &str) -> ConsentPrompt {
+    let warning = if p.destructive {
+        "The service says this can delete or overwrite data."
+    } else {
+        "This can change data in the service."
+    };
+    ConsentPrompt {
+        title: format!("Send this to {}?", q(&p.server_name, 60)),
+        message: format!(
+            "{} — {}\n\nSends to: {}\n\n{args_text}",
+            clean_capped(&p.tool, 80),
+            warning,
+            clean_capped(&p.destination, 120),
+        ),
+        allow: "Send".into(),
+        decline: "Don't send".into(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Approver: the confirm card
 // ---------------------------------------------------------------------------
@@ -190,7 +403,7 @@ struct AppApprover {
     app: AppHandle,
 }
 
-/// Withdraws the card if the call is abandoned (turn cancelled, timeout).
+/// Withdraws the card if the call is abandoned (turn cancelled).
 struct WithdrawOnDrop {
     app: AppHandle,
     id: String,
@@ -255,7 +468,10 @@ impl CallApprover for AppApprover {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DecideResult {
+    /// The card was answered and can close.
     ok: bool,
+    /// Why it stays open (bad arguments). `ok: false` with no error: the
+    /// user said no in the native dialog; the card stays open.
     error: Option<String>,
 }
 
@@ -270,16 +486,23 @@ pub fn pending_connector_calls(st: State<'_, ConnectorsState>) -> Vec<CallPropos
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardAction {
+    Deny,
+    AllowOnce,
+    /// Read-only tools only: set Always allow (native dialog) and run.
+    AlwaysAllow,
+}
+
 /// The user's answer to a confirm card. `args` are the (possibly edited)
-/// arguments; `None` runs the proposal as shown. Invalid arguments keep the
-/// card open. A call that may change data also needs a yes in a native
-/// dialog showing the final arguments.
+/// arguments; `None` runs the proposal as shown.
 #[tauri::command]
 pub async fn decide_connector_call(
     app: AppHandle,
     st: State<'_, ConnectorsState>,
     proposal_id: String,
-    run: bool,
+    action: CardAction,
     args: Option<Value>,
 ) -> CmdResult<DecideResult> {
     let proposal = st
@@ -289,100 +512,107 @@ pub async fn decide_connector_call(
         .get(&proposal_id)
         .map(|p| p.proposal.clone())
         .ok_or("That call is no longer waiting for an answer.")?;
-    let settle = |decision: Decision, outcome: &str| {
-        if let Some(p) = st.pending.lock().unwrap().remove(&proposal_id) {
-            let _ = p.reply.send(decision);
-            let _ = app.emit(
-                EVENT_SETTLED,
-                Settled {
-                    proposal_id: &proposal_id,
-                    outcome,
-                },
-            );
+    let settle = |decision: Decision, outcome: &str| -> bool {
+        match st.pending.lock().unwrap().remove(&proposal_id) {
+            Some(p) => {
+                let _ = p.reply.send(decision);
+                let _ = app.emit(
+                    EVENT_SETTLED,
+                    Settled {
+                        proposal_id: &proposal_id,
+                        outcome,
+                    },
+                );
+                true
+            }
+            None => false,
         }
     };
-    if !run {
-        settle(Decision::Decline, "declined");
-        return Ok(DecideResult {
-            ok: true,
-            error: None,
-        });
-    }
-    let final_args = args.unwrap_or_else(|| proposal.args.clone());
-    if !final_args.is_object() {
-        return Ok(DecideResult {
-            ok: false,
-            error: Some("The arguments must be a JSON object.".into()),
-        });
-    }
-    if let Err(errs) = fly_mcp_client::schema::validate(&proposal.input_schema, &final_args) {
-        return Ok(DecideResult {
-            ok: false,
-            error: Some(format!(
-                "These arguments don't fit the tool: {}",
-                errs.join("; ")
-            )),
-        });
-    }
-    if proposal.kind == ToolKind::Write {
-        let prompt = write_call_prompt(&proposal, &final_args);
-        let _one = st.dialog.lock().await;
-        // A second click may have waited for the first dialog: answer once.
-        if !st.pending.lock().unwrap().contains_key(&proposal_id) {
-            return Ok(DecideResult {
-                ok: true,
-                error: None,
-            });
-        }
-        if ask_consent_natively(&app, &prompt).await != ConsentAnswer::Allow {
-            settle(Decision::Decline, "declined");
-            return Ok(DecideResult {
-                ok: true,
-                error: None,
-            });
-        }
-    }
-    settle(Decision::Run { args: final_args }, "ran");
-    Ok(DecideResult {
+    let done = DecideResult {
         ok: true,
         error: None,
-    })
-}
-
-fn pretty_capped(v: &Value) -> String {
-    let s = serde_json::to_string_pretty(v).unwrap_or_default();
-    clean_capped(&s, DIALOG_ARGS_CHARS)
-}
-
-fn write_call_prompt(p: &CallProposal, args: &Value) -> ConsentPrompt {
-    let tool = clean_capped(&p.tool, 80);
-    let server = clean_capped(&p.server_name, 60);
-    let warning = if p.destructive {
-        "The service says this tool can delete or overwrite data."
-    } else {
-        "This tool may change data in the service."
     };
-    ConsentPrompt {
-        title: format!("Run {tool} on {server}?"),
-        message: format!(
-            "{warning}\n\nSends to: {}\n\nWith these details:\n{}\n\nRun it only if this is what you want.",
-            clean_capped(&p.destination, 120),
-            pretty_capped(args)
-        ),
-        allow: "Run".into(),
-        decline: "Don't run".into(),
+    let stay = |error: Option<String>| DecideResult { ok: false, error };
+    if action == CardAction::Deny {
+        settle(Decision::Decline, "declined");
+        return Ok(done);
     }
+    let final_args = args.unwrap_or_else(|| proposal.args.clone());
+    if let Some(p) = args_problem(&final_args) {
+        return Ok(stay(Some(p)));
+    }
+    if let Err(errs) = fly_mcp_client::schema::validate(&proposal.input_schema, &final_args) {
+        return Ok(stay(Some(format!(
+            "These details don't fit the tool: {}",
+            errs.join("; ")
+        ))));
+    }
+    match (action, proposal.kind) {
+        (CardAction::AlwaysAllow, ToolKind::Write) => {
+            return Ok(stay(Some(
+                "Tools that can change data can only be set to Always allow in Settings.".into(),
+            )));
+        }
+        (CardAction::AlwaysAllow, ToolKind::Read) => {
+            let changes = vec![PermissionChange {
+                tool: proposal.tool.clone(),
+                permission: Permission::AlwaysAllow,
+            }];
+            let reg = st.hub.registry();
+            let entry = reg
+                .server(&proposal.server_id)
+                .ok_or("That connector is gone.")?;
+            let plan = st
+                .hub
+                .plan_permissions(&proposal.server_id, &changes)
+                .map_err(err_str)?;
+            if !ask(&st, &app, &loosen_prompt(entry, &plan.loosen)).await {
+                return Ok(stay(None));
+            }
+            st.hub
+                .apply_loosening(&proposal.server_id, &changes, &plan.loosen)
+                .map_err(err_str)?;
+        }
+        (_, ToolKind::Write) => {
+            let text = match dialog_args(&final_args) {
+                Ok(t) => t,
+                Err(e) => return Ok(stay(Some(e))),
+            };
+            let _one = st.dialog.lock().await;
+            // A second click may have waited for the first dialog.
+            if !st.pending.lock().unwrap().contains_key(&proposal_id) {
+                return Ok(done);
+            }
+            if ask_consent_natively(&app, &send_prompt(&proposal, &text)).await
+                != ConsentAnswer::Allow
+            {
+                return Ok(stay(None));
+            }
+        }
+        _ => {}
+    }
+    settle(Decision::Run { args: final_args }, "ran");
+    Ok(done)
 }
 
 // ---------------------------------------------------------------------------
-// Settings › Connectors
+// Views
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EnvView {
+pub struct SecretView {
     name: String,
     set: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretsView {
+    api_key_set: bool,
+    client_secret_set: bool,
+    /// Secret headers (web) or settings (local): set or not, never values.
+    values: Vec<SecretView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -391,15 +621,18 @@ pub struct ToolView {
     name: String,
     title: Option<String>,
     description: String,
-    enabled: bool,
-    read_only: bool,
     kind: ToolKind,
-    can_mark_read_only: bool,
+    /// The server labelled it read-only or not; unlabelled tools are change
+    /// tools ("Not labelled — treated as a change tool").
+    labelled: bool,
     destructive: bool,
+    permission: Permission,
+    /// "ok", "changed", "new", "missing" or "unusable".
     status: &'static str,
     problem: Option<String>,
     pinned_hash: String,
-    pending_hash: Option<String>,
+    /// Pass back to approve a change or a new tool.
+    review_hash: Option<String>,
     diff: Vec<FieldChange>,
     input_schema: Value,
 }
@@ -409,13 +642,22 @@ pub struct ToolView {
 pub struct ConnectorView {
     id: String,
     name: String,
+    /// "web" or "local".
+    kind: &'static str,
     transport: TransportConfig,
     auth: AuthConfig,
     destination: String,
+    will_run: Option<String>,
     approved: bool,
+    enabled: bool,
     config_hash: String,
+    /// "connected", "needs_sign_in", "review", "could_not_start",
+    /// "unreachable", "not_checked", "off" or "not_approved".
+    status: &'static str,
+    review_count: usize,
+    /// `null`: no browser sign-in.
     signed_in: Option<bool>,
-    env: Vec<EnvView>,
+    secrets: SecretsView,
     last_sync: Option<i64>,
     tools: Vec<ToolView>,
 }
@@ -430,8 +672,11 @@ pub struct Overview {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveResult {
+    /// False when the native dialog was declined.
     saved: bool,
     connector: Option<ConnectorView>,
+    /// A follow-up step failed (e.g. listing tools after adding).
+    error: Option<String>,
 }
 
 fn short(hash: &str) -> String {
@@ -441,6 +686,8 @@ fn short(hash: &str) -> String {
 fn tool_view(p: &pin::ToolPin) -> ToolView {
     let status = if p.pending.is_some() {
         "changed"
+    } else if p.unreviewed {
+        "new"
     } else if p.missing {
         "missing"
     } else if p.definition.problem.is_some() {
@@ -452,39 +699,67 @@ fn tool_view(p: &pin::ToolPin) -> ToolView {
         name: p.name.clone(),
         title: p.definition.title.clone(),
         description: p.definition.description.clone(),
-        enabled: p.enabled,
-        read_only: p.read_only,
         kind: pin::kind(p),
-        can_mark_read_only: p.can_mark_read_only(),
+        labelled: p.labelled(),
         destructive: p.definition.annotations.destructive_hint == Some(true),
+        permission: p.permission,
         status,
         problem: p.definition.problem.clone(),
         pinned_hash: short(&p.hash),
-        pending_hash: p.pending.as_ref().map(|c| c.hash.clone()),
-        diff: p
-            .pending
-            .as_ref()
-            .map(|c| pin::diff(&p.definition, &c.definition))
-            .unwrap_or_default(),
+        review_hash: pin::review_hash(p).map(str::to_string),
+        diff: match &p.pending {
+            Some(c) => pin::diff(&p.definition, &c.definition),
+            None => Vec::new(),
+        },
         input_schema: p.definition.input_schema.clone(),
     }
 }
 
 fn view(hub: &ConnectorHub, e: &ServerEntry) -> ConnectorView {
+    let review_count = e.tools.iter().filter(|t| t.needs_review()).count();
+    let signed_in = e.config.uses_oauth().then(|| hub.signed_in(e));
+    let status = if !e.is_approved() {
+        "not_approved"
+    } else if !e.enabled {
+        "off"
+    } else if signed_in == Some(false) || e.last_problem == Some(ConnectProblem::NeedsSignIn) {
+        "needs_sign_in"
+    } else if review_count > 0 {
+        "review"
+    } else {
+        match e.last_problem {
+            Some(ConnectProblem::CouldNotStart | ConnectProblem::ProgramNotFound) => {
+                "could_not_start"
+            }
+            Some(ConnectProblem::Unreachable) => "unreachable",
+            _ if e.last_sync.is_none() => "not_checked",
+            _ => "connected",
+        }
+    };
+    let s = hub.secret_status(e);
     ConnectorView {
         id: e.id.clone(),
         name: e.config.name.clone(),
+        kind: if e.config.is_local() { "local" } else { "web" },
         transport: e.config.transport.clone(),
         auth: e.config.auth.clone(),
         destination: e.config.destination(),
+        will_run: e.config.will_run(),
         approved: e.is_approved(),
+        enabled: e.enabled,
         config_hash: short(e.approved_hash.as_deref().unwrap_or("")),
-        signed_in: e.config.uses_oauth().then(|| hub.signed_in(e)),
-        env: hub
-            .env_set(e)
-            .into_iter()
-            .map(|(name, set)| EnvView { name, set })
-            .collect(),
+        status,
+        review_count,
+        signed_in,
+        secrets: SecretsView {
+            api_key_set: s.api_key_set,
+            client_secret_set: s.client_secret_set,
+            values: s
+                .values
+                .into_iter()
+                .map(|(name, set)| SecretView { name, set })
+                .collect(),
+        },
         last_sync: e.last_sync,
         tools: e.tools.iter().map(tool_view).collect(),
     }
@@ -496,6 +771,68 @@ fn view_of(hub: &ConnectorHub, id: &str) -> CmdResult<ConnectorView> {
     Ok(view(hub, e))
 }
 
+/// Replace every secret value with dots, so program output shown in the UI
+/// can't leak a key.
+fn scrub(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for s in secrets.iter().filter(|s| s.chars().count() >= 4) {
+        out = out.replace(s.as_str(), "••••");
+    }
+    out
+}
+
+/// Every secret value a connector holds (for [`scrub`]).
+fn secret_values(hub: &ConnectorHub, e: &ServerEntry, extra: &NewSecrets) -> Vec<String> {
+    let store = hub.secrets();
+    let mut out: Vec<String> = fly_mcp_client::registry::secret_keys_for(e)
+        .iter()
+        .filter_map(|k| store.get(k).ok().flatten())
+        .collect();
+    out.extend(extra.values.values().cloned());
+    out.extend(extra.api_key.clone());
+    out
+}
+
+/// A person-readable error. Program output goes after a `\n---\n` line, with
+/// secrets scrubbed (the UI shows it under "Show details").
+fn describe(e: HubError, secrets: &[String]) -> String {
+    match e {
+        HubError::Session(SessionError::ProgramNotFound(p)) => {
+            let file = p
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&p)
+                .to_ascii_lowercase();
+            if file.starts_with("npx") {
+                "Couldn't find npx. Install Node.js and try again.".into()
+            } else if file.starts_with("uvx") {
+                "Couldn't find uvx. Install uv (Python) and try again.".into()
+            } else {
+                format!(
+                    "Couldn't find {}. Check the program.",
+                    clean_capped(&p, 200)
+                )
+            }
+        }
+        HubError::Session(SessionError::Exited(tail)) => {
+            let tail = scrub(&tail, secrets);
+            let chars: Vec<char> = tail.chars().collect();
+            let start = chars.len().saturating_sub(DETAILS_CHARS);
+            let end: String = chars[start..].iter().collect();
+            format!(
+                "The program stopped right away.\n---\n{}",
+                clean_capped(&end, DETAILS_CHARS)
+            )
+        }
+        HubError::Session(SessionError::AuthRequired) => "Sign in to this connector first.".into(),
+        HubError::Session(SessionError::Timeout) => "The connector took too long to answer.".into(),
+        HubError::Session(SessionError::Connect(_) | SessionError::Listing(_)) => {
+            "That address didn't answer like a connector.".into()
+        }
+        other => scrub(&other.to_string(), secrets),
+    }
+}
+
 #[tauri::command]
 pub fn connectors_overview(app: AppHandle, st: State<'_, ConnectorsState>) -> Overview {
     let reg = st.hub.registry();
@@ -505,89 +842,64 @@ pub fn connectors_overview(app: AppHandle, st: State<'_, ConnectorsState>) -> Ov
     }
 }
 
-/// What the Add form sends.
-#[derive(Debug, Deserialize)]
+#[tauri::command]
+pub fn connectors_directory() -> Vec<DirectoryEntry> {
+    directory::directory()
+}
+
+/// What the Add forms send: the configuration plus secret values bound for
+/// the keychain.
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConnectorConfigInput {
-    name: String,
-    transport: TransportConfig,
+pub struct ConnectorInput {
+    config: ServerConfig,
     #[serde(default)]
-    auth: AuthConfig,
-    #[serde(default)]
-    client_secret: Option<String>,
+    secrets: NewSecrets,
 }
 
-fn add_prompt(c: &ServerConfig) -> ConsentPrompt {
-    let mut lines = vec![format!(
-        "Ask will be able to use tools from {}.",
-        clean_capped(&c.name, 60)
-    )];
-    match &c.transport {
-        TransportConfig::Http { url } => {
-            lines.push(format!("Connects to: {}", clean_capped(url, 300)));
-        }
-        TransportConfig::Stdio {
-            command,
-            args,
-            env_names,
-        } => {
-            lines.push(format!(
-                "Runs this program on your computer: {} {}",
-                clean_capped(command, 300),
-                clean_capped(&args.join(" "), 400)
-            ));
-            if !env_names.is_empty() {
-                lines.push(format!(
-                    "With these variables from your keychain: {}",
-                    env_names.join(", ")
-                ));
-            }
-        }
+/// Look at a web connector before it's added ("Checking…"): its tools, or
+/// that it wants a browser sign-in. Local programs are never started here.
+#[tauri::command]
+pub async fn probe_connector(
+    st: State<'_, ConnectorsState>,
+    input: ConnectorInput,
+) -> CmdResult<ProbeResult> {
+    let secrets: Vec<String> = input
+        .secrets
+        .values
+        .values()
+        .cloned()
+        .chain(input.secrets.api_key.clone())
+        .collect();
+    st.hub
+        .probe(input.config, &input.secrets)
+        .await
+        .map_err(|e| describe(e, &secrets))
+}
+
+/// After adding (or editing): list tools now when no browser sign-in is
+/// needed. Failure leaves the connector saved and says why.
+async fn first_sync(st: &ConnectorsState, id: &str, extra: &NewSecrets) -> Option<String> {
+    let entry = st.hub.registry().server(id).cloned()?;
+    if entry.config.uses_oauth() && !st.hub.signed_in(&entry) {
+        return None;
     }
-    if c.uses_oauth() {
-        lines.push("You'll sign in to it in your browser.".into());
-    }
-    lines.push(
-        "Its tools start turned off. Every call is shown to you first, with its exact details, \
-         and runs only if you click Run. Notes you keep local are never used with connectors."
-            .into(),
-    );
-    ConsentPrompt {
-        title: format!("Connect {}?", clean_capped(&c.name, 60)),
-        message: lines.join("\n\n"),
-        allow: "Connect".into(),
-        decline: "Cancel".into(),
+    match st.hub.sync_tools(id).await {
+        Ok(_) => None,
+        Err(e) => Some(describe(e, &secret_values(&st.hub, &entry, extra))),
     }
 }
 
-/// Add a connector after a yes in a native dialog. The approval stored is
-/// bound to this exact configuration's hash.
+/// Add a connector after a yes in a native dialog. The stored approval is
+/// bound to this exact configuration's hash; secret values go to the
+/// keychain.
 #[tauri::command]
 pub async fn add_connector(
     app: AppHandle,
     st: State<'_, ConnectorsState>,
-    config: ConnectorConfigInput,
+    input: ConnectorInput,
 ) -> CmdResult<SaveResult> {
-    let cfg = st
-        .hub
-        .check_config(ServerConfig {
-            name: config.name,
-            transport: config.transport,
-            auth: config.auth,
-        })
-        .map_err(err_str)?;
-    let secret = config.client_secret.filter(|s| !s.trim().is_empty());
-    if secret.is_some()
-        && !matches!(
-            &cfg.auth,
-            AuthConfig::OAuth {
-                client_id: Some(_),
-                ..
-            }
-        )
-    {
-        return Err("A client secret needs a client ID.".into());
-    }
+    let cfg = st.hub.check_config(input.config).map_err(err_str)?;
     if st
         .hub
         .registry()
@@ -597,27 +909,83 @@ pub async fn add_connector(
     {
         return Err("A connector with that name already exists.".into());
     }
-    let prompt = add_prompt(&cfg);
-    let answer = {
-        let _one = st.dialog.lock().await;
-        ask_consent_natively(&app, &prompt).await
-    };
-    if answer != ConsentAnswer::Allow {
+    if !ask(&st, &app, &add_prompt(&cfg, false)).await {
         return Ok(SaveResult {
             saved: false,
             connector: None,
+            error: None,
         });
     }
-    let id = st.hub.add_approved(cfg).map_err(err_str)?;
-    if let Some(s) = secret {
-        KeychainCredentials::new(st.hub.secrets(), id.clone())
-            .set_client_secret(Some(s.trim()))
-            .map_err(err_str)?;
-    }
+    let id = st.hub.add_approved(cfg, &input.secrets).map_err(err_str)?;
     tracing::info!(connector = %id, "connector added");
+    let error = first_sync(&st, &id, &input.secrets).await;
     Ok(SaveResult {
         saved: true,
         connector: Some(view_of(&st.hub, &id)?),
+        error,
+    })
+}
+
+/// Edit a connector after a yes in a native dialog (the approval moves to
+/// the new configuration's hash). Empty secret values keep what's stored.
+#[tauri::command]
+pub async fn update_connector(
+    app: AppHandle,
+    st: State<'_, ConnectorsState>,
+    id: String,
+    input: ConnectorInput,
+) -> CmdResult<SaveResult> {
+    let cfg = st.hub.check_config(input.config).map_err(err_str)?;
+    if !ask(&st, &app, &edit_prompt(&cfg)).await {
+        return Ok(SaveResult {
+            saved: false,
+            connector: Some(view_of(&st.hub, &id)?),
+            error: None,
+        });
+    }
+    st.hub
+        .update_approved(&id, cfg, &input.secrets)
+        .await
+        .map_err(err_str)?;
+    let error = first_sync(&st, &id, &input.secrets).await;
+    Ok(SaveResult {
+        saved: true,
+        connector: Some(view_of(&st.hub, &id)?),
+        error,
+    })
+}
+
+/// The connector's switch: off at once, on after a native dialog.
+#[tauri::command]
+pub async fn set_connector_enabled(
+    app: AppHandle,
+    st: State<'_, ConnectorsState>,
+    id: String,
+    enabled: bool,
+) -> CmdResult<SaveResult> {
+    if enabled {
+        let entry = st
+            .hub
+            .registry()
+            .server(&id)
+            .cloned()
+            .ok_or("No connector with that id.")?;
+        if !entry.is_approved() {
+            return Err("Edit this connector to approve it again.".into());
+        }
+        if !ask(&st, &app, &add_prompt(&entry.config, true)).await {
+            return Ok(SaveResult {
+                saved: false,
+                connector: Some(view_of(&st.hub, &id)?),
+                error: None,
+            });
+        }
+    }
+    st.hub.set_enabled(&id, enabled).await.map_err(err_str)?;
+    Ok(SaveResult {
+        saved: true,
+        connector: Some(view_of(&st.hub, &id)?),
+        error: None,
     })
 }
 
@@ -629,133 +997,91 @@ pub async fn remove_connector(st: State<'_, ConnectorsState>, id: String) -> Cmd
     Ok(())
 }
 
-/// Connect and refresh the tool list. New tools arrive turned off; changed
-/// ones are turned off with their diff kept.
+/// Connect and refresh the tool list. Changed tools are blocked with a diff;
+/// tools added since approval are blocked until reviewed.
 #[tauri::command]
 pub async fn sync_connector_tools(
     st: State<'_, ConnectorsState>,
     id: String,
 ) -> CmdResult<ConnectorView> {
-    st.hub.sync_tools(&id).await.map_err(err_str)?;
+    let entry = st
+        .hub
+        .registry()
+        .server(&id)
+        .cloned()
+        .ok_or("No connector with that id.")?;
+    st.hub
+        .sync_tools(&id)
+        .await
+        .map_err(|e| describe(e, &secret_values(&st.hub, &entry, &NewSecrets::default())))?;
     view_of(&st.hub, &id)
 }
 
-fn permissions_prompt(name: &str, plan: &PermissionPlan) -> ConsentPrompt {
-    let mut lines = Vec::new();
-    if !plan.enable.is_empty() {
-        lines.push(format!("Turn on: {}", plan.enable.join(", ")));
-    }
-    if !plan.mark_read_only.is_empty() {
-        lines.push(format!(
-            "Mark as read-only (their calls are labelled \"Read\"): {}",
-            plan.mark_read_only.join(", ")
-        ));
-    }
-    if !plan.disable.is_empty() {
-        lines.push(format!("Turn off: {}", plan.disable.join(", ")));
-    }
-    lines.push("You still confirm every call before it runs.".into());
-    ConsentPrompt {
-        title: format!("Change what {} can do?", clean_capped(name, 60)),
-        message: lines.join("\n\n"),
-        allow: "Save".into(),
-        decline: "Cancel".into(),
-    }
-}
-
-/// Save tool toggles. Turning tools on or marking them read-only needs a
-/// yes in a native dialog; turning them off doesn't.
+/// Set tool permissions. Tightening applies at once; loosening needs a yes
+/// in a native dialog (`saved: false` when declined; tightening in the same
+/// request still applies).
 #[tauri::command]
-pub async fn save_connector_tools(
+pub async fn set_connector_tool_permissions(
     app: AppHandle,
     st: State<'_, ConnectorsState>,
     id: String,
-    changes: Vec<ToolPermission>,
+    changes: Vec<PermissionChange>,
 ) -> CmdResult<SaveResult> {
     if changes.len() > 512 {
         return Err("Too many changes at once.".into());
     }
     let plan = st.hub.plan_permissions(&id, &changes).map_err(err_str)?;
+    st.hub.apply_tightening(&id, &changes).map_err(err_str)?;
+    let mut saved = true;
     if plan.grants_trust() {
-        let name = st
-            .hub
-            .registry()
-            .server(&id)
-            .map(|e| e.config.name.clone())
-            .unwrap_or_default();
-        let answer = {
-            let _one = st.dialog.lock().await;
-            ask_consent_natively(&app, &permissions_prompt(&name, &plan)).await
-        };
-        if answer != ConsentAnswer::Allow {
-            return Ok(SaveResult {
-                saved: false,
-                connector: Some(view_of(&st.hub, &id)?),
-            });
+        let reg = st.hub.registry();
+        let entry = reg.server(&id).ok_or("No connector with that id.")?;
+        if ask(&st, &app, &loosen_prompt(entry, &plan.loosen)).await {
+            st.hub
+                .apply_loosening(&id, &changes, &plan.loosen)
+                .map_err(err_str)?;
+        } else {
+            saved = false;
         }
     }
-    st.hub
-        .apply_permissions(&id, &changes, &plan)
-        .map_err(err_str)?;
     Ok(SaveResult {
-        saved: true,
+        saved,
         connector: Some(view_of(&st.hub, &id)?),
+        error: None,
     })
 }
 
-/// Accept a tool's changed definition after a yes in a native dialog.
-/// `pending_hash` is the change the user reviewed; a newer one is refused.
+/// Approve a changed tool (or one added since approval) after a yes in a
+/// native dialog. `review_hash` is the definition the user reviewed; a newer
+/// one is refused. The tool goes to Needs approval.
 #[tauri::command]
-pub async fn accept_connector_tool_change(
+pub async fn approve_connector_tool(
     app: AppHandle,
     st: State<'_, ConnectorsState>,
     id: String,
     tool: String,
-    pending_hash: String,
+    review_hash: String,
 ) -> CmdResult<SaveResult> {
     let reg = st.hub.registry();
     let entry = reg.server(&id).ok_or("No connector with that id.")?;
     let pin = entry.tool(&tool).ok_or("No such tool.")?;
-    let change = pin
-        .pending
-        .as_ref()
-        .ok_or("This tool has no pending change.")?;
-    if change.hash != pending_hash {
+    if pin::review_hash(pin) != Some(review_hash.as_str()) {
         return Err("The tool changed again; review the latest change.".into());
     }
-    let fields: Vec<String> = pin::diff(&pin.definition, &change.definition)
-        .into_iter()
-        .map(|c| c.field)
-        .collect();
-    let prompt =
-        ConsentPrompt {
-            title: format!("Accept the new version of {}?", clean_capped(&tool, 80)),
-            message: format!(
-            "{} changed this tool since you approved it. Changed: {}.\n\nNew description:\n{}\n\n\
-             Accepting pins this version. If it was read-only, mark it again.",
-            clean_capped(&entry.config.name, 60),
-            if fields.is_empty() { "details".into() } else { fields.join(", ") },
-            clean_capped(&change.definition.description, 600),
-        ),
-            allow: "Accept".into(),
-            decline: "Cancel".into(),
-        };
-    let answer = {
-        let _one = st.dialog.lock().await;
-        ask_consent_natively(&app, &prompt).await
-    };
-    if answer != ConsentAnswer::Allow {
+    if !ask(&st, &app, &review_prompt(entry, pin)).await {
         return Ok(SaveResult {
             saved: false,
             connector: Some(view_of(&st.hub, &id)?),
+            error: None,
         });
     }
     st.hub
-        .accept_change(&id, &tool, &pending_hash)
+        .accept_change(&id, &tool, &review_hash)
         .map_err(err_str)?;
     Ok(SaveResult {
         saved: true,
         connector: Some(view_of(&st.hub, &id)?),
+        error: None,
     })
 }
 
@@ -773,19 +1099,29 @@ impl BrowserOpener for SystemBrowser {
     }
 }
 
-/// Sign in in the system browser (the user signs in themselves) and store
-/// the tokens in the keychain. Waits up to five minutes.
+/// Sign in in the system browser (the user signs in themselves), store the
+/// tokens in the keychain, then list tools. Waits up to five minutes.
 #[tauri::command]
 pub async fn sign_in_connector(
     app: AppHandle,
     st: State<'_, ConnectorsState>,
     id: String,
-) -> CmdResult<ConnectorView> {
+) -> CmdResult<SaveResult> {
     st.hub
         .sign_in(&id, &SystemBrowser { app: app.clone() })
         .await
-        .map_err(err_str)?;
-    view_of(&st.hub, &id)
+        .map_err(|e| match e {
+            HubError::OAuth(fly_mcp_client::oauth::OAuthError::Denied(_)) => {
+                "Sign-in was cancelled.".to_string()
+            }
+            other => err_str(other),
+        })?;
+    let error = first_sync(&st, &id, &NewSecrets::default()).await;
+    Ok(SaveResult {
+        saved: true,
+        connector: Some(view_of(&st.hub, &id)?),
+        error,
+    })
 }
 
 #[tauri::command]
@@ -797,16 +1133,116 @@ pub async fn sign_out_connector(
     view_of(&st.hub, &id)
 }
 
-/// Store (or clear, when empty) a local program's variable in the keychain.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeImport {
+    found: bool,
+    candidates: Vec<ImportCandidate>,
+}
+
+/// Where Claude Desktop keeps its config: the standard location, plus the
+/// Windows Store (MSIX) one. Read only, never written.
+fn claude_config_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(d) = dirs::config_dir() {
+        paths.push(d.join("Claude").join("claude_desktop_config.json"));
+    }
+    #[cfg(windows)]
+    if let Some(local) = dirs::data_local_dir() {
+        if let Ok(rd) = std::fs::read_dir(local.join("Packages")) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().starts_with("Claude_") {
+                    paths.push(
+                        e.path()
+                            .join("LocalCache")
+                            .join("Roaming")
+                            .join("Claude")
+                            .join("claude_desktop_config.json"),
+                    );
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// The most recently changed Claude Desktop config, if any.
+fn read_claude_config() -> Option<String> {
+    let newest = claude_config_paths()
+        .into_iter()
+        .filter_map(|p| {
+            let m = std::fs::metadata(&p).ok()?;
+            (m.is_file() && m.len() as usize <= claude_import::MAX_CONFIG_BYTES)
+                .then(|| (m.modified().ok(), p))
+        })
+        .max_by_key(|(t, _)| *t)?;
+    std::fs::read_to_string(newest.1).ok()
+}
+
+/// Servers in Claude Desktop's config (names only; values stay in the file
+/// until a server is imported).
 #[tauri::command]
-pub fn set_connector_env(
+pub async fn claude_desktop_candidates() -> CmdResult<ClaudeImport> {
+    let read = tauri::async_runtime::spawn_blocking(read_claude_config)
+        .await
+        .map_err(err_str)?;
+    Ok(match read {
+        Some(json) => ClaudeImport {
+            found: true,
+            candidates: claude_import::candidates(&json),
+        },
+        None => ClaudeImport {
+            found: false,
+            candidates: Vec::new(),
+        },
+    })
+}
+
+/// Import one server from Claude Desktop's config after a yes in a native
+/// dialog. Its settings move to the keychain; permissions aren't imported.
+#[tauri::command]
+pub async fn import_claude_desktop_connector(
+    app: AppHandle,
     st: State<'_, ConnectorsState>,
-    id: String,
-    name: String,
-    value: String,
-) -> CmdResult<ConnectorView> {
-    st.hub.set_env_secret(&id, &name, &value).map_err(err_str)?;
-    view_of(&st.hub, &id)
+    key: String,
+) -> CmdResult<SaveResult> {
+    let json = tauri::async_runtime::spawn_blocking(read_claude_config)
+        .await
+        .map_err(err_str)?
+        .ok_or("No Claude Desktop setup found on this computer.")?;
+    let (mut cfg, secrets) = claude_import::to_config(&json, &key)
+        .ok_or("That connector isn't in Claude Desktop's setup.")?;
+    // A name already in use gets a suffix rather than failing.
+    let taken = |n: &str| {
+        st.hub
+            .registry()
+            .servers
+            .iter()
+            .any(|s| s.config.name.eq_ignore_ascii_case(n))
+    };
+    if taken(&cfg.name) {
+        let base: String = cfg.name.chars().take(30).collect();
+        cfg.name = (2..100)
+            .map(|n| format!("{base} ({n})"))
+            .find(|n| !taken(n))
+            .unwrap_or(base);
+    }
+    let cfg = st.hub.check_config(cfg).map_err(err_str)?;
+    if !ask(&st, &app, &add_prompt(&cfg, false)).await {
+        return Ok(SaveResult {
+            saved: false,
+            connector: None,
+            error: None,
+        });
+    }
+    let id = st.hub.add_approved(cfg, &secrets).map_err(err_str)?;
+    tracing::info!(connector = %id, "connector imported from Claude Desktop");
+    let error = first_sync(&st, &id, &secrets).await;
+    Ok(SaveResult {
+        saved: true,
+        connector: Some(view_of(&st.hub, &id)?),
+        error,
+    })
 }
 
 #[tauri::command]
@@ -826,8 +1262,8 @@ pub struct TestResult {
     text: String,
 }
 
-/// Try one enabled tool from Settings. Goes through the same rules as an
-/// Ask turn, confirm card included.
+/// Try one tool from Settings. Goes through the same rules as an Ask turn,
+/// including the confirm card for tools on Needs approval.
 #[tauri::command]
 pub async fn test_connector_tool(
     app: AppHandle,
@@ -853,7 +1289,7 @@ pub async fn test_connector_tool(
         .hub
         .turn(opts, Arc::new(AppApprover { app: app.clone() }));
     if !turn.owns(&name) {
-        return Err("Turn this tool on (and save) before trying it.".into());
+        return Err("This tool is blocked or waiting for review.".into());
     }
     Ok(match turn.call(&name, args).await {
         Ok(text) => TestResult { ok: true, text },
@@ -861,20 +1297,84 @@ pub async fn test_connector_tool(
     })
 }
 
+/// "Choose a file…" for a local connector's program: a native file picker
+/// opened by the backend (the webview has no file-dialog access). The path
+/// only becomes a connector after the native "Run a program" approval.
+#[tauri::command]
+pub async fn pick_connector_program(app: AppHandle) -> CmdResult<Option<String>> {
+    pick_file(&app).await
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+async fn pick_file(app: &AppHandle) -> CmdResult<Option<String>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let mut dialog = rfd::AsyncFileDialog::new().set_title("Choose the connector program");
+        if let Some(window) = handle.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
+        }
+        let picked = dialog.pick_file();
+        std::thread::spawn(move || {
+            let file = tauri::async_runtime::block_on(picked);
+            let _ = tx.send(file.map(|f| f.path().display().to_string()));
+        });
+    })
+    .map_err(err_str)?;
+    Ok(rx.await.unwrap_or(None))
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+async fn pick_file(_app: &AppHandle) -> CmdResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Choose the connector program")
+            .pick_file()
+            .map(|p| p.display().to_string())
+    })
+    .await
+    .map_err(err_str)
+}
+
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
+async fn pick_file(_app: &AppHandle) -> CmdResult<Option<String>> {
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fly_mcp_client::config::EnvConfig;
 
     #[test]
     fn connector_state_is_backend_only() {
-        for key in [REGISTRY_KEY, CALL_LOG_KEY, "connectors.anything"] {
+        for key in [
+            REGISTRY_KEY,
+            CALL_LOG_KEY,
+            "connectors.anything",
+            "Connectors.Registry",
+        ] {
             assert!(!crate::commands::is_webview_setting_key(key), "{key}");
             assert!(
                 !crate::commands::is_webview_writable_setting_key(key),
                 "{key}"
             );
         }
-        // The beta flag is a UI preference and grants nothing.
+        // The beta switch is a UI preference and grants nothing.
         assert!(crate::commands::is_webview_writable_setting_key(BETA_KEY));
     }
 
@@ -890,6 +1390,7 @@ mod tests {
                     name: "Docs".into(),
                     transport: TransportConfig::Http {
                         url: "https://mcp.example.com/mcp".into(),
+                        headers: vec![],
                     },
                     auth: AuthConfig::OAuth {
                         scopes: vec![],
@@ -903,11 +1404,11 @@ mod tests {
         let keys = stored_secret_keys(&storage);
         assert!(keys.contains(&format!("connector.{id}.access")));
         assert!(keys.contains(&format!("connector.{id}.refresh")));
+        assert!(keys.contains(&format!("connector.{id}.apikey")));
     }
 
-    #[test]
-    fn dialogs_show_cleaned_server_text() {
-        let p = CallProposal {
+    fn proposal(kind: ToolKind, destructive: bool) -> CallProposal {
+        CallProposal {
             proposal_id: "p1".into(),
             turn_id: "t".into(),
             server_id: "c1".into(),
@@ -915,18 +1416,78 @@ mod tests {
             destination: "mcp.example.com".into(),
             tool: "delete_contact".into(),
             tool_title: None,
-            kind: ToolKind::Write,
-            destructive: true,
+            kind,
+            destructive,
             args: serde_json::json!({"id": "c-1"}),
             input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn native_dialogs_use_the_brief_copy_and_safe_defaults() {
+        let p = proposal(ToolKind::Write, true);
+        let text = dialog_args(&p.args).unwrap();
+        let send = send_prompt(&p, &text);
+        assert_eq!(send.title, "Send this to \"Acme CRM\"?");
+        assert!(send.message.contains("delete or overwrite"));
+        assert!(send.message.contains("\"id\": \"c-1\""));
+        assert_eq!(send.decline, "Don't send");
+
+        let local = ServerConfig {
+            name: "Docs".into(),
+            transport: TransportConfig::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@example/docs".into()],
+                env: vec![EnvConfig {
+                    name: "DOCS_TOKEN".into(),
+                    value: None,
+                }],
+            },
+            auth: AuthConfig::None,
         };
-        let prompt = write_call_prompt(&p, &serde_json::json!({"id": "x".repeat(5000)}));
-        assert_eq!(prompt.title, "Run delete_contact on Acme CRM?");
-        assert!(prompt.message.contains("delete or overwrite"));
-        assert!(prompt.message.chars().count() < DIALOG_ARGS_CHARS + 400);
+        let add = add_prompt(&local, false);
+        assert_eq!(add.title, "Run a program on this computer?");
+        assert!(add.message.contains("will run: npx -y @example/docs"));
+        assert!(add.message.contains("DOCS_TOKEN"));
         assert_eq!(
-            prompt.decline, "Don't run",
-            "the safe answer is the default button"
+            (add.allow.as_str(), add.decline.as_str()),
+            ("Run and add", "Cancel")
         );
+
+        let web = ServerConfig {
+            name: "Docs".into(),
+            transport: TransportConfig::Http {
+                url: "https://mcp.example.com/mcp".into(),
+                headers: vec![],
+            },
+            auth: AuthConfig::None,
+        };
+        let add = add_prompt(&web, false);
+        assert_eq!(add.title, "Add \"Docs\" connector?");
+        assert!(add.message.contains("sent to mcp.example.com"));
+    }
+
+    #[test]
+    fn arguments_too_long_for_the_dialog_are_refused_not_cut() {
+        let big = serde_json::json!({"body": "x".repeat(DIALOG_ARGS_CHARS)});
+        assert!(dialog_args(&big).is_err());
+    }
+
+    #[test]
+    fn program_output_is_scrubbed_of_secrets() {
+        let err = HubError::Session(SessionError::Exited(
+            "starting\nfatal: token sk-live-1234 rejected".into(),
+        ));
+        let msg = describe(err, &["sk-live-1234".into()]);
+        assert!(msg.starts_with("The program stopped right away.\n---\n"));
+        assert!(
+            !msg.contains("sk-live-1234") && msg.contains("••••"),
+            "{msg}"
+        );
+        let npx = describe(
+            HubError::Session(SessionError::ProgramNotFound("npx".into())),
+            &[],
+        );
+        assert_eq!(npx, "Couldn't find npx. Install Node.js and try again.");
     }
 }

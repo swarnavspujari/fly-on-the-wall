@@ -2,18 +2,25 @@
 //! Ask harness.
 //!
 //! A [`ConnectorTurn`] enforces the call-time rules, in this order:
-//! 1. only tools offered this turn can be called; nothing is offered on a
-//!    small local model or when the turn's scope includes Keep-local notes,
-//!    and [`ExternalTools::mark_keep_local`] refuses everything after;
-//! 2. once any connector result (or server error) has been returned, every
-//!    later proposal in the turn is refused;
+//! 1. only tools offered this turn can be called: tools of active
+//!    connectors that aren't Blocked or waiting for review. Nothing is
+//!    offered on a small local model or when the turn's scope includes
+//!    Keep-local notes, and [`ExternalTools::mark_keep_local`] refuses
+//!    everything after;
+//! 2. once any connector result or error has been returned, every later
+//!    proposal in the turn is refused ([`ExternalTools::sealed`]);
 //! 3. proposals are capped per turn;
-//! 4. arguments must match the pinned input schema;
+//! 4. arguments must be an object without hidden characters, within a size
+//!    cap, matching the pinned input schema;
 //! 5. the tool is re-listed live: if its definition changed or it vanished,
-//!    it's turned off and the call refused (the user reviews the diff);
-//! 6. the user sees the exact, editable arguments on a confirm card and must
-//!    click Run ([`CallApprover`]); edited arguments are validated again;
-//! 7. the result is fenced, schema-checked and size-capped ([`crate::fence`]).
+//!    it's blocked and the call refused (the user reviews the diff);
+//! 6. Needs approval: the user sees the exact, editable arguments on a card
+//!    and must allow the call ([`CallApprover`]; the app adds a native
+//!    confirm for change tools); edited arguments are checked again. Always
+//!    allow (set only by the user in a native dialog) skips the card;
+//! 7. the result is fenced, link-stripped, schema-checked and size-capped
+//!    ([`crate::fence`]); errors after contact with the server are fenced
+//!    the same way.
 //!
 //! Every routed proposal lands in the call log, without arguments or results.
 
@@ -28,21 +35,26 @@ use fly_secrets::SecretStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{ConfigError, ServerConfig, TransportConfig};
+use crate::config::{AuthConfig, ConfigError, ServerConfig, TransportConfig};
 use crate::fence::{self, SchemaCheck, DEFAULT_MAX_RESULT_CHARS};
 use crate::netguard::NetPolicy;
 use crate::oauth;
-use crate::pin::{self, kind, model_tool_name, ReconcileReport, ToolKind};
+use crate::pin::{self, kind, model_tool_name, LiveTool, Permission, ReconcileReport, ToolKind};
 use crate::registry::{
-    append_log, apply_permissions, env_secret_key, plan_permissions, secret_keys_for, CallLogEntry,
-    CallOutcome, ConnectorStore, PermissionPlan, RefusalCode, Registry, ServerEntry,
-    ToolPermission,
+    append_log, apply_loosen, apply_tighten, env_secret_key, header_secret_key, plan_permissions,
+    secret_key, secret_keys_for, Approval, CallLogEntry, CallOutcome, ConnectProblem,
+    ConnectorStore, PermissionChange, PermissionPlan, RefusalCode, Registry, SecretSlot,
+    ServerEntry,
 };
+use crate::sanitize::is_hidden_char;
 use crate::schema;
+use crate::secrets::{delete_chunked, get_chunked, put_chunked, KeychainCredentials};
 use crate::session::{self, ConnectOptions, Connection, SessionError, CALL_TIMEOUT};
 
 /// Most connector tools offered in one turn (context budget).
 pub const MAX_OFFERED_TOOLS: usize = 24;
+/// Longest argument object accepted, as pretty JSON, in chars.
+pub const MAX_ARGS_CHARS: usize = 16_000;
 /// A cached connection unused this long is closed before reuse.
 const IDLE_CLOSE: Duration = Duration::from_secs(5 * 60);
 
@@ -54,7 +66,7 @@ pub struct CallProposal {
     pub turn_id: String,
     pub server_id: String,
     pub server_name: String,
-    /// Host or local program the call goes to.
+    /// Host the call goes to, or "this computer".
     pub destination: String,
     pub tool: String,
     pub tool_title: Option<String>,
@@ -84,6 +96,21 @@ pub trait CallApprover: Send + Sync {
     async fn decide(&self, proposal: CallProposal) -> Decision;
 }
 
+/// Secret values entered in a form, on their way to the keychain. Empty
+/// strings mean "keep what's stored". No `Debug`: values must never be
+/// logged.
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewSecrets {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// Secret header (web) or variable (local) values, by name.
+    #[serde(default)]
+    pub values: HashMap<String, String>,
+}
+
 /// Opens connections. The app uses [`LiveConnector`]; tests plug in a
 /// fixture server.
 #[async_trait]
@@ -91,27 +118,54 @@ pub trait Connector: Send + Sync {
     async fn connect(&self, entry: &ServerEntry) -> Result<Connection, SessionError>;
 }
 
-/// Connects for real: stdio programs with their keychain variables, HTTP
-/// servers with a fresh OAuth token when they use sign-in.
+/// Connects for real: local programs with their variables, web servers
+/// with their headers and a fresh OAuth token or API key.
 pub struct LiveConnector {
     pub secrets: Arc<dyn SecretStore>,
     pub policy: NetPolicy,
 }
 
-#[async_trait]
-impl Connector for LiveConnector {
-    async fn connect(&self, entry: &ServerEntry) -> Result<Connection, SessionError> {
-        let mut opts = ConnectOptions::default();
-        if let TransportConfig::Stdio { env_names, .. } = &entry.config.transport {
-            for name in env_names {
-                if let Ok(Some(v)) = self.secrets.get(&env_secret_key(&entry.id, name)) {
-                    opts.env.push((name.clone(), v));
+/// Resolve a stored connector's secret values into connection options.
+pub async fn resolve_options(
+    entry: &ServerEntry,
+    secrets: &Arc<dyn SecretStore>,
+    policy: NetPolicy,
+) -> Result<ConnectOptions, SessionError> {
+    let mut opts = ConnectOptions::default();
+    match &entry.config.transport {
+        TransportConfig::Stdio { env, .. } => {
+            for e in env {
+                let v = match &e.value {
+                    Some(v) => Some(v.clone()),
+                    None => secrets
+                        .get(&env_secret_key(&entry.id, &e.name))
+                        .ok()
+                        .flatten(),
+                };
+                if let Some(v) = v {
+                    opts.env.push((e.name.clone(), v));
                 }
             }
         }
-        if entry.config.uses_oauth() {
-            opts.access_token = Some(
-                oauth::access_token(entry, self.secrets.clone(), self.policy)
+        TransportConfig::Http { headers, .. } => {
+            for h in headers {
+                let v = match &h.value {
+                    Some(v) => Some(v.clone()),
+                    None => secrets
+                        .get(&header_secret_key(&entry.id, &h.name))
+                        .ok()
+                        .flatten(),
+                };
+                if let Some(v) = v {
+                    opts.headers.push((h.name.clone(), v));
+                }
+            }
+        }
+    }
+    match &entry.config.auth {
+        AuthConfig::OAuth { .. } => {
+            opts.bearer = Some(
+                oauth::access_token(entry, secrets.clone(), policy)
                     .await
                     .map_err(|e| match e {
                         oauth::OAuthError::SignInRequired => SessionError::AuthRequired,
@@ -119,12 +173,28 @@ impl Connector for LiveConnector {
                     })?,
             );
         }
+        AuthConfig::ApiKey => {
+            let key = get_chunked(secrets.as_ref(), &secret_key(&entry.id, SecretSlot::ApiKey))
+                .ok()
+                .flatten()
+                .ok_or(SessionError::AuthRequired)?;
+            opts.bearer = Some(key);
+        }
+        AuthConfig::None => {}
+    }
+    Ok(opts)
+}
+
+#[async_trait]
+impl Connector for LiveConnector {
+    async fn connect(&self, entry: &ServerEntry) -> Result<Connection, SessionError> {
+        let opts = resolve_options(entry, &self.secrets, self.policy).await?;
         session::connect(&entry.config, self.policy, opts).await
     }
 }
 
 /// Called with a server id when its stored state changed outside a Settings
-/// command (for example a tool turned off mid-turn), so the UI can refresh.
+/// command (for example a tool blocked mid-turn), so the UI can refresh.
 pub type ChangeListener = Arc<dyn Fn(&str) + Send + Sync>;
 
 struct Cached {
@@ -159,8 +229,36 @@ pub enum HubError {
     Store(String),
 }
 
+/// What a quick look at a web connector found, before the user approves it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeResult {
+    /// The server wants a browser sign-in before it lists tools.
+    pub needs_sign_in: bool,
+    pub tools: Vec<ToolPreview>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPreview {
+    pub name: String,
+    pub title: Option<String>,
+    pub description: String,
+    pub kind: ToolKind,
+    pub labelled: bool,
+}
+
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+fn problem_for(e: &SessionError) -> ConnectProblem {
+    match e {
+        SessionError::AuthRequired => ConnectProblem::NeedsSignIn,
+        SessionError::ProgramNotFound(_) => ConnectProblem::ProgramNotFound,
+        SessionError::Spawn(_) | SessionError::Exited(_) => ConnectProblem::CouldNotStart,
+        _ => ConnectProblem::Unreachable,
+    }
 }
 
 impl ConnectorHub {
@@ -235,11 +333,285 @@ impl ConnectorHub {
         Ok(config)
     }
 
+    /// Every secret the configuration names must come with a value when it
+    /// is first stored.
+    fn check_secrets(
+        config: &ServerConfig,
+        secrets: &NewSecrets,
+        existing: bool,
+    ) -> Result<(), HubError> {
+        if existing {
+            return Ok(());
+        }
+        for name in config.secret_names() {
+            if secrets.values.get(&name).is_none_or(|v| v.is_empty()) {
+                return Err(HubError::Invalid(format!("Enter a value for {name}.")));
+            }
+        }
+        if matches!(config.auth, AuthConfig::ApiKey)
+            && secrets.api_key.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(HubError::Invalid("Enter the API key or token.".into()));
+        }
+        Ok(())
+    }
+
+    /// Look at a web connector before it's approved: list its tools, or find
+    /// out it wants a browser sign-in. Sends nothing but the MCP handshake
+    /// and a tool listing. Local programs are never started before approval.
+    pub async fn probe(
+        &self,
+        config: ServerConfig,
+        secrets: &NewSecrets,
+    ) -> Result<ProbeResult, HubError> {
+        let config = self.check_config(config)?;
+        let TransportConfig::Http { headers, .. } = &config.transport else {
+            return Err(HubError::Invalid(
+                "A local program runs only after you approve it.".into(),
+            ));
+        };
+        if config.uses_oauth() {
+            return Ok(ProbeResult {
+                needs_sign_in: true,
+                tools: Vec::new(),
+            });
+        }
+        let mut opts = ConnectOptions::default();
+        for h in headers {
+            let v = h
+                .value
+                .clone()
+                .or_else(|| secrets.values.get(&h.name).cloned());
+            if let Some(v) = v.filter(|v| !v.is_empty()) {
+                opts.headers.push((h.name.clone(), v));
+            }
+        }
+        if matches!(config.auth, AuthConfig::ApiKey) {
+            opts.bearer = secrets.api_key.clone().filter(|k| !k.is_empty());
+        }
+        let conn = match session::connect(&config, self.policy, opts).await {
+            Ok(c) => c,
+            Err(SessionError::AuthRequired) => {
+                return Ok(ProbeResult {
+                    needs_sign_in: true,
+                    tools: Vec::new(),
+                })
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let live = conn.list_tools().await?;
+        conn.close().await;
+        let mut pins = Vec::new();
+        pin::reconcile(&mut pins, &live, now(), true)
+            .map_err(|e| HubError::Invalid(e.to_string()))?;
+        Ok(ProbeResult {
+            needs_sign_in: false,
+            tools: pins
+                .iter()
+                .map(|p| ToolPreview {
+                    name: p.name.clone(),
+                    title: p.definition.title.clone(),
+                    description: p.definition.description.clone(),
+                    kind: kind(p),
+                    labelled: p.labelled(),
+                })
+                .collect(),
+        })
+    }
+
     /// Store a configuration the user approved in a native dialog. The
     /// approval is bound to the configuration's hash.
-    pub fn add_approved(&self, config: ServerConfig) -> Result<String, HubError> {
+    pub fn add_approved(
+        &self,
+        config: ServerConfig,
+        secrets: &NewSecrets,
+    ) -> Result<String, HubError> {
         let config = self.check_config(config)?;
-        self.update(|reg| Ok(reg.add_approved(config, now())?))
+        Self::check_secrets(&config, secrets, false)?;
+        let id = self.update(|reg| Ok(reg.add_approved(config, now())?))?;
+        if let Err(e) = self.store_secrets(&id, secrets) {
+            let _ = self.update(|reg| Ok(reg.remove(&id)));
+            return Err(e);
+        }
+        Ok(id)
+    }
+
+    /// Replace a connector's configuration after the user approved the new
+    /// one in a native dialog. Tool permissions are kept; the next listing
+    /// catches any tool that changed.
+    pub async fn update_approved(
+        &self,
+        id: &str,
+        config: ServerConfig,
+        secrets: &NewSecrets,
+    ) -> Result<(), HubError> {
+        let config = self.check_config(config)?;
+        let old = self
+            .registry()
+            .server(id)
+            .cloned()
+            .ok_or(HubError::NotFound)?;
+        if old.config.name != config.name
+            && self
+                .registry()
+                .servers
+                .iter()
+                .any(|s| s.id != id && s.config.name.eq_ignore_ascii_case(&config.name))
+        {
+            return Err(HubError::Invalid(
+                "A connector with that name already exists.".into(),
+            ));
+        }
+        // Names that are new to the configuration need a value now.
+        let old_names = old.config.secret_names();
+        for name in config.secret_names() {
+            if !old_names.contains(&name) && secrets.values.get(&name).is_none_or(|v| v.is_empty())
+            {
+                return Err(HubError::Invalid(format!("Enter a value for {name}.")));
+            }
+        }
+        if matches!(config.auth, AuthConfig::ApiKey)
+            && !matches!(old.config.auth, AuthConfig::ApiKey)
+            && secrets.api_key.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(HubError::Invalid("Enter the API key or token.".into()));
+        }
+        let auth_changed = old.config.auth != config.auth
+            || std::mem::discriminant(&old.config.transport)
+                != std::mem::discriminant(&config.transport)
+            || old.config.destination() != config.destination();
+        self.update(|reg| {
+            let e = reg.server_mut(id).ok_or(HubError::NotFound)?;
+            e.approved_hash = Some(config.hash());
+            e.approved_at = Some(now());
+            e.config = config.clone();
+            e.last_problem = None;
+            Ok(())
+        })?;
+        // Drop secrets the new configuration no longer names.
+        let kept = self
+            .registry()
+            .server(id)
+            .map(secret_keys_for)
+            .unwrap_or_default();
+        for key in secret_keys_for(&old) {
+            if !kept.contains(&key) {
+                let _ = self.secrets.delete(&key);
+            }
+        }
+        if auth_changed {
+            let _ = KeychainCredentials::new(self.secrets.clone(), id).clear_tokens();
+        }
+        self.store_secrets(id, secrets)?;
+        self.drop_connection(id).await;
+        Ok(())
+    }
+
+    /// Write the non-empty secret values the form sent.
+    fn store_secrets(&self, id: &str, secrets: &NewSecrets) -> Result<(), HubError> {
+        let reg = self.registry();
+        let entry = reg.server(id).ok_or(HubError::NotFound)?;
+        let store = self.secrets.as_ref();
+        let err = |e: crate::secrets::ChunkError| HubError::Store(e.to_string());
+        if let Some(k) = secrets.api_key.as_deref().filter(|k| !k.is_empty()) {
+            if !matches!(entry.config.auth, AuthConfig::ApiKey) {
+                return Err(HubError::Invalid(
+                    "This connector doesn't use an API key.".into(),
+                ));
+            }
+            if k.len() > 8 * 1024 || k.contains(['\0', '\r', '\n']) {
+                return Err(HubError::Invalid("That API key isn't valid.".into()));
+            }
+            put_chunked(store, &secret_key(id, SecretSlot::ApiKey), k.trim()).map_err(err)?;
+        }
+        if let Some(s) = secrets.client_secret.as_deref().filter(|s| !s.is_empty()) {
+            if !matches!(
+                &entry.config.auth,
+                AuthConfig::OAuth {
+                    client_id: Some(_),
+                    ..
+                }
+            ) {
+                return Err(HubError::Invalid(
+                    "A client secret needs a client ID.".into(),
+                ));
+            }
+            KeychainCredentials::new(self.secrets.clone(), id)
+                .set_client_secret(Some(s.trim()))
+                .map_err(err)?;
+        }
+        let names = entry.config.secret_names();
+        for (name, value) in &secrets.values {
+            if value.is_empty() {
+                continue;
+            }
+            if !names.contains(name) {
+                return Err(HubError::Invalid(format!(
+                    "{name} isn't a secret of this connector."
+                )));
+            }
+            if value.chars().count() > crate::config::MAX_VALUE_CHARS
+                || value.contains(['\0', '\r', '\n'])
+            {
+                return Err(HubError::Invalid(format!(
+                    "The value for {name} isn't valid."
+                )));
+            }
+            let key = if entry.config.is_local() {
+                env_secret_key(id, name)
+            } else {
+                header_secret_key(id, name)
+            };
+            self.secrets
+                .set(&key, value)
+                .map_err(|e| HubError::Store(e.to_string()))?;
+        }
+        if !matches!(entry.config.auth, AuthConfig::ApiKey) {
+            let _ = delete_chunked(store, &secret_key(id, SecretSlot::ApiKey));
+        }
+        Ok(())
+    }
+
+    /// Which secrets have a stored value (never the values).
+    pub fn secret_status(&self, entry: &ServerEntry) -> SecretStatus {
+        let store = self.secrets.as_ref();
+        let names = entry
+            .config
+            .secret_names()
+            .into_iter()
+            .map(|n| {
+                let key = if entry.config.is_local() {
+                    env_secret_key(&entry.id, &n)
+                } else {
+                    header_secret_key(&entry.id, &n)
+                };
+                let set = matches!(store.get(&key), Ok(Some(_)));
+                (n, set)
+            })
+            .collect();
+        SecretStatus {
+            api_key_set: matches!(
+                get_chunked(store, &secret_key(&entry.id, SecretSlot::ApiKey)),
+                Ok(Some(_))
+            ),
+            client_secret_set: KeychainCredentials::new(self.secrets.clone(), entry.id.clone())
+                .client_secret()
+                .is_some(),
+            values: names,
+        }
+    }
+
+    /// Switch a connector off (at once) or on (after the caller's native
+    /// dialog).
+    pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), HubError> {
+        self.update(|reg| {
+            reg.server_mut(id).ok_or(HubError::NotFound)?.enabled = enabled;
+            Ok(())
+        })?;
+        if !enabled {
+            self.drop_connection(id).await;
+        }
+        Ok(())
     }
 
     /// Remove a connector, its keychain entries and its connection.
@@ -250,13 +622,13 @@ impl ConnectorHub {
                 tracing::warn!(key, error = %e, "couldn't delete a connector keychain entry");
             }
         }
-        if let Some(c) = self.connections.lock().await.remove(id) {
-            drop(c);
-        }
+        self.drop_connection(id).await;
         Ok(())
     }
 
-    /// Connect, list tools and update the pins. New tools arrive turned off.
+    /// Connect, list tools and update the pins. Tools in the first listing
+    /// after approval start on Needs approval; later new tools are blocked
+    /// for review.
     pub async fn sync_tools(&self, id: &str) -> Result<ReconcileReport, HubError> {
         let entry = self
             .registry()
@@ -277,109 +649,82 @@ impl ConnectorHub {
         self.reconcile(id, &live)
     }
 
-    fn reconcile(&self, id: &str, live: &[pin::LiveTool]) -> Result<ReconcileReport, HubError> {
+    fn reconcile(&self, id: &str, live: &[LiveTool]) -> Result<ReconcileReport, HubError> {
         self.update(|reg| {
             let entry = reg.server_mut(id).ok_or(HubError::NotFound)?;
-            let report = pin::reconcile(&mut entry.tools, live, now())
+            let report = pin::reconcile(&mut entry.tools, live, now(), !entry.baseline_done)
                 .map_err(|e| HubError::Invalid(e.to_string()))?;
+            entry.baseline_done = true;
             entry.last_sync = Some(now());
+            entry.last_problem = None;
             Ok(report)
         })
     }
 
-    /// Sort requested permission changes into grants and removals, without
-    /// applying them (grants need the user's yes in a native dialog first).
+    /// Sort requested permission changes into loosening (needs the user's
+    /// yes in a native dialog) and tightening (applies at once).
     pub fn plan_permissions(
         &self,
         id: &str,
-        changes: &[ToolPermission],
+        changes: &[PermissionChange],
     ) -> Result<PermissionPlan, HubError> {
         let reg = self.registry();
         let entry = reg.server(id).ok_or(HubError::NotFound)?;
         plan_permissions(entry, changes).map_err(HubError::Invalid)
     }
 
-    /// Apply changes; re-planned against current state so a stale plan can't
-    /// grant more than the user saw.
-    pub fn apply_permissions(
-        &self,
-        id: &str,
-        changes: &[ToolPermission],
-        approved: &PermissionPlan,
-    ) -> Result<(), HubError> {
+    /// Apply the tightening part of a request.
+    pub fn apply_tightening(&self, id: &str, changes: &[PermissionChange]) -> Result<(), HubError> {
         self.update(|reg| {
             let entry = reg.server_mut(id).ok_or(HubError::NotFound)?;
             let plan = plan_permissions(entry, changes).map_err(HubError::Invalid)?;
-            if plan != *approved {
-                return Err(HubError::Invalid(
-                    "The connector changed while you were deciding; review it again.".into(),
-                ));
-            }
-            apply_permissions(entry, &plan);
+            apply_tighten(entry, &plan);
             Ok(())
         })
     }
 
-    /// Accept a tool's pending definition change (after the user's yes).
-    /// `expected_hash` is the pending hash the user reviewed.
-    pub fn accept_change(&self, id: &str, tool: &str, expected_hash: &str) -> Result<(), HubError> {
+    /// Apply the loosening the user approved. Re-planned against current
+    /// state, so it can't grant more than the dialog showed.
+    pub fn apply_loosening(
+        &self,
+        id: &str,
+        changes: &[PermissionChange],
+        approved: &[PermissionChange],
+    ) -> Result<(), HubError> {
+        self.update(|reg| {
+            let entry = reg.server_mut(id).ok_or(HubError::NotFound)?;
+            let plan = plan_permissions(entry, changes).map_err(HubError::Invalid)?;
+            if plan.loosen != approved {
+                return Err(HubError::Invalid(
+                    "The connector changed while you were deciding; review it again.".into(),
+                ));
+            }
+            apply_loosen(entry, &plan);
+            Ok(())
+        })
+    }
+
+    /// Approve a tool's pending change or a new tool (after the user's yes).
+    /// `hash` is the definition the user reviewed. The tool goes to Needs
+    /// approval.
+    pub fn accept_change(&self, id: &str, tool: &str, hash: &str) -> Result<(), HubError> {
         self.update(|reg| {
             let entry = reg.server_mut(id).ok_or(HubError::NotFound)?;
             let pin = entry
                 .tool_mut(tool)
                 .ok_or_else(|| HubError::Invalid("No such tool.".into()))?;
-            if pin.pending.as_ref().map(|p| p.hash.as_str()) != Some(expected_hash) {
-                return Err(HubError::Invalid(
+            if pin::accept_change(pin, hash) {
+                Ok(())
+            } else {
+                Err(HubError::Invalid(
                     "The tool changed again; review the latest change.".into(),
-                ));
+                ))
             }
-            pin::accept_change(pin);
-            Ok(())
         })
     }
 
-    /// Store a stdio connector's environment variable in the keychain.
-    pub fn set_env_secret(&self, id: &str, name: &str, value: &str) -> Result<(), HubError> {
-        let reg = self.registry();
-        let entry = reg.server(id).ok_or(HubError::NotFound)?;
-        match &entry.config.transport {
-            TransportConfig::Stdio { env_names, .. } if env_names.iter().any(|n| n == name) => {}
-            _ => {
-                return Err(HubError::Invalid(
-                    "That variable isn't part of this connector.".into(),
-                ))
-            }
-        }
-        if value.len() > 8 * 1024 || value.contains('\0') {
-            return Err(HubError::Invalid("That value is too long.".into()));
-        }
-        let key = env_secret_key(id, name);
-        let res = if value.is_empty() {
-            self.secrets.delete(&key)
-        } else {
-            self.secrets.set(&key, value)
-        };
-        res.map_err(|e| HubError::Store(e.to_string()))
-    }
-
-    /// Which env variables have a stored value (never the values).
-    pub fn env_set(&self, entry: &ServerEntry) -> Vec<(String, bool)> {
-        match &entry.config.transport {
-            TransportConfig::Stdio { env_names, .. } => env_names
-                .iter()
-                .map(|n| {
-                    let set =
-                        matches!(self.secrets.get(&env_secret_key(&entry.id, n)), Ok(Some(_)));
-                    (n.clone(), set)
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-
     pub fn signed_in(&self, entry: &ServerEntry) -> bool {
-        crate::secrets::KeychainCredentials::new(self.secrets.clone(), entry.id.clone())
-            .has_tokens()
+        KeychainCredentials::new(self.secrets.clone(), entry.id.clone()).has_tokens()
     }
 
     pub async fn sign_in(
@@ -414,7 +759,7 @@ impl ConnectorHub {
             .cloned()
             .ok_or(HubError::NotFound)?;
         self.drop_connection(id).await;
-        crate::secrets::KeychainCredentials::new(self.secrets.clone(), entry.id)
+        KeychainCredentials::new(self.secrets.clone(), entry.id)
             .clear_tokens()
             .map_err(|e| HubError::Store(e.to_string()))
     }
@@ -426,15 +771,29 @@ impl ConnectorHub {
             c.last_used = Instant::now();
             return Ok(c.conn.clone());
         }
-        let conn = Arc::new(self.connector.connect(entry).await?);
-        conns.insert(
-            entry.id.clone(),
-            Cached {
-                conn: conn.clone(),
-                last_used: Instant::now(),
-            },
-        );
-        Ok(conn)
+        match self.connector.connect(entry).await {
+            Ok(conn) => {
+                let conn = Arc::new(conn);
+                conns.insert(
+                    entry.id.clone(),
+                    Cached {
+                        conn: conn.clone(),
+                        last_used: Instant::now(),
+                    },
+                );
+                Ok(conn)
+            }
+            Err(e) => {
+                let problem = problem_for(&e);
+                let _ = self.update(|reg| {
+                    if let Some(s) = reg.server_mut(&entry.id) {
+                        s.last_problem = Some(problem);
+                    }
+                    Ok(())
+                });
+                Err(e)
+            }
+        }
     }
 
     async fn drop_connection(&self, id: &str) {
@@ -460,6 +819,43 @@ impl ConnectorHub {
             f(id);
         }
     }
+}
+
+/// Which of a connector's secrets have a stored value.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretStatus {
+    pub api_key_set: bool,
+    pub client_secret_set: bool,
+    pub values: Vec<(String, bool)>,
+}
+
+/// Why the arguments can't be shown or sent as they are.
+pub fn args_problem(args: &Value) -> Option<String> {
+    fn hidden(v: &Value, depth: usize) -> bool {
+        if depth > 64 {
+            return true;
+        }
+        match v {
+            Value::String(s) => s.chars().any(is_hidden_char),
+            Value::Array(a) => a.iter().any(|x| hidden(x, depth + 1)),
+            Value::Object(m) => m
+                .iter()
+                .any(|(k, x)| k.chars().any(is_hidden_char) || hidden(x, depth + 1)),
+            _ => false,
+        }
+    }
+    if !args.is_object() {
+        return Some("The arguments must be a JSON object.".into());
+    }
+    if hidden(args, 0) {
+        return Some("The arguments contain hidden characters.".into());
+    }
+    let len = serde_json::to_string_pretty(args).map_or(usize::MAX, |s| s.chars().count());
+    if len > MAX_ARGS_CHARS {
+        return Some("The arguments are too long.".into());
+    }
+    None
 }
 
 /// Per-turn settings from the harness.
@@ -535,7 +931,18 @@ const DECLINED_MSG: &str = "The user chose not to run this call. Don't propose i
 const TIMED_OUT_MSG: &str = "The user didn't answer the confirm card in time, so the call didn't \
      run.";
 const CHANGED_MSG: &str = "This tool changed on the server since the user approved it, so FOTW \
-     turned it off until the user reviews the change in Settings. Answer without it.";
+     blocked it until the user reviews the change in Settings. Answer without it.";
+const BLOCKED_MSG: &str = "The user has blocked this tool. Answer without it.";
+
+#[derive(Debug, Default)]
+struct LogExtra {
+    approval: Option<Approval>,
+    duration_ms: u64,
+    result_chars: usize,
+    truncated: bool,
+    schema: SchemaCheck,
+    args_edited: bool,
+}
 
 impl ConnectorTurn {
     fn new(hub: Arc<ConnectorHub>, opts: TurnOptions, approver: Arc<dyn CallApprover>) -> Self {
@@ -543,7 +950,7 @@ impl ConnectorTurn {
         let mut routes = HashMap::new();
         if opts.tools_allowed && !opts.keep_local_in_scope && opts.max_calls > 0 {
             let reg = hub.registry();
-            'outer: for entry in reg.servers.iter().filter(|e| e.is_approved()) {
+            'outer: for entry in reg.servers.iter().filter(|e| e.is_active()) {
                 for pin in entry.tools.iter().filter(|p| p.offerable()) {
                     if specs.len() >= MAX_OFFERED_TOOLS {
                         break 'outer;
@@ -555,8 +962,8 @@ impl ConnectorTurn {
                     let k = kind(pin);
                     let d = &pin.definition;
                     let label = match k {
-                        ToolKind::Read => "read-only",
-                        ToolKind::Write => "may change data",
+                        ToolKind::Read => "looks things up",
+                        ToolKind::Write => "can change data",
                     };
                     let what = d
                         .title
@@ -566,7 +973,7 @@ impl ConnectorTurn {
                     specs.push(ToolSpec {
                         name: name.clone(),
                         description: format!(
-                            "[{} connector, {label}; the user confirms every call] {what}{}",
+                            "[{} connector, {label}; the user may review each call] {what}{}",
                             entry.config.name, d.description
                         ),
                         input_schema: d.input_schema.clone(),
@@ -619,6 +1026,7 @@ impl ConnectorTurn {
                 tool: route.tool.clone(),
                 kind: route.kind,
                 outcome,
+                approval: extra.approval,
                 refusal,
                 duration_ms: extra.duration_ms,
                 result_chars: extra.result_chars,
@@ -639,8 +1047,31 @@ impl ConnectorTurn {
         Err(msg.into())
     }
 
-    /// The live definition still matches the pin, and the tool is still on.
-    async fn verify_live(&self, route: &Route, conn: &Connection) -> Result<bool, SessionError> {
+    /// An error after contact with the server: it counts as a connector
+    /// result (the turn is sealed) and is fenced like one.
+    fn server_error(&self, route: &Route, msg: String) -> String {
+        self.state.lock().unwrap().sealed = true;
+        fence::render(
+            &route.server_name,
+            &route.tool,
+            &fence::ToolResult {
+                blocks: vec![fence::ResultBlock::Text(msg)],
+                structured: None,
+                is_error: true,
+            },
+            None,
+            self.opts.max_result_chars.min(500),
+        )
+        .text
+    }
+
+    /// The live definition still matches the pin; returns the tool's current
+    /// permission (`None`: no longer offerable).
+    async fn verify_live(
+        &self,
+        route: &Route,
+        conn: &Connection,
+    ) -> Result<Option<Permission>, SessionError> {
         let live = conn.list_tools().await?;
         let report = self
             .hub
@@ -650,22 +1081,13 @@ impl ConnectorTurn {
             self.hub.notify(&route.server_id);
         }
         let reg = self.hub.registry();
-        let ok = reg.server(&route.server_id).is_some_and(|e| {
-            e.is_approved()
-                && e.tool(&route.tool)
-                    .is_some_and(|p| p.offerable() && kind(p) == route.kind)
-        });
-        Ok(ok)
+        Ok(reg
+            .server(&route.server_id)
+            .filter(|e| e.is_active())
+            .and_then(|e| e.tool(&route.tool))
+            .filter(|p| p.offerable() && kind(p) == route.kind)
+            .map(|p| p.permission))
     }
-}
-
-#[derive(Debug, Default)]
-struct LogExtra {
-    duration_ms: u64,
-    result_chars: usize,
-    truncated: bool,
-    schema: SchemaCheck,
-    args_edited: bool,
 }
 
 /// A transport error for the local log: cleaned and short.
@@ -718,69 +1140,85 @@ impl ExternalTools for ConnectorTurn {
             }
             st.proposals += 1;
         }
-        if !args.is_object() {
-            return self.refuse(
-                &route,
-                RefusalCode::InvalidArguments,
-                "The arguments must be a JSON object.",
-            );
+        if let Some(p) = args_problem(&args) {
+            return self.refuse(&route, RefusalCode::InvalidArguments, p);
         }
         if let Err(errs) = schema::validate(&route.input_schema, &args) {
             return self.refuse(&route, RefusalCode::InvalidArguments, schema_errors(errs));
         }
 
         let entry = self.hub.registry().server(&route.server_id).cloned();
-        let Some(entry) = entry.filter(|e| e.is_approved()) else {
-            return self.refuse(&route, RefusalCode::NotApproved, CHANGED_MSG);
+        let Some(entry) = entry.filter(|e| e.is_active()) else {
+            return self.refuse(&route, RefusalCode::NotApproved, BLOCKED_MSG);
         };
         let conn = match self.hub.connection(&entry).await {
             Ok(c) => c,
             Err(e) => {
-                // Error text can carry the server's words: the model gets a
-                // fixed message; details stay in the local log.
                 tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector unreachable");
                 self.log(&route, CallOutcome::Failed, None, LogExtra::default());
-                return Err(format!(
-                    "Couldn't reach {} right now. Answer without it.",
-                    route.server_name
+                return Err(self.server_error(
+                    &route,
+                    format!(
+                        "Couldn't reach {} right now. Answer without it.",
+                        route.server_name
+                    ),
                 ));
             }
         };
-        match self.verify_live(&route, &conn).await {
-            Ok(true) => {}
-            Ok(false) => return self.refuse(&route, RefusalCode::ToolChanged, CHANGED_MSG),
+        let permission = match self.verify_live(&route, &conn).await {
+            Ok(Some(p)) => p,
+            Ok(None) => return self.refuse(&route, RefusalCode::ToolChanged, CHANGED_MSG),
             Err(e) => {
                 self.hub.drop_connection(&route.server_id).await;
-                self.log(&route, CallOutcome::Failed, None, LogExtra::default());
                 tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector tool check failed");
-                return Err(format!(
-                    "Couldn't check {}'s tools right now. Answer without it.",
-                    route.server_name
+                self.log(&route, CallOutcome::Failed, None, LogExtra::default());
+                return Err(self.server_error(
+                    &route,
+                    format!(
+                        "Couldn't check {}'s tools right now. Answer without it.",
+                        route.server_name
+                    ),
                 ));
             }
-        }
+        };
 
-        let proposal = CallProposal {
-            proposal_id: format!("p{}", uuid::Uuid::new_v4().simple()),
-            turn_id: self.opts.turn_id.clone(),
-            server_id: route.server_id.clone(),
-            server_name: route.server_name.clone(),
-            destination: route.destination.clone(),
-            tool: route.tool.clone(),
-            tool_title: route.title.clone(),
-            kind: route.kind,
-            destructive: route.destructive,
-            args: args.clone(),
-            input_schema: route.input_schema.clone(),
-        };
-        let final_args = match self.approver.decide(proposal).await {
-            Decision::Run { args: a } => a,
-            Decision::Decline => {
-                self.log(&route, CallOutcome::Declined, None, LogExtra::default());
-                return Err(DECLINED_MSG.into());
+        let (final_args, approval) = match permission {
+            Permission::Blocked => {
+                return self.refuse(&route, RefusalCode::NotOffered, BLOCKED_MSG)
             }
-            Decision::TimedOut => return self.refuse(&route, RefusalCode::TimedOut, TIMED_OUT_MSG),
+            Permission::AlwaysAllow => (args.clone(), Approval::Automatic),
+            Permission::NeedsApproval => {
+                let proposal = CallProposal {
+                    proposal_id: format!("p{}", uuid::Uuid::new_v4().simple()),
+                    turn_id: self.opts.turn_id.clone(),
+                    server_id: route.server_id.clone(),
+                    server_name: route.server_name.clone(),
+                    destination: route.destination.clone(),
+                    tool: route.tool.clone(),
+                    tool_title: route.title.clone(),
+                    kind: route.kind,
+                    destructive: route.destructive,
+                    args: args.clone(),
+                    input_schema: route.input_schema.clone(),
+                };
+                match self.approver.decide(proposal).await {
+                    Decision::Run { args: a } => (a, Approval::User),
+                    Decision::Decline => {
+                        self.log(&route, CallOutcome::Declined, None, LogExtra::default());
+                        return Err(DECLINED_MSG.into());
+                    }
+                    Decision::TimedOut => {
+                        return self.refuse(&route, RefusalCode::TimedOut, TIMED_OUT_MSG)
+                    }
+                }
+            }
         };
+        if let Some(p) = args_problem(&final_args) {
+            return self.refuse(&route, RefusalCode::InvalidArguments, p);
+        }
+        if let Err(errs) = schema::validate(&route.input_schema, &final_args) {
+            return self.refuse(&route, RefusalCode::InvalidArguments, schema_errors(errs));
+        }
         let Value::Object(map) = final_args.clone() else {
             return self.refuse(
                 &route,
@@ -788,9 +1226,6 @@ impl ExternalTools for ConnectorTurn {
                 "The arguments must be a JSON object.",
             );
         };
-        if let Err(errs) = schema::validate(&route.input_schema, &final_args) {
-            return self.refuse(&route, RefusalCode::InvalidArguments, schema_errors(errs));
-        }
         let args_edited = final_args != args;
 
         // From here on, whatever comes back is the server's: seal the turn.
@@ -801,30 +1236,32 @@ impl ExternalTools for ConnectorTurn {
         match result {
             Err(e) => {
                 self.hub.drop_connection(&route.server_id).await;
+                tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector call failed");
                 self.log(
                     &route,
                     CallOutcome::Failed,
                     None,
                     LogExtra {
+                        approval: Some(approval),
                         duration_ms,
                         args_edited,
                         ..Default::default()
                     },
                 );
-                // Transport errors can carry the server's words: the model
-                // gets a fixed message; details stay in the local log.
-                tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector call failed");
-                Err(format!(
-                    "The call to {} failed ({}). Answer without it.",
-                    route.server_name,
-                    match e {
-                        SessionError::Timeout => "it took too long",
-                        SessionError::AuthRequired => "sign in again in Settings",
-                        SessionError::Unsupported(_) => {
-                            "the service asked for something FOTW doesn't support"
-                        }
-                        _ => "connection or protocol error",
+                let why = match e {
+                    SessionError::Timeout => "it took too long",
+                    SessionError::AuthRequired => "sign in again in Settings",
+                    SessionError::Unsupported(_) => {
+                        "the service asked for something FOTW doesn't support"
                     }
+                    _ => "connection or protocol error",
+                };
+                Err(self.server_error(
+                    &route,
+                    format!(
+                        "The call to {} failed ({why}). Answer without it.",
+                        route.server_name
+                    ),
                 ))
             }
             Ok(res) => {
@@ -844,6 +1281,7 @@ impl ExternalTools for ConnectorTurn {
                     },
                     None,
                     LogExtra {
+                        approval: Some(approval),
                         duration_ms,
                         result_chars: r.raw_chars,
                         truncated: r.truncated,
