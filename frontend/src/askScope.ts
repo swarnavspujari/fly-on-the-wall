@@ -102,11 +102,8 @@ export function mentionOptions(query: string, catalog: MentionCatalog, limit = 8
   const known = [...meetings, ...people, ...folders].slice(0, limit);
   const exact = known.some((o) => norm(o.label) === norm(q));
   if (q.length < 2 || exact) return known;
-  // The typed name sits with the people, so the list reads in groups.
-  const typed: MentionOption = { kind: "person", id: q, label: q, typed: true };
-  const firstFolder = known.findIndex((o) => o.kind === "folder");
-  const at = firstFolder === -1 ? known.length : firstFolder;
-  return [...known.slice(0, at), typed, ...known.slice(at)];
+  // Last, so a known meeting, person or folder is what Enter picks.
+  return [...known, { kind: "person", id: q, label: q, typed: true }];
 }
 
 /** The composer text with the @ query removed (it became the scope). */

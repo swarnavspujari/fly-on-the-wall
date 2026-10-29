@@ -470,6 +470,20 @@ const MENTION_GROUP: Record<MentionOption["kind"], string> = {
   folder: "Folders",
 };
 
+/** Suggestions in runs of one kind, in list order (so the arrow keys move
+ *  through them as shown). A typed name is its own group. */
+function mentionGroups(options: MentionOption[]) {
+  const groups: { key: string; label: string; items: { o: MentionOption; i: number }[] }[] = [];
+  options.forEach((o, i) => {
+    const key = o.typed ? "typed" : o.kind;
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) last.items.push({ o, i });
+    else
+      groups.push({ key, label: o.typed ? "By name" : MENTION_GROUP[o.kind], items: [{ o, i }] });
+  });
+  return groups;
+}
+
 /** The composer's runs-on label: where the saved provider runs. */
 function RunsOnLabel({ llm }: { llm: LlmSettings | null }) {
   if (!llm) return null;
@@ -642,6 +656,8 @@ export function AskComposer({
     [mention, catalog],
   );
   const listOpen = mention !== null && options.length > 0;
+  // The list can shrink under the highlight as you type.
+  const activeIdx = Math.max(0, Math.min(active, options.length - 1));
   useEscapeLayer(() => setMention(null), listOpen);
   const canSend = chat.input.trim() !== "" && !chat.busy;
   const submit = () => {
@@ -747,7 +763,7 @@ export function AskComposer({
             }
             if ((e.key === "Enter" || e.key === "Tab") && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              pick(options[Math.min(active, options.length - 1)]);
+              pick(options[activeIdx]);
               return;
             }
           }
@@ -778,7 +794,7 @@ export function AskComposer({
         // open. (aria-expanded isn't valid on a text box; the sheet
         // announces itself as a labelled dialog.)
         aria-controls={listOpen ? listId : open ? chat.sheetId : undefined}
-        aria-activedescendant={listOpen ? optionId(active) : undefined}
+        aria-activedescendant={listOpen ? optionId(activeIdx) : undefined}
         className="block min-w-0 flex-1 resize-none overflow-hidden border-0 bg-transparent py-1.5 text-[14px] leading-[1.45] text-text outline-none placeholder:text-text-3"
         // the pill around it shows the focus ring
         style={{ boxShadow: "none", maxHeight: COMPOSER_MAX_PX }}
@@ -830,37 +846,33 @@ export function AskComposer({
           }}
           data-testid="ask-mentions"
         >
-          {(["meeting", "person", "folder"] as const).map((kind) => {
-            const inGroup = options.map((o, i) => ({ o, i })).filter(({ o }) => o.kind === kind);
-            if (inGroup.length === 0) return null;
-            return (
-              <div key={kind} role="group" aria-label={MENTION_GROUP[kind]}>
-                <div
-                  aria-hidden="true"
-                  className="px-2.5 pb-0.5 pt-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
-                  style={{ color: "var(--text-3)" }}
-                >
-                  {MENTION_GROUP[kind]}
-                </div>
-                {inGroup.map(({ o, i }) => (
-                  <div
-                    key={`${o.id}-${o.typed ? "typed" : "known"}`}
-                    id={optionId(i)}
-                    role="option"
-                    aria-selected={i === active}
-                    // keep focus (and the caret) in the composer
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => pick(o)}
-                    onMouseEnter={() => setActive(i)}
-                    className="cursor-pointer truncate rounded-lg px-2.5 py-1.5 text-[13px] text-text"
-                    style={{ background: i === active ? "var(--surface-3)" : "transparent" }}
-                  >
-                    {o.typed ? `Meetings with “${o.label}”` : o.label}
-                  </div>
-                ))}
+          {mentionGroups(options).map((g) => (
+            <div key={g.key} role="group" aria-label={g.label}>
+              <div
+                aria-hidden="true"
+                className="px-2.5 pb-0.5 pt-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
+                style={{ color: "var(--text-3)" }}
+              >
+                {g.label}
               </div>
-            );
-          })}
+              {g.items.map(({ o, i }) => (
+                <div
+                  key={`${o.id}-${o.typed ? "typed" : "known"}`}
+                  id={optionId(i)}
+                  role="option"
+                  aria-selected={i === activeIdx}
+                  // keep focus (and the caret) in the composer
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => pick(o)}
+                  onMouseEnter={() => setActive(i)}
+                  className="cursor-pointer truncate rounded-lg px-2.5 py-1.5 text-[13px] text-text"
+                  style={{ background: i === activeIdx ? "var(--surface-3)" : "transparent" }}
+                >
+                  {o.typed ? `Meetings with “${o.label}”` : o.label}
+                </div>
+              ))}
+            </div>
+          ))}
         </div>
       )}
       <span className="sr-only" aria-live="polite" data-testid="ask-live">
