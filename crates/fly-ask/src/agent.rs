@@ -58,10 +58,10 @@ pub fn tool_specs(caps: &fly_llm::Capabilities) -> Vec<ToolSpec> {
     out
 }
 
-pub struct ToolState<'a, S> {
+pub struct ToolState<'a, S, E> {
     pub store: &'a S,
     pub resolved: &'a Resolved,
-    pub embedder: Option<&'a dyn QueryEmbedder>,
+    pub embedder: Option<&'a E>,
     pub sink: Option<EventSink<'a>>,
     pub observation_chars: usize,
     pub now: DateTime<Utc>,
@@ -126,16 +126,16 @@ fn meeting_segments(s: &Storage, meeting_id: &str) -> HashMap<String, SegmentVie
         .collect()
 }
 
-impl<S: StoreAccess> ToolState<'_, S> {
+impl<S: StoreAccess, E: QueryEmbedder> ToolState<'_, S, E> {
     pub fn new<'a>(
         store: &'a S,
         resolved: &'a Resolved,
-        embedder: Option<&'a dyn QueryEmbedder>,
+        embedder: Option<&'a E>,
         sink: Option<EventSink<'a>>,
         observation_chars: usize,
         now: DateTime<Utc>,
         evidence: Evidence,
-    ) -> ToolState<'a, S> {
+    ) -> ToolState<'a, S, E> {
         ToolState {
             store,
             resolved,
@@ -286,15 +286,28 @@ impl<S: StoreAccess> ToolState<'_, S> {
                 self.finish(render::event(&ev), vec![])
             }
             fly_context::tools::GET_NOTE => {
-                let a: GetNoteArgs = args(name, input)?;
+                let raw: GetNoteArgs = args(name, input)?;
+                // Normalize exactly as fly-context does (trimmed, empty =
+                // absent), check, and pass on only the normalized form.
+                let norm = |s: &Option<String>| {
+                    s.as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                };
+                let a = GetNoteArgs {
+                    note_id: norm(&raw.note_id),
+                    meeting_id: norm(&raw.meeting_id),
+                    kind: raw.kind,
+                };
                 let note_ok = |nid: &str| {
                     self.resolved.note_id.as_deref() == Some(nid)
                         || self.resolved.meetings.iter().any(|m| m.note_id == nid)
                 };
                 let allowed = match (a.note_id.as_deref(), a.meeting_id.as_deref()) {
-                    (Some(n), None) => note_ok(n.trim()),
-                    (None, Some(m)) => self.resolved.allows_meeting(m.trim()),
-                    _ => true, // fly-context rejects the shape itself
+                    (Some(n), None) => note_ok(n),
+                    (None, Some(m)) => self.resolved.allows_meeting(m),
+                    _ => return Err("Pass exactly one of note_id or meeting_id.".into()),
                 };
                 if !allowed {
                     return Err(OUTSIDE_SCOPE.into());

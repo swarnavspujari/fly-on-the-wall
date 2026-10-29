@@ -92,6 +92,23 @@ pub struct Proposal {
     pub executed: bool,
 }
 
+impl Proposal {
+    /// What the button's preview shows (Markdown, links already removed).
+    pub fn preview(&self) -> String {
+        match self.tool {
+            ProposalTool::InsertIntoNote => self.markdown.clone().unwrap_or_default(),
+            ProposalTool::AddActionItem => {
+                let owner = self
+                    .owner
+                    .as_deref()
+                    .map(|o| format!(" — {o}"))
+                    .unwrap_or_default();
+                format!("- [ ] {}{owner}", self.text.as_deref().unwrap_or_default())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalReason {
@@ -398,6 +415,7 @@ mod tests {
             wide: false,
             kept_local_excluded: 0,
             known: Known::default(),
+            sub_meeting_ids: vec![],
             meetings: vec![MeetingRef {
                 id: "M11".into(),
                 note_id: "N11".into(),

@@ -81,8 +81,9 @@ impl ToolName {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ToolCallLog {
+    #[serde(serialize_with = "code::tool")]
     pub tool: ToolName,
     pub ok: bool,
 }
@@ -127,6 +128,8 @@ pub enum AnswerStatus {
 #[serde(rename_all = "snake_case")]
 pub enum FailureKind {
     EmptyReply,
+    /// The reply stopped at `max_tokens` (or the context limit).
+    Truncated,
     NotConfigured,
     Auth,
     Unavailable,
@@ -134,7 +137,7 @@ pub enum FailureKind {
     Provider,
     InvalidRequest,
     ToolProtocol,
-    OverBudget,
+    BudgetExhausted,
     Storage,
 }
 
@@ -142,7 +145,7 @@ impl FailureKind {
     pub fn from_error(e: &fly_llm::LlmError) -> Self {
         use fly_llm::LlmError::*;
         if crate::provider::is_over_budget(e) {
-            return Self::OverBudget;
+            return Self::BudgetExhausted;
         }
         match e {
             NotConfigured(_) => Self::NotConfigured,
@@ -156,11 +159,13 @@ impl FailureKind {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct RouterLog {
+    #[serde(serialize_with = "code::date_rule")]
     pub date_rule: Option<DateRule>,
     pub people: u32,
     pub folder: bool,
+    #[serde(serialize_with = "code::items")]
     pub items_intent: Option<String>,
 }
 
@@ -184,17 +189,22 @@ pub struct Timings {
     pub total_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Serialize-only: enum values are written as run-log codes (see `code`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunLog {
     pub v: u32,
     pub run_id: String,
     pub started_at: String,
     pub tier: Tier,
+    #[serde(serialize_with = "code::reach")]
     pub reach: Reach,
+    #[serde(serialize_with = "code::provider")]
     pub provider: ProviderKind,
+    #[serde(serialize_with = "code::scope")]
     pub scope: ScopeKind,
     pub scope_meetings: u32,
     pub kept_local_excluded: u32,
+    #[serde(serialize_with = "code::scope_refusal")]
     pub scope_refusal: Option<ScopeRefusal>,
     pub history_turns: u32,
     pub router: RouterLog,
@@ -208,12 +218,16 @@ pub struct RunLog {
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
     pub truncation_suspected: bool,
+    #[serde(serialize_with = "code::retries")]
     pub retries: Vec<RetryReason>,
     pub validation: ValidationStats,
     pub cited_segment_ids: Vec<String>,
     pub proposals: u32,
+    #[serde(serialize_with = "code::refusals")]
     pub proposal_refusals: Vec<RefusalReason>,
+    #[serde(serialize_with = "code::status")]
     pub status: AnswerStatus,
+    #[serde(serialize_with = "code::failure")]
     pub failure: Option<FailureKind>,
     pub timings: Timings,
 }
@@ -261,9 +275,103 @@ impl RunLog {
     }
 }
 
+/// Run-log codes: every enum value is written as `<kind>_<value>`, so no
+/// string in a record is ever a bare word (a value like `meeting` or
+/// `answered` could otherwise equal a word of the question).
+mod code {
+    use serde::ser::{Error, SerializeSeq};
+    use serde::{Serialize, Serializer};
+
+    fn one<T: Serialize>(prefix: &str, v: &T) -> Result<String, String> {
+        match serde_json::to_value(v).map_err(|e| e.to_string())? {
+            serde_json::Value::String(s) => Ok(format!("{prefix}_{s}")),
+            other => Err(format!("not a unit enum: {other}")),
+        }
+    }
+
+    fn plain<T: Serialize, S: Serializer>(prefix: &str, v: &T, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&one(prefix, v).map_err(S::Error::custom)?)
+    }
+
+    fn opt<T: Serialize, S: Serializer>(
+        prefix: &str,
+        v: &Option<T>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(x) => plain(prefix, x, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    fn seq<T: Serialize, S: Serializer>(prefix: &str, v: &[T], s: S) -> Result<S::Ok, S::Error> {
+        let mut q = s.serialize_seq(Some(v.len()))?;
+        for x in v {
+            q.serialize_element(&one(prefix, x).map_err(S::Error::custom)?)?;
+        }
+        q.end()
+    }
+
+    pub fn tool<S: Serializer>(v: &super::ToolName, s: S) -> Result<S::Ok, S::Error> {
+        plain("tool", v, s)
+    }
+    pub fn date_rule<S: Serializer>(
+        v: &Option<crate::router::DateRule>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        opt("date", v, s)
+    }
+    pub fn items<S: Serializer>(v: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+        opt("items", v, s)
+    }
+    pub fn reach<S: Serializer>(v: &super::Reach, s: S) -> Result<S::Ok, S::Error> {
+        plain("reach", v, s)
+    }
+    pub fn provider<S: Serializer>(v: &super::ProviderKind, s: S) -> Result<S::Ok, S::Error> {
+        plain("provider", v, s)
+    }
+    pub fn scope<S: Serializer>(v: &crate::scope::ScopeKind, s: S) -> Result<S::Ok, S::Error> {
+        plain("scope", v, s)
+    }
+    pub fn scope_refusal<S: Serializer>(
+        v: &Option<crate::scope::ScopeRefusal>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        opt("refused", v, s)
+    }
+    pub fn retries<S: Serializer>(
+        v: &[crate::prompt::RetryReason],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        seq("retry", v, s)
+    }
+    pub fn refusals<S: Serializer>(
+        v: &[crate::proposals::RefusalReason],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        seq("proposal", v, s)
+    }
+    pub fn status<S: Serializer>(v: &super::AnswerStatus, s: S) -> Result<S::Ok, S::Error> {
+        plain("status", v, s)
+    }
+    pub fn failure<S: Serializer>(v: &Option<super::FailureKind>, s: S) -> Result<S::Ok, S::Error> {
+        opt("failure", v, s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Field names (struct keys), which are fixed by this schema.
+    fn is_key(s: &str) -> bool {
+        KEYS.with(|k| k.borrow().contains(s))
+    }
+
+    thread_local! {
+        static KEYS: std::cell::RefCell<std::collections::HashSet<String>> =
+            std::cell::RefCell::new(std::collections::HashSet::new());
+    }
 
     fn leaves(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
@@ -271,7 +379,7 @@ mod tests {
             serde_json::Value::Array(a) => a.iter().for_each(|x| leaves(x, out)),
             serde_json::Value::Object(o) => {
                 for (k, x) in o {
-                    out.push(k.clone());
+                    KEYS.with(|keys| keys.borrow_mut().insert(k.clone()));
                     leaves(x, out);
                 }
             }
@@ -308,6 +416,11 @@ mod tests {
                 "free text in the run log: {s:?}"
             );
             assert!(s.len() <= 64, "{s:?}");
+            // Values are never a bare word a question could contain.
+            let coded = s.len() <= 1
+                || s.contains(['_', '-', ':'])
+                || s.chars().any(|c| c.is_ascii_digit());
+            assert!(coded || is_key(&s), "bare word in the run log: {s:?}");
         }
     }
 }

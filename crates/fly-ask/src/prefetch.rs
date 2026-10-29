@@ -43,6 +43,9 @@ const SOFT_FILTER_MIN: usize = 3;
 const MAX_SUB_QUERIES: usize = 3;
 /// Most meetings a narrow scope reads whole.
 const FULL_READ_MEETINGS: usize = 3;
+/// The plain search's top transcript passages shown whole (retrieval
+/// alone shows the top 8 passages).
+const MUST_INCLUDE: usize = 8;
 /// Most items fetched before the char budget applies.
 const ITEM_FETCH: u32 = 40;
 
@@ -242,6 +245,8 @@ struct Excerpt {
     started_at: Option<DateTime<Utc>>,
     segments: Vec<SegmentView>,
     lines: Vec<usize>,
+    /// One of the plain search's top passages: shown whole, always kept.
+    must: bool,
 }
 
 fn line_chars(s: &SegmentView) -> usize {
@@ -329,25 +334,6 @@ fn merge(into: &mut Vec<Passage>, more: Vec<Passage>) {
     into.extend(more.into_iter().filter(|p| !have.contains(&key(p))));
 }
 
-/// Interleave two ranked lists (first-seen wins).
-fn interleave(a: Vec<Passage>, b: Vec<Passage>) -> Vec<Passage> {
-    let mut out: Vec<Passage> = Vec::new();
-    let mut seen = HashSet::new();
-    let (mut a, mut b) = (a.into_iter(), b.into_iter());
-    loop {
-        let (x, y) = (a.next(), b.next());
-        if x.is_none() && y.is_none() {
-            break;
-        }
-        for p in [x, y].into_iter().flatten() {
-            if seen.insert(key(&p)) {
-                out.push(p);
-            }
-        }
-    }
-    out
-}
-
 /// Whole transcripts of a narrow scope, if they fit.
 fn full_read(s: &Storage, r: &Resolved, budget: &Budget) -> Option<Vec<Excerpt>> {
     let ids = r.meeting_ids.as_ref()?;
@@ -380,6 +366,7 @@ fn full_read(s: &Storage, r: &Resolved, budget: &Budget) -> Option<Vec<Excerpt>>
             started_at: Some(m.started_at),
             segments,
             lines,
+            must: true,
         });
     }
     let total: usize = out.iter().map(excerpt_chars).sum();
@@ -437,101 +424,173 @@ pub fn prefetch(
     if let Some(full) = full_read(s, r, &b) {
         stats.full_transcripts = full.len() as u32;
         excerpts = full;
+    } else if r.meeting_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        // A note with no recordings: nothing to search.
     } else {
-        let scoped_ids = r
-            .meeting_ids
-            .clone()
-            .filter(|ids| ids.len() <= fly_context::tools::MAX_MEETING_IDS);
-        if r.meeting_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
-            // A note with no recordings: nothing to search.
-        } else {
-            let base = SearchPassagesArgs {
-                query: input.question.to_string(),
-                meeting_ids: scoped_ids.clone(),
-                folder_id: r
-                    .folder_id
-                    .clone()
-                    .or_else(|| input.hints.folder_id.clone()),
-                since: None,
-                until: None,
-                limit: Some(SEARCH_LIMIT),
-            };
-            let filtered = SearchPassagesArgs {
-                since: input.hints.since.map(|d| d.to_rfc3339()),
-                until: input.hints.until.map(|d| d.to_rfc3339()),
-                ..base.clone()
-            };
-            let mut found = search(&ctx, &filtered, input, &mut stats)?;
-            if (input.hints.since.is_some() || input.hints.until.is_some())
-                && found.len() < SOFT_FILTER_MIN
-            {
-                stats.router_fallback = true;
-                let more = search(&ctx, &base, input, &mut stats)?;
-                merge(&mut found, more);
-            }
-            if let Some(fq) = input.follow_up_query {
-                let follow = search(
+        // A scope's meetings, in batches the search accepts (`None` = the
+        // whole visible corpus, or the folder via `folder_id`).
+        let batches: Vec<Option<Vec<String>>> = match &r.meeting_ids {
+            None => vec![None],
+            Some(ids) => ids
+                .chunks(fly_context::tools::MAX_MEETING_IDS)
+                .map(|c| Some(c.to_vec()))
+                .collect(),
+        };
+        let base = |meeting_ids: Option<Vec<String>>, query: &str| SearchPassagesArgs {
+            query: query.to_string(),
+            meeting_ids,
+            folder_id: r
+                .folder_id
+                .clone()
+                .or_else(|| input.hints.folder_id.clone()),
+            since: None,
+            until: None,
+            limit: Some(SEARCH_LIMIT),
+        };
+        let dated = |a: SearchPassagesArgs| SearchPassagesArgs {
+            since: input.hints.since.map(|d| d.to_rfc3339()),
+            until: input.hints.until.map(|d| d.to_rfc3339()),
+            ..a
+        };
+        let has_dates = input.hints.since.is_some() || input.hints.until.is_some();
+
+        // 1. The plain search (exactly what retrieval alone would show): its
+        //    top transcript passages always go in whole.
+        let mut plain: Vec<Passage> = Vec::new();
+        for batch in &batches {
+            merge(
+                &mut plain,
+                search(
                     &ctx,
-                    &SearchPassagesArgs {
-                        query: fq.to_string(),
-                        ..filtered.clone()
-                    },
+                    &base(batch.clone(), input.question),
                     input,
                     &mut stats,
-                )?;
-                found = interleave(found, follow);
-            }
-            // One long meeting / note: search caps passages per meeting, so
-            // widen with single-term searches.
-            if !r.wide && scoped_ids.is_some() {
-                let mut subs: Vec<&String> = salient.iter().collect();
-                subs.sort_by_key(|t| std::cmp::Reverse(t.chars().count()));
-                for t in subs.into_iter().take(MAX_SUB_QUERIES) {
-                    let more = search(
+                )?,
+            );
+        }
+        // 2. Extras: the router's date filter, the follow-up, subfolders,
+        //    and single-term searches for one long meeting.
+        let mut extra: Vec<Passage> = Vec::new();
+        if has_dates {
+            let mut dated_hits = Vec::new();
+            for batch in &batches {
+                merge(
+                    &mut dated_hits,
+                    search(
                         &ctx,
-                        &SearchPassagesArgs {
-                            query: t.clone(),
-                            ..base.clone()
-                        },
+                        &dated(base(batch.clone(), input.question)),
                         input,
                         &mut stats,
-                    )?;
-                    merge(&mut found, more);
+                    )?,
+                );
+            }
+            if dated_hits.len() < SOFT_FILTER_MIN {
+                stats.router_fallback = true;
+            }
+            merge(&mut extra, dated_hits);
+        }
+        if let Some(fq) = input.follow_up_query {
+            for batch in &batches {
+                let a = base(batch.clone(), fq);
+                let a = if has_dates { dated(a) } else { a };
+                merge(&mut extra, search(&ctx, &a, input, &mut stats)?);
+            }
+        }
+        for chunk in r
+            .sub_meeting_ids
+            .chunks(fly_context::tools::MAX_MEETING_IDS)
+        {
+            let a = SearchPassagesArgs {
+                folder_id: None,
+                ..base(Some(chunk.to_vec()), input.question)
+            };
+            merge(&mut extra, search(&ctx, &a, input, &mut stats)?);
+        }
+        if !r.wide && r.meeting_ids.is_some() {
+            let mut subs: Vec<&String> = salient.iter().collect();
+            subs.sort_by_key(|t| std::cmp::Reverse(t.chars().count()));
+            for t in subs.into_iter().take(MAX_SUB_QUERIES) {
+                for batch in &batches {
+                    merge(
+                        &mut extra,
+                        search(&ctx, &base(batch.clone(), t), input, &mut stats)?,
+                    );
                 }
             }
-            stats.passages_found = found.len() as u32;
-            for p in found {
-                match p.source {
-                    PassageSource::Transcript => {
-                        let Some(mid) = p.meeting_id.clone() else {
-                            continue;
-                        };
-                        // Defense in depth: never show a meeting outside the
-                        // resolved (visibility-checked) scope.
-                        if !r.allows_meeting(&mid) {
-                            continue;
-                        }
-                        let lines = clip(&p.segments, &terms, b.passage_clip_chars);
-                        excerpts.push(Excerpt {
-                            meeting_id: mid,
-                            title: p.title.clone(),
-                            started_at: p.started_at,
-                            segments: p.segments,
-                            lines,
-                        });
+        }
+
+        // The scope's own notes only (a narrow scope never shows another
+        // note's paragraphs, whatever the search returned).
+        let scope_notes: HashSet<&str> = r
+            .meetings
+            .iter()
+            .map(|m| m.note_id.as_str())
+            .chain(r.note_id.as_deref())
+            .collect();
+        let note_allowed =
+            |p: &Passage| r.meeting_ids.is_none() || scope_notes.contains(p.note_id.as_str());
+
+        let mut whole = 0usize;
+        let mut ordered: Vec<(Passage, bool)> = Vec::new();
+        for p in plain {
+            let must = p.source == PassageSource::Transcript && whole < MUST_INCLUDE;
+            if must {
+                whole += 1;
+            }
+            ordered.push((p, must));
+        }
+        let have: HashSet<_> = ordered.iter().map(|(p, _)| key(p)).collect();
+        // Extras rank after the plain top passages, before its tail.
+        let tail_at = ordered
+            .iter()
+            .rposition(|(_, must)| *must)
+            .map_or(0, |i| i + 1);
+        let extras: Vec<(Passage, bool)> = extra
+            .into_iter()
+            .filter(|p| !have.contains(&key(p)))
+            .map(|p| (p, false))
+            .collect();
+        ordered.splice(tail_at..tail_at, extras);
+        stats.passages_found = ordered.len() as u32;
+
+        for (p, must) in ordered {
+            match p.source {
+                PassageSource::Transcript => {
+                    let Some(mid) = p.meeting_id.clone() else {
+                        continue;
+                    };
+                    // Defense in depth: never show a meeting outside the
+                    // resolved (visibility-checked) scope.
+                    if !r.allows_meeting(&mid) {
+                        continue;
                     }
-                    PassageSource::Note => note_passages.push(p),
+                    let lines = if must {
+                        (0..p.segments.len()).collect()
+                    } else {
+                        clip(&p.segments, &terms, b.passage_clip_chars)
+                    };
+                    excerpts.push(Excerpt {
+                        meeting_id: mid,
+                        title: p.title.clone(),
+                        started_at: p.started_at,
+                        segments: p.segments,
+                        lines,
+                        must,
+                    });
                 }
+                PassageSource::Note if note_allowed(&p) => note_passages.push(p),
+                PassageSource::Note => {}
             }
         }
     }
 
-    // Fit to the budget in rank order.
+    // Fit to the budget in rank order (the plain top passages always fit:
+    // they're what retrieval alone would have shown).
     let mut used = 0usize;
     let mut kept: Vec<Excerpt> = Vec::new();
     for e in excerpts {
         let c = excerpt_chars(&e);
-        if used + c > b.context_chars && !kept.is_empty() {
+        if !e.must && used + c > b.context_chars && !kept.is_empty() {
             continue;
         }
         used += c;
@@ -548,6 +607,9 @@ pub fn prefetch(
         }
     }
 
+    // Best-ranked meeting last, next to the question (and furthest from a
+    // server that trims an oversized prompt from the front).
+    by_meeting.reverse();
     let mut transcript_text = String::new();
     let mut shown: Vec<SegmentInfo> = Vec::new();
     for (_, mut group) in by_meeting {
@@ -590,9 +652,11 @@ pub fn prefetch(
     let narrow = !r.wide;
     if input.hints.items.is_some() || narrow {
         let intent = input.hints.items;
-        let item_scope = r
-            .meeting_ids
-            .clone()
+        // Items of the scope's meetings (a folder too), when that fits one
+        // query; otherwise everything visible, filtered to the scope below.
+        let scope_meetings: Vec<String> = r.meetings.iter().map(|m| m.id.clone()).collect();
+        let item_scope = (r.kind != crate::scope::ScopeKind::All)
+            .then_some(scope_meetings)
             .filter(|ids| !ids.is_empty() && ids.len() <= fly_context::tools::MAX_MEETING_IDS);
         let owner = intent
             .and(input.hints.people.first().cloned())

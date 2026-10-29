@@ -91,8 +91,35 @@ fn tidy_spaces(s: &str) -> String {
 
 /// Neutralize marker syntax inside meeting content before it's shown to a
 /// model, so speech can't plant a citation (`[seg:x]` → `[seg-x]`).
+///
+/// Any `[` followed by `seg` and `:` — any case, any spacing — loses its
+/// bracket, a superset of what [`take_markers`] parses.
 pub fn defuse_markers(text: &str) -> String {
-    text.replace("[seg:", "[seg-").replace("[SEG:", "[SEG-")
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '[' && looks_like_marker(&chars[i + 1..]) {
+            out.push('(');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn looks_like_marker(rest: &[char]) -> bool {
+    let mut it = rest
+        .iter()
+        .copied()
+        .skip_while(|c| c.is_whitespace())
+        .peekable();
+    for want in ['s', 'e', 'g'] {
+        match it.next() {
+            Some(c) if c.eq_ignore_ascii_case(&want) => {}
+            _ => return false,
+        }
+    }
+    it.find(|c| !c.is_whitespace()) == Some(':')
 }
 
 /// Remove `<think>…</think>` (and an unterminated trailing one) — some
@@ -126,8 +153,7 @@ pub fn strip_links(text: &str) -> (String, usize) {
     let mut removed = 0;
     let mut s = text.to_string();
     // [label](target) and ![alt](target)
-    loop {
-        let Some(i) = s.find("](") else { break };
+    while let Some(i) = s.find("](") {
         let open = s[..i].rfind('[');
         let close = s[i..].find(')').map(|j| i + j + 1);
         let (Some(open), Some(close)) = (open, close) else {
@@ -439,7 +465,17 @@ mod tests {
 
     #[test]
     fn defused_content_has_no_markers() {
-        let (_, ids) = take_markers(&defuse_markers("say [seg:m10-07] now"));
-        assert!(ids.is_empty());
+        for planted in [
+            "say [seg:m10-07] now",
+            "say [ seg:m10-07] now",
+            "say [SEG:m10-07] now",
+            "say [Seg :m10-07] now",
+            "say [\tseg: m10-07, seg:m10-08] now",
+        ] {
+            let (_, ids) = take_markers(&defuse_markers(planted));
+            assert!(ids.is_empty(), "{planted}");
+        }
+        // Ordinary brackets survive.
+        assert_eq!(defuse_markers("[1] and [segment]"), "[1] and [segment]");
     }
 }

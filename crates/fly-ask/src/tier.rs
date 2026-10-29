@@ -25,6 +25,22 @@ pub enum Tier {
     C,
 }
 
+/// The externally declared part of a budget (what the evals gate and the
+/// spec states): model calls, tool rounds, input tokens. Tokens are
+/// estimated as characters / 4 per content block (see
+/// [`crate::provider::request_tokens`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Limits {
+    /// Requests sent, retries included.
+    pub model_calls: u32,
+    /// Model replies that asked for a tool (0 = no tools offered).
+    pub tool_rounds: u32,
+    /// Summed over every request; `None` = only the per-request cap.
+    pub input_tokens: Option<u32>,
+    /// The largest single request.
+    pub request_tokens: u32,
+}
+
 /// Declared limits for one answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Budget {
@@ -35,7 +51,9 @@ pub struct Budget {
     /// Every model call: tool turns, the answer, a retry, a re-query.
     pub max_model_calls: u32,
     /// Estimated input tokens summed over every model call.
-    pub max_input_tokens: u32,
+    pub max_input_tokens: Option<u32>,
+    /// Estimated tokens of the largest single request.
+    pub max_request_tokens: u32,
     /// Transcript excerpts in the prefetch, in chars.
     pub context_chars: usize,
     /// Extracted items in the prefetch, in chars.
@@ -55,60 +73,83 @@ pub struct Budget {
 }
 
 impl Tier {
-    pub fn budget(self) -> Budget {
+    /// The spec's limits for this tier (spec §4.2 step 3).
+    pub fn limits(self) -> Limits {
         match self {
-            Tier::S => Budget {
-                max_tool_calls: 0,
-                max_rounds: 0,
-                max_model_calls: 2,
-                max_input_tokens: 12_000,
-                context_chars: 9_000,
-                item_chars: 1_500,
-                note_chars: 1_000,
-                passage_clip_chars: 900,
-                max_note_passages: 1,
-                observation_chars: 0,
-                max_output_tokens: 1_024,
+            // No tools; the answer plus one retry.
+            Tier::S => Limits {
+                model_calls: 2,
+                tool_rounds: 0,
+                input_tokens: None,
+                request_tokens: 6_000,
             },
-            Tier::M => Budget {
-                max_tool_calls: 3,
-                max_rounds: 2,
-                max_model_calls: 5,
-                max_input_tokens: 32_000,
-                context_chars: 12_000,
-                item_chars: 2_000,
-                note_chars: 1_500,
-                passage_clip_chars: 1_100,
-                max_note_passages: 1,
-                observation_chars: 4_000,
-                max_output_tokens: 1_536,
+            Tier::M => Limits {
+                model_calls: 3,
+                tool_rounds: 2,
+                input_tokens: None,
+                request_tokens: 12_000,
             },
-            Tier::C => Budget {
-                max_tool_calls: 8,
-                max_rounds: 5,
-                max_model_calls: 8,
-                max_input_tokens: 40_000,
-                context_chars: 15_000,
-                item_chars: 3_000,
-                note_chars: 2_500,
-                passage_clip_chars: 1_500,
-                max_note_passages: 2,
-                observation_chars: 6_000,
-                max_output_tokens: 4_096,
+            Tier::C => Limits {
+                model_calls: 8,
+                tool_rounds: 5,
+                input_tokens: Some(40_000),
+                request_tokens: 40_000,
             },
+        }
+    }
+
+    pub fn budget(self) -> Budget {
+        self.budget_with(self.limits())
+    }
+
+    /// This tier's prompt sizing under externally declared limits.
+    pub fn budget_with(self, l: Limits) -> Budget {
+        let (max_tool_calls, context_chars, item_chars, note_chars, clip, notes, obs, out) =
+            match self {
+                Tier::S => (0, 17_000, 1_500, 1_000, 600, 1, 0, 1_024),
+                Tier::M => (3, 18_000, 2_000, 1_500, 800, 1, 4_000, 1_536),
+                Tier::C => (8, 18_000, 3_000, 2_500, 1_000, 2, 6_000, 4_096),
+            };
+        // Whatever a tier would like, a request must fit its cap. Room is kept
+        // for the system prompt, tools, items, notes, history, a retry and
+        // (tool tiers) every observation the rounds can add.
+        let reserve = 10_000 + l.tool_rounds as usize * obs;
+        let cap_chars = (l.request_tokens as usize * 4).saturating_sub(reserve);
+        Budget {
+            max_tool_calls: if l.tool_rounds == 0 {
+                0
+            } else {
+                max_tool_calls
+            },
+            max_rounds: l.tool_rounds,
+            max_model_calls: l.model_calls,
+            max_input_tokens: l.input_tokens,
+            max_request_tokens: l.request_tokens,
+            context_chars: context_chars.min(cap_chars),
+            item_chars,
+            note_chars,
+            passage_clip_chars: clip,
+            max_note_passages: notes,
+            observation_chars: obs,
+            max_output_tokens: out,
         }
     }
 
     pub fn uses_tools(self) -> bool {
         self != Tier::S
     }
+}
 
-    pub fn loop_limits(self) -> ToolLoopLimits {
-        let b = self.budget();
+impl Budget {
+    pub fn uses_tools(&self) -> bool {
+        self.max_rounds > 0 && self.max_tool_calls > 0
+    }
+
+    pub fn loop_limits(&self) -> ToolLoopLimits {
         ToolLoopLimits {
-            max_calls: b.max_tool_calls,
-            max_rounds: b.max_rounds,
-            max_observation_chars: b.observation_chars,
+            max_calls: self.max_tool_calls,
+            max_rounds: self.max_rounds,
+            max_observation_chars: self.observation_chars,
         }
     }
 }
@@ -297,13 +338,24 @@ mod tests {
     fn budgets_match_the_spec() {
         let s = Tier::S.budget();
         assert_eq!((s.max_tool_calls, s.max_model_calls), (0, 2));
+        assert!(!s.uses_tools());
         let m = Tier::M.budget();
-        assert_eq!((m.max_tool_calls, m.max_rounds), (3, 2));
+        assert_eq!(
+            (m.max_tool_calls, m.max_rounds, m.max_model_calls),
+            (3, 2, 3)
+        );
         let c = Tier::C.budget();
         assert_eq!(
             (c.max_tool_calls, c.max_rounds, c.max_input_tokens),
-            (8, 5, 40_000)
+            (8, 5, Some(40_000))
         );
+        // A smaller declared cap shrinks the prefetch to fit it.
+        let tight = Tier::S.budget_with(Limits {
+            request_tokens: 4_000,
+            ..Tier::S.limits()
+        });
+        assert_eq!(tight.context_chars, 6_000);
+        assert_eq!(Tier::S.budget().context_chars, 14_000);
     }
 
     #[tokio::test]

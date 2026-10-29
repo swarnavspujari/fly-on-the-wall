@@ -63,6 +63,9 @@ pub enum RetryReason {
     Empty,
     /// The model said "not found" but a fresh search found more (M/C).
     Requery,
+    /// A transient provider error (network, busy server): the same request
+    /// once more.
+    ProviderError,
 }
 
 pub fn retry(reason: RetryReason, extra_context: Option<&str>) -> String {
@@ -73,6 +76,7 @@ pub fn retry(reason: RetryReason, extra_context: Option<&str>) -> String {
         RetryReason::Empty => format!(
             "Your reply was empty. Answer the question from the excerpts, ending every sentence with its [seg:ID] marker, or reply exactly: {NOT_FOUND_REPLY}"
         ),
+        RetryReason::ProviderError => String::new(),
         RetryReason::Requery => format!(
             "Before concluding it isn't there, here are more excerpts from a second search:\n{}\nAnswer from all the excerpts, ending every sentence with its [seg:ID] marker, or reply exactly: {NOT_FOUND_REPLY}",
             extra_context.unwrap_or("")

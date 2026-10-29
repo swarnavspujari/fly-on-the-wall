@@ -10,19 +10,20 @@
 //!    meetings, and the user's trace counts how many weren't searched.
 //! 2. **Route** ([`router`]): dates, people, a folder and list intents
 //!    pulled from the question and validated against known values.
-//! 3. **Prefetch** ([`prefetch`]): fly-context passages (deep pool, notes
-//!    demoted, clipped), extracted items and the user's notes, as
-//!    `[seg:ID]` lines sized to the tier.
+//! 3. **Prefetch** ([`prefetch`]): fly-context passages (the plain top 8
+//!    whole, a deeper pool clipped, notes demoted), extracted items and the
+//!    user's notes, as `[seg:ID]` lines sized to the tier.
 //! 4. **Floor**: a wide-scope question whose topic words aren't in what was
 //!    found is "not found" without a model call.
-//! 5. **Synthesize** (streamed): tier S writes from the prefetch alone;
-//!    tiers M/C may call the read tools and propose changes, inside
-//!    budgets ([`tier`], fly-llm's tool loop, [`provider::Metered`]).
+//! 5. **Synthesize**, streamed as sanitized frames: tier S writes from the
+//!    prefetch alone; tiers M/C may call the read tools and propose
+//!    changes, inside budgets ([`tier`], fly-llm's tool loop,
+//!    [`provider::Metered`]).
 //! 6. **Validate** ([`validate`], [`claims`]): only shown ids count;
 //!    unsourced and flagged sentences; numbers, dates, names and quotes
 //!    checked; links removed. Zero valid citations → one retry → otherwise
-//!    shown fully flagged. An empty reply is a model failure, not "not
-//!    found".
+//!    shown fully flagged. An empty or truncated reply is a model failure,
+//!    not "not found".
 //! 7. **Proposals** ([`proposals`]): validated, returned, never executed.
 //! 8. **Run log** ([`runlog`]): typed and allowlisted, returned for the app
 //!    to persist.
@@ -30,13 +31,17 @@
 //! The harness never constructs a provider, reads a secret or writes to
 //! storage.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use fly_context::Visibility;
-use fly_llm::tool_loop::{run_tool_loop_async, LoopEnd};
-use fly_llm::{ContentBlock, ConverseRequest, LLMProvider, LlmError, Message, Role, ThinkingMode};
+use fly_llm::tool_loop::{run_tool_loop_async, LoopEnd, ToolCallRecord};
+use fly_llm::{
+    ContentBlock, ConverseRequest, LLMProvider, LlmError, Message, StopReason, ThinkingMode,
+    ToolChoice,
+};
 use serde::{Deserialize, Serialize};
 
 pub mod agent;
@@ -56,12 +61,12 @@ pub mod tier;
 pub mod validate;
 
 pub use events::{AskEvent, EventSink, Stage};
-pub use evidence::SegmentInfo;
+pub use evidence::{SegmentInfo, SourceLine, SourceView};
 pub use proposals::{Proposal, ProposalRefusal, ProposalTool};
 pub use runlog::{AnswerStatus, FailureKind, RunLog};
 pub use scope::{AskScope, ScopeKind};
 pub use store::StoreAccess;
-pub use tier::{measure_tier, tool_smoke, Tier, TierInputs};
+pub use tier::{measure_tier, tool_smoke, Limits, Tier, TierInputs};
 pub use validate::{AnswerSentence, Flag, FlagKind, SentenceStatus};
 
 use prefetch::{PrefetchInput, QueryEmbedding};
@@ -73,34 +78,46 @@ use runlog::{FloorLog, Reach, RouterLog, Stop, ToolCallLog, ToolName};
 /// found" without asking the model.
 pub const FLOOR_COVERAGE: f64 = 0.34;
 /// Earlier chat turns sent with a question.
-const HISTORY_TURNS: usize = 6;
-const HISTORY_TURN_CHARS: usize = 1_200;
+const HISTORY_TURNS: usize = 3;
+const HISTORY_TURN_CHARS: usize = 600;
 
-/// Embeds a question for semantic search. The app's embeds through the
-/// local Ollama (`embeddinggemma`); `None` = semantic search off.
-#[async_trait::async_trait]
-pub trait QueryEmbedder: Send + Sync {
+/// Embeds a question for semantic search (the app's embeds through the
+/// local Ollama). Takes the raw query; applies its own query prompt.
+/// `None` = no vector this time (search falls back to keywords).
+pub trait QueryEmbedder {
     /// The model id stored on chunks (e.g. `embeddinggemma:300m`).
     fn model(&self) -> &str;
-    async fn embed(&self, text: &str) -> Option<Vec<f32>>;
+    fn embed(&self, text: &str) -> impl Future<Output = Option<Vec<f32>>>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnRole {
-    User,
-    Assistant,
+/// Keyword search only.
+pub struct NoEmbedder;
+
+impl QueryEmbedder for NoEmbedder {
+    fn model(&self) -> &str {
+        ""
+    }
+    async fn embed(&self, _: &str) -> Option<Vec<f32>> {
+        None
+    }
 }
 
-/// One earlier chat turn (the answer's display text for the assistant).
+/// An earlier turn of this chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
-    pub role: TurnRole,
-    pub text: String,
+    pub question: String,
+    /// The answer as displayed.
+    pub answer: String,
+    /// The segment ids it cited.
+    #[serde(default)]
+    pub citations: Vec<String>,
+    /// It ran on this device, so its answer may hold Keep-local content: it
+    /// is never sent to a provider that isn't on this device.
+    pub on_device: bool,
 }
 
 /// Who answers, and with what.
-pub struct AskEnv<'a, S> {
+pub struct AskEnv<'a, S, E> {
     pub store: &'a S,
     /// Built by the app's `build_provider` (consent and Keep local already
     /// enforced there).
@@ -111,7 +128,9 @@ pub struct AskEnv<'a, S> {
     pub on_device: bool,
     /// Measured with [`measure_tier`] (the evals pin it).
     pub tier: Tier,
-    pub embedder: Option<&'a dyn QueryEmbedder>,
+    /// Declared limits; `None` = the tier's own ([`Tier::limits`]).
+    pub limits: Option<Limits>,
+    pub embedder: Option<&'a E>,
     pub events: Option<EventSink<'a>>,
     pub cancel: Option<&'a AtomicBool>,
 }
@@ -119,15 +138,15 @@ pub struct AskEnv<'a, S> {
 /// The question.
 pub struct AskInput<'a> {
     pub question: &'a str,
-    /// Earlier turns of this chat, oldest first (not including `question`).
+    /// Earlier turns of this chat, oldest first.
     pub history: &'a [Turn],
     pub scope: AskScope,
     /// The clock for "last week".
     pub now: DateTime<Utc>,
 }
 
-/// What the user's trace shows (not the run log: this may be richer).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// What the user's trace shows (not the run log).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Trace {
     pub tier: Option<Tier>,
     pub scope: Option<ScopeKind>,
@@ -146,6 +165,62 @@ pub struct Trace {
     pub budget_forced: bool,
 }
 
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+impl Trace {
+    /// The trace as shown, one step per line.
+    pub fn lines(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if let Some(scope) = self.scope {
+            v.push(match scope {
+                ScopeKind::Meeting | ScopeKind::Note => "Searched this meeting".to_string(),
+                _ => format!(
+                    "Searched {}",
+                    plural(self.meetings_in_scope, "meeting", "meetings")
+                ),
+            });
+        }
+        if self.kept_local_not_searched > 0 {
+            v.push(format!(
+                "{} not searched",
+                plural(
+                    self.kept_local_not_searched,
+                    "kept-local meeting",
+                    "kept-local meetings"
+                )
+            ));
+        }
+        if self.passages > 0 || self.items > 0 {
+            v.push(format!(
+                "Read {} and {}",
+                plural(self.passages as usize, "passage", "passages"),
+                plural(self.items as usize, "extracted item", "extracted items")
+            ));
+        }
+        if !self.tool_calls.is_empty() {
+            v.push(format!(
+                "Looked further {}",
+                plural(self.tool_calls.len(), "time", "times")
+            ));
+        }
+        if self.floor_not_found {
+            v.push("Nothing in your meetings matched the question".into());
+        }
+        if self.retried {
+            v.push("Asked the model again".into());
+        }
+        if self.budget_forced {
+            v.push("Stopped looking to stay within the answer's budget".into());
+        }
+        if self.context_truncated {
+            v.push("The model may not have read every excerpt".into());
+        }
+        v
+    }
+}
+
 /// A model failure as the user sees it. `message` may quote the provider's
 /// error (shown in the UI only; never logged).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,18 +229,27 @@ pub struct Failure {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Timing {
+    pub first_token_ms: Option<u64>,
+    pub total_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct AskAnswer {
     pub status: AnswerStatus,
-    /// Display Markdown for a plain renderer (markers removed).
+    /// Display Markdown for a plain renderer (markers and links removed).
     pub text: String,
     pub sentences: Vec<AnswerSentence>,
-    /// The lines the answer cites, first-cited first.
-    pub sources: Vec<SegmentInfo>,
+    /// The meetings and lines the answer cites, first-cited first.
+    pub sources: Vec<SourceView>,
     pub proposals: Vec<Proposal>,
     pub refusals: Vec<ProposalRefusal>,
     pub trace: Trace,
     pub failure: Option<Failure>,
+    pub timing: Timing,
+    /// Where the answering model ran (the next turn's `Turn::on_device`).
+    pub on_device: bool,
     pub run_log: RunLog,
 }
 
@@ -175,8 +259,8 @@ impl AskAnswer {
     }
 }
 
-fn reach(env_on_device: bool, provider: &dyn LLMProvider) -> Reach {
-    if env_on_device {
+fn reach(on_device: bool, provider: &dyn LLMProvider) -> Reach {
+    if on_device {
         Reach::OnDevice
     } else if provider.is_local() {
         Reach::LocalRemote
@@ -197,47 +281,64 @@ fn join(sentences: &[AnswerSentence]) -> String {
     out
 }
 
-fn stop_of(r: fly_llm::StopReason) -> Stop {
+fn stop_of(r: StopReason) -> Stop {
     match r {
-        fly_llm::StopReason::EndTurn => Stop::EndTurn,
-        fly_llm::StopReason::ToolUse => Stop::ToolUse,
-        fly_llm::StopReason::MaxTokens => Stop::MaxTokens,
+        StopReason::EndTurn => Stop::EndTurn,
+        StopReason::ToolUse => Stop::ToolUse,
+        StopReason::MaxTokens => Stop::MaxTokens,
     }
 }
 
-fn failure_message(e: &LlmError) -> String {
-    match e {
-        LlmError::ToolProtocol(_) => "The model's tool calls couldn't be understood, so there's no answer. Try again, or switch to another model.".into(),
-        e if provider::is_over_budget(e) => "Ask used up its model-call budget before the model answered.".into(),
-        e => e.to_string(),
-    }
+fn failure_of(e: &LlmError) -> Failure {
+    let kind = FailureKind::from_error(e);
+    let message = match kind {
+        FailureKind::ToolProtocol => "The model's tool calls couldn't be understood, so there's no answer. Try again, or switch to another model.".into(),
+        FailureKind::BudgetExhausted => "Ask used up its budget before the model answered.".into(),
+        _ => e.to_string(),
+    };
+    Failure { kind, message }
 }
 
-struct Run<'a> {
+struct Run {
     log: RunLog,
     trace: Trace,
     started: Instant,
     on_device: bool,
-    _marker: std::marker::PhantomData<&'a ()>,
 }
 
-impl Run<'_> {
-    fn done(
-        mut self,
-        status: AnswerStatus,
-        sentences: Vec<AnswerSentence>,
-        sources: Vec<SegmentInfo>,
-        proposals: Vec<Proposal>,
-        refusals: Vec<ProposalRefusal>,
-        failure: Option<Failure>,
-    ) -> AskAnswer {
-        self.log.status = status;
-        self.log.failure = failure.as_ref().map(|f| f.kind);
+struct Outcome {
+    status: AnswerStatus,
+    sentences: Vec<AnswerSentence>,
+    sources: Vec<SourceView>,
+    proposals: Vec<Proposal>,
+    refusals: Vec<ProposalRefusal>,
+    failure: Option<Failure>,
+    cited: Vec<String>,
+}
+
+impl Outcome {
+    fn bare(status: AnswerStatus, failure: Option<Failure>) -> Self {
+        Outcome {
+            status,
+            sentences: vec![],
+            sources: vec![],
+            proposals: vec![],
+            refusals: vec![],
+            failure,
+            cited: vec![],
+        }
+    }
+}
+
+impl Run {
+    fn done(mut self, o: Outcome) -> AskAnswer {
+        self.log.status = o.status;
+        self.log.failure = o.failure.as_ref().map(|f| f.kind);
         self.log.timings.total_ms = self.started.elapsed().as_millis() as u64;
-        self.log.proposals = proposals.len() as u32;
-        self.log.proposal_refusals = refusals.iter().map(|r| r.reason).collect();
-        self.log.cited_segment_ids = sources.iter().map(|s| s.id.clone()).collect();
-        let text = match status {
+        self.log.proposals = o.proposals.len() as u32;
+        self.log.proposal_refusals = o.refusals.iter().map(|r| r.reason).collect();
+        self.log.cited_segment_ids = o.cited;
+        let text = match o.status {
             AnswerStatus::NotFound => {
                 let mut t = prompt::NOT_FOUND_REPLY.to_string();
                 let n = self.trace.kept_local_not_searched;
@@ -250,80 +351,105 @@ impl Run<'_> {
                 t
             }
             AnswerStatus::Refused => match self.log.scope_refusal {
-                Some(scope::ScopeRefusal::KeepLocal) => {
-                    "This is marked Keep local, so it isn't sent to a model that runs off this computer.".into()
-                }
+                Some(scope::ScopeRefusal::KeepLocal) => "This is marked Keep local, so it isn't sent to a model that runs off this computer.".into(),
                 _ => "There's nothing to search here.".into(),
             },
-            AnswerStatus::Cancelled => String::new(),
-            AnswerStatus::ModelFailed => String::new(),
-            AnswerStatus::Answered | AnswerStatus::Unverified => join(&sentences),
+            AnswerStatus::Cancelled | AnswerStatus::ModelFailed => String::new(),
+            AnswerStatus::Answered | AnswerStatus::Unverified => join(&o.sentences),
         };
         AskAnswer {
-            status,
+            status: o.status,
             text,
-            sentences,
-            sources,
-            proposals,
-            refusals,
+            sentences: o.sentences,
+            sources: o.sources,
+            proposals: o.proposals,
+            refusals: o.refusals,
+            timing: Timing {
+                first_token_ms: self.log.timings.first_token_ms,
+                total_ms: self.log.timings.total_ms,
+            },
             trace: self.trace,
-            failure,
+            failure: o.failure,
+            on_device: self.on_device,
             run_log: self.log,
         }
     }
 }
 
-/// Earlier turns to send: alternating, starting with a user turn, the
-/// newest `HISTORY_TURNS`. Assistant turns only when they can't carry
-/// content this provider may not see (on device, or a narrow scope that
-/// `build_provider` already cleared).
-fn history_messages(history: &[Turn], with_answers: bool) -> (Vec<Message>, Vec<String>) {
+/// Earlier turns to send, as alternating user/assistant messages: the
+/// newest few, never one that ran on this device when this provider isn't
+/// on this device (its answer — or even its question — may hold Keep-local
+/// content).
+fn history_messages(history: &[Turn], on_device: bool) -> Vec<Message> {
     let clip = |t: &str| prefetch::truncate(t.trim(), HISTORY_TURN_CHARS);
-    let turns: Vec<&Turn> = history
+    let allowed: Vec<&Turn> = history
         .iter()
-        .filter(|t| !t.text.trim().is_empty())
+        .filter(|t| on_device || !t.on_device)
+        .filter(|t| !t.question.trim().is_empty() && !t.answer.trim().is_empty())
         .collect();
-    if !with_answers {
-        let users: Vec<&&Turn> = turns.iter().filter(|t| t.role == TurnRole::User).collect();
-        let skip = users.len().saturating_sub(3);
-        let qs: Vec<String> = users
-            .into_iter()
-            .skip(skip)
-            .map(|t| clip(&t.text))
-            .collect();
-        return (vec![], qs);
+    let skip = allowed.len().saturating_sub(HISTORY_TURNS);
+    let mut out = Vec::new();
+    for t in allowed.into_iter().skip(skip) {
+        let (answer, _) = text::take_markers(&t.answer);
+        out.push(Message::user(evidence::safe(&clip(&t.question))));
+        out.push(Message::assistant(evidence::safe(&clip(&answer))));
     }
-    let skip = turns.len().saturating_sub(HISTORY_TURNS);
-    let mut msgs: Vec<Message> = Vec::new();
-    for t in turns.into_iter().skip(skip) {
-        let role = match t.role {
-            TurnRole::User => Role::User,
-            TurnRole::Assistant => Role::Assistant,
-        };
-        if msgs.is_empty() && role != Role::User {
-            continue;
-        }
-        if msgs.last().is_some_and(|m| m.role == role) {
-            continue; // keep strict alternation
-        }
-        msgs.push(Message::new(
-            role,
-            vec![ContentBlock::text(evidence::safe(&clip(&t.text)))],
-        ));
+    out
+}
+
+/// What one synthesis phase produced.
+struct Phase {
+    text: String,
+    convo: Vec<Message>,
+    rounds: u32,
+    calls: Vec<ToolCallRecord>,
+    end: Option<LoopEnd>,
+}
+
+async fn synthesize<S: StoreAccess, E: QueryEmbedder>(
+    metered: &Metered<'_>,
+    req: &ConverseRequest,
+    budget: tier::Budget,
+    state: &agent::ToolState<'_, S, E>,
+) -> Result<Phase, LlmError> {
+    if budget.uses_tools() && req.has_tools() {
+        let out = run_tool_loop_async(
+            metered,
+            req.clone(),
+            budget.loop_limits(),
+            |name, args| async move { state.call(name, args).await },
+        )
+        .await?;
+        return Ok(Phase {
+            text: out.answer,
+            convo: out.messages,
+            rounds: out.rounds,
+            calls: out.calls,
+            end: Some(out.end),
+        });
     }
-    // The question follows as a user turn, so history must end on an answer.
-    if msgs.last().is_some_and(|m| m.role == Role::User) {
-        msgs.pop();
-    }
-    (msgs, vec![])
+    let r = metered.converse(req.clone()).await?;
+    let text = r.text();
+    let mut convo = req.messages.clone();
+    convo.push(Message::assistant(text.clone()));
+    Ok(Phase {
+        text,
+        convo,
+        rounds: 0,
+        calls: vec![],
+        end: None,
+    })
 }
 
 /// Answer one question. Never panics on model output; a model or storage
 /// failure is an [`AnswerStatus`], not an `Err`.
-pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> AskAnswer {
+pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
+    env: AskEnv<'_, S, E>,
+    input: AskInput<'_>,
+) -> AskAnswer {
     let started = Instant::now();
     let tier = env.tier;
-    let budget = tier.budget();
+    let budget = tier.budget_with(env.limits.unwrap_or(tier.limits()));
     let vis = if env.on_device {
         Visibility::All
     } else {
@@ -343,10 +469,8 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
         },
         started,
         on_device: env.on_device,
-        _marker: std::marker::PhantomData,
     };
     run.log.history_turns = input.history.len() as u32;
-    let none = || (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let cancelled = || env.cancel.is_some_and(|c| c.load(Ordering::Relaxed));
 
     // 1. Scope.
@@ -363,8 +487,7 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
         Ok(r) => r,
         Err(refusal) => {
             run.log.scope_refusal = Some(refusal);
-            let (a, b, c, d) = none();
-            return run.done(AnswerStatus::Refused, a, b, c, d, None);
+            return run.done(Outcome::bare(AnswerStatus::Refused, None));
         }
     };
     run.log.scope = resolved.kind;
@@ -387,15 +510,21 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
         }),
     };
     let salient = prefetch::salient_terms(input.question);
-    let prev_question = input
+    // A short follow-up searches with the previous question too (a local
+    // search; the previous question itself is only sent if its turn is).
+    let follow_up = input
         .history
         .iter()
         .rev()
-        .find(|t| t.role == TurnRole::User && !t.text.trim().is_empty())
-        .map(|t| t.text.trim().to_string());
-    let follow_up = prev_question
+        .find(|t| !t.question.trim().is_empty())
         .filter(|_| salient.len() < 3)
-        .map(|p| format!("{} {}", prefetch::truncate(&p, 300), input.question));
+        .map(|t| {
+            format!(
+                "{} {}",
+                prefetch::truncate(t.question.trim(), 300),
+                input.question
+            )
+        });
 
     // 3. Embed the queries (outside any storage lock).
     events::emit(
@@ -420,12 +549,12 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
     }
     run.log.timings.embed_ms = t.elapsed().as_millis() as u64;
     if cancelled() {
-        let (a, b, c, d) = none();
-        return run.done(AnswerStatus::Cancelled, a, b, c, d, None);
+        return run.done(Outcome::bare(AnswerStatus::Cancelled, None));
     }
 
     // 4. Prefetch.
     let t = Instant::now();
+    let embed_model = env.embedder.map(|e| e.model().to_string());
     let pf = env.store.with(|s| {
         prefetch::prefetch(
             s,
@@ -436,7 +565,7 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
                 hints: &hints,
                 budget,
                 embeddings: &embeddings,
-                embed_model: env.embedder.map(|e| e.model()),
+                embed_model: embed_model.as_deref(),
             },
         )
     });
@@ -444,18 +573,13 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
     let pf = match pf {
         Ok(p) => p,
         Err(_) => {
-            let (a, b, c, d) = none();
-            return run.done(
+            return run.done(Outcome::bare(
                 AnswerStatus::ModelFailed,
-                a,
-                b,
-                c,
-                d,
                 Some(Failure {
                     kind: FailureKind::Storage,
                     message: "Couldn't read your meetings to answer that.".into(),
                 }),
-            );
+            ))
         }
     };
     run.log.prefetch = pf.stats.clone();
@@ -464,12 +588,7 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
     events::emit(
         env.events,
         AskEvent::Sources {
-            sources: pf
-                .evidence
-                .ids()
-                .iter()
-                .filter_map(|id| pf.evidence.get(id).cloned())
-                .collect(),
+            sources: evidence::source_views(&pf.evidence, pf.evidence.ids()),
             kept_local_not_searched: resolved.kept_local_excluded,
         },
     );
@@ -486,8 +605,7 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
     };
     if !passed {
         run.trace.floor_not_found = true;
-        let (a, b, c, d) = none();
-        return run.done(AnswerStatus::NotFound, a, b, c, d, None);
+        return run.done(Outcome::bare(AnswerStatus::NotFound, None));
     }
 
     // 6. Synthesize.
@@ -497,35 +615,26 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
             stage: Stage::Answering,
         },
     );
-    let metered = Metered::new(
-        env.provider,
-        env.events,
-        env.cancel,
-        budget.max_model_calls,
-        budget.max_input_tokens,
-        started,
-    );
+    let metered = Metered::new(env.provider, env.events, env.cancel, budget, started);
     let local_model = env.provider.is_local();
     let profile = fly_core::prompt_profile::profile_for(env.provider.model());
-    let with_answers = env.on_device || !resolved.wide;
-    let (history, earlier) = history_messages(input.history, with_answers);
+    let uses_tools = budget.uses_tools() && tier.uses_tools();
     let mut messages = vec![Message::system(
         profile.apply_preamble(prompt::system(tier)),
     )];
-    messages.extend(history);
+    messages.extend(history_messages(input.history, env.on_device));
     messages.push(Message::user(prompt::user(
         &pf.context,
-        &earlier,
+        &[],
         input.question,
     )));
-    let tools = if tier.uses_tools() {
-        agent::tool_specs(&env.provider.capabilities())
-    } else {
-        vec![]
-    };
     let req = ConverseRequest {
         messages,
-        tools,
+        tools: if uses_tools {
+            agent::tool_specs(&env.provider.capabilities())
+        } else {
+            vec![]
+        },
         temperature: Some(0.2),
         max_tokens: Some(if local_model {
             budget.max_output_tokens
@@ -542,7 +651,6 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
         effort: profile.effort.ask.map(String::from),
         ..Default::default()
     };
-
     let state = agent::ToolState::new(
         env.store,
         &resolved,
@@ -552,71 +660,40 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
         input.now,
         pf.evidence.clone(),
     );
-    // (answer text, the conversation so far for a retry)
-    let first: Result<(String, Vec<Message>), LlmError> = if tier.uses_tools() {
-        let st = &state;
-        let out = run_tool_loop_async(
-            &metered,
-            req.clone(),
-            tier.loop_limits(),
-            move |name, args| async move { st.call(name, args).await },
-        )
-        .await;
-        match out {
-            Ok(o) => {
-                run.log.rounds = o.rounds;
-                run.log.tool_calls = o
-                    .calls
-                    .iter()
-                    .map(|c| ToolCallLog {
-                        tool: ToolName::from_name(&c.name),
-                        ok: c.ok,
-                    })
-                    .collect();
-                match o.end {
-                    LoopEnd::CallBudget => run.log.stops.push(Stop::CallBudget),
-                    LoopEnd::RoundBudget => run.log.stops.push(Stop::RoundBudget),
-                    LoopEnd::MaxTokens => run.log.stops.push(Stop::MaxTokens),
-                    LoopEnd::Done => {}
-                }
-                Ok((o.answer, o.messages))
-            }
-            Err(e) => {
-                if matches!(e, LlmError::ToolProtocol(_)) {
-                    run.log.stops.push(Stop::ToolProtocol);
-                }
-                Err(e)
-            }
-        }
-    } else {
-        metered.converse(req.clone()).await.map(|r| {
-            let text = r.text();
-            let mut msgs = req.messages.clone();
-            msgs.push(Message::assistant(text.clone()));
-            (text, msgs)
-        })
-    };
 
-    let finish_meter = |run: &mut Run<'_>| {
+    let mut first = synthesize(&metered, &req, budget, &state).await;
+    // One bounded retry of a transient provider failure.
+    if let Err(e) = &first {
+        if provider::is_transient(e)
+            && !cancelled()
+            && metered.affords(provider::request_tokens(&req))
+        {
+            run.log.retries.push(RetryReason::ProviderError);
+            run.trace.retried = true;
+            first = synthesize(&metered, &req, budget, &state).await;
+        }
+    }
+
+    let finish_meter = |run: &mut Run| {
         let m = metered.meter();
         run.log.model_calls = m.calls;
-        run.log.input_tokens_est = m.est_input;
+        run.log.input_tokens_est = m.input_tokens;
         run.log.input_tokens = m.usage.input_tokens;
         run.log.output_tokens = m.usage.output_tokens;
         run.log.truncation_suspected = m.truncation_suspected;
         run.log.timings.first_token_ms = m.first_token_ms;
         run.log.timings.model_ms = m.model_ms;
-        run.log
-            .stops
-            .splice(0..0, m.stops.iter().map(|s| stop_of(*s)));
+        let mut stops: Vec<Stop> = m.stops.iter().map(|s| stop_of(*s)).collect();
+        stops.append(&mut run.log.stops);
         if m.budget_forced {
-            run.log.stops.push(Stop::TokenBudget);
+            stops.push(Stop::TokenBudget);
         }
+        run.log.stops = stops;
         run.trace.context_truncated = m.truncation_suspected;
         run.trace.budget_forced = m.budget_forced;
         run.trace.tool_calls = run.log.tool_calls.clone();
     };
-    let take_tool_results = |state: &agent::ToolState<'_, S>| {
+    let tool_results = |state: &agent::ToolState<'_, S, E>| {
         (
             state
                 .proposals
@@ -630,28 +707,42 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
                 .clone(),
         )
     };
+    let failed = |run: Run, state: &agent::ToolState<'_, S, E>, status, failure| {
+        let (proposals, refusals) = tool_results(state);
+        run.done(Outcome {
+            proposals,
+            refusals,
+            ..Outcome::bare(status, failure)
+        })
+    };
 
-    let (first_text, mut convo) = match first {
-        Ok(x) => x,
+    let phase = match first {
+        Ok(p) => p,
         Err(e) => {
-            finish_meter(&mut run);
-            let (props, refs) = take_tool_results(&state);
-            if provider::is_cancel(&e) || cancelled() {
-                return run.done(AnswerStatus::Cancelled, vec![], vec![], props, refs, None);
+            if matches!(e, LlmError::ToolProtocol(_)) {
+                run.log.stops.push(Stop::ToolProtocol);
             }
-            return run.done(
-                AnswerStatus::ModelFailed,
-                vec![],
-                vec![],
-                props,
-                refs,
-                Some(Failure {
-                    kind: FailureKind::from_error(&e),
-                    message: failure_message(&e),
-                }),
-            );
+            finish_meter(&mut run);
+            if provider::is_cancel(&e) || cancelled() {
+                return failed(run, &state, AnswerStatus::Cancelled, None);
+            }
+            return failed(run, &state, AnswerStatus::ModelFailed, Some(failure_of(&e)));
         }
     };
+    run.log.rounds = phase.rounds;
+    run.log.tool_calls = phase
+        .calls
+        .iter()
+        .map(|c| ToolCallLog {
+            tool: ToolName::from_name(&c.name),
+            ok: c.ok,
+        })
+        .collect();
+    match phase.end {
+        Some(LoopEnd::CallBudget) => run.log.stops.push(Stop::CallBudget),
+        Some(LoopEnd::RoundBudget) => run.log.stops.push(Stop::RoundBudget),
+        _ => {}
+    }
 
     // 7. Validate, retry once if needed.
     events::emit(
@@ -661,125 +752,135 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
         },
     );
     let t = Instant::now();
-    let evidence = state
+    let mut evidence = state
         .evidence
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone();
-    let mut v = validate::validate(&first_text, &evidence);
-    let mut evidence = evidence;
-    let retry_reason = if v.empty {
+    let last_stop = metered.meter().stops.last().copied();
+    let truncated =
+        last_stop == Some(StopReason::MaxTokens) || phase.end == Some(LoopEnd::MaxTokens);
+    let mut v = validate::validate(&phase.text, &evidence);
+    let retry_reason = if truncated {
+        None // the same budget would cut it off again
+    } else if v.empty {
         Some(RetryReason::Empty)
     } else if !v.refusal && !v.any_valid_citation() {
         Some(RetryReason::NoValidCitations)
-    } else if v.refusal && tier.uses_tools() && !state.searched.load(Ordering::Relaxed) {
+    } else if v.refusal && uses_tools && !state.searched.load(Ordering::Relaxed) {
         Some(RetryReason::Requery)
     } else {
         None
     };
     run.log.timings.validate_ms = t.elapsed().as_millis() as u64;
+    let mut truncated = truncated;
 
-    if let Some(reason) = retry_reason.filter(|_| metered.calls_left() > 0 && !cancelled()) {
-        // A re-query only helps if a second, keyword-led search finds lines
-        // the model hasn't seen.
+    if let Some(reason) = retry_reason.filter(|_| !cancelled()) {
+        // A re-query only helps if a second, keyword-led search finds
+        // lines the model hasn't seen.
         let extra = if reason == RetryReason::Requery {
-            requery(
-                &env,
-                &resolved,
-                &hints,
-                budget,
-                input.question,
-                &salient,
-                &evidence,
-            )
+            requery(&env, &resolved, &hints, budget, &salient, &evidence)
         } else {
             None
         };
-        let go = reason != RetryReason::Requery || extra.is_some();
-        if go {
-            if let Some((extra_ctx, extra_ev)) = &extra {
-                for id in extra_ev.ids() {
-                    if let Some(info) = extra_ev.get(id) {
-                        evidence.insert(info.clone());
-                    }
-                }
-                let _ = extra_ctx;
-            }
-            run.log.retries.push(reason);
-            run.trace.retried = true;
-            events::emit(
-                env.events,
-                AskEvent::Stage {
-                    stage: Stage::Retrying,
-                },
-            );
+        if reason != RetryReason::Requery || extra.is_some() {
+            let note = prompt::retry(reason, extra.as_ref().map(|(c, _)| c.as_str()));
             let mut retry_req = ConverseRequest {
-                tool_choice: fly_llm::ToolChoice::None,
+                tool_choice: ToolChoice::None,
                 ..req.clone()
             };
-            let note = prompt::retry(reason, extra.as_ref().map(|(c, _)| c.as_str()));
             if reason == RetryReason::Empty {
-                // Never send an empty assistant turn; ask again in the user turn.
+                // Never send an empty assistant turn: ask again in the user
+                // turn.
                 let mut msgs = req.messages.clone();
                 if let Some(last) = msgs.last_mut() {
                     last.content.push(ContentBlock::text(format!("\n\n{note}")));
                 }
                 retry_req.messages = msgs;
             } else {
+                let mut convo = phase.convo.clone();
                 convo.push(Message::user(note));
-                retry_req.messages = convo.clone();
+                retry_req.messages = convo;
             }
-            if !tier.uses_tools() {
+            if !uses_tools {
                 retry_req.tools.clear();
             }
-            match metered.converse(retry_req).await {
-                Ok(resp) => {
-                    let v2 = validate::validate(&resp.text(), &evidence);
-                    // Keep the retry unless it's worse: empty, or citing
-                    // nothing when the first did.
-                    if !v2.empty && (v2.any_valid_citation() || !v.any_valid_citation()) {
-                        v = v2;
+            if metered.affords(provider::request_tokens(&retry_req)) {
+                if let Some((_, extra_ev)) = &extra {
+                    for id in extra_ev.ids() {
+                        if let Some(info) = extra_ev.get(id) {
+                            evidence.insert(info.clone());
+                        }
                     }
                 }
-                Err(e) if provider::is_cancel(&e) || cancelled() => {
-                    finish_meter(&mut run);
-                    let (props, refs) = take_tool_results(&state);
-                    return run.done(AnswerStatus::Cancelled, vec![], vec![], props, refs, None);
+                run.log.retries.push(reason);
+                run.trace.retried = true;
+                events::emit(
+                    env.events,
+                    AskEvent::Stage {
+                        stage: Stage::Retrying,
+                    },
+                );
+                match metered.converse(retry_req).await {
+                    Ok(resp) => {
+                        let v2 = validate::validate(&resp.text(), &evidence);
+                        let cut = resp.stop_reason == StopReason::MaxTokens;
+                        // Keep the retry unless it's worse: empty, or citing
+                        // nothing when the first did.
+                        if !v2.empty && (v2.any_valid_citation() || !v.any_valid_citation()) {
+                            v = v2;
+                            truncated = cut;
+                        }
+                    }
+                    Err(e) if provider::is_cancel(&e) || cancelled() => {
+                        finish_meter(&mut run);
+                        return failed(run, &state, AnswerStatus::Cancelled, None);
+                    }
+                    Err(_) => {} // keep the first answer
                 }
-                Err(_) => {} // keep the first answer
             }
         }
     }
     finish_meter(&mut run);
     run.log.validation = v.stats;
-    let (proposals, refusals) = take_tool_results(&state);
+    let (proposals, refusals) = tool_results(&state);
 
-    if v.empty {
-        return run.done(
-            AnswerStatus::ModelFailed,
-            vec![],
-            vec![],
+    if truncated {
+        return run.done(Outcome {
             proposals,
             refusals,
-            Some(Failure {
-                kind: FailureKind::EmptyReply,
-                message: "The model returned an empty answer. Try again, or switch to another model in Settings.".into(),
-            }),
-        );
+            ..Outcome::bare(
+                AnswerStatus::ModelFailed,
+                Some(Failure {
+                    kind: FailureKind::Truncated,
+                    message: "The model's answer was cut off before it finished. Try again, or ask a narrower question.".into(),
+                }),
+            )
+        });
+    }
+    if v.empty {
+        return run.done(Outcome {
+            proposals,
+            refusals,
+            ..Outcome::bare(
+                AnswerStatus::ModelFailed,
+                Some(Failure {
+                    kind: FailureKind::EmptyReply,
+                    message: "The model returned an empty answer. Try again, or switch to another model in Settings.".into(),
+                }),
+            )
+        });
     }
     if v.refusal {
         run.log.validation = validate::ValidationStats {
             links_removed: v.stats.links_removed,
             ..Default::default()
         };
-        return run.done(
-            AnswerStatus::NotFound,
-            vec![],
-            vec![],
+        return run.done(Outcome {
             proposals,
             refusals,
-            None,
-        );
+            ..Outcome::bare(AnswerStatus::NotFound, None)
+        });
     }
     let status = if v.any_valid_citation() {
         AnswerStatus::Answered
@@ -788,28 +889,33 @@ pub async fn ask<S: StoreAccess>(env: AskEnv<'_, S>, input: AskInput<'_>) -> Ask
         run.log.validation = v.stats;
         AnswerStatus::Unverified
     };
-    let mut sources: Vec<SegmentInfo> = Vec::new();
+    let mut cited: Vec<String> = Vec::new();
     for s in &v.sentences {
         for id in &s.citations {
-            if !sources.iter().any(|x| &x.id == id) {
-                if let Some(info) = evidence.get(id) {
-                    sources.push(info.clone());
-                }
+            if !cited.contains(id) {
+                cited.push(id.clone());
             }
         }
     }
-    run.done(status, v.sentences, sources, proposals, refusals, None)
+    run.done(Outcome {
+        status,
+        sources: evidence::source_views(&evidence, &cited),
+        sentences: v.sentences,
+        proposals,
+        refusals,
+        failure: None,
+        cited,
+    })
 }
 
 /// One deterministic re-query before accepting "not discussed" (tiers M/C,
-/// §4.2a #12): the topic words alone, without router filters. Returns the
-/// new lines (only ones not shown yet) as extra context.
-fn requery<S: StoreAccess>(
-    env: &AskEnv<'_, S>,
+/// §4.2a #12): the topic words alone, without the router's date filter.
+/// Returns the new lines (only if some weren't shown yet) as extra context.
+fn requery<S: StoreAccess, E: QueryEmbedder>(
+    env: &AskEnv<'_, S, E>,
     resolved: &scope::Resolved,
     hints: &router::Hints,
     budget: tier::Budget,
-    question: &str,
     salient: &[String],
     shown: &evidence::Evidence,
 ) -> Option<(String, evidence::Evidence)> {
@@ -846,15 +952,9 @@ fn requery<S: StoreAccess>(
             )
         })
         .ok()?;
-    let _ = question;
-    let new: Vec<&String> = pf
-        .evidence
+    pf.evidence
         .ids()
         .iter()
-        .filter(|id| !shown.contains(id))
-        .collect();
-    if new.is_empty() {
-        return None;
-    }
-    Some((pf.context, pf.evidence))
+        .any(|id| !shown.contains(id))
+        .then_some((pf.context, pf.evidence))
 }

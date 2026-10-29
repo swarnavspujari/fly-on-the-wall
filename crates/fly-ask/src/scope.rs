@@ -72,6 +72,9 @@ pub struct Resolved {
     pub known: Known,
     /// Visible meetings in scope, newest first.
     pub meetings: Vec<MeetingRef>,
+    /// Folder scope: meetings filed in its subfolders (searched by id;
+    /// `folder_id` itself matches only notes filed directly in it).
+    pub sub_meeting_ids: Vec<String>,
 }
 
 impl Resolved {
@@ -188,6 +191,8 @@ pub fn resolve(s: &Storage, scope: &AskScope, vis: Visibility) -> Result<Resolve
         }
     };
 
+    let mut folder_tree: Vec<String> = Vec::new();
+    let mut sub_meeting_ids: Vec<String> = Vec::new();
     let (kind, in_scope, folder_id, note_id): (ScopeKind, Vec<&fly_core::Meeting>, _, _) =
         match scope {
             AskScope::All => (ScopeKind::All, visible.iter().collect(), None, None),
@@ -215,12 +220,25 @@ pub fn resolve(s: &Storage, scope: &AskScope, vis: Visibility) -> Result<Resolve
                 if !known.folders.iter().any(|(f, _)| f == id) {
                     return Err(ScopeRefusal::NotFound);
                 }
-                let ids: HashSet<String> = all_meetings(s, Some(id), shareable)?
-                    .into_iter()
-                    .map(|m| m.id)
-                    .collect();
+                // The folder and every folder under it.
+                folder_tree = descendants(s, id);
+                let mut direct: HashSet<String> = HashSet::new();
+                let mut ids: HashSet<String> = HashSet::new();
+                for (n, f) in folder_tree.iter().enumerate() {
+                    for m in all_meetings(s, Some(f), shareable)? {
+                        if n == 0 {
+                            direct.insert(m.id.clone());
+                        }
+                        ids.insert(m.id);
+                    }
+                }
                 let v: Vec<&fly_core::Meeting> =
                     visible.iter().filter(|m| ids.contains(&m.id)).collect();
+                sub_meeting_ids = v
+                    .iter()
+                    .filter(|m| !direct.contains(&m.id))
+                    .map(|m| m.id.clone())
+                    .collect();
                 (ScopeKind::Folder, v, Some(id.clone()), None)
             }
             AskScope::Person(name) => {
@@ -264,8 +282,10 @@ pub fn resolve(s: &Storage, scope: &AskScope, vis: Visibility) -> Result<Resolve
         ScopeKind::Folder => None, // folder_id filters the search itself
         _ => Some(in_scope.iter().map(|m| m.id.clone()).collect()),
     };
+    let item_ids: Option<Vec<String>> =
+        (kind != ScopeKind::All).then(|| in_scope.iter().map(|m| m.id.clone()).collect());
     if let Ok(items) = s.query_items(&ItemFilter {
-        meeting_ids: scope_ids.clone(),
+        meeting_ids: item_ids,
         exclude_keep_local: shareable,
         limit: 300,
         ..Default::default()
@@ -284,10 +304,16 @@ pub fn resolve(s: &Storage, scope: &AskScope, vis: Visibility) -> Result<Resolve
     // a narrow keep-local scope was refused above).
     let kept_local_excluded = if shareable && wide {
         match kind {
-            ScopeKind::Folder => all_meetings(s, folder_id.as_deref(), false)?
-                .iter()
-                .filter(|m| hidden.hides(m))
-                .count(),
+            ScopeKind::Folder => {
+                let mut n = 0;
+                for f in &folder_tree {
+                    n += all_meetings(s, Some(f), false)?
+                        .iter()
+                        .filter(|m| hidden.hides(m))
+                        .count();
+                }
+                n
+            }
             ScopeKind::All => all_meetings(s, None, false)?
                 .iter()
                 .filter(|m| hidden.hides(m))
@@ -309,7 +335,25 @@ pub fn resolve(s: &Storage, scope: &AskScope, vis: Visibility) -> Result<Resolve
         kept_local_excluded,
         known,
         meetings,
+        sub_meeting_ids,
     })
+}
+
+/// `root` and every folder below it, root first.
+fn descendants(s: &Storage, root: &str) -> Vec<String> {
+    let all = s.list_folders().unwrap_or_default();
+    let mut out = vec![root.to_string()];
+    let mut i = 0;
+    while i < out.len() {
+        let parent = out[i].clone();
+        for f in &all {
+            if f.parent_id.as_deref() == Some(parent.as_str()) && !out.contains(&f.id) {
+                out.push(f.id.clone());
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Speaker labels and attendee names of one meeting (proposal owners).

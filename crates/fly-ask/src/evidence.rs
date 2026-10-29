@@ -32,6 +32,75 @@ pub struct SegmentInfo {
     pub text: String,
 }
 
+/// One cited line as the UI lists it (sanitized: no links or images).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLine {
+    pub segment_id: String,
+    pub speaker: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// The line, links removed, clipped.
+    pub snippet: String,
+}
+
+/// A meeting's cited lines, as listed with an answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceView {
+    pub meeting_id: String,
+    pub meeting_title: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub lines: Vec<SourceLine>,
+    /// One-line label: title, date, first line's time and snippet.
+    pub label: String,
+}
+
+/// Longest snippet shown per source line.
+const SNIPPET_CHARS: usize = 220;
+
+fn display_safe(text: &str) -> String {
+    let t = crate::text::strip_links(text).0;
+    crate::prefetch::truncate(&t, SNIPPET_CHARS)
+}
+
+/// Group `ids` (in order) by meeting into display sources.
+pub fn source_views(ev: &Evidence, ids: &[String]) -> Vec<SourceView> {
+    let mut out: Vec<SourceView> = Vec::new();
+    for id in ids {
+        let Some(s) = ev.get(id) else { continue };
+        let line = SourceLine {
+            segment_id: s.id.clone(),
+            speaker: display_safe(&s.speaker),
+            start_ms: s.start_ms,
+            end_ms: s.end_ms,
+            snippet: display_safe(&s.text),
+        };
+        match out.iter_mut().find(|v| v.meeting_id == s.meeting_id) {
+            Some(v) => v.lines.push(line),
+            None => {
+                let title = display_safe(&s.meeting_title);
+                let date = s
+                    .started_at
+                    .map(|d| format!(" · {}", d.format("%Y-%m-%d")))
+                    .unwrap_or_default();
+                let label = format!(
+                    "{title}{date} · {} {}: {}",
+                    fly_context::render::clock(s.start_ms),
+                    line.speaker,
+                    line.snippet
+                );
+                out.push(SourceView {
+                    meeting_id: s.meeting_id.clone(),
+                    meeting_title: title,
+                    started_at: s.started_at,
+                    lines: vec![line],
+                    label,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// The segments shown to the model, in first-shown order.
 #[derive(Debug, Default, Clone)]
 pub struct Evidence {

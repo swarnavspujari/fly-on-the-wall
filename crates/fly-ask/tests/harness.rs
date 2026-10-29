@@ -6,7 +6,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use fly_ask::{
     ask, AnswerStatus, AskEnv, AskInput, AskScope, FailureKind, QueryEmbedder, SentenceStatus,
-    Tier, Turn, TurnRole,
+    Tier, Turn,
 };
 use fly_core::{Attendee, ItemKind, MeetingItem, Speaker, Transcript, TranscriptSegment};
 use fly_llm::mock::MockLLMProvider;
@@ -83,7 +83,6 @@ fn bow(text: &str) -> Vec<f32> {
 
 struct Bow;
 
-#[async_trait::async_trait]
 impl QueryEmbedder for Bow {
     fn model(&self) -> &str {
         MODEL
@@ -266,6 +265,7 @@ async fn run(
             provider: model,
             on_device,
             tier,
+            limits: None,
             embedder: Some(&Bow),
             events: None,
             cancel: None,
@@ -333,7 +333,7 @@ async fn tier_s_answers_with_a_valid_citation_in_one_call() {
     assert_eq!(a.status, AnswerStatus::Answered);
     assert_eq!(a.sentences[0].status, SentenceStatus::Sourced);
     assert_eq!(a.sentences[0].citations, vec!["a01"]);
-    assert_eq!(a.sources[0].speaker, "Ines Carvalho");
+    assert_eq!(a.sources[0].lines[0].speaker, "Ines Carvalho");
     assert_eq!(a.text, "Ines asked for $8,400 for the first month.");
     let reqs = m.requests();
     assert_eq!(reqs.len(), 1);
@@ -648,18 +648,21 @@ async fn tier_c_tool_results_join_the_retrieved_set() {
 }
 
 #[tokio::test]
-async fn wide_cloud_questions_send_earlier_questions_but_not_earlier_answers() {
+async fn earlier_on_device_turns_never_reach_an_off_device_model() {
     let f = fx();
-    let history = vec![
-        Turn {
-            role: TurnRole::User,
-            text: "What's the launch budget?".into(),
-        },
-        Turn {
-            role: TurnRole::Assistant,
-            text: "PRIOR-ANSWER-TEXT".into(),
-        },
-    ];
+    let local_turn = Turn {
+        question: "What's the launch budget?".into(),
+        answer: "PRIOR-LOCAL-ANSWER [seg:a01]".into(),
+        citations: vec!["a01".into()],
+        on_device: true,
+    };
+    let cloud_turn = Turn {
+        question: "Who runs the webinar?".into(),
+        answer: "PRIOR-CLOUD-ANSWER".into(),
+        citations: vec![],
+        on_device: false,
+    };
+    let history = vec![local_turn.clone(), cloud_turn.clone()];
     let m = Model::new(
         false,
         vec![ChatResponse::text_reply("Not found in your meetings.")],
@@ -675,9 +678,13 @@ async fn wide_cloud_questions_send_earlier_questions_but_not_earlier_answers() {
     )
     .await;
     let sent = sent_text(&m.requests());
-    assert!(!sent.contains("PRIOR-ANSWER-TEXT"));
-    assert!(sent.contains("What's the launch budget?"));
+    assert!(!sent.contains("PRIOR-LOCAL-ANSWER") && !sent.contains("What's the launch budget?"));
+    assert!(
+        sent.contains("PRIOR-CLOUD-ANSWER"),
+        "an off-device turn may go back"
+    );
 
+    // On this device every turn goes, as alternating messages, markers out.
     let m = Model::new(
         true,
         vec![ChatResponse::text_reply("You capped it [seg:a02].")],
@@ -693,26 +700,39 @@ async fn wide_cloud_questions_send_earlier_questions_but_not_earlier_answers() {
     )
     .await;
     let reqs = m.requests();
-    assert!(sent_text(&reqs).contains("PRIOR-ANSWER-TEXT"));
-    assert_eq!(reqs[0].messages[1].role, Role::User);
-    assert_eq!(reqs[0].messages[2].role, Role::Assistant);
+    let msgs = &reqs[0].messages;
+    assert_eq!(msgs[1].role, Role::User);
+    assert_eq!(msgs[2].role, Role::Assistant);
+    assert!(msgs[2].text().contains("PRIOR-LOCAL-ANSWER") && !msgs[2].text().contains("[seg:"));
     assert_eq!(a.status, AnswerStatus::Answered);
+    assert!(a.on_device);
 }
 
 #[tokio::test]
 async fn links_and_images_never_render() {
     let f = fx();
+    let seen = std::sync::Mutex::new(Vec::new());
+    let sink = |e: fly_ask::AskEvent| seen.lock().unwrap().push(e);
     let m = Model::new(true, vec![ChatResponse::text_reply(
         "The webinar is on November third [seg:a04]. ![x](https://e.example/p.png?d=1) [more](https://e.example/m).",
     )]);
-    let a = run(
-        &f,
-        &m,
-        true,
-        Tier::S,
-        AskScope::Meeting(f.launch.clone()),
-        "When is the webinar?",
-        &[],
+    let a = ask(
+        AskEnv {
+            store: &f.s,
+            provider: &m,
+            on_device: true,
+            tier: Tier::S,
+            limits: None,
+            embedder: Some(&Bow),
+            events: Some(&sink),
+            cancel: None,
+        },
+        AskInput {
+            question: "When is the webinar?",
+            history: &[],
+            scope: AskScope::Meeting(f.launch.clone()),
+            now: now(),
+        },
     )
     .await;
     for s in &a.sentences {
@@ -724,4 +744,20 @@ async fn links_and_images_never_render() {
     }
     assert!(!a.text.contains("http"));
     assert_eq!(a.sentences[0].status, SentenceStatus::Sourced);
+    let frames: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            fly_ask::AskEvent::Frame { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!frames.is_empty(), "the reply streams");
+    for fr in frames {
+        assert!(!fr.contains("http") && !fr.contains("]("), "{fr}");
+    }
+    for s in &a.sources {
+        assert!(!s.label.contains("http"), "{}", s.label);
+    }
 }
