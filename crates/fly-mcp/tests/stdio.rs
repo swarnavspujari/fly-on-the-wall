@@ -16,6 +16,23 @@ fn stdio_server_answers_initialize_and_tool_calls() {
         storage
             .update_note_scratchpad(&note.id, "the quarterly zebra migration plan")
             .unwrap();
+        let meeting = storage.create_meeting("MCP smoke", &note.id, &[]).unwrap();
+        storage
+            .save_transcript(&fly_core::Transcript {
+                meeting_id: meeting.id.clone(),
+                language: Some("en".into()),
+                engine: "test".into(),
+                segments: vec![fly_core::TranscriptSegment {
+                    id: "seg-zebra".into(),
+                    speaker_key: "mic".into(),
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    text: "the zebra migration starts in March".into(),
+                    words: vec![],
+                }],
+                speakers: vec![],
+            })
+            .unwrap();
         note.id
     };
 
@@ -70,6 +87,18 @@ fn stdio_server_answers_initialize_and_tool_calls() {
         .as_str()
         .unwrap()
         .contains("zebra migration plan"));
+
+    // passage-level search (fly-context) through the real binary
+    send(
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_passages","arguments":{"query":"zebra migration"}}}),
+    );
+    let passages = recv();
+    assert_ne!(passages["result"]["isError"], true, "{passages}");
+    let text = passages["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("[seg:seg-zebra]") && text.contains("zebra migration starts in March"),
+        "passages were: {text}"
+    );
 
     drop(stdin); // EOF → clean shutdown
     let status = child.wait().unwrap();

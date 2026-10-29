@@ -175,6 +175,37 @@ impl Storage {
         }
     }
 
+    /// The speaker legend (key → current label) of each listed meeting's
+    /// raw transcript, without deserializing segments or word timings:
+    /// SQLite extracts `$.speakers`. Meetings with no transcript, or whose
+    /// transcript JSON doesn't parse, are absent. Read-only.
+    pub fn transcript_speakers(
+        &self,
+        meeting_ids: &[String],
+    ) -> Result<HashMap<String, Vec<Speaker>>> {
+        let mut out = HashMap::new();
+        // SQLite's default host-parameter limit is far above this.
+        for chunk in meeting_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT meeting_id,
+                        CASE WHEN json_valid(json) AND json_type(json, '$.speakers') = 'array'
+                             THEN json_extract(json, '$.speakers') END
+                   FROM transcripts WHERE meeting_id IN ({placeholders})"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?;
+            for row in rows {
+                let (meeting_id, speakers) = row?;
+                if let Some(speakers) = speakers.and_then(|s| serde_json::from_str(&s).ok()) {
+                    out.insert(meeting_id, speakers);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Store the LLM-polished transcript variant ALONGSIDE the raw one, in the
     /// raw row's `cleaned_json` column — the raw `json` is never touched, so a
     /// bad or re-run polish can't corrupt the source of truth. Re-runnable:
@@ -456,6 +487,43 @@ mod tests {
                 label: "Speaker 1".into(),
             }],
         }
+    }
+
+    #[test]
+    fn transcript_speakers_reads_current_labels_only() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("Budget mtg", None).unwrap();
+        let a = s.create_meeting("Budget mtg", &note.id, &[]).unwrap();
+        let b = s.create_meeting("Budget mtg", &note.id, &[]).unwrap();
+        s.save_transcript(&sample_transcript(&a.id)).unwrap();
+        s.save_transcript(&sample_transcript(&b.id)).unwrap();
+        s.relabel_speaker(&a.id, "spk_0", "Dana").unwrap();
+        // a row whose JSON doesn't parse is skipped, not an error
+        s.conn
+            .execute(
+                "UPDATE transcripts SET json = 'not json' WHERE meeting_id = ?1",
+                [&b.id],
+            )
+            .unwrap();
+        // valid JSON of the wrong shape too
+        let c = s.create_meeting("Budget mtg", &note.id, &[]).unwrap();
+        s.save_transcript(&sample_transcript(&c.id)).unwrap();
+        s.conn
+            .execute(
+                "UPDATE transcripts SET json = '{\"speakers\": 1}' WHERE meeting_id = ?1",
+                [&c.id],
+            )
+            .unwrap();
+        let ids = vec![
+            a.id.clone(),
+            b.id.clone(),
+            c.id.clone(),
+            "no-such-meeting".to_string(),
+        ];
+        let got = s.transcript_speakers(&ids).unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[&a.id][0].label, "Dana");
+        assert!(s.transcript_speakers(&[]).unwrap().is_empty());
     }
 
     #[test]
