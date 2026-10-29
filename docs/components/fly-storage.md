@@ -1,7 +1,7 @@
 # Storage (`fly-storage`)
 
 > Layer: crate. Described at main `82b7edf` (v2.4.0).
-> In flight: **PR #92** (draft, v2.5) changes this crate heavily: schema v3 (`user_version` 2→3), new `transcript_segments` + `segments_fts` tables (per-segment FTS, polished text when present), new `embedding_chunks` columns `segment_ids_json` / `end_ms` / `variant` (label-free chunk text), `citation_locators` with re-anchoring inside `save_transcript`, `list_meetings_filtered(&MeetingFilter)`, and a keep-local filter inside the SQL of `vector_search`. New files `citations.rs`, `segments.rs`; touches `embeddings`, `hybrid`, `items`, `lib`, `meetings`, `migrations`, `notes`, `privacy`, `search`, `transcripts`. Everything below describes main, not #92.
+> In flight: **PR #92** (draft, v2.5) changes this crate heavily: schema v3 (`user_version` 2→3), new `transcript_segments` + `segments_fts` tables (per-segment FTS, polished text when present), new `embedding_chunks` columns `segment_ids_json` / `end_ms` / `variant` (label-free chunk text), `citation_locators` with re-anchoring inside `save_transcript`, `list_meetings_filtered(&MeetingFilter)`, and a keep-local filter inside the SQL of `vector_search`. New files `citations.rs`, `segments.rs`; touches `embeddings`, `hybrid`, `items`, `lib`, `meetings`, `migrations`, `notes`, `privacy`, `search`, `transcripts`. Everything below describes main before #92, except the search parts refreshed for the v2.5 search-quality PR (`query.rs`, `cache.rs`, the FTS fallback, term statistics, `vector_search_floor`); #92 has since merged (see `SCHEMA_V3.md`).
 
 ## Purpose
 The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) is the index. Markdown/JSON mirrors on disk are the copy the user owns: one folder per meeting, note mirrors, a portability manifest and `note.json` that let a copied folder rebuild its meeting on another machine (self-heal). It also owns hybrid search (FTS5 + brute-force vectors fused with RRF), the per-note/per-folder Keep-local flags, audio retention, the in-place database erase used by "Delete all my data", path containment, and the machine-local pipeline scratch folder.
@@ -17,9 +17,11 @@ The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) 
 - `crates/fly-storage/src/folders.rs` — folder tree, folder-path names for manifests.
 - `crates/fly-storage/src/meetings.rs` — meeting rows, meeting folders, renames, `purge_meeting`, `contained_recordings_dir`.
 - `crates/fly-storage/src/transcripts.rs` — raw + polished transcripts, mirrors (md/json/vtt), speaker undo snapshot.
-- `crates/fly-storage/src/search.rs` — FTS5 search, query sanitizing, `SearchFilter`.
+- `crates/fly-storage/src/query.rs` — query terms, stopwords, the prefix rule, `FtsQuery` (AND form + OR fallback), `TermStats` / IDF.
+- `crates/fly-storage/src/search.rs` — FTS5 search (`search_split` with the fallback), `note_term_stats`, `SearchFilter`.
+- `crates/fly-storage/src/cache.rs` — in-memory, i8-quantized copy of the embedding vectors, dropped by any database write.
 - `crates/fly-storage/src/hybrid.rs` — RRF fusion of FTS and vector rankings.
-- `crates/fly-storage/src/embeddings.rs` — chunkers, `embedding_chunks` store, `vector_search`.
+- `crates/fly-storage/src/embeddings.rs` — chunkers, `embedding_chunks` store, `vector_search` / `vector_search_floor`, `similarity_floor`.
 - `crates/fly-storage/src/items.rs` — extracted meeting items, `query_items`, `list_meetings`.
 - `crates/fly-storage/src/jobs.rs` — transcription job queue.
 - `crates/fly-storage/src/attachments.rs` — attachment copies and `attachment_abs_path`.
@@ -38,7 +40,7 @@ The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) 
 | Folders | `create_folder`, `list_folders`, `rename_folder`, `move_folder`, `delete_folder` |
 | Meetings | `create_meeting`, `update_attendees`, `end_meeting`, `set_meeting_started_at`, `get_meeting`, `get_meeting_for_note`, `meetings_for_note`, `allocate_meeting_dir`, `purge_meeting`, `list_meetings`, free fns `recording_dir_rel`, `contained_recordings_dir` |
 | Transcripts | `save_transcript`, `get_transcript`, `save_cleaned_transcript`, `get_cleaned_transcript`, `clear_cleaned_transcript`, `relabel_speaker`, `edit_segment_text`, `save_speaker_snapshot` / `get_speaker_snapshot` / `clear_speaker_snapshot`, `revert_speaker_assignment`, `SpeakerSnapshot` |
-| Search | `search`, `search_filtered`, `search_split`, `SearchFilter`, `SearchHit`, `SearchHitKind`; `hybrid::fuse`; `embeddings::{chunk_transcript, chunk_note, encode_vector}`, `pending_embedding_chunks`, `embedding_backlog`, `store_chunk_embeddings`, `backfill_embedding_chunks`, `vector_search`, `PendingChunk`, `VectorHit` |
+| Search | `search`, `search_filtered`, `search_split`, `search_segments`, `SearchFilter`, `SearchHit`, `SearchHitKind`, `SegmentHit`; `query::{query_terms, words, term_matches, term_expr, is_stopword, STOPWORDS, FtsQuery, TermStats, TermOwners}`, `segment_term_stats`, `note_term_stats`; `hybrid::fuse`; `embeddings::{chunk_transcript, chunk_note, encode_vector, similarity_floor, EMBEDDINGGEMMA}`, `pending_embedding_chunks`, `embedding_backlog`, `store_chunk_embeddings`, `backfill_embedding_chunks`, `vector_search`, `vector_search_floor`, `PendingChunk`, `VectorHit`, `VectorResults` |
 | Items | `replace_meeting_items`, `get_meeting_items`, `has_meeting_items`, `query_items` + `ItemFilter`, `mark_extracted`, `meetings_missing_items` |
 | Jobs | `enqueue_transcription`, `next_transcription_job`, `transcription_job`, `queued_transcription_ids`, `mark_transcription_running` / `_done` / `_failed`, `requeue_transcription`, `delete_transcription_job`, `reset_running_transcriptions`, `TranscriptionJob`, `JOB_QUEUED/RUNNING/DONE/FAILED` |
 | Attachments | `add_attachment`, `add_attachment_in_place`, `remove_attachment`, `attachment_abs_path` |
@@ -132,12 +134,13 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 - A fresh (table-less) database never runs the v2 orphan sweep, so a lost index never mass-parks folders (`lib.rs:390`, `402-404`). DECISIONS.md "Storage naming & startup latency"; 2026-07-13 incident.
 - Backfill never overwrites a mirror that may be newer: manifests only gain missing fields; `note.json` is replaced only when its `updated_at` is older; unreadable/foreign/future files are left alone (`recovery.rs:331-414`).
 - `open_existing` (MCP) never creates, migrates, repairs or seeds, and refuses any schema that isn't exactly v2 with every expected column (`lib.rs:231-335`). Spec §2 item 5 (MCP holds no keys; reads the app's DB).
-- Keep local fails closed: unknown meeting or lookup error answers `true` (`privacy.rs:209-241`). Bulk readers filter inside SQL before `LIMIT` via `KEEP_LOCAL_CTE` (`privacy.rs:90-102`; used in `search.rs:84-92`, `notes.rs:144-151`, `items.rs:89-100`, `privacy.rs:306-337`). **Not** applied in `vector_search` (`embeddings.rs:391-418` ignores `SearchFilter.exclude_keep_local`), `list_meetings` (`items.rs:180`) or `search()` / `search_filtered` without the flag. Spec §2 item 1 (enforcement in the app), THREAT_MODEL T10.
+- Keep local fails closed: unknown meeting or lookup error answers `true` (`privacy.rs:209-241`). Bulk readers filter inside SQL before `LIMIT` via `KEEP_LOCAL_CTE` (`privacy.rs:90-102`; used in `search.rs:84-92`, `notes.rs:144-151`, `items.rs:89-100`, `privacy.rs:306-337`). `vector_search` / `vector_search_floor` apply it in SQL before the limit and floor (#92); the vector cache (`cache.rs`) never decides visibility, each search asks SQL for the ids it may see and re-applies every filter when it reads the winners. `segment_term_stats` / `note_term_stats` scope their statistics the same way, so keep-local text never weighs on shareable ranking. **Not** applied in `list_meetings` (`items.rs:180`) or `search()` / `search_filtered` without the flag. Spec §2 item 1 (enforcement in the app), THREAT_MODEL T10.
 - A re-recording into a keep-local note inherits the flag (`meetings.rs:73`, `privacy.rs:266-275`).
 - Calendar-seeded attendees start unconfirmed; only the editor's save sets `attendees_confirmed` (`meetings.rs:42-91`). Spec §2 item 7.
 - Raw transcript `json` is never overwritten by polish; a new transcription must clear the cleaned variant (`transcripts.rs:96-129`).
 - Retention deletes media only (extension allow-list, plain files, symlinks not followed), keeps transcripts/notes/manifest, stamps `audio_deleted_at` only when nothing failed, and requires both `ended_at` and file mtimes past the cutoff (`privacy.rs:44-47`, `479-582`).
-- FTS input is always sanitized (each token quoted, last token prefix-starred) (`search.rs:155-174`). DECISIONS.md M1 "FTS5 MATCH input is sanitized".
+- FTS input is always sanitized: every user word reaches FTS5 inside double quotes, so no input can inject syntax (`query.rs`, test `hostile_and_degenerate_input`). The AND form quotes each token, minus stopwords, and prefix-stars the last; when it matches nothing under the filter, the OR form (content terms, 4+ characters as prefixes, quoted phrases still required) runs instead. The choice ignores the page offset. DECISIONS.md M1 "FTS5 MATCH input is sanitized" and the v2.5 search entry.
+- The vector cache is valid only while `PRAGMA data_version` (other connections' commits) and this connection's `total_changes()` are unchanged: any write drops it (`cache.rs`, test `any_write_drops_the_cache`). Ranking uses i8-quantized vectors; reported scores are exact (re-read from the stored f32 vectors).
 - Meeting folders are found through `recording_json`, never derived from titles; a running transcription blocks the folder rename (`meetings.rs:293-302`). DECISIONS.md "Title-edit policy".
 - Scratch is keyed by meeting id, outside the meeting folder; old in-folder scratch is deleted only for finished meetings and only with exact pipeline names in the pipeline's WAV format (`scratch.rs:179-258`, `289-336`).
 
@@ -151,7 +154,7 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 | env-gated | `src-tauri/tests/search_eval.rs` | 1 | hybrid vs FTS hit rate; returns early (passes) when Ollama with the embedding model isn't reachable, so CI checks nothing |
 
 **Known gaps:**
-- `vector_search` ignores `exclude_keep_local` and no test pins either behavior; any future AI caller leaks keep-local chunks (T10). PR #92 fixes it.
+- `similarity_floor` (0.35 for `embeddinggemma:300m`) is calibrated on a 16-meeting gold set for the app's prompts; nothing re-checks it when the prompts or model change.
 - Keep local doesn't survive database loss or a copied folder: the manifest has no keep-local field and heal inserts `meetings` with the default 0 (`recovery.rs:59-81`, `540-553`); folders recreated by name start unflagged (`folders.rs:147-166`). No test.
 - Path-containment tests cover deletes, the portability backfill and manifest rebasing, but not every write path or every id taken from a manifest (THREAT_MODEL T7).
 - No test pins `secure_delete`, `foreign_keys` or `journal_mode` pragmas, or that deleted text is gone from the file (T11).
@@ -165,5 +168,5 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 - New readers that hand data to AI tools must filter keep-local inside SQL (`KEEP_LOCAL_CTE` / `SHAREABLE_CHUNK`) before `LIMIT`; never post-filter a truncated list.
 - New recursive deletes go through `contained_recordings_dir`, and any id or path that came from a manifest or `note.json` is checked with `safe_path` before use; new mirror files go through `write_atomic`; new manifest fields are `Option` with `#[serde(default)]` so v1/v2 files still parse.
 - New files outside `<data_dir>` must be added to `erase_all_content` (the restart wipe only clears the data dir). New tables are erased automatically (`sqlite_master` scan).
-- Coordinate with PR #92 before touching `embeddings`, `search`, `transcripts`, `migrations` or `privacy`.
+- Search changes: judge them with the real embedder on the eval gold set, not only the hashed CI embedder (see [fly-context](fly-context.md#how-search_passages-ranks-toolsrs632-1021)). A new write path needs nothing for the vector cache (any write drops it).
 - The repo is public: test fixtures use synthetic titles and names only.

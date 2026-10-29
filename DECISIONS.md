@@ -348,3 +348,29 @@ Running log of technical decisions, newest last. Format: date — decision — w
   the 12-month transition window. Tool list + discover results are marked cacheable
   (1 h, public — static per binary, no user data), sparing clients a `tools/list`
   round-trip per conversation.
+
+## v2.5 — Search and retrieval quality
+
+- **2026-10-29 — Keyword search: every word first, any word as the fallback.** The M1 sanitizer
+  ANDed every token, stopwords included, so a typed question ("What did Ines ask for in the
+  launch meeting?") found nothing: FTS was empty for 53 of 63 natural-language eval questions,
+  and the Search UI went vector-only (and blank without Ollama). Now stopwords are dropped and the
+  AND form runs first; only when it matches nothing under the filter does an OR of the content
+  terms run, ranked by bm25 (quoted phrases stay required, every word is still quoted). Keyword
+  searches behave as before; the choice ignores the page offset so MCP cursors stay consistent.
+- **2026-10-29 — Passage keyword ranking by IDF-weighted term coverage, plus a semantic floor,
+  shipped together.** `search_passages` scores each window by the BM25 IDF mass of the query
+  terms it holds (speaker labels and the meeting title count), keeps windows holding ≥ 40% of
+  the query's mass (unseen words count, so one shared common word isn't a match), and drops
+  vector hits under a per-model cosine floor (0.35 for embeddinggemma). The OR keyword fix alone
+  cut real-embedder recall from 0.98 to 0.79 because every keyword candidate also collected a
+  semantic RRF vote from an unfloored list; together they hold recall at 0.984 and lift MRR from
+  0.636 to 0.703. Tuned with the real embedder on the eval gold set, since CI's hashed embedder
+  ranks differently. Raw cosines ride on `PassageResults`, not `Passage` (the eval runner builds
+  `Passage` literals).
+- **2026-10-29 — In-memory vector cache keyed on `data_version` + `total_changes`.** Reading
+  every vector from SQLite per query cost ~1.8 s at a thousand meetings. Vectors are cached
+  quantized to i8 (a quarter of the memory; winners are re-scored exactly), and any database
+  write by any connection drops the cache, so it can never serve a replaced vector. Visibility
+  is never cached: each search asks SQL which chunk ids it may see. ANN is deferred until
+  libraries reach ~100k chunks.

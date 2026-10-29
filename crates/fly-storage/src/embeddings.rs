@@ -95,6 +95,36 @@ pub struct VectorHit {
     pub text: String,
 }
 
+/// [`Storage::vector_search_floor`]'s result.
+#[derive(Debug, Clone, Default)]
+pub struct VectorResults {
+    /// Hits at or above the floor, best first, at most `limit`.
+    pub hits: Vec<VectorHit>,
+    /// The best cosine of any in-scope chunk, floor or not (`None` when no
+    /// chunk in scope is embedded with this model).
+    pub best_score: Option<f32>,
+}
+
+/// The app's embedding model (EmbeddingGemma 300M via Ollama).
+pub const EMBEDDINGGEMMA: &str = "embeddinggemma:300m";
+
+/// Cosine below which a chunk embedded by `model` isn't a match. With no
+/// floor every query "finds" the nearest chunks however unrelated, so a
+/// question nothing answers still returns passages, and every keyword
+/// candidate also collects a semantic vote. Measured per model on the
+/// retrieval gold set (see `docs/components/fly-context.md`); `None` (no
+/// floor) for a model nobody has measured.
+pub fn similarity_floor(model: &str) -> Option<f32> {
+    match model {
+        EMBEDDINGGEMMA => Some(EMBEDDINGGEMMA_FLOOR),
+        _ => None,
+    }
+}
+
+/// EmbeddingGemma's floor, for the app's prompts (document
+/// `title: … | text: …`, query `task: search result | query: …`).
+const EMBEDDINGGEMMA_FLOOR: f32 = 0.35;
+
 // ---------------------------------------------------------------------------
 // Chunkers (pure)
 // ---------------------------------------------------------------------------
@@ -285,8 +315,19 @@ fn decode_vector(blob: &[u8]) -> Vec<f32> {
     chunks.iter().map(|b| f32::from_le_bytes(*b)).collect()
 }
 
+#[cfg(test)]
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Dot product of `a` with a stored little-endian f32 BLOB of the same
+/// length, without decoding it into a new vector.
+fn dot_blob(a: &[f32], blob: &[u8]) -> f32 {
+    let (chunks, _tail) = blob.as_chunks::<4>();
+    a.iter()
+        .zip(chunks)
+        .map(|(x, b)| x * f32::from_le_bytes(*b))
+        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -499,28 +540,253 @@ impl Storage {
         filter: &SearchFilter,
         limit: usize,
     ) -> Result<Vec<VectorHit>> {
-        let qnorm = decode_vector(&encode_vector(query));
-        let folder = filter.folder_id.as_deref();
-        let since = filter.since.map(|t| t.to_rfc3339());
-        let until = filter.until.map(|t| t.to_rfc3339());
+        Ok(self
+            .vector_search_floor(query, model, filter, limit, None)?
+            .hits)
+    }
 
-        let (cte, shareable) = if filter.exclude_keep_local {
+    /// [`vector_search`](Self::vector_search) that also drops hits scoring
+    /// below `floor` (before `limit`) and reports the best score in scope
+    /// whether or not it passed: a "nothing close" signal for callers.
+    ///
+    /// Two phases: score every in-scope vector (ids and vectors only), then
+    /// read text and spans for the `limit` winners alone. The second read
+    /// re-applies every filter, so a row whose privacy or owner changed in
+    /// between is dropped, never returned.
+    pub fn vector_search_floor(
+        &self,
+        query: &[f32],
+        model: &str,
+        filter: &SearchFilter,
+        limit: usize,
+        floor: Option<f32>,
+    ) -> Result<VectorResults> {
+        let qnorm = decode_vector(&encode_vector(query));
+        // Rank on the cached, quantized vectors, over the chunks whose owner
+        // this search may see (decided by the database on every call), then
+        // re-score exactly: the best candidate always (so `best_score` is
+        // exact), and those within the quantization margin of the floor, a
+        // few past `limit` (so the error can't reorder hits across the cut).
+        let matrix = self.vector_matrix(model, qnorm.len())?;
+        let visible = self.visible_owners(&matrix.owners, filter)?;
+        let mut approx: Vec<(f32, i64)> = (0..matrix.len())
+            .filter(|&i| visible[matrix.owner_of[i] as usize])
+            .map(|i| (matrix.score(i, &qnorm), matrix.ids[i]))
+            .collect();
+        approx.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let margin = floor.map(|f| f - QUANT_MARGIN);
+        let candidates: Vec<(f32, i64)> = approx
+            .into_iter()
+            .enumerate()
+            .filter(|(rank, (s, _))| *rank == 0 || margin.is_none_or(|m| *s >= m))
+            .take(limit.saturating_add(RESCORE_EXTRA))
+            .map(|(_, c)| c)
+            .collect();
+        // A caller asking for every hit (a meeting-scoped search) keeps
+        // approximate scores past the first RESCORE_MAX.
+        let head: Vec<i64> = candidates
+            .iter()
+            .take(RESCORE_MAX)
+            .map(|(_, id)| *id)
+            .collect();
+        let mut scored = self.exact_scores(&qnorm, model, &head)?;
+        let best_score = scored.first().map(|(s, _)| *s);
+        scored.extend(candidates.into_iter().skip(RESCORE_MAX));
+        if let Some(f) = floor {
+            scored.retain(|(s, _)| *s >= f);
+        }
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.truncate(limit);
+        if scored.is_empty() {
+            return Ok(VectorResults {
+                hits: vec![],
+                best_score,
+            });
+        }
+
+        let ids: Vec<i64> = scored.iter().map(|(_, id)| *id).collect();
+        let (sql, params) = chunk_scope_sql(
+            "c.id, c.owner_kind,
+             COALESCE(n.id, m.note_id, ''),
+             CASE c.owner_kind WHEN 'transcript' THEN c.owner_id END,
+             COALESCE(n.title, m.title, ''),
+             c.text, c.start_ms, c.segment_ids_json, c.end_ms",
+            model,
+            filter,
+            &ids,
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut by_id: std::collections::HashMap<i64, VectorHit> = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                let kind: String = r.get(1)?;
+                let text: String = r.get(5)?;
+                let ids: String = r.get(7)?;
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    VectorHit {
+                        kind: if kind == "note" {
+                            crate::SearchHitKind::Note
+                        } else {
+                            crate::SearchHitKind::Transcript
+                        },
+                        note_id: r.get(2)?,
+                        meeting_id: r.get(3)?,
+                        title: r.get(4)?,
+                        snippet: snippet_of(&text),
+                        start_ms: r.get::<_, Option<i64>>(6)?.map(|v| v.max(0) as u64),
+                        score: 0.0,
+                        segment_ids: serde_json::from_str(&ids).unwrap_or_default(),
+                        end_ms: r.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
+                        text,
+                    },
+                ))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let hits = scored
+            .into_iter()
+            .filter_map(|(score, id)| {
+                by_id.remove(&id).map(|mut h| {
+                    h.score = score;
+                    h
+                })
+            })
+            .collect();
+        Ok(VectorResults { hits, best_score })
+    }
+
+    /// For each owner, whether `filter` lets a search see its chunks: the
+    /// owner-level form of [`chunk_scope_sql`]'s conditions (note chunks on
+    /// the note's folder and `updated_at`; transcript chunks on the meeting's
+    /// note's folder and `started_at`; under `exclude_keep_local` only
+    /// shareable owners, and a meeting only while its note exists; an owner
+    /// kind it doesn't know only with no filter at all). The winners' read
+    /// re-applies the chunk-level SQL, so a mismatch could only hide hits,
+    /// never leak them.
+    fn visible_owners(
+        &self,
+        owners: &[(crate::cache::OwnerKind, String)],
+        filter: &SearchFilter,
+    ) -> Result<Vec<bool>> {
+        use crate::cache::OwnerKind;
+        let (cte, note_local, meeting_local) = if filter.exclude_keep_local {
             (
                 crate::privacy::KEEP_LOCAL_CTE,
-                format!(
-                    " AND (c.owner_kind != 'transcript' OR mn.id IS NOT NULL) AND {}",
-                    crate::privacy::SHAREABLE_CHUNK
-                ),
+                " AND n.id NOT IN (SELECT id FROM local_notes)",
+                " AND mn.id IS NOT NULL AND m.note_id NOT IN (SELECT id FROM local_notes)",
             )
         } else {
-            ("", String::new())
+            ("", "", "")
         };
+        let params = rusqlite::params![
+            filter.folder_id.as_deref(),
+            filter.since.map(|t| t.to_rfc3339()),
+            filter.until.map(|t| t.to_rfc3339())
+        ];
+        let ids = |sql: String| -> Result<std::collections::HashSet<String>> {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params, |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        };
+        let notes = ids(format!(
+            "{cte}SELECT n.id FROM notes n
+              WHERE (?1 IS NULL OR n.folder_id = ?1)
+                AND (?2 IS NULL OR n.updated_at >= ?2)
+                AND (?3 IS NULL OR n.updated_at <= ?3){note_local}"
+        ))?;
+        let meetings = ids(format!(
+            "{cte}SELECT m.id FROM meetings m LEFT JOIN notes mn ON mn.id = m.note_id
+              WHERE (?1 IS NULL OR mn.folder_id = ?1)
+                AND (?2 IS NULL OR m.started_at >= ?2)
+                AND (?3 IS NULL OR m.started_at <= ?3){meeting_local}"
+        ))?;
+        let unfiltered = !filter.exclude_keep_local
+            && filter.folder_id.is_none()
+            && filter.since.is_none()
+            && filter.until.is_none();
+        Ok(owners
+            .iter()
+            .map(|(kind, id)| match kind {
+                OwnerKind::Note => notes.contains(id),
+                OwnerKind::Transcript => meetings.contains(id),
+                OwnerKind::Other => unfiltered,
+            })
+            .collect())
+    }
+}
+
+impl Storage {
+    /// Exact cosines (from the stored f32 vectors) for `ids`, best first.
+    fn exact_scores(&self, qnorm: &[f32], model: &str, ids: &[i64]) -> Result<Vec<(f32, i64)>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
         let mut stmt = self.conn.prepare(&format!(
-            "{cte}SELECT c.owner_kind,
-                    COALESCE(n.id, m.note_id, ''),
-                    CASE c.owner_kind WHEN 'transcript' THEN c.owner_id END,
-                    COALESCE(n.title, m.title, ''),
-                    c.text, c.start_ms, c.embedding, c.segment_ids_json, c.end_ms
+            "SELECT id, embedding FROM embedding_chunks
+              WHERE model = ?1 AND embedding IS NOT NULL AND id IN ({})",
+            list.join(",")
+        ))?;
+        let mut rows = stmt.query([model])?;
+        let mut out: Vec<(f32, i64)> = Vec::with_capacity(ids.len());
+        while let Some(r) = rows.next()? {
+            let rusqlite::types::ValueRef::Blob(blob) = r.get_ref(1)? else {
+                continue;
+            };
+            if blob.len() == qnorm.len() * 4 {
+                out.push((dot_blob(qnorm, blob), r.get::<_, i64>(0)?));
+            }
+        }
+        out.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        Ok(out)
+    }
+}
+
+/// Quantized scores this close under the floor are re-scored exactly.
+const QUANT_MARGIN: f32 = 0.01;
+/// Candidates re-scored past `limit`, so quantization error can't reorder
+/// hits across the cut.
+const RESCORE_EXTRA: usize = 16;
+/// At most this many candidates are re-scored exactly (every unscoped
+/// search fits: 200 + RESCORE_EXTRA).
+const RESCORE_MAX: usize = 256;
+
+/// `SELECT {columns}` over the embedded chunks of `model` that pass
+/// `filter` (see [`Storage::vector_search`]), restricted to `ids` when
+/// given. Returns the SQL and its positional parameters.
+fn chunk_scope_sql(
+    columns: &str,
+    model: &str,
+    filter: &SearchFilter,
+    ids: &[i64],
+) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+    let (cte, shareable) = if filter.exclude_keep_local {
+        (
+            crate::privacy::KEEP_LOCAL_CTE,
+            format!(
+                " AND (c.owner_kind != 'transcript' OR mn.id IS NOT NULL) AND {}",
+                crate::privacy::SHAREABLE_CHUNK
+            ),
+        )
+    } else {
+        ("", String::new())
+    };
+    let only = if ids.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        format!(" AND c.id IN ({})", list.join(","))
+    };
+    let text = |v: Option<String>| v.map(Value::Text).unwrap_or(Value::Null);
+    let params = vec![
+        Value::Text(model.to_string()),
+        text(filter.folder_id.clone()),
+        text(filter.since.map(|t| t.to_rfc3339())),
+        text(filter.until.map(|t| t.to_rfc3339())),
+    ];
+    (
+        format!(
+            "{cte}SELECT {columns}
              FROM embedding_chunks c
              LEFT JOIN notes n  ON c.owner_kind = 'note' AND n.id = c.owner_id
              LEFT JOIN meetings m ON c.owner_kind = 'transcript' AND m.id = c.owner_id
@@ -530,50 +796,10 @@ impl Storage {
                AND (c.owner_kind != 'transcript' OR m.id IS NOT NULL)
                AND (?2 IS NULL OR COALESCE(n.folder_id, mn.folder_id) = ?2)
                AND (?3 IS NULL OR COALESCE(m.started_at, n.updated_at) >= ?3)
-               AND (?4 IS NULL OR COALESCE(m.started_at, n.updated_at) <= ?4){shareable}"
-        ))?;
-        let rows = stmt.query_map(rusqlite::params![model, folder, &since, &until], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, Option<i64>>(5)?,
-                r.get::<_, Vec<u8>>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, Option<i64>>(8)?,
-            ))
-        })?;
-
-        let mut hits: Vec<VectorHit> = Vec::new();
-        for row in rows {
-            let (kind, note_id, meeting_id, title, text, start_ms, blob, ids, end_ms) = row?;
-            let v = decode_vector(&blob);
-            if v.len() != qnorm.len() {
-                continue; // vector from an older/mismatched model dimension
-            }
-            hits.push(VectorHit {
-                kind: if kind == "note" {
-                    crate::SearchHitKind::Note
-                } else {
-                    crate::SearchHitKind::Transcript
-                },
-                note_id,
-                meeting_id,
-                title,
-                snippet: snippet_of(&text),
-                start_ms: start_ms.map(|v| v as u64),
-                score: dot(&qnorm, &v),
-                segment_ids: serde_json::from_str(&ids).unwrap_or_default(),
-                end_ms: end_ms.map(|v| v.max(0) as u64),
-                text,
-            });
-        }
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        hits.truncate(limit);
-        Ok(hits)
-    }
+               AND (?4 IS NULL OR COALESCE(m.started_at, n.updated_at) <= ?4){shareable}{only}"
+        ),
+        params,
+    )
 }
 
 #[cfg(test)]
@@ -730,6 +956,57 @@ mod tests {
             .vector_search(&[1.0, 0.0], "other-model", &SearchFilter::default(), 10)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn floor_drops_weak_hits_but_reports_the_best_score() {
+        let (_dir, s) = test_storage();
+        let mut ids = Vec::new();
+        for (title, v) in [("close", [1.0, 0.1]), ("far", [0.1, 1.0])] {
+            let n = s.create_note(title, None).unwrap();
+            s.update_note_scratchpad(&n.id, &format!("{title} body"))
+                .unwrap();
+            let p = s.pending_embedding_chunks("m", 10).unwrap();
+            let chunk = p.iter().find(|c| c.title == title).unwrap();
+            s.store_chunk_embeddings("m", &[(chunk.id, v.to_vec())])
+                .unwrap();
+            ids.push(n.id);
+        }
+        let q = [1.0, 0.0];
+        let f = SearchFilter::default();
+        let all = s.vector_search_floor(&q, "m", &f, 10, None).unwrap();
+        assert_eq!(all.hits.len(), 2);
+        assert!(all.hits[0].score > all.hits[1].score);
+        // Exact scores (re-scored from the stored vectors).
+        assert!((all.hits[0].score - 1.0 / 1.01f32.sqrt()).abs() < 1e-6);
+        let floored = s.vector_search_floor(&q, "m", &f, 10, Some(0.5)).unwrap();
+        assert_eq!(floored.hits.len(), 1);
+        assert_eq!(floored.hits[0].note_id, ids[0]);
+        assert!((floored.best_score.unwrap() - all.hits[0].score).abs() < 1e-6);
+        // Nothing passes: no hits, but the best score still says how close.
+        let none = s.vector_search_floor(&q, "m", &f, 10, Some(0.999)).unwrap();
+        assert!(none.hits.is_empty());
+        assert!(none.best_score.is_some_and(|b| b < 0.999 && b > 0.9));
+        // A keep-local owner is out before the limit, and out of the best
+        // score too.
+        let private = s.create_folder("Private", None).unwrap();
+        s.set_folder_keep_local(&private.id, true).unwrap();
+        s.move_note(&ids[0], Some(&private.id)).unwrap();
+        let shareable = s
+            .vector_search_floor(
+                &q,
+                "m",
+                &SearchFilter {
+                    exclude_keep_local: true,
+                    ..Default::default()
+                },
+                1,
+                None,
+            )
+            .unwrap();
+        assert_eq!(shareable.hits.len(), 1);
+        assert_eq!(shareable.hits[0].note_id, ids[1]);
+        assert!(shareable.best_score.unwrap() < 0.2);
     }
 
     #[test]

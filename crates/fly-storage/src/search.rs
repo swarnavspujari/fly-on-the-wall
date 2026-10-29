@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::query::{term_expr, FtsQuery, TermOwners, TermStats};
 use crate::{Result, Storage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,31 +65,94 @@ impl Storage {
     /// The two FTS rankings (note hits, transcript hits) separately — each
     /// rank-ordered by bm25. Hybrid fusion treats them as independent lists;
     /// [`search_filtered`] concatenates them for the classic API.
+    ///
+    /// Keyword queries match every word (see [`crate::query`]); when that
+    /// finds nothing in either list under `filter`, the query's content
+    /// terms are ORed instead, so a question still finds the notes and
+    /// meetings sharing its rarest words. The choice depends only on the
+    /// query and the filter, never on `offset`, so pages stay consistent.
     pub fn search_split(
         &self,
         query: &str,
         filter: &SearchFilter,
     ) -> Result<(Vec<SearchHit>, Vec<SearchHit>)> {
-        let fts_query = sanitize_fts_query(query);
-        if fts_query.is_empty() {
+        let q = FtsQuery::parse(query);
+        if q.is_empty() {
             return Ok((vec![], vec![]));
         }
-        let limit = filter.limit.max(1) as i64;
-        let offset = filter.offset as i64;
-        let folder = filter.folder_id.as_deref();
-        let since = filter.since.map(|t| t.to_rfc3339());
-        let until = filter.until.map(|t| t.to_rfc3339());
-        let mut note_hits = Vec::new();
-        let mut transcript_hits = Vec::new();
+        let expr = q.choose(|all| -> Result<bool> {
+            let first = SearchFilter {
+                limit: 1,
+                offset: 0,
+                ..filter.clone()
+            };
+            Ok(!self.fts_note_hits(all, &first)?.is_empty()
+                || !self.fts_transcript_hits(all, &first)?.is_empty())
+        })?;
+        Ok((
+            self.fts_note_hits(expr, filter)?,
+            self.fts_transcript_hits(expr, filter)?,
+        ))
+    }
 
-        let (cte, not_local_note, not_local_meeting) = if filter.exclude_keep_local {
+    /// [`Storage::segment_term_stats`] for notes (title and body): how many
+    /// notes are in scope and, per term, which notes hold it. Honors
+    /// `filter`'s folder, `updated_at` window and `exclude_keep_local` (in
+    /// SQL); `limit`/`offset` don't apply.
+    pub fn note_term_stats(&self, terms: &[String], filter: &SearchFilter) -> Result<TermStats> {
+        let (cte, not_local) = if filter.exclude_keep_local {
             (
                 crate::privacy::KEEP_LOCAL_CTE,
                 " AND n.id NOT IN (SELECT id FROM local_notes)",
-                " AND m.note_id NOT IN (SELECT id FROM local_notes)",
             )
         } else {
-            ("", "", "")
+            ("", "")
+        };
+        let scope = format!(
+            "(:folder IS NULL OR n.folder_id = :folder)
+              AND (:since IS NULL OR n.updated_at >= :since)
+              AND (:until IS NULL OR n.updated_at <= :until){not_local}"
+        );
+        let folder = filter.folder_id.as_deref();
+        let since = filter.since.map(|t| t.to_rfc3339());
+        let until = filter.until.map(|t| t.to_rfc3339());
+        let docs: i64 = self.conn.query_row(
+            &format!("{cte}SELECT count(*) FROM notes n WHERE {scope}"),
+            rusqlite::named_params! {":folder": folder, ":since": since, ":until": until},
+            |r| r.get(0),
+        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "{cte}SELECT f.note_id, 1 FROM notes_fts f JOIN notes n ON n.id = f.note_id
+              WHERE notes_fts MATCH :expr AND {scope}"
+        ))?;
+        let mut out = Vec::with_capacity(terms.len());
+        for term in terms {
+            let rows = stmt.query_map(
+                rusqlite::named_params! {
+                    ":expr": term_expr(term),
+                    ":folder": folder,
+                    ":since": since,
+                    ":until": until,
+                },
+                |r| Ok((r.get::<_, String>(0)?, 1usize)),
+            )?;
+            out.push(TermOwners::collect(rows)?);
+        }
+        Ok(TermStats {
+            docs: docs.max(0) as usize,
+            terms: out,
+        })
+    }
+
+    /// Note rows matching an FTS5 expression, bm25-ranked.
+    fn fts_note_hits(&self, fts_query: &str, filter: &SearchFilter) -> Result<Vec<SearchHit>> {
+        let (cte, not_local) = if filter.exclude_keep_local {
+            (
+                crate::privacy::KEEP_LOCAL_CTE,
+                " AND n.id NOT IN (SELECT id FROM local_notes)",
+            )
+        } else {
+            ("", "")
         };
         let mut stmt = self.conn.prepare(&format!(
             "{cte}SELECT f.note_id, n.title, snippet(notes_fts, 2, '[[', ']]', ' … ', 12)
@@ -96,11 +160,18 @@ impl Storage {
              WHERE notes_fts MATCH ?1
                AND (?2 IS NULL OR n.folder_id = ?2)
                AND (?3 IS NULL OR n.updated_at >= ?3)
-               AND (?4 IS NULL OR n.updated_at <= ?4){not_local_note}
+               AND (?4 IS NULL OR n.updated_at <= ?4){not_local}
              ORDER BY rank LIMIT ?5 OFFSET ?6"
         ))?;
         let rows = stmt.query_map(
-            rusqlite::params![&fts_query, folder, &since, &until, limit, offset],
+            rusqlite::params![
+                fts_query,
+                filter.folder_id.as_deref(),
+                filter.since.map(|t| t.to_rfc3339()),
+                filter.until.map(|t| t.to_rfc3339()),
+                filter.limit.max(1) as i64,
+                filter.offset as i64
+            ],
             |r| {
                 Ok(SearchHit {
                     kind: SearchHitKind::Note,
@@ -112,12 +183,25 @@ impl Storage {
                 })
             },
         )?;
-        for row in rows {
-            note_hits.push(row?);
-        }
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
 
-        // Transcript hits join back to the owning note through meetings;
-        // folder filtering goes through that note.
+    /// Transcript rows (one per meeting) matching an FTS5 expression,
+    /// bm25-ranked. They join back to the owning note through meetings;
+    /// folder filtering goes through that note.
+    fn fts_transcript_hits(
+        &self,
+        fts_query: &str,
+        filter: &SearchFilter,
+    ) -> Result<Vec<SearchHit>> {
+        let (cte, not_local) = if filter.exclude_keep_local {
+            (
+                crate::privacy::KEEP_LOCAL_CTE,
+                " AND m.note_id NOT IN (SELECT id FROM local_notes)",
+            )
+        } else {
+            ("", "")
+        };
         let mut stmt = self.conn.prepare(&format!(
             "{cte}SELECT m.note_id, m.id, m.title, snippet(transcripts_fts, 1, '[[', ']]', ' … ', 12)
              FROM transcripts_fts t JOIN meetings m ON m.id = t.meeting_id
@@ -125,11 +209,18 @@ impl Storage {
              WHERE transcripts_fts MATCH ?1
                AND (?2 IS NULL OR n.folder_id = ?2)
                AND (?3 IS NULL OR m.started_at >= ?3)
-               AND (?4 IS NULL OR m.started_at <= ?4){not_local_meeting}
+               AND (?4 IS NULL OR m.started_at <= ?4){not_local}
              ORDER BY rank LIMIT ?5 OFFSET ?6"
         ))?;
         let rows = stmt.query_map(
-            rusqlite::params![&fts_query, folder, &since, &until, limit, offset],
+            rusqlite::params![
+                fts_query,
+                filter.folder_id.as_deref(),
+                filter.since.map(|t| t.to_rfc3339()),
+                filter.until.map(|t| t.to_rfc3339()),
+                filter.limit.max(1) as i64,
+                filter.offset as i64
+            ],
             |r| {
                 Ok(SearchHit {
                     kind: SearchHitKind::Transcript,
@@ -141,36 +232,8 @@ impl Storage {
                 })
             },
         )?;
-        for row in rows {
-            transcript_hits.push(row?);
-        }
-
-        Ok((note_hits, transcript_hits))
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
-}
-
-/// Turn free-form user input into a safe FTS5 MATCH expression: each token
-/// double-quoted (no operator injection / syntax errors), joined with
-/// implicit AND, last token gets prefix matching for search-as-you-type.
-pub(crate) fn sanitize_fts_query(input: &str) -> String {
-    let tokens: Vec<String> = input
-        .split_whitespace()
-        .map(|t| t.replace('"', ""))
-        .filter(|t| !t.is_empty())
-        .collect();
-    let n = tokens.len();
-    tokens
-        .into_iter()
-        .enumerate()
-        .map(|(i, t)| {
-            if i + 1 == n {
-                format!("\"{t}\"*")
-            } else {
-                format!("\"{t}\"")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[cfg(test)]
@@ -196,10 +259,111 @@ mod tests {
     }
 
     #[test]
+    fn keywords_need_every_word_questions_need_one() {
+        let (_dir, s) = test_storage();
+        let pricing = s.create_note("Pricing sync", None).unwrap();
+        s.update_note_scratchpad(&pricing.id, "usage-based pricing for enterprise accounts")
+            .unwrap();
+        let hiring = s.create_note("Hiring plan", None).unwrap();
+        s.update_note_scratchpad(&hiring.id, "two engineers for enterprise support")
+            .unwrap();
+
+        // Keywords: AND, as before (only one note has both words).
+        let hits = s.search("enterprise pricing", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].note_id, pricing.id);
+        // A quoted phrase must match as a phrase.
+        assert_eq!(s.search("\"enterprise support\"", 10).unwrap().len(), 1);
+        assert!(s.search("\"support enterprise\"", 10).unwrap().is_empty());
+
+        // A question no single note answers word for word: before, AND
+        // over "what did we decide about …" found nothing at all.
+        let hits = s
+            .search(
+                "What did we decide about pricing for the enterprise tier?",
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 2, "OR fallback finds both enterprise notes");
+        assert_eq!(hits[0].note_id, pricing.id, "more shared terms rank first");
+        // Nothing shares a word: still nothing.
+        assert!(s
+            .search("Who owns the Berlin lease?", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn note_term_stats_respect_scope_and_keep_local() {
+        let (_dir, s) = test_storage();
+        let a = s.create_note("Budget review", None).unwrap();
+        s.update_note_scratchpad(&a.id, "hiring is frozen").unwrap();
+        let private = s.create_folder("Private", None).unwrap();
+        s.set_folder_keep_local(&private.id, true).unwrap();
+        let b = s.create_note("Private", Some(&private.id)).unwrap();
+        s.update_note_scratchpad(&b.id, "budget secret").unwrap();
+        let terms = vec!["budget".to_string(), "hiring".to_string()];
+        let all = s
+            .note_term_stats(&terms, &super::SearchFilter::default())
+            .unwrap();
+        assert_eq!(all.docs, 2);
+        assert_eq!(all.terms[0].count, 2, "title counts too");
+        let shareable = s
+            .note_term_stats(
+                &terms,
+                &super::SearchFilter {
+                    exclude_keep_local: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(shareable.docs, 1);
+        assert_eq!(shareable.terms[0].owners.len(), 1);
+        assert!(shareable.terms[0].owners.contains_key(&a.id));
+    }
+
+    #[test]
+    fn fallback_choice_ignores_offset() {
+        let (_dir, s) = test_storage();
+        for i in 0..3 {
+            let n = s.create_note(&format!("n{i}"), None).unwrap();
+            s.update_note_scratchpad(&n.id, &format!("budget memo number {i}"))
+                .unwrap();
+        }
+        let n = s.create_note("both", None).unwrap();
+        s.update_note_scratchpad(&n.id, "budget and hiring together")
+            .unwrap();
+        let page = |offset| {
+            s.search_filtered(
+                "budget hiring",
+                &super::SearchFilter {
+                    limit: 1,
+                    offset,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        // AND matches one note, so every page uses AND: page 2 is empty
+        // rather than switching to the broader OR list.
+        assert_eq!(page(0).len(), 1);
+        assert!(page(1).is_empty());
+    }
+
+    #[test]
     fn hostile_query_syntax_does_not_error() {
         let (_dir, s) = test_storage();
         s.create_note("x", None).unwrap();
-        for q in ["\"unbalanced", "AND OR NOT", "a*b(c)", "   ", "col:val"] {
+        for q in [
+            "\"unbalanced",
+            "AND OR NOT",
+            "a*b(c)",
+            "   ",
+            "col:val",
+            "what is NEAR(a b) for x?",
+            "x\" OR \"y budget plan",
+            "who said ^start - minus * in (the) plan?",
+        ] {
             s.search(q, 10).unwrap();
         }
     }

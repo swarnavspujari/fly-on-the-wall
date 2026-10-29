@@ -20,8 +20,9 @@ use tauri::Manager;
 use crate::ollama;
 use crate::state::AppState;
 
-/// Embedding model tag pulled into the managed Ollama runtime.
-pub const EMBED_MODEL: &str = "embeddinggemma:300m";
+/// Embedding model tag pulled into the managed Ollama runtime (its
+/// similarity floor lives with it in fly-storage).
+pub const EMBED_MODEL: &str = fly_storage::embeddings::EMBEDDINGGEMMA;
 
 /// Chunks per `/api/embed` call. Small enough to keep each request quick on
 /// CPU, large enough to amortize HTTP overhead across a backfill.

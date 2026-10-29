@@ -409,22 +409,27 @@ fn semantic_hits_map_onto_windows_and_fuse() {
     let f = fixture();
     embed_all(&f.storage);
     let ctx = Context::new(&f.storage, Visibility::ShareableOnly);
-    // FTS ANDs every term, so "timeline" (absent everywhere) kills the
-    // keyword list; the vector list still finds the budget passage.
-    let q = "hiring frozen timeline";
-    let v = embed(q);
+    // No word of the query text occurs anywhere, so the keyword lists are
+    // empty; the vector list still finds the budget passage.
+    let v = embed("hiring frozen timeline");
     let qv = QueryVector {
         vector: &v,
         model: MODEL,
     };
-    let r = ctx.search_passages(&search(q), Some(qv)).unwrap();
+    let r = ctx.search_passages(&search("zzqx"), Some(qv)).unwrap();
     assert!(r.semantic);
-    let p = r
+    let (i, p) = r
         .passages
         .iter()
-        .find(|p| p.segments.iter().any(|s| s.id == "b031"))
+        .enumerate()
+        .find(|(_, p)| p.segments.iter().any(|s| s.id == "b031"))
         .expect("semantic passage with the hiring line");
     assert_eq!(p.matched_by, vec!["semantic"]);
+    // Its raw cosine rides along (no floor for this test model).
+    assert!(r.similarity[i].is_some_and(|c| c > 0.0));
+    assert_eq!(r.similarity.len(), r.passages.len());
+    assert_eq!(r.similarity_floor, None);
+    assert!(r.top_similarity >= r.similarity[i]);
     // Agreement between lists ranks first.
     let q = "hiring frozen";
     let v = embed(q);
@@ -991,10 +996,11 @@ fn keep_local_chunks_cannot_starve_the_vector_pool() {
     let (_dir, s, weak) = starvation_fixture(false);
     let ctx = Context::new(&s, Visibility::ShareableOnly);
     let v = embed("budget forecast");
-    // "zzqx" keeps FTS out of it: only the semantic list can find `weak`.
+    // No word of "zzqx" occurs anywhere: only the semantic list can find
+    // `weak`.
     let r = ctx
         .search_passages(
-            &search("budget forecast zzqx"),
+            &search("zzqx"),
             Some(QueryVector {
                 vector: &v,
                 model: MODEL,
@@ -1029,6 +1035,87 @@ fn out_of_scope_chunks_cannot_starve_a_scoped_search() {
     assert_eq!(r.passages.len(), 1);
     assert_eq!(r.passages[0].meeting_id.as_deref(), Some(weak.as_str()));
     assert_eq!(r.passages[0].matched_by, vec!["semantic"]);
+}
+
+#[test]
+fn questions_find_keyword_passages_without_vectors() {
+    // A natural-language question with no query vector (Ollama down): FTS
+    // used to AND every word ("what", "did", "say"…) and find nothing.
+    let f = fixture();
+    let ctx = Context::new(&f.storage, Visibility::ShareableOnly);
+    let r = ctx
+        .search_passages(&search("What did Dana say about the Q3 budget?"), None)
+        .unwrap();
+    let first = r.passages.first().expect("keyword passage");
+    assert_eq!(first.meeting_id.as_deref(), Some(f.budget.as_str()));
+    assert!(first.segments.iter().any(|s| s.id == "b030"));
+    assert_eq!(first.matched_by, vec!["keyword"]);
+    assert_eq!(r.similarity, vec![None; r.passages.len()]);
+    assert_eq!(r.top_similarity, None);
+    // Keep-local meetings share the words but never surface.
+    assert!(r
+        .passages
+        .iter()
+        .all(|p| p.meeting_id.as_deref() != Some(f.legal.as_str())
+            && p.meeting_id.as_deref() != Some(f.one_on_one.as_str())));
+}
+
+#[test]
+fn one_shared_common_word_is_not_a_keyword_match() {
+    let f = fixture();
+    let ctx = Context::new(&f.storage, Visibility::All);
+    // "contract" occurs (the renewal and budget meetings), but it carries
+    // a small share of the question's weight next to words the library
+    // has never seen.
+    let r = ctx
+        .search_passages(
+            &search("Who approved the Lisbon catering contract amendment?"),
+            None,
+        )
+        .unwrap();
+    assert!(r.passages.is_empty(), "{:?}", r.passages);
+    // The same word as a keyword query still matches.
+    let r = ctx.search_passages(&search("contract"), None).unwrap();
+    assert!(!r.passages.is_empty());
+}
+
+#[test]
+fn similarity_floor_drops_weak_semantic_hits() {
+    let f = fixture();
+    // Vectors under the app model's name, so its floor applies.
+    let model = fly_storage::embeddings::EMBEDDINGGEMMA;
+    let floor = fly_storage::embeddings::similarity_floor(model).expect("measured floor");
+    let pending = f.storage.pending_embedding_chunks(model, 10_000).unwrap();
+    let vectors: Vec<(i64, Vec<f32>)> = pending.iter().map(|p| (p.id, embed(&p.text))).collect();
+    f.storage.store_chunk_embeddings(model, &vectors).unwrap();
+    let ctx = Context::new(&f.storage, Visibility::All);
+    // The hiring line's own chunk text: cosine 1 with its chunk.
+    let hiring = pending
+        .iter()
+        .find(|p| p.text.contains("hiring stays frozen"))
+        .expect("hiring chunk");
+    let v = embed(&hiring.text);
+    let r = ctx
+        .search_passages(&search("zzqx"), Some(QueryVector { vector: &v, model }))
+        .unwrap();
+    assert_eq!(r.similarity_floor, Some(floor));
+    assert!(!r.passages.is_empty());
+    assert!(r.similarity.iter().all(|c| c.is_some_and(|c| c >= floor)));
+    // A vector pointing away from every chunk (the fake vectors are
+    // non-negative counts): nothing passes, but the best score is still
+    // reported, below the floor.
+    let odd = vec![-1f32; DIMS];
+    let r = ctx
+        .search_passages(
+            &search("zzqx"),
+            Some(QueryVector {
+                vector: &odd,
+                model,
+            }),
+        )
+        .unwrap();
+    assert!(r.passages.is_empty(), "{:?}", r.passages);
+    assert!(r.top_similarity.is_some_and(|c| c < floor));
 }
 
 #[test]

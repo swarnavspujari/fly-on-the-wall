@@ -115,39 +115,45 @@ pub fn window_text(t: &Transcript, w: &Window) -> String {
     out
 }
 
-const STOPWORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "did", "do", "does", "for", "from", "how", "i",
-    "in", "is", "it", "me", "my", "of", "on", "or", "our", "say", "said", "that", "the", "this",
-    "to", "was", "we", "were", "what", "when", "where", "which", "who", "why", "with", "you",
-    "about", "they", "their", "there", "us",
-];
-
-/// Lowercase alphanumeric terms of a query, minus stopwords.
+/// Lowercase content terms of a query (stopwords and lone letters
+/// dropped, deduplicated): the same terms the storage keyword index is
+/// queried with ([`fly_storage::query::query_terms`]).
 pub fn query_terms(q: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
-    q.split(|c: char| !c.is_alphanumeric())
-        .map(|t| t.to_lowercase())
-        .filter(|t| !t.is_empty() && !STOPWORDS.contains(&t.as_str()))
-        .filter(|t| seen.insert(t.clone()))
+    fly_storage::query::query_terms(q)
+}
+
+/// Which query terms a text contains (a term also matches as a word
+/// prefix when ≥ 4 chars: "budget" finds "budgets").
+pub fn matched_terms(terms: &[String], text: &str) -> Vec<bool> {
+    let words: HashSet<String> = fly_storage::query::words(text).collect();
+    terms
+        .iter()
+        .map(|t| words.iter().any(|w| fly_storage::query::term_matches(t, w)))
         .collect()
 }
 
-/// How many distinct query terms a text contains (a term also matches as
-/// a word prefix when ≥ 4 chars: "budget" finds "budgets").
+/// How many distinct query terms a text contains.
 pub fn lexical_score(terms: &[String], text: &str) -> usize {
-    let words: Vec<String> = text
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_lowercase())
-        .collect();
-    terms
-        .iter()
-        .filter(|t| {
-            words
-                .iter()
-                .any(|w| w == *t || (t.chars().count() >= 4 && w.starts_with(t.as_str())))
-        })
-        .count()
+    matched_terms(terms, text).iter().filter(|m| **m).count()
+}
+
+/// The IDF mass of the query terms present in `texts` (`idf[i]` weighs
+/// `terms[i]`; each text has a weight, and a term counts once, at the
+/// highest weight of a text holding it). Rare terms (names, figures,
+/// project words) count for much more than words every meeting uses.
+pub fn weighted_match(terms: &[String], idf: &[f32], texts: &[(&str, f32)]) -> f32 {
+    let mut best = vec![0f32; terms.len()];
+    for (text, weight) in texts {
+        if *weight <= 0.0 || text.is_empty() {
+            continue;
+        }
+        for (b, m) in best.iter_mut().zip(matched_terms(terms, text)) {
+            if m {
+                *b = b.max(*weight);
+            }
+        }
+    }
+    best.iter().zip(idf).map(|(b, w)| b * w).sum()
 }
 
 /// Where a passage lives: `(owner, window index)`.
@@ -157,15 +163,39 @@ pub enum PassageKey {
     Transcript(String, usize),
     /// Paragraph chunk of a note.
     Note(String, usize),
+    /// A vector hit in a meeting whose windows haven't been computed:
+    /// `(meeting id, anchor)`, the anchor being the chunk's first segment id
+    /// (or `@<start_ms>` for a chunk an older build wrote). Resolved onto a
+    /// [`PassageKey::Transcript`] window only if it makes the result, so a
+    /// search doesn't parse every transcript its vector hits touch.
+    Chunk(String, String),
 }
 
 impl PassageKey {
     /// The meeting/note a per-owner cap applies to.
     pub fn owner(&self) -> &str {
         match self {
-            PassageKey::Transcript(id, _) | PassageKey::Note(id, _) => id,
+            PassageKey::Transcript(id, _) | PassageKey::Note(id, _) | PassageKey::Chunk(id, _) => {
+                id
+            }
         }
     }
+}
+
+/// The window a vector hit lands on: the one holding the chunk's first
+/// segment (chunks may embed polished text, so their boundaries can differ
+/// from raw-text windows), or for an anchor `@<start_ms>` (a chunk an older
+/// build wrote, without ids) the window starting at, else before, it.
+pub fn resolve_anchor(t: &Transcript, windows: &[Window], anchor: &str) -> Option<usize> {
+    if let Some(start) = anchor.strip_prefix('@') {
+        let start: u64 = start.parse().ok()?;
+        return windows
+            .iter()
+            .position(|w| w.start_ms == start)
+            .or_else(|| windows.iter().rposition(|w| w.start_ms <= start));
+    }
+    let pos = t.segments.iter().position(|s| s.id == anchor)?;
+    windows.iter().position(|w| w.segments.contains(&pos))
 }
 
 /// Which retrieval lists found a passage.
@@ -176,8 +206,10 @@ pub enum Via {
 }
 
 /// Reciprocal-rank fusion of ranked passage lists, then a per-owner cap so
-/// one long meeting can't fill the whole result. Ties keep first-seen
-/// order (lists are passed keyword-first).
+/// one long meeting can't crowd the others out. Ties keep first-seen order
+/// (lists are passed keyword-first). Slots the cap would leave empty go to
+/// the capped-out passages, best first: with nothing left to crowd out, a
+/// meeting's next-best window is worth more than an empty slot.
 pub fn fuse(
     lists: &[(Via, Vec<PassageKey>)],
     per_owner: usize,
@@ -209,17 +241,21 @@ pub fn fuse(
     all.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.1.cmp(&b.1)));
     let mut per: HashMap<String, usize> = HashMap::new();
     let mut out = Vec::new();
+    let mut capped = Vec::new();
     for (k, _, s, v) in all {
+        if out.len() >= limit {
+            break;
+        }
         let n = per.entry(k.owner().to_string()).or_default();
         if *n >= per_owner {
+            capped.push((k, s, v));
             continue;
         }
         *n += 1;
         out.push((k, s, v));
-        if out.len() >= limit {
-            break;
-        }
     }
+    let room = limit.saturating_sub(out.len());
+    out.extend(capped.into_iter().take(room));
     out
 }
 
@@ -323,6 +359,28 @@ mod tests {
     }
 
     #[test]
+    fn weighted_match_counts_each_term_once_across_texts() {
+        let terms = query_terms("Dana budget hiring");
+        let idf = [3.0, 1.0, 0.5];
+        // "Dana" in the label line, "budgets" in the body: 3 + 1.
+        assert_eq!(
+            weighted_match(
+                &terms,
+                &idf,
+                &[("Dana: the budgets", 1.0), ("budget again", 1.0)]
+            ),
+            4.0
+        );
+        // A term in a lighter text (a title) counts at that weight, unless
+        // a full-weight text has it too.
+        assert_eq!(
+            weighted_match(&terms, &idf, &[("Hiring plan", 0.5), ("Dana: hi", 1.0)]),
+            3.25
+        );
+        assert_eq!(weighted_match(&terms, &idf, &[("nothing here", 1.0)]), 0.0);
+    }
+
+    #[test]
     fn fuse_rewards_agreement_and_caps_per_owner() {
         let t = |m: &str, i| PassageKey::Transcript(m.into(), i);
         let lists = vec![
@@ -332,11 +390,26 @@ mod tests {
             ),
             (Via::Semantic, vec![t("b", 0), t("a", 3)]),
         ];
-        let fused = fuse(&lists, 2, 10);
+        let fused = fuse(&lists, 2, 4);
         assert_eq!(fused[0].0, t("b", 0), "found by both lists");
         assert_eq!(fused[0].2, vec![Via::Keyword, Via::Semantic]);
         let from_a = fused.iter().filter(|(k, _, _)| k.owner() == "a").count();
-        assert_eq!(from_a, 2, "per-owner cap");
+        assert_eq!(from_a, 3, "per-owner cap, then the free slot");
+        assert_eq!(fused[1].0.owner(), "a");
+        assert_eq!(fused[2].0.owner(), "a");
+        assert_eq!(
+            fused[3].0,
+            t("a", 3),
+            "capped-out passages only fill free slots"
+        );
+        // With other owners to show, the cap holds.
+        let mut more = lists.clone();
+        more.push((
+            Via::Semantic,
+            vec![t("c", 0), t("d", 0), t("e", 0), t("f", 0)],
+        ));
+        let fused = fuse(&more, 2, 6);
+        assert_eq!(fused.iter().filter(|(k, _, _)| k.owner() == "a").count(), 2);
         assert_eq!(fuse(&lists, 3, 1).len(), 1, "limit");
     }
 }

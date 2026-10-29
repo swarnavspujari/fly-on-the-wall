@@ -21,6 +21,7 @@
 
 mod atomic;
 mod attachments;
+mod cache;
 pub mod citations;
 pub mod embeddings;
 mod folders;
@@ -32,6 +33,7 @@ mod migrations;
 pub mod naming;
 mod notes;
 pub mod privacy;
+pub mod query;
 mod recovery;
 pub mod safe_path;
 pub mod scratch;
@@ -43,7 +45,7 @@ mod transcripts;
 
 pub use atomic::rename_with_retry;
 pub use citations::{CitationLocator, CitationStatus};
-pub use embeddings::{PendingChunk, VectorHit};
+pub use embeddings::{PendingChunk, VectorHit, VectorResults};
 pub use items::ItemFilter;
 pub use jobs::{TranscriptionJob, JOB_DONE, JOB_FAILED, JOB_QUEUED, JOB_RUNNING};
 pub use meetings::MeetingFilter;
@@ -204,6 +206,8 @@ const EXPECTED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 pub struct Storage {
     conn: Connection,
     data_dir: PathBuf,
+    /// Embedding vectors kept between searches (see `cache.rs`).
+    read_cache: cache::ReadCache,
 }
 
 impl Storage {
@@ -228,6 +232,7 @@ impl Storage {
         let storage = Self {
             conn,
             data_dir: data_dir.to_path_buf(),
+            read_cache: Default::default(),
         };
         storage.migrate()?;
         storage.seed_builtin_templates()?;
@@ -278,6 +283,7 @@ impl Storage {
         Ok(Self {
             conn,
             data_dir: data_dir.to_path_buf(),
+            read_cache: Default::default(),
         })
     }
 
