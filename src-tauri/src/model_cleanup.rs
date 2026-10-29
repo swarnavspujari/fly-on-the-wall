@@ -1431,7 +1431,8 @@ mod tests {
         let outside = tmp.path().join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("medium.bin"), vec![0u8; 64]).unwrap();
-        std::fs::create_dir_all(d.join("models/asr")).unwrap();
+        // the Balanced model on disk, so medium isn't the stand-in (in use)
+        install(&d, TURBO, 9);
         let linked = d.join("models/asr/ggml-medium-q5_0.bin");
         #[cfg(unix)]
         let ok = std::os::unix::fs::symlink(outside.join("medium.bin"), &linked).is_ok();
@@ -1445,11 +1446,17 @@ mod tests {
             );
             let r = build_report(&d, &usage_with(&[]), None, 1);
             let medium = row(&r, MEDIUM);
+            assert!(medium.installed && medium.in_use.is_none());
             assert!(medium.linked && !medium.can_delete);
+            assert_eq!(medium.note.as_deref(), Some(LINKED));
             assert_eq!(medium.size_on_disk, 0, "never measured through");
             assert_eq!(r.reclaimable_bytes, 0);
             let out = delete_requested(&d, &usage_with(&[]), &[MEDIUM.into()], &[], 1);
             assert!(out.removed.is_empty(), "{out:?}");
+            assert_eq!(
+                out.skipped,
+                vec![format!("{}: in a linked folder", medium.display)]
+            );
             assert!(outside.join("medium.bin").is_file());
             assert!(std::fs::symlink_metadata(&linked).is_ok());
         } else {
