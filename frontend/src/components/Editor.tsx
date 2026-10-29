@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type {
   Attachment,
@@ -51,7 +51,9 @@ import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
 import EnhancedDoc from "./EnhancedDoc";
-import { AskComposer, AskSheet, useAskChat, useWideWindow } from "./AskPanel";
+import { AskComposer, AskSheet, OPEN_ASK_EVENT, useAskChat, useWideWindow } from "./AskPanel";
+import type { OpenAskDetail } from "./AskPanel";
+import { ALL_SCOPE, namedSpeakers } from "../askScope";
 
 /** The title a new note starts with (App.tsx `newNote`). */
 const UNTITLED = "Untitled";
@@ -102,6 +104,12 @@ interface Props {
   onOpenSettings: (focus: "engine" | "groq") => void;
   onRelabel: (speakerKey: string, label: string) => void;
   onEditSegment: (segmentId: string, text: string) => void;
+  /** An Ask source in a meeting of another note: open that note there. */
+  onOpenSourceElsewhere?: (meetingId: string, segmentIds: string[]) => void;
+  /** Open the transcript at these lines once this note shows (an Ask source
+   *  opened from Home or another note). `nonce` makes each request one. */
+  pendingZoom?: { noteId: string; meetingId: string; segmentIds: string[]; nonce: number } | null;
+  onPendingZoomDone?: () => void;
 }
 
 type View = "notes" | "transcript" | "enhanced";
@@ -979,6 +987,9 @@ export default function Editor({
   onOpenSettings,
   onRelabel,
   onEditSegment,
+  onOpenSourceElsewhere,
+  pendingZoom = null,
+  onPendingZoomDone,
 }: Props) {
   const [title, setTitle] = useState(note.title);
   // A note opened with the "Untitled" it was created with shows that as the
@@ -995,9 +1006,8 @@ export default function Editor({
   const [enhancing, setEnhancing] = useState(false);
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
   const [askOpen, setAskOpen] = useState(false);
-  // Ask chat for this note (ephemeral; resets on note switch) and whether
-  // its sheet is pinned beside the note (wide windows only; remembered).
-  const ask = useAskChat(note.id);
+  // Whether the Ask sheet is pinned beside the note (wide windows only;
+  // remembered). The chat itself is set up below, once hasMeeting is known.
   const askInputRef = useRef<HTMLTextAreaElement>(null);
   const wideWindow = useWideWindow();
   const [askPinPref, setAskPinPref] = useState(false);
@@ -1065,6 +1075,29 @@ export default function Editor({
   const enhanced = note.blocks.length > 0;
   const isRecordingThisNote = recStatus.active && recStatus.note_id === note.id;
   const hasMeeting = meeting != null || (isRecordingThisNote && recStatus.meeting_id != null);
+  // Ask chat for this note (ephemeral; resets on note switch).
+  const ask = useAskChat(note.id, { hasMeeting });
+  // Names @ suggests: this meeting's attendees and named speakers.
+  const askPeople = useMemo(
+    () =>
+      namedSpeakers([
+        ...(meeting?.attendees ?? []).map((a) => a.name.trim() || a.email || ""),
+        ...(transcript?.speakers ?? []).map((s) => s.label),
+      ]),
+    [meeting?.attendees, transcript?.speakers],
+  );
+  // Ask from anywhere (the sidebar entry, Ctrl/Cmd+J): this note's Ask.
+  const { setScope: setAskScope } = ask;
+  useEffect(() => {
+    const onOpenAsk = (e: Event) => {
+      const detail = (e as CustomEvent<OpenAskDetail>).detail ?? {};
+      if (detail.scope === "all") setAskScope(ALL_SCOPE);
+      setAskOpen(true);
+      askInputRef.current?.focus();
+    };
+    window.addEventListener(OPEN_ASK_EVENT, onOpenAsk);
+    return () => window.removeEventListener(OPEN_ASK_EVENT, onOpenAsk);
+  }, [setAskScope]);
 
   // Swap editor contents when a different note is opened.
   useEffect(() => {
@@ -1210,13 +1243,6 @@ export default function Editor({
     exportTimer.current = window.setTimeout(() => setExportState("idle"), 1800);
   };
 
-  const insertFromAsk = (content: string) => {
-    const next = scratchpad ? `${scratchpad}\n\n${content}` : content;
-    setScratchpad(next);
-    setNotesRev((r) => r + 1);
-    scheduleSave(title, next);
-  };
-
   const zoom = (segmentIds: string[], meetingId?: string) => {
     setZoomIds(segmentIds);
     setZoomMeetingId(meetingId ?? null);
@@ -1227,6 +1253,37 @@ export default function Editor({
   };
   const highlightIds =
     zoomMeetingId && transcript?.meeting_id !== zoomMeetingId ? NO_HIGHLIGHT : zoomIds;
+
+  // An Ask source: this note's own recordings open here; another note's
+  // meeting opens that note (App), at the same lines.
+  const ownsMeeting = (id: string) => meeting?.id === id || meetings.some((m) => m.id === id);
+  const openAskSource = ({
+    meetingId,
+    segmentIds,
+  }: {
+    meetingId: string;
+    segmentIds: string[];
+  }) => {
+    if (ownsMeeting(meetingId)) zoom(segmentIds, meetingId);
+    else onOpenSourceElsewhere?.(meetingId, segmentIds);
+  };
+  // A source opened from elsewhere lands here once this note (and the
+  // recording it points into) is loaded.
+  const zoomRef = useRef(zoom);
+  useEffect(() => {
+    zoomRef.current = zoom;
+  });
+  const doneZoom = useRef<number | null>(null);
+  const pendingKnown =
+    !!pendingZoom &&
+    (meeting?.id === pendingZoom.meetingId || meetings.some((m) => m.id === pendingZoom.meetingId));
+  useEffect(() => {
+    if (!pendingZoom || pendingZoom.noteId !== note.id || !pendingKnown) return;
+    if (doneZoom.current === pendingZoom.nonce) return;
+    doneZoom.current = pendingZoom.nonce;
+    zoomRef.current(pendingZoom.segmentIds, pendingZoom.meetingId);
+    onPendingZoomDone?.();
+  }, [pendingZoom, pendingKnown, note.id, onPendingZoomDone]);
 
   // "Someone else…" in the transcript speaker dropdown: add the person to the
   // attendee list AND assign them to the speaker in one step. The attendee
@@ -1590,6 +1647,7 @@ export default function Editor({
               open={askOpen}
               onOpen={() => setAskOpen(true)}
               placeholder={hasMeeting ? "Ask about this meeting" : "Ask about this note"}
+              people={askPeople}
             />
             {askOpen && !askPinned && (
               <AskSheet
@@ -1601,7 +1659,10 @@ export default function Editor({
                 canPin={wideWindow}
                 onTogglePin={toggleAskPin}
                 onClose={() => setAskOpen(false)}
-                onInsert={insertFromAsk}
+                insertNoteId={note.id}
+                onNoteChanged={onNoteChanged}
+                onOpenSource={openAskSource}
+                onShowInserted={() => setView("enhanced")}
               />
             )}
           </ViewSwitcher>
@@ -1620,7 +1681,10 @@ export default function Editor({
             canPin={wideWindow}
             onTogglePin={toggleAskPin}
             onClose={() => setAskOpen(false)}
-            onInsert={insertFromAsk}
+            insertNoteId={note.id}
+            onNoteChanged={onNoteChanged}
+            onOpenSource={openAskSource}
+            onShowInserted={() => setView("enhanced")}
           />
         </div>
       )}

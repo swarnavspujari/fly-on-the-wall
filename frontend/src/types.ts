@@ -331,7 +331,14 @@ export interface AskSentence {
   /** sourced = every claim checked; unsourced = no valid citation;
    *  flagged = a claim isn't in the cited lines (or an uncited claim). */
   status: "sourced" | "unsourced" | "flagged";
-  flags?: { kind: string; detail?: string }[];
+  flags?: AskFlag[];
+}
+
+/** Why a sentence isn't sourced (fly-ask `FlagKind`). `detail` is the
+ *  answer's own word or number that failed the check ("84000"). */
+export interface AskFlag {
+  kind: "uncited_claim" | "invalid_citation" | "number" | "date" | "name" | "quote";
+  detail?: string;
 }
 
 export interface AskSourceLine {
@@ -374,10 +381,88 @@ export interface AskReply {
   sentences: AskSentence[];
   sources: AskSource[];
   proposals: AskProposal[];
-  refusals: { tool: string | null; reason: string }[];
+  refusals: AskRefusal[];
   trace_lines: string[];
   /** Where the answering model ran (store it on the assistant turn). */
   on_device: boolean;
+  /** What the user's trace shows (counts and codes only, never meeting
+   *  text). Optional so a reply from an older build still renders. */
+  trace?: AskTrace;
+  timing?: { first_token_ms: number | null; total_ms: number };
+  /** The typed run log (ids, counts and enum codes like "reach_cloud").
+   *  The UI reads only `reach`, `provider` and `prefetch`. */
+  run_log?: AskRunLog;
+}
+
+/** A proposal the harness refused (fly-ask `ProposalRefusal`). */
+export interface AskRefusal {
+  /** `null` = a tool that isn't a proposal tool. */
+  tool: "insert_into_note" | "add_action_item" | null;
+  reason:
+    | "bad_arguments"
+    | "no_sources"
+    | "source_not_shown"
+    | "mixed_meetings"
+    | "outside_scope"
+    | "unsupported_claim"
+    | "unknown_owner"
+    | "too_long"
+    | "duplicate"
+    | "blocked";
+}
+
+/** fly-ask `Tier`: S answers from what the prefetch found; M and C may
+ *  look further with tools. */
+export type AskTier = "S" | "M" | "C";
+
+export interface AskTrace {
+  tier: AskTier | null;
+  scope: "all" | "meeting" | "note" | "folder" | "person" | null;
+  /** Kept-local meetings an off-device model didn't search. The UI never
+   *  shows the number, only that some weren't searched. */
+  kept_local_not_searched: number;
+  meetings_in_scope: number;
+  passages: number;
+  items: number;
+  /** One per model tool call: `tool` is a code like "tool_search_passages". */
+  tool_calls: { tool: string; ok: boolean }[];
+  retried: boolean;
+  context_truncated: boolean;
+  floor_not_found: boolean;
+  budget_forced: boolean;
+  /** Requested from the harness (3.4): connectors were off for this question
+   *  because its scope holds a Keep-local meeting. */
+  connectors_off_keep_local?: boolean;
+}
+
+/** The part of fly-ask's `RunLog` the UI reads. */
+export interface AskRunLog {
+  /** "reach_on_device" | "reach_local_remote" | "reach_cloud" */
+  reach?: string;
+  /** "provider_ollama" | "provider_anthropic" | … */
+  provider?: string;
+  prefetch?: { searches?: number; memory_facts?: number; semantic?: boolean };
+}
+
+/** What Ask is asked over: `ask_meeting`'s `scope` (fly-ask `AskScope`). */
+export type AskScope =
+  { kind: "all" } | { kind: "note" | "meeting" | "folder" | "person"; id: string };
+
+/** fly-ask `Stage`. */
+export type AskStage = "scoping" | "searching" | "answering" | "reading" | "checking" | "retrying";
+
+/** One `ask:event` (fly-ask `AskEvent`), for the `ask_id` it names. */
+export type AskStreamEvent =
+  | { type: "stage"; stage: AskStage }
+  | { type: "sources"; sources: AskSource[]; kept_local_not_searched: number }
+  | { type: "turn_start"; turn: number }
+  /** The reply so far (whole text, not a delta). Turn 0 is the final,
+   *  validated answer. */
+  | { type: "frame"; turn: number; text: string };
+
+export interface AskEventPayload {
+  ask_id: string;
+  event: AskStreamEvent;
 }
 
 export interface CalendarAttendee {
