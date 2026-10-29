@@ -236,6 +236,9 @@ impl CallApprover for AppApprover {
             Ok(Ok(decision)) => decision,
             Ok(Err(_)) => Decision::Decline,
             Err(_) => {
+                // Remove first so the drop guard doesn't also report it.
+                let st = self.app.state::<ConnectorsState>();
+                st.pending.lock().unwrap().remove(&id);
                 let _ = self.app.emit(
                     EVENT_SETTLED,
                     Settled {
@@ -324,6 +327,13 @@ pub async fn decide_connector_call(
     if proposal.kind == ToolKind::Write {
         let prompt = write_call_prompt(&proposal, &final_args);
         let _one = st.dialog.lock().await;
+        // A second click may have waited for the first dialog: answer once.
+        if !st.pending.lock().unwrap().contains_key(&proposal_id) {
+            return Ok(DecideResult {
+                ok: true,
+                error: None,
+            });
+        }
         if ask_consent_natively(&app, &prompt).await != ConsentAnswer::Allow {
             settle(Decision::Decline, "declined");
             return Ok(DecideResult {
