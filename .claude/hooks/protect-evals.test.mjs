@@ -43,8 +43,16 @@ const at = (...p) => path.join(root, ...p);
 const edit = (file_path, tool_name = "Edit") => decide({ tool_name, cwd: root, tool_input: { file_path } }, env);
 const bash = (command, cwd = root, tool_name = "Bash") => decide({ tool_name, cwd, tool_input: { command } }, env);
 const ps = (command, cwd = root) => bash(command, cwd, "PowerShell");
+const decision = (v) => v?.decision ?? null;
+const isAsk = (v, msg) => assert.equal(decision(v), "ask", msg);
+const isDeny = (v, msg) => assert.equal(decision(v), "deny", msg);
+/** Protected-path changes: the user is asked. */
+const asks = (cmds, run = bash) => {
+  for (const c of cmds) isAsk(run(c), `should ask: ${c}`);
+};
+/** Trust roots and hook switches: always denied. */
 const denies = (cmds, run = bash) => {
-  for (const c of cmds) assert.ok(run(c), `should deny: ${c}`);
+  for (const c of cmds) isDeny(run(c), `should deny: ${c}`);
 };
 const allows = (cmds, run = bash) => {
   for (const c of cmds) assert.equal(run(c), null, `should allow: ${c}`);
@@ -59,19 +67,19 @@ test("protected repo-relative paths", () => {
   }
 });
 
-test("file tools: protected paths are denied", () => {
-  assert.ok(edit("evals/thresholds.toml", "Write"));
-  assert.ok(edit(at("evals", "runner", "src", "main.rs")));
-  assert.ok(edit(at("evals", "fixtures", "m01.json"), "MultiEdit"));
-  assert.ok(edit(at(".claude", "settings.json")));
-  assert.ok(edit(at(".claude", "settings.local.json"), "Write"), "settings.local.json can switch hooks off");
-  assert.ok(edit(at(".claude", "hooks", "protect-evals.mjs"), "Write"));
-  assert.ok(edit(at(".github", "workflows", "evals.yml")));
-  assert.ok(edit(at(".github", "workflows", "evals-guard.yml")));
-  assert.ok(edit(at("crates", "..", "evals", "x.toml")), "traversal");
-  assert.ok(decide({ tool_name: "NotebookEdit", cwd: root, tool_input: { notebook_path: "evals/x.ipynb" } }, env));
-  assert.ok(edit(path.join(wt, "evals", "thresholds.toml")), "a worktree of this repo");
-  assert.match(edit("evals/thresholds.toml", "Write"), /only the user/);
+test("file tools: protected paths ask the user", () => {
+  isAsk(edit("evals/thresholds.toml", "Write"));
+  isAsk(edit(at("evals", "runner", "src", "main.rs")));
+  isAsk(edit(at("evals", "fixtures", "m01.json"), "MultiEdit"));
+  isAsk(edit(at(".claude", "settings.json")));
+  isAsk(edit(at(".claude", "settings.local.json"), "Write"), "settings.local.json can switch hooks off");
+  isAsk(edit(at(".claude", "hooks", "protect-evals.mjs"), "Write"));
+  isAsk(edit(at(".github", "workflows", "evals.yml")));
+  isAsk(edit(at(".github", "workflows", "evals-guard.yml")));
+  isAsk(edit(at("crates", "..", "evals", "x.toml")), "traversal");
+  isAsk(decide({ tool_name: "NotebookEdit", cwd: root, tool_input: { notebook_path: "evals/x.ipynb" } }, env));
+  isAsk(edit(path.join(wt, "evals", "thresholds.toml")), "a worktree of this repo");
+  assert.match(edit("evals/thresholds.toml", "Write").reason, /Eval change/);
 });
 
 test("file tools: everything else is allowed", () => {
@@ -95,13 +103,16 @@ test("symlinks resolve to their target", () => {
   } catch {
     return; // no symlink rights here
   }
-  assert.ok(edit(path.join(link, "thresholds.toml")), "write through a link into evals/");
-  assert.ok(bash("rm frontend/eval-link/thresholds.toml"));
+  isAsk(edit(path.join(link, "thresholds.toml")), "write through a link into evals/");
+  isAsk(bash("rm frontend/eval-link/thresholds.toml"));
 });
 
 test("disableAllHooks is denied anywhere, escaped or not", () => {
-  assert.ok(decide({ tool_name: "Write", cwd: root, tool_input: { file_path: path.join(tmpdir(), "x.json"), content: '{"disableAllHooks": true}' } }, env));
-  assert.ok(decide({ tool_name: "Write", cwd: root, tool_input: { file_path: path.join(tmpdir(), "y.json"), content: '{"disable\\u0041llHooks": true}' } }, env));
+  isDeny(decide({ tool_name: "Write", cwd: root, tool_input: { file_path: path.join(tmpdir(), "x.json"), content: '{"disableAllHooks": true}' } }, env));
+  isDeny(decide({ tool_name: "Write", cwd: root, tool_input: { file_path: path.join(tmpdir(), "y.json"), content: '{"disable\\u0041llHooks": true}' } }, env));
+  // Even in the local settings file, which is otherwise only asked about.
+  isDeny(decide({ tool_name: "Write", cwd: root, tool_input: { file_path: at(".claude", "settings.local.json"), content: '{"disableAllHooks": true}' } }, env));
+  isAsk(decide({ tool_name: "Write", cwd: root, tool_input: { file_path: at(".claude", "settings.local.json"), content: '{"permissions": {}}' } }, env));
   denies([`echo '{"disableAllHooks": true}' > ~/.claude/settings.json`, `python -c "k='disable'+'AllHooks'"`]);
   denies(['Set-Content ~/.claude/settings.json "{`"disableAllHooks`": true}"'], ps);
 });
@@ -122,6 +133,15 @@ test("trust roots: the lock variable, rulesets, branch protection, admin merges"
   denies([
     "gh api graphql -f query='mutation { updateBranchProtectionRule(input: {}) { clientMutationId } }'",
     "gh api graphql -f query='mutation { deleteRepositoryRuleset(input: {}) { clientMutationId } }'",
+    // GraphQL that can't be inspected, or any mutation.
+    "gh api graphql -F query=@q.graphql",
+    "gh api graphql --input body.json",
+    "gh api graphql -f query='mutation { addStar(input: {}) { clientMutationId } }'",
+    "curl -X POST https://api.github.com/graphql --data @body.json",
+    "curl https://api.github.com/graphql -d @-",
+    // Nested in a shell, still denied rather than asked.
+    'bash -c "gh variable set FOO --body x"',
+    "echo \"gh pr merge 103 --admin\" | sh",
   ]);
   allows(["gh pr merge 103 --squash", "gh variable list", "gh pr view 103", "gh api repos/o/r/pulls/103", "gh api graphql -f query='{ viewer { login } }'"]);
 });
@@ -131,7 +151,7 @@ test("patches: git apply / git am / patch of protected paths", () => {
   writeFileSync(evil, "diff --git a/evals/thresholds.toml b/evals/thresholds.toml\n--- a/evals/thresholds.toml\n+++ b/evals/thresholds.toml\n@@ -1 +1 @@\n-schema = 1\n+schema = 2\n");
   const fine = path.join(tmpdir(), "fine.patch");
   writeFileSync(fine, "diff --git a/crates/x.rs b/crates/x.rs\n--- a/crates/x.rs\n+++ b/crates/x.rs\n");
-  denies([`git apply ${evil}`, `git am ${evil}`, `git apply < ${evil}`, `patch -p1 < ${evil}`, "git apply /tmp/missing-evals.patch", "cat /tmp/p | git apply # evals"]);
+  asks([`git apply ${evil}`, `git am ${evil}`, `git apply < ${evil}`, `patch -p1 < ${evil}`, "git apply /tmp/missing-evals.patch", "cat /tmp/p | git apply # evals"]);
   allows([`git apply ${fine}`, `patch -p1 < ${fine}`, `git apply -p1 ${fine}`]);
   // Prefix tricks: a relative patch aimed at evals/ by --directory, a
   // deep patch whose -p2 strip lands in evals/, and applying from inside.
@@ -139,7 +159,7 @@ test("patches: git apply / git am / patch of protected paths", () => {
   writeFileSync(rel, "diff --git a/thresholds.toml b/thresholds.toml\n--- a/thresholds.toml\n+++ b/thresholds.toml\n@@ -1 +1 @@\n-schema = 1\n+schema = 2\n");
   const deep = path.join(tmpdir(), "deep.patch");
   writeFileSync(deep, "diff --git a/b/evals/thresholds.toml b/b/evals/thresholds.toml\n--- a/b/evals/thresholds.toml\n+++ b/b/evals/thresholds.toml\n@@ -1 +1 @@\n-schema = 1\n+schema = 2\n");
-  denies([
+  asks([
     `git apply --directory=evals ${rel}`,
     `git apply --directory evals ${rel}`,
     `git apply -p2 ${deep}`,
@@ -153,23 +173,23 @@ test("patches: git apply / git am / patch of protected paths", () => {
 
 if (process.platform === "win32" || process.platform === "darwin") {
   test("paths are case-insensitive on Windows and macOS", () => {
-    assert.ok(edit(at("EVALS", "Thresholds.TOML")));
-    assert.ok(bash("rm -f Evals/thresholds.toml"));
+    isAsk(edit(at("EVALS", "Thresholds.TOML")));
+    isAsk(bash("rm -f Evals/thresholds.toml"));
   });
 }
 
 if (process.platform === "win32") {
   test("Windows path forms", () => {
-    assert.ok(edit(at("evals", "x").replace(/\//g, "\\")));
+    isAsk(edit(at("evals", "x").replace(/\//g, "\\")));
     const msys = "/" + root[0].toLowerCase() + root.slice(2).replace(/\\/g, "/") + "/evals/x";
-    assert.ok(edit(msys), msys);
-    assert.ok(bash(`rm "${at("evals", "thresholds.toml")}"`));
-    assert.ok(ps(`Remove-Item '${at("evals", "thresholds.toml")}'`));
+    isAsk(edit(msys), msys);
+    isAsk(bash(`rm "${at("evals", "thresholds.toml")}"`));
+    isAsk(ps(`Remove-Item '${at("evals", "thresholds.toml")}'`));
   });
 }
 
-test("Bash: writes, moves, deletes and redirects are denied", () => {
-  denies([
+test("Bash: writes, moves, deletes and redirects ask the user", () => {
+  asks([
     "echo x > evals/thresholds.toml",
     "echo x >evals/x",
     "echo x>>evals/x",
@@ -247,12 +267,6 @@ test("Bash: writes, moves, deletes and redirects are denied", () => {
     "cat /no/such/file | sh",
     // A heredoc whose own reader is a shell, piped onward to something else.
     "bash <<'EOF' | cat\nrm evals/thresholds.toml\nEOF",
-    // GraphQL that can't be inspected, or any mutation.
-    "gh api graphql -F query=@q.graphql",
-    "gh api graphql --input body.json",
-    "gh api graphql -f query='mutation { addStar(input: {}) { clientMutationId } }'",
-    "curl -X POST https://api.github.com/graphql --data @body.json",
-    "curl https://api.github.com/graphql -d @-",
     // Interpreters whose flags aren't inline code still read stdin.
     "echo \"open('evals/x', 'w').write('x')\" | python -E",
     "echo \"open('evals/x', 'w')\" | perl -p",
@@ -287,11 +301,11 @@ test("Bash: writes, moves, deletes and redirects are denied", () => {
   writeFileSync(bad, "rm -rf evals\n");
   const good = path.join(tmpdir(), "good-script.sh");
   writeFileSync(good, "echo hello\n");
-  denies([`bash < ${bad}`, `cat < ${bad} | bash`, `sh -s < ${bad}`]);
+  asks([`bash < ${bad}`, `cat < ${bad} | bash`, `sh -s < ${bad}`]);
   allows([`bash < ${good}`, `cat < ${good} | bash`]);
   // Already inside a protected folder: relative writes are denied.
-  assert.ok(bash("echo x > a.txt", at("evals")));
-  assert.ok(bash("rm thresholds.toml", at("evals")));
+  isAsk(bash("echo x > a.txt", at("evals")));
+  isAsk(bash("rm thresholds.toml", at("evals")));
 });
 
 test("Bash: reads, quoted text, heredoc bodies and unrelated work are allowed", () => {
@@ -338,8 +352,8 @@ test("Bash: reads, quoted text, heredoc bodies and unrelated work are allowed", 
   ]);
 });
 
-test("PowerShell: writes are denied, reads allowed", () => {
-  denies(
+test("PowerShell: writes ask the user, reads allowed", () => {
+  asks(
     [
       "Set-Content -Path evals/thresholds.toml -Value x",
       "Add-Content evals\\README.md 'x'",
@@ -395,18 +409,26 @@ test("protectedTarget resolves relative to cwd", () => {
 
 test("end to end: the hook process speaks the PreToolUse protocol", () => {
   const run = (input) => spawnSync(process.execPath, [HOOK], { input, env: { ...process.env, ...env }, encoding: "utf8" });
-  const deny = run(JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Write", cwd: root, tool_input: { file_path: "evals/thresholds.toml", content: "x" } }));
-  assert.equal(deny.status, 0, deny.stderr);
-  const out = JSON.parse(deny.stdout);
+  const asked = run(JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Write", cwd: root, tool_input: { file_path: "evals/thresholds.toml", content: "x" } }));
+  assert.equal(asked.status, 0, asked.stderr);
+  const out = JSON.parse(asked.stdout);
   assert.equal(out.hookSpecificOutput.hookEventName, "PreToolUse");
-  assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
-  assert.match(out.hookSpecificOutput.permissionDecisionReason, /evals\/thresholds\.toml/);
+  assert.equal(out.hookSpecificOutput.permissionDecision, "ask");
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /Eval change: evals\/thresholds\.toml/);
+
+  const denied = run(JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", cwd: root, tool_input: { command: "gh variable set EVALS_LOCK_SHA256 --body 00" } }));
+  assert.equal(denied.status, 0, denied.stderr);
+  assert.equal(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision, "deny");
 
   const allow = run(JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", cwd: root, tool_input: { command: "cat evals/thresholds.toml" } }));
   assert.equal(allow.status, 0);
   assert.equal(allow.stdout, "");
 
-  // Unparseable input fails closed only when it could touch the evals.
-  assert.equal(run("{not json evals").status, 2);
-  assert.equal(run("{not json").status, 0);
+  // Unparseable input asks the user only when it could touch the evals.
+  const unparsed = run("{not json evals");
+  assert.equal(unparsed.status, 0);
+  assert.equal(JSON.parse(unparsed.stdout).hookSpecificOutput.permissionDecision, "ask");
+  const unrelated = run("{not json");
+  assert.equal(unrelated.status, 0);
+  assert.equal(unrelated.stdout, "");
 });

@@ -34,7 +34,7 @@ These rules come from spec §4.2 "Evals" and §4.2a items 1, 2, 5, 13 and 14
 | Layer | What | Where |
 |---|---|---|
 | 1. Rule | Agents change the protected paths only with the user's approval, and never to make a result pass. | `CLAUDE.md` |
-| 2. Agent hook | A Claude Code `PreToolUse` hook catches agent changes to the protected paths: file tools; Bash and PowerShell writes, moves, deletes, formatting, extraction, downloads and redirects (nested shells, `iex`, heredocs run by a shell, `cd`/`git -C`, globs, variables, symlinks, `git checkout/restore/rm/apply`). It denies the trust roots outright (`gh variable set/delete`, GitHub API calls for variables, rulesets or branch protection, GraphQL mutations, `gh pr merge --admin`) and anything that would switch hooks off. It protects checkouts of this repository only. Today it blocks protected-path changes outright; switching those to "ask the user" (the permission rule's intent) is pending the user's approval. Tested by `node --test .claude/hooks/protect-evals.test.mjs` (also in `evals-security`). | `.claude/settings.json`, `.claude/hooks/protect-evals.mjs` |
+| 2. Agent hook | A Claude Code `PreToolUse` hook catches agent changes to the protected paths and asks the user to approve or decline each one: file tools; Bash and PowerShell writes, moves, deletes, formatting, extraction, downloads and redirects (nested shells, `iex`, heredocs run by a shell, `cd`/`git -C`, globs, variables, symlinks, `git checkout/restore/rm/apply`). It denies the trust roots outright (anything naming `EVALS_LOCK_SHA256`, `gh variable set/delete`, GitHub API calls for variables, rulesets or branch protection, GraphQL mutations, `gh pr merge --admin`) and anything that would switch hooks off. It protects checkouts of this repository only. Tested by `node --test .claude/hooks/protect-evals.test.mjs` (also in `evals-security`). | `.claude/settings.json`, `.claude/hooks/protect-evals.mjs` |
 | 3. CI tripwires | `evals-security` and `evals-quality` refuse toolchain overrides, check the scorer's dependency graph, grep production code for references to the answer key, and fail when anything under `evals/` changes during a run. `evals-lock` always flags another workflow that names an eval check. | `.github/workflows/evals.yml`, `.github/workflows/evals-guard.yml` |
 | 4. Review | The coordinating session never merges an eval change without the user's explicit yes. | process |
 
@@ -504,7 +504,7 @@ fails. If "any lost question fails" is wanted, the tolerance has to go below
    session proposes it. A session relaying "the user approved" from another
    session quotes the user's words.
 2. Make the change: the files under `evals/`, the two workflows, or the
-   hook.
+   hook. In Claude Code, the hook asks the user to confirm each edit.
 3. Run the suites and read the result:
    `cargo run -p fly-evals -- --suite ci --strict` (with Ollama running).
 4. To bless a new baseline, copy it: `cp target/evals/retrieval.json evals/baselines/retrieval.json`.
