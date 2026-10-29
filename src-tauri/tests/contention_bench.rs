@@ -13,7 +13,7 @@
 //!   recording too, and a cancel at the end lands within one meeting);
 //! - `ask`: an Ask every 30 s through the shipped prompt
 //!   (`llm_commands::build_ask_system`) and the Ollama provider;
-//! - `disk`: ~150 MB/s of file writes with periodic fsync on the same volume;
+//! - `disk`: ~50 MB/s of file writes with periodic fsync on the same volume;
 //! - live captions over the recording, through the app's own
 //!   `live::LiveCaptioner`.
 //!
@@ -276,6 +276,25 @@ fn open_scratch_file(path: &Path) -> std::io::Result<std::fs::File> {
             .custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
     }
     o.open(path)
+}
+
+/// Stop processes this bench started that are still running. Sidecars are
+/// spawned without kill-on-drop, so dropping their task leaves them behind.
+fn stop_own_children() {
+    let Ok(me) = sysinfo::get_current_pid() else {
+        return;
+    };
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    for (pid, proc_) in sys.processes() {
+        if proc_.parent() == Some(me) {
+            eprintln!(
+                "stopping leftover child {} ({pid})",
+                proc_.name().to_string_lossy()
+            );
+            proc_.kill();
+        }
+    }
 }
 
 /// Everything a run writes besides the model cache, the scratch database and
@@ -760,6 +779,9 @@ fn contention_bench() {
         }
     });
     rt.shutdown_timeout(Duration::from_secs(5));
+    // a sidecar still running (a live-caption whisper starved past the wait
+    // above) would outlive the run, load the next one and hold its output
+    stop_own_children();
     for t in threads {
         let _ = t.join();
     }
