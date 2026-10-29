@@ -69,6 +69,148 @@ struct ChannelCursor {
     prompt_tail: String,
 }
 
+/// What one channel's pass of a [`LiveCaptioner::tick`] produced.
+pub enum ChunkOutcome {
+    /// A chunk transcribed (text may be empty: silence).
+    Text {
+        channel: &'static str,
+        text: String,
+        /// Chunk start / end on the channel's recording timeline.
+        start_ms: u64,
+        end_ms: u64,
+    },
+    /// The engine failed on this chunk (the cursor still moved past it).
+    Failed(String),
+}
+
+/// The engine-agnostic core of the live loop: per-channel cursors over the
+/// WAVs being recorded, chunking, and transcription. The app loop below
+/// turns its outcomes into `live:*` events; the contention bench
+/// (`src-tauri/tests/contention_bench.rs`) drives the same code to measure
+/// caption lag under load.
+pub struct LiveCaptioner {
+    cursors: [ChannelCursor; 2],
+    tmp_dir: PathBuf,
+}
+
+impl LiveCaptioner {
+    /// Follow `recording.mic.wav` ("you") and `recording.system.wav`
+    /// ("them") in `out_dir`; chunk files go to `tmp_dir`.
+    pub fn new(out_dir: &Path, tmp_dir: PathBuf) -> Self {
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        Self {
+            cursors: [
+                ChannelCursor {
+                    path: out_dir.join("recording.mic.wav"),
+                    channel: "you",
+                    consumed_samples: 0,
+                    prompt_tail: String::new(),
+                },
+                ChannelCursor {
+                    path: out_dir.join("recording.system.wav"),
+                    channel: "them",
+                    consumed_samples: 0,
+                    prompt_tail: String::new(),
+                },
+            ],
+            tmp_dir,
+        }
+    }
+
+    pub fn tmp_dir(&self) -> &Path {
+        &self.tmp_dir
+    }
+
+    /// Transcribe the new audio of each channel that has at least
+    /// MIN_CHUNK_SECS of it. `stop` is checked between channels.
+    pub async fn tick(
+        &mut self,
+        engine: &dyn TranscriptionEngine,
+        stop: &AtomicBool,
+    ) -> Vec<ChunkOutcome> {
+        let mut out = Vec::new();
+        for cur in self.cursors.iter_mut() {
+            if let Some((samples, rate, start_sample)) = take_chunk(&cur.path, cur.consumed_samples)
+            {
+                let start_ms = start_sample * 1000 / rate as u64;
+                let end_ms = (start_sample + samples.len() as u64) * 1000 / rate as u64;
+                let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
+                let chunk_path = self
+                    .tmp_dir
+                    .join(format!("{}-{}.wav", cur.channel, start_sample));
+                if fly_audio::mix::write_wav_mono_16(&chunk_path, &resampled, 16_000).is_err() {
+                    continue;
+                }
+                let opts = fly_asr::TranscribeOptions {
+                    language: None,
+                    prompt: (!cur.prompt_tail.is_empty()).then(|| cur.prompt_tail.clone()),
+                    ..Default::default()
+                };
+                let outcome = match engine.transcribe(&chunk_path, &opts).await {
+                    Ok(raw) => {
+                        let text = raw
+                            .words
+                            .iter()
+                            .map(|w| w.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !text.trim().is_empty() {
+                            cur.prompt_tail = text
+                                .split_whitespace()
+                                .rev()
+                                .take(24)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                        }
+                        ChunkOutcome::Text {
+                            channel: cur.channel,
+                            text,
+                            start_ms,
+                            end_ms,
+                        }
+                    }
+                    Err(e) => ChunkOutcome::Failed(e.to_string()),
+                };
+                let _ = std::fs::remove_file(&chunk_path);
+                cur.consumed_samples = start_sample + samples.len() as u64;
+                out.push(outcome);
+            }
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        out
+    }
+}
+
+/// The live-caption engine: the small model on a strict CPU budget — a
+/// quarter of the logical CPUs, 2..=4 threads (it stays well ahead of real
+/// time on that; partials are cosmetic and the capture must never starve).
+///
+/// It deliberately stays off the GPU offload path (gpu.rs is post-meeting
+/// only): it runs DURING capture, exactly when the GPU is busy with the video
+/// call / screen share, and mid-meeting contention is the one regression this
+/// app can't afford. On Windows that means the CPU whisper build; on macOS
+/// whisper.cpp defaults to Metal, so `-ng` keeps live decoding on CPU (this
+/// also sidesteps the Metal init abort on GPUs Metal can't serve — see the
+/// guarded fallback in pipeline.rs).
+pub fn live_engine(exe: PathBuf, model: PathBuf) -> fly_asr::whisper_cpp::WhisperCppEngine {
+    let threads = std::thread::available_parallelism()
+        .map(|n| (n.get() / 4).clamp(2, 4))
+        .unwrap_or(2);
+    fly_asr::whisper_cpp::WhisperCppEngine {
+        exe,
+        model,
+        threads,
+        force_cpu: cfg!(target_os = "macos"),
+        // live windows are throwaway snippets — nothing to checkpoint
+        resume: false,
+    }
+}
+
 /// Spawn the live loop for an active recording. Returns the stop flag the
 /// recording holds; setting it ends the loop after the current tick.
 pub fn spawn(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf) -> Arc<AtomicBool> {
@@ -153,29 +295,7 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
             return;
         }
     };
-    // Live chunks run WHILE audio is captured, so they get a strict budget:
-    // a quarter of the logical CPUs, at most 4 threads (the small model stays
-    // well ahead of real time on that; partials are cosmetic anyway and the
-    // capture callbacks must never be starved).
-    let threads = std::thread::available_parallelism()
-        .map(|n| (n.get() / 4).clamp(2, 4))
-        .unwrap_or(2);
-    // The live loop deliberately stays off the GPU offload path (gpu.rs is
-    // post-meeting only): it runs DURING capture, exactly when the GPU is
-    // busy with the video call / screen share, and mid-meeting contention is
-    // the one regression this app can't afford. On Windows that means the
-    // CPU whisper build resolved above; on macOS whisper.cpp defaults to
-    // Metal, so pass `-ng` to actually keep live decoding on CPU (this also
-    // sidesteps the Metal init abort on GPUs Metal can't serve — see the
-    // guarded fallback in pipeline.rs).
-    let engine = fly_asr::whisper_cpp::WhisperCppEngine {
-        exe,
-        model,
-        threads,
-        force_cpu: cfg!(target_os = "macos"),
-        // live windows are throwaway snippets — nothing to checkpoint
-        resume: false,
-    };
+    let engine = live_engine(exe, model);
     set_status(
         &app,
         LiveStatus {
@@ -185,25 +305,11 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
         },
     );
 
-    let mut cursors = [
-        ChannelCursor {
-            path: out_dir.join("recording.mic.wav"),
-            channel: "you",
-            consumed_samples: 0,
-            prompt_tail: String::new(),
-        },
-        ChannelCursor {
-            path: out_dir.join("recording.system.wav"),
-            channel: "them",
-            consumed_samples: 0,
-            prompt_tail: String::new(),
-        },
-    ];
     // Chunk files go to the machine-local scratch dir keyed by meeting id,
     // not the meeting folder (which a rename can move mid-recording).
     let tmp_dir = fly_storage::scratch::meeting_scratch_dir(&data_dir, &meeting_id)
         .join(fly_storage::scratch::LIVE_TMP_DIR);
-    let _ = std::fs::create_dir_all(&tmp_dir);
+    let mut captioner = LiveCaptioner::new(&out_dir, tmp_dir);
 
     // Chunk failures across both channels, reset by any success. Engine
     // resolution succeeding does not mean the engine RUNS (missing dylib,
@@ -234,95 +340,64 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
             continue;
         }
 
-        for cur in cursors.iter_mut() {
-            match take_chunk(&cur.path, cur.consumed_samples) {
-                Some((samples, rate, start_sample)) => {
-                    let start_ms = start_sample * 1000 / rate as u64;
-                    let resampled = fly_audio::mix::resample_linear(&samples, rate, 16_000);
-                    let chunk_path = tmp_dir.join(format!("{}-{}.wav", cur.channel, start_sample));
-                    if fly_audio::mix::write_wav_mono_16(&chunk_path, &resampled, 16_000).is_err() {
-                        continue;
+        for outcome in captioner.tick(&engine, &stop).await {
+            match outcome {
+                ChunkOutcome::Text {
+                    channel,
+                    text,
+                    start_ms,
+                    ..
+                } => {
+                    if consecutive_failures >= FAILURES_BEFORE_UNAVAILABLE {
+                        set_status(
+                            &app,
+                            LiveStatus {
+                                meeting_id: meeting_id.clone(),
+                                state: "ready",
+                                detail: String::new(),
+                            },
+                        );
                     }
-                    let opts = fly_asr::TranscribeOptions {
-                        language: None,
-                        prompt: (!cur.prompt_tail.is_empty()).then(|| cur.prompt_tail.clone()),
-                        ..Default::default()
-                    };
-                    let text = match engine.transcribe(&chunk_path, &opts).await {
-                        Ok(raw) => {
-                            if consecutive_failures >= FAILURES_BEFORE_UNAVAILABLE {
-                                set_status(
-                                    &app,
-                                    LiveStatus {
-                                        meeting_id: meeting_id.clone(),
-                                        state: "ready",
-                                        detail: String::new(),
-                                    },
-                                );
-                            }
-                            consecutive_failures = 0;
-                            raw.words
-                                .iter()
-                                .map(|w| w.text.as_str())
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        }
-                        Err(e) => {
-                            consecutive_failures += 1;
-                            if consecutive_failures == FAILURES_BEFORE_UNAVAILABLE {
-                                tracing::warn!(
-                                    failures = consecutive_failures,
-                                    "live chunk transcription keeps failing — captions \
-                                     unavailable: {e}"
-                                );
-                                set_status(
-                                    &app,
-                                    LiveStatus {
-                                        meeting_id: meeting_id.clone(),
-                                        state: "unavailable",
-                                        detail: format!(
-                                            "Live captions are unavailable ({e}) — the full \
-                                             transcript still arrives after Stop."
-                                        ),
-                                    },
-                                );
-                            } else {
-                                tracing::debug!("live chunk transcription failed: {e}");
-                            }
-                            String::new()
-                        }
-                    };
-                    let _ = std::fs::remove_file(&chunk_path);
-                    cur.consumed_samples = start_sample + samples.len() as u64;
+                    consecutive_failures = 0;
                     if !text.trim().is_empty() {
-                        cur.prompt_tail = text
-                            .split_whitespace()
-                            .rev()
-                            .take(24)
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect::<Vec<_>>()
-                            .join(" ");
                         let _ = app.emit(
                             "live:segment",
                             LiveSegment {
                                 meeting_id: meeting_id.clone(),
-                                channel: cur.channel,
+                                channel,
                                 text: text.trim().to_string(),
                                 start_ms,
                             },
                         );
                     }
                 }
-                None => continue,
-            }
-            if stop.load(Ordering::Relaxed) {
-                break;
+                ChunkOutcome::Failed(e) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures == FAILURES_BEFORE_UNAVAILABLE {
+                        tracing::warn!(
+                            failures = consecutive_failures,
+                            "live chunk transcription keeps failing — captions \
+                             unavailable: {e}"
+                        );
+                        set_status(
+                            &app,
+                            LiveStatus {
+                                meeting_id: meeting_id.clone(),
+                                state: "unavailable",
+                                detail: format!(
+                                    "Live captions are unavailable ({e}) — the full \
+                                     transcript still arrives after Stop."
+                                ),
+                            },
+                        );
+                    } else {
+                        tracing::debug!("live chunk transcription failed: {e}");
+                    }
+                }
             }
         }
     }
-    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let _ = std::fs::remove_dir_all(captioner.tmp_dir());
 }
 
 /// Read the samples appended past `consumed` from a mono 16-bit WAV that is

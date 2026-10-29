@@ -17,6 +17,7 @@ pub mod null;
 #[cfg(target_os = "linux")]
 mod pulse_loopback;
 pub mod tap_messages;
+pub mod testtone;
 pub mod vad;
 #[cfg(target_os = "windows")]
 mod win_volume;
