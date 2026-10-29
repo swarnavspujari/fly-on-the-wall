@@ -83,6 +83,30 @@ What "memory" means here is the knowledge the app has already extracted, offered
 - **Cost:** each meeting in a briefing loads its transcript once per call (participants, `said_by`, evidence). A person briefing reads at most the 30 newest candidate meetings.
 - **The MCP entry points** (`memory::mcp::*`) keep fly-mcp's historical routing: no person routing, no caps, and no evidence for `open_items`. Their text is rendered by fly-mcp.
 
+### Using it from the Ask harness
+**Tier S (no model tool calls):**
+1. Call `ctx.memory_prefetch(question, &MemoryPrefetch { people, since, until, max_facts, max_meetings })`.
+   - Pass the router's validated `people` and dates.
+   - A `0` cap means the defaults: 40 facts and 12 meetings.
+2. If it returns `Some(b)`, call `b.retain_meetings(|m| resolved.allows_meeting(m))`.
+3. Register every `c` in `b.evidence` with `evidence::info(&c.segment, &c.meeting_id, &c.meeting_title, Some(c.started_at))`.
+4. Add `render::briefing_within(&b, item_budget)` to the prompt.
+
+**Tiers M/C:** `get_briefing`, `open_items` and `whats_changed` arrive through `fly_context::tool_defs()`. `agent.rs` dispatches by name, so it needs one arm per tool:
+1. Parse `GetBriefingArgs` / `OpenItemsArgs` / `WhatsChangedArgs` and call the method.
+2. Call `retain_meetings`.
+3. Register `evidence`.
+4. Render with `render::briefing_within(&b, observation_chars)` or `render::open_items(&o)`.
+
+**What the renderers guarantee the claim check:**
+- Every printed `[seg:ID]` is in `evidence`.
+- A fact whose sources are gone is not printed.
+- Each fact is followed by its cited segments verbatim (`> Speaker: "…"`, at most 2, each clipped at a word boundary to ~220 chars).
+
+Facts are extraction paraphrases ("Launch budget is $40k" from "forty thousand dollars"). The footer tells the model to take numbers, names and quotes from the source lines, and the claim check compares against the segments.
+
+**Tier C:** `decompose(question, 4)`, then `fan_out(&readers, visibility, &queries, &scope_args, &vectors, &budget)`, with `budget.max_searches` set to what is left of the tier's tool calls. `render::fanout(&f)` prints every passage's lines with `[seg:ID]`, so register those segments too.
+
 ### Fan-out (tier C)
 - **`decompose`:**
   - Splits on sentences, independent clauses ("… and who owns the checklist") and noun lists ("pricing, hiring and the launch" share their head).
@@ -155,6 +179,9 @@ None.
   - People are learned only from visible meetings, so a name that appears only in a Keep-local meeting matches nothing.
   - Sources: THREAT_MODEL T10; spec §4.2a #13. Tests: `keep_local_is_excluded_on_every_path`, `each_path_hides_keep_local_on_its_own`, `keep_local_never_reaches_memory_under_shareable_only`, `a_failed_keep_local_lookup_fails_closed_on_every_memory_path`.
 - **Tool output carries no trace of excluded meetings:** no ids, titles, dates or counts. A window holding only Keep-local meetings looks like an empty window, so a client can't binary-search their dates (test `tool_output_carries_no_keep_local_metadata`).
+- **Memory comes only from the user's own meetings.** That means `meeting_items`, transcripts and meeting rows written by the app's pipeline and extraction.
+  - Connector (external MCP server) results never feed memory, and nothing here writes.
+  - Spec §4.3 fences connector output. A future "pinned facts" store would need its own marker and its own consent, not `[seg:]`.
 - **Every memory fact keeps its provenance** (meeting id + segment ids).
   - The model-facing text cites only ids that resolve in the current transcript.
   - It never prints a literal `[seg:` from meeting content or a placeholder marker.

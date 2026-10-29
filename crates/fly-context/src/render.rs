@@ -5,7 +5,7 @@
 use std::fmt::Write;
 
 use crate::fanout::Fanout;
-use crate::memory::{Briefing, MatchedBy, MemoryFact, OpenItems};
+use crate::memory::{Briefing, CitedSegment, MatchedBy, MemoryFact, OpenItems};
 use crate::tools::{
     EventInfo, ItemList, MeetingList, NoteView, PassageResults, PassageSource, SegmentView,
     SegmentWindow,
@@ -244,16 +244,58 @@ const KIND_SECTIONS: [(ItemKind, &str); 5] = [
     (ItemKind::Figure, "Key figures"),
 ];
 
-/// `[seg:ID]` markers for the ids of `f` that resolved (`cited`), or
-/// `None` when none did (the fact can't be cited, so it isn't shown).
-fn fact_cites(f: &MemoryFact, cited: impl Fn(&str, &str) -> bool) -> Option<String> {
-    let ids: Vec<String> = f
+/// Longest source quote shown under a fact, in chars.
+const QUOTE_CHARS: usize = 220;
+/// Source quotes shown per fact.
+const QUOTES_PER_FACT: usize = 2;
+
+/// `text` cut to about `max` chars at a word boundary, with "…".
+fn clip(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max).collect();
+    let cut = match cut.rfind(char::is_whitespace) {
+        Some(i) if i > max / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{} …", cut.trim_end())
+}
+
+/// A fact and the words it came from: the fact line, ending in the
+/// `[seg:ID]` markers of its cited segments, then those segments verbatim.
+/// Facts are extraction paraphrases, so an answer should take numbers,
+/// names and quotes from the source lines (the Ask claim check compares
+/// against the segments, not the fact). `None` when no cited segment still
+/// exists: the fact can't be cited, so it isn't shown.
+fn fact_block<'b>(
+    f: &MemoryFact,
+    cited: impl Fn(&str, &str) -> Option<&'b CitedSegment>,
+    with_kind: bool,
+) -> Option<String> {
+    let segs: Vec<&CitedSegment> = f
         .segment_ids
         .iter()
-        .filter(|id| cited(&f.meeting_id, id))
-        .map(|id| format!(" [seg:{id}]"))
+        .filter_map(|id| cited(&f.meeting_id, id))
         .collect();
-    (!ids.is_empty()).then(|| ids.concat())
+    if segs.is_empty() {
+        return None;
+    }
+    let cites: String = segs
+        .iter()
+        .map(|c| format!(" [seg:{}]", c.segment.id))
+        .collect();
+    let mut block = fact_line(f, &cites, with_kind);
+    for c in segs.iter().take(QUOTES_PER_FACT) {
+        let _ = write!(
+            block,
+            "\n  > {}: \"{}\"",
+            safe(&c.segment.speaker),
+            safe(&clip(&c.segment.text, QUOTE_CHARS))
+        );
+    }
+    Some(block)
 }
 
 fn fact_line(f: &MemoryFact, cites: &str, with_kind: bool) -> String {
@@ -366,25 +408,29 @@ pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
     }
 
     // Facts that can be cited, newest first, while they fit.
-    let cited = |m: &str, id: &str| b.cited(m, id).is_some();
     let lines: Vec<Option<String>> = b
         .facts
         .iter()
-        .map(|f| fact_cites(f, cited).map(|c| fact_line(f, &c, false)))
+        .map(|f| fact_block(f, |m, id| b.cited(m, id), false))
         .collect();
     // (no literal marker here: a model could copy it as a citation)
-    let footer =
-        "Cite an item by the segment markers after it. Each item's status is as stated in its \
-         meeting.\n";
-    let mut budget = max_chars.saturating_sub(out.len() + footer.len() + 120);
+    let footer = "Cite an item by the segment markers after it, and take numbers, names and \
+                  quotes from the quoted source lines (items are paraphrased). Each item's \
+                  status is as stated in its meeting.\n";
+    // Section headings and the "not shown" line take a little room too.
+    let mut budget = max_chars.saturating_sub(out.len() + footer.len() + 80);
     let mut keep = vec![false; lines.len()];
+    let mut kept = 0;
     for i in (0..lines.len()).rev() {
         if let Some(l) = &lines[i] {
-            if l.len() + 1 > budget {
+            // The newest citable fact always shows: a briefing with facts
+            // never reads like one without.
+            if l.len() + 1 > budget && kept > 0 {
                 break;
             }
-            budget -= l.len() + 1;
+            budget = budget.saturating_sub(l.len() + 1);
             keep[i] = true;
+            kept += 1;
         }
     }
     let mut any = false;
@@ -434,11 +480,10 @@ pub fn open_items(o: &OpenItems) -> String {
     } else {
         format!(" in \"{}\"", safe(&o.scope))
     };
-    let cited = |m: &str, id: &str| o.cited(m, id).is_some();
     let lines: Vec<String> = o
         .facts
         .iter()
-        .filter_map(|f| fact_cites(f, cited).map(|c| fact_line(f, &c, true)))
+        .filter_map(|f| fact_block(f, |m, id| o.cited(m, id), true))
         .collect();
     if lines.is_empty() {
         let _ = writeln!(out, "No open action items or commitments{who}{scope}.");

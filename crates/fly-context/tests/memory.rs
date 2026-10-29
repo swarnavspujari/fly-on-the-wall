@@ -479,7 +479,18 @@ fn series_briefing_cites_every_fact_and_shows_current_speaker_names() {
         text.starts_with("Memory: \"launch weekly\" (recurring meeting) — 3 meeting(s)"),
         "{text}"
     );
-    assert!(text.contains("Send the launch deck — owner: Dana [open] (2026-09-01, Launch weekly 2026-09-01) [seg:a1]"), "{text}");
+    // each fact is followed by the words it was extracted from, verbatim
+    assert!(
+        text.contains(
+            "Send the launch deck — owner: Dana [open] (2026-09-01, Launch weekly 2026-09-01) \
+             [seg:a1]\n  > Dana: \"I will send the launch deck to everyone tomorrow.\""
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("Launch budget is $40k — said by You (2026-09-01, Launch weekly 2026-09-01) [seg:a3]\n  > You: \"The launch budget is forty thousand dollars.\""),
+        "{text}"
+    );
     assert!(
         text.contains("Beta moves to October — said by You"),
         "{text}"
@@ -663,6 +674,10 @@ fn briefings_fit_a_budget_newest_facts_first() {
     assert!(!small.contains("Beta moves to October"), "{small}");
     assert!(small.contains("older item(s) not shown"), "{small}");
     assert_cites_resolve(&b, &small);
+    // even a budget too small for any fact shows the newest one
+    let tiny = render::briefing_within(&b, 10);
+    assert!(tiny.contains("Draft the FAQ"), "{tiny}");
+    assert!(!tiny.contains("No extracted"), "{tiny}");
 }
 
 #[test]
