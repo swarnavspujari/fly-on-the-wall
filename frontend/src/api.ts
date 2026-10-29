@@ -6,6 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
 /** Window event after the saved AI provider or a cloud consent changes, so
  *  views that name the provider (the skipped-cleanup notice) re-read it. */
 export const LLM_SETTINGS_CHANGED_EVENT = "fotw:llm-settings-changed";
+/** Ask's stream (`ask_meeting` with an `askId`): `{ask_id, event}`. */
+export const ASK_EVENT = "ask:event";
 const llmSettingsChanged = (): void => {
   window.dispatchEvent(new Event(LLM_SETTINGS_CHANGED_EVENT));
 };
@@ -15,6 +17,7 @@ import type {
   AppInfo,
   AskMessage,
   AskReply,
+  AskScope,
   MeetingItem,
   Attendee,
   AudioDevice,
@@ -197,8 +200,15 @@ export const api = {
   // sourced/unsourced/flagged status, sources, proposals, trace). Scope
   // defaults to the note; `askId` streams "ask:event" (stage, sources,
   // sanitized frames) for that id.
-  askMeeting: (noteId: string, history: AskMessage[]) =>
-    invoke<AskReply>("ask_meeting", { noteId, history }),
+  // `noteId` is the default scope and the note an answer can be inserted
+  // into; Ask on Home passes null with an explicit scope.
+  askMeeting: (noteId: string | null, history: AskMessage[], scope?: AskScope, askId?: string) =>
+    invoke<AskReply>("ask_meeting", {
+      noteId,
+      history,
+      scope: scope ?? null,
+      askId: askId ?? null,
+    }),
   // Stop an answer that is still being written (the Ask sheet's Stop):
   // the backend drops the request, proposes nothing, and askMeeting rejects
   // with "Ask was cancelled.". An id that isn't running does nothing.

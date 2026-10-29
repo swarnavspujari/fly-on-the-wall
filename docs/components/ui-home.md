@@ -9,7 +9,7 @@ What you see when no note is open, plus the two left columns that are always the
 ## Files it owns
 - `frontend/src/components/Home.tsx` — no-note-open screen: greeting, Up next card, expired-calendar banners, empty state.
 - `frontend/src/components/NoteList.tsx` — search box, New note, date-grouped rows with status chips, search hits, hover trash.
-- `frontend/src/components/Sidebar.tsx` — logo, All notes, Up next list, folder tree (create/rename/delete, keep-local lock, color/emoji), Unfiled, privacy pill, Import, Settings; drag-drop filing.
+- `frontend/src/components/Sidebar.tsx` — logo, All notes, "Ask your meetings" (opens Ask from anywhere, with the Ctrl/Cmd+J hint; see [ui-ask](ui-ask.md)), Up next list, folder tree (create/rename/delete, keep-local lock, color/emoji), Unfiled, privacy pill, Import, Settings; drag-drop filing.
 - `frontend/src/homeModel.ts` — pure rules: date groups, row dates, status chips, Up next, greeting, privacy summary, `isLoopbackUrl`.
 - `frontend/src/notesCache.ts` — last "All notes" list in `localStorage` for an instant first paint.
 - `frontend/src/deferredDelete.ts` — `useDeferredDelete`: commit only after the Undo window.

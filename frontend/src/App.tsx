@@ -45,6 +45,9 @@ import {
 } from "./pipelineFailures";
 import RestartRequired from "./components/RestartRequired";
 import Home from "./components/Home";
+import GlobalAsk from "./components/GlobalAsk";
+import { openAsk, useAskChat } from "./components/AskPanel";
+import { useInlineAskTurns } from "./components/AskConnectors";
 import UndoToast from "./components/UndoToast";
 import { useUpdater } from "./updater";
 
@@ -323,12 +326,17 @@ export default function App() {
     return () => window.removeEventListener("resize", apply);
   }, []);
 
-  // Ctrl+K (Cmd+K on macOS) opens Settings from anywhere.
+  // Ctrl+K (Cmd+K on macOS) opens Settings from anywhere; Ctrl+J (Cmd+J)
+  // opens Ask (the open note's, or Ask over every meeting on Home).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setShowSettings(true);
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        openAsk();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -512,6 +520,23 @@ export default function App() {
     setPipelineError(null);
   }, []);
 
+  // Ask over every meeting (Home). Lives here so its thread survives
+  // opening one of its sources and coming back; never saved.
+  const globalAsk = useAskChat(null);
+  // Ask turns showing their connector cards in the answer sheet.
+  const inlineAskTurns = useInlineAskTurns();
+
+  // An Ask source in another note: open that note at the cited lines (the
+  // editor applies the zoom once the note and that recording are loaded).
+  const [pendingZoom, setPendingZoom] = useState<{
+    noteId: string;
+    meetingId: string;
+    segmentIds: string[];
+    nonce: number;
+  } | null>(null);
+  const zoomNonce = useRef(0);
+  const clearPendingZoom = useCallback(() => setPendingZoom(null), []);
+
   // Undo toast = deferred delete (spec §3.2.5, noteDeletion.ts): the note
   // disappears now and stays hidden until the delete and the list refresh
   // land; the delete command runs only when the toast expires or closes.
@@ -579,6 +604,23 @@ export default function App() {
     },
     [isDeleted],
   );
+
+  const openSourceAt = async (meetingId: string, segmentIds: string[], sourceNoteId?: string) => {
+    // The source names its note (any recording of it); older replies
+    // didn't, so fall back to the notes' latest meetings.
+    let noteId = sourceNoteId || notesRef.current.find((n) => n.meeting_id === meetingId)?.id;
+    if (!noteId) {
+      const recent = await api.listRecentNotes(500).catch(() => [] as NoteSummary[]);
+      noteId = recent.find((n) => n.meeting_id === meetingId)?.id;
+    }
+    if (!noteId) {
+      setError("Couldn't open that source. Its meeting may have been deleted.");
+      return;
+    }
+    setDrawerOpen(false);
+    setPendingZoom({ noteId, meetingId, segmentIds, nonce: ++zoomNonce.current });
+    await openNoteById(noteId);
+  };
 
   const newNote = async () => {
     const folderId = selection.view === "folder" ? selection.id : null;
@@ -968,6 +1010,11 @@ export default function App() {
         setDrawerOpen(false);
         setShowSettings(true);
       }}
+      onAsk={() => {
+        setDrawerOpen(false);
+        openAsk({ scope: "all" });
+      }}
+      askShortcut={info?.os === "macos" ? "⌘J" : "Ctrl J"}
       theme={resolved}
       onMoveNote={(id, fid) => void moveNoteToFolder(id, fid)}
     />
@@ -1065,24 +1112,37 @@ export default function App() {
             }}
             onRelabel={(k, l) => void relabel(k, l)}
             onEditSegment={(id, text) => void editSegment(id, text)}
+            onOpenSourceElsewhere={(meetingId, ids, noteId) =>
+              void openSourceAt(meetingId, ids, noteId)
+            }
+            pendingZoom={pendingZoom}
+            onPendingZoomDone={clearPendingZoom}
           />
         ) : (
-          <Home
-            recording={recStatus.active}
-            upcoming={upcoming}
-            calendar={calendarStatus}
-            needsReconnect={calendarNeedsReconnect}
-            calendarBusy={calendarBusy}
-            hasNotes={
-              selection.view === "all" && !searchQuery.trim() ? listedNotes.length > 0 : null
-            }
-            onRecord={() => void startRecording()}
-            onStartFromEvent={(ev) => void startFromEvent(ev)}
-            onConnectCalendar={connectCalendar}
-            onOpenSettings={() => setShowSettings(true)}
-            onImport={() => void importMedia()}
-            onNewNote={() => void newNote()}
-          />
+          <div className="relative flex min-w-0 flex-1 flex-col">
+            <Home
+              recording={recStatus.active}
+              upcoming={upcoming}
+              calendar={calendarStatus}
+              needsReconnect={calendarNeedsReconnect}
+              calendarBusy={calendarBusy}
+              hasNotes={
+                selection.view === "all" && !searchQuery.trim() ? listedNotes.length > 0 : null
+              }
+              onRecord={() => void startRecording()}
+              onStartFromEvent={(ev) => void startFromEvent(ev)}
+              onConnectCalendar={connectCalendar}
+              onOpenSettings={() => setShowSettings(true)}
+              onImport={() => void importMedia()}
+              onNewNote={() => void newNote()}
+            />
+            <GlobalAsk
+              chat={globalAsk}
+              onOpenSource={({ meetingId, noteId, segmentIds }) =>
+                void openSourceAt(meetingId, segmentIds, noteId)
+              }
+            />
+          </div>
         )}
       </div>
       {narrow && drawerOpen && (
@@ -1140,7 +1200,7 @@ export default function App() {
       />
       {/* Every proposed connector call waits here for Run / Don't run,
           wherever you are (including over Settings). */}
-      <ConnectorCallStack />
+      <ConnectorCallStack hideTurnIds={inlineAskTurns} />
       {deletion.pending.length > 0 && (
         <UndoToast
           titles={deletion.pending.map((i) => i.title)}

@@ -57,8 +57,14 @@
                                      Keep local (the review notice)
      fotwMockAskError = keep_local | consent | no_key | auth | ollama_missing |
                         ollama_down | model_missing | offline | timeout |
-                        rate_limit | server | other → ask_meeting fails with
-                                     the backend's own text for that case
+                        rate_limit | server | other | empty | truncated |
+                        budget → ask_meeting fails with the backend's own
+                                     text for that case
+     fotwMockAskReply = unverified | refused → ask_meeting answers with that
+                                     status (see the Ask section for the
+                                     question keywords and the other Ask
+                                     toggles: fotwMockAskStale,
+                                     fotwMockAskConnectorsOff, fotwMockAskSlow)
      fotwMockImportPipelineFail = "1" → a staged import's run fails for good
                                      at "Detecting speakers" (after ASR);
                                      pipeline_failure keeps the cause, so the
@@ -1038,66 +1044,431 @@ const MOCK_VENDORS: Record<string, string> = {
   openai: "OpenAI",
   nim: "NVIDIA",
 };
-const MOCK_ASK_ANSWER =
-  "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
-/** Like the backend's approvals: what an answer's id may insert, once. */
-const mockApprovals = new Map<string, { noteId: string; markdown: string; applied: boolean }>();
-/** `ask_meeting`'s reply shape (the harness's answer). Sentences are
- *  sourced; localStorage `fotwMockAskUnsourced` = "1" marks the last one unsourced and the
- *  one before it flagged, to see the panel's answer check. */
-function mockAskReply(text: string, noteId = "n1") {
-  const unsourced = mockFlag("fotwMockAskUnsourced") === "1";
-  const local = llmSettings.providers.find((p) => p.id === llmSettings.provider)?.is_local ?? true;
-  const insertId = `mock-insert-${mockApprovals.size + 1}`;
-  mockApprovals.set(insertId, { noteId, markdown: text, applied: false });
+/* ---- Ask (the harness, fly-ask) ----
+   `ask_meeting` streams `ask:event` for its ask id like the backend (stage →
+   sources → model-turn frames → checking → the final checked frame), then
+   resolves with the harness's answer shape. The question picks the case:
+     "zebra" / "unicorn"        → not found (nothing matched)
+     "add … action items" /     → proposals (an action item, a note insert);
+     "add … to my note"           like the harness, only a request for a
+                                  change gets them
+     "price" / "pricing"        → a flagged number (the spoken-number check)
+     "crm" / "look up"          → with a cloud provider, the model first
+                                  proposes a connector call (Acme CRM): its
+                                  card shows in the turn, which waits on it
+     anything else              → sourced sentences + one unsourced line
+   Toggles (localStorage): fotwMockAskReply = unverified | refused forces
+   that status; fotwMockAskStale = "1" cites one moved and one changed line;
+   fotwMockAskConnectorsOff = "1" says connectors were off for Keep local;
+   fotwMockAskSlow = "1" streams slowly (to try Stop). `cancel_ask` stops a
+   running answer, which then fails with the backend's "Ask was cancelled." */
+const MOCK_ASK_EXTRA_ERRORS: Record<string, string> = {
+  empty: "The model returned an empty answer. Try again, or switch to another model in Settings.",
+  truncated:
+    "The model's answer was cut off before it finished. Try again, or ask a narrower question.",
+  budget: "Ask used up its budget before the model answered.",
+};
+const mockAskCancelled = new Set<string>();
+/** Like the backend's approvals: what each id an answer handed out may do,
+ *  once (an answer's `insert_id`, or a proposal's `id`). */
+type MockApproval =
+  | {
+      kind: "insert";
+      id: string;
+      noteId: string;
+      markdown: string;
+      segmentIds: string[];
+      applied: boolean;
+    }
+  | {
+      kind: "action";
+      id: string;
+      meetingId: string;
+      text: string;
+      owner: string | null;
+      segmentIds: string[];
+      applied: boolean;
+    };
+const mockApprovals = new Map<string, MockApproval>();
+let mockApprovalSeq = 0;
+
+type MockSentence = {
+  text: string;
+  citations: string[];
+  status: "sourced" | "unsourced" | "flagged";
+  flags?: { kind: string; detail?: string }[];
+};
+
+function mockLine(id: string) {
+  const s = transcript.segments.find((x) => x.id === id) ?? transcript.segments[0];
+  const speaker = transcript.speakers.find((p) => p.key === s.speaker_key)?.label ?? s.speaker_key;
+  return { segment_id: id, speaker, start_ms: s.start_ms, end_ms: s.end_ms, snippet: s.text };
+}
+
+function mockSource(meetingId: string, ids: string[], stale = false) {
+  const meta = noteMeta.find((n) => n.meeting_id === meetingId) ?? noteMeta[0];
+  const lines = ids.map((id) => mockLine(id));
+  if (stale) {
+    // re-transcribed since: t4 now has a new id (same words, same time) and
+    // the line cited as t9 says something else now
+    lines.push({ ...mockLine("t4"), segment_id: "t4-before" });
+    lines.push({
+      ...mockLine("t5"),
+      segment_id: "t9",
+      snippet: "I'll send the revised SOW on Friday and skip the legal review.",
+    });
+  }
   return {
-    insert_id: insertId,
-    status: "answered",
-    text,
-    sentences: text
-      .split("\n")
-      .filter((l) => l.trim())
-      .map((l, i, all) => ({
-        text: l,
-        citations: ["mock-seg"],
-        status: !unsourced
-          ? "sourced"
-          : i === all.length - 1
-            ? "unsourced"
-            : i === all.length - 2
-              ? "flagged"
-              : "sourced",
-      })),
-    sources: [],
-    proposals: [],
-    refusals: [],
-    trace: {},
-    trace_lines: ["Searched this meeting"],
-    on_device: local,
-    run_log: {},
+    meeting_id: meetingId,
+    note_id: meta.id,
+    meeting_title: meta.title,
+    started_at: meta.happened_at,
+    lines,
+    label: meta.title,
   };
 }
-function mockAsk(args: Record<string, unknown>): Promise<ReturnType<typeof mockAskReply>> {
+
+function mockAskAnswer(
+  question: string,
+  wide: boolean,
+  local: boolean,
+  stale: boolean,
+  // the meeting a narrow scope points at (one fixture serves them all)
+  meetingId = "m1",
+) {
+  const q = question.toLowerCase();
+  const sources = [mockSource(meetingId, ["t1", "t3", "t4", "t5"], stale)];
+  if (wide) sources.push({ ...mockSource("m2", []), lines: [mockLine("t2")] });
+  if (/zebra|unicorn/.test(q)) {
+    return { status: "not_found", sentences: [] as MockSentence[], sources: [], floor: true };
+  }
+  let sentences: MockSentence[];
+  if (/price|pricing/.test(q)) {
+    sentences = [
+      {
+        text: "Procurement flagged the renewal price.",
+        citations: ["t1"],
+        status: "sourced",
+      },
+      {
+        text: "They want it cut to $84,000 before signing.",
+        citations: ["t1"],
+        status: "flagged",
+        flags: [{ kind: "number", detail: "84000" }],
+      },
+      {
+        text: "Dana thinks they can close by Friday if legal is comfortable.",
+        citations: ["t4"],
+        status: "sourced",
+      },
+    ];
+  } else {
+    sentences = [
+      {
+        text: "Acme is happy with the pilot: PMs stopped taking manual notes.",
+        citations: ["t1", "t3"],
+        status: "sourced",
+      },
+      {
+        text: "- The blocker is the renewal price and the data-residency wording for legal.",
+        citations: stale ? ["t1", "t4-before"] : ["t1", "t4"],
+        status: "sourced",
+      },
+      {
+        text: "- You'll send the revised SOW today and book a legal review on Monday.",
+        citations: stale ? ["t9"] : ["t5"],
+        status: "sourced",
+      },
+      {
+        text: "- Expect a signed annual contract by the end of the month.",
+        citations: [],
+        status: "unsourced",
+      },
+    ];
+    if (wide) {
+      sentences.splice(1, 0, {
+        text: "In your 1:1, Dana asked to walk through where the value landed.",
+        citations: ["t2"],
+        status: "sourced",
+      });
+    }
+  }
+  return { status: "answered", sentences, sources, floor: false, local };
+}
+
+function mockAskProposals(question: string) {
+  // Like the harness: only a request for a change gets proposals.
+  if (!/\b(add|create|make|put|insert)\b.*\b(action items?|follow-ups?|note)\b/i.test(question))
+    return [];
+  const expires = new Date(Date.now() + 30 * 60_000).toISOString();
+  const n = ++mockApprovalSeq;
+  const proposals = [
+    {
+      id: `prop-sow-${n}`,
+      tool: "add_action_item",
+      gate: "review",
+      meeting_id: "m1",
+      note_id: "n1",
+      text: "Send the revised SOW to Acme",
+      owner: "You",
+      segment_ids: ["t5"],
+      expires_at: expires,
+      executed: false,
+    },
+    {
+      id: `prop-legal-${n}`,
+      tool: "insert_into_note",
+      gate: "review",
+      meeting_id: "m1",
+      note_id: "n1",
+      markdown: "## Follow-ups\n- Send the revised SOW today.\n- Book the legal review for Monday.",
+      segment_ids: ["t5"],
+      expires_at: expires,
+      executed: false,
+    },
+  ];
+  for (const p of proposals) {
+    mockApprovals.set(
+      p.id,
+      p.tool === "insert_into_note"
+        ? {
+            kind: "insert",
+            id: p.id,
+            noteId: p.note_id,
+            markdown: p.markdown ?? "",
+            segmentIds: p.segment_ids,
+            applied: false,
+          }
+        : {
+            kind: "action",
+            id: p.id,
+            meetingId: p.meeting_id,
+            text: p.text ?? "",
+            owner: p.owner ?? null,
+            segmentIds: p.segment_ids,
+            applied: false,
+          },
+    );
+  }
+  return proposals;
+}
+
+/** Like the backend: an answer can be inserted into the note it was asked
+ *  about, as its sourced sentences that cite only that note's own lines.
+ *  Returns the id `insert_ask_answer` takes, or null. */
+function mockInsertId(
+  status: string,
+  sentences: MockSentence[],
+  sources: { meeting_id: string; lines: { segment_id: string }[] }[],
+  noteId: string | null,
+): string | null {
+  if (status !== "answered" || !noteId) return null;
+  const meetingId = noteMeta.find((m) => m.id === noteId)?.meeting_id;
+  if (!meetingId) return null;
+  // A cited line is the note's own when its source is the note's meeting.
+  const meetingOf = new Map<string, string>();
+  for (const src of sources) for (const l of src.lines) meetingOf.set(l.segment_id, src.meeting_id);
+  const own = (id: string) => meetingOf.get(id) === meetingId;
+  const kept = sentences.filter(
+    (s) => s.status === "sourced" && s.citations.length > 0 && s.citations.every(own),
+  );
+  if (kept.length === 0) return null;
+  const id = `mock-insert-${++mockApprovalSeq}`;
+  mockApprovals.set(id, {
+    kind: "insert",
+    id,
+    noteId,
+    markdown: kept
+      .map((x, i) => (i && x.text.startsWith("- ") ? "\n" : i ? " " : "") + x.text)
+      .join(""),
+    segmentIds: [...new Set(kept.flatMap((x) => x.citations))],
+    applied: false,
+  });
+  return id;
+}
+
+function mockAsk(args: Record<string, unknown>): Promise<unknown> {
   const forced = mockFlag("fotwMockAskError");
   const provider = llmSettings.provider;
   const info = llmSettings.providers.find((p) => p.id === provider);
-  const meetingId = noteMeta.find((n) => n.id === args.noteId)?.meeting_id ?? null;
+  // Like the backend: the note is the default scope and where an answer
+  // can be inserted; Ask on Home sends no note and an explicit scope.
+  const askedNote = typeof args.noteId === "string" && args.noteId.trim() ? args.noteId : null;
+  const askedScope = (args.scope as { kind: string; id?: string } | null) ?? null;
+  if (!askedScope && !askedNote) return Promise.reject("Ask needs a note or a scope to search.");
+  const scope = askedScope ?? { kind: "note", id: askedNote! };
+  const insertNote = askedNote ?? (scope.kind === "note" ? (scope.id ?? null) : null);
+  const narrowNote = scope.kind === "note" ? scope.id : null;
+  const meetingId = narrowNote
+    ? (noteMeta.find((n) => n.id === narrowNote)?.meeting_id ?? null)
+    : null;
   const privacy = meetingId ? meetingPrivacy(meetingId) : null;
   const keptLocal = !!privacy && (privacy.keep_local || privacy.keep_local_from_folder);
-  let error = forced ? (MOCK_ASK_ERRORS[forced] ?? MOCK_ASK_ERRORS.other) : null;
+  let error = forced
+    ? (MOCK_ASK_ERRORS[forced] ?? MOCK_ASK_EXTRA_ERRORS[forced] ?? MOCK_ASK_ERRORS.other)
+    : null;
   if (!error && info && !info.is_local) {
     if (keptLocal) error = MOCK_ASK_ERRORS.keep_local.replace("anthropic", provider);
     else if (mockConsentRefusal()) error = mockConsentRefusal();
     else if (!info.has_key)
       error = MOCK_ASK_ERRORS.no_key.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
   }
-  return new Promise((resolve, reject) =>
-    setTimeout(
-      () =>
-        error ? reject(error) : resolve(mockAskReply(MOCK_ASK_ANSWER, String(args.noteId ?? "n1"))),
-      700,
-    ),
-  );
+  const askId = (args.askId as string | null) ?? null;
+  const emit = (event: Record<string, unknown>) => {
+    if (askId && !mockAskCancelled.has(askId)) mockEmit("ask:event", { ask_id: askId, event });
+  };
+  const history = (args.history as { role: string; content: string }[]) ?? [];
+  const question = history[history.length - 1]?.content ?? "";
+  const local = info?.is_local ?? true;
+  const wide = scope.kind === "all" || scope.kind === "folder" || scope.kind === "person";
+  const stale = mockFlag("fotwMockAskStale") === "1";
+  const forcedStatus = mockFlag("fotwMockAskReply");
+  const shaped = mockAskAnswer(question, wide, local, stale, meetingId ?? "m1");
+  const step = mockFlag("fotwMockAskSlow") === "1" ? 450 : 90;
+  const tier = local ? "S" : "C";
+  const keptLocalOut = wide && !local ? 2 : 0;
+
+  return new Promise((resolve, reject) => {
+    const timers: number[] = [];
+    const at = (ms: number, fn: () => void) => timers.push(window.setTimeout(fn, ms));
+    const cancelledNow = () => {
+      if (askId && mockAskCancelled.has(askId)) {
+        timers.forEach((t) => window.clearTimeout(t));
+        reject("Ask was cancelled.");
+        return true;
+      }
+      return false;
+    };
+    if (error) {
+      at(700, () => reject(error));
+      return;
+    }
+    let t = 0;
+    at((t += 120), () => emit({ type: "stage", stage: "scoping" }));
+    at((t += 200), () => emit({ type: "stage", stage: "searching" }));
+    at((t += 400), () =>
+      emit({
+        type: "sources",
+        sources: shaped.sources,
+        kept_local_not_searched: keptLocalOut,
+      }),
+    );
+    // The rest of the answer, from `start` ms (after a connector card, if
+    // the model asked for one).
+    const rest = (start: number) => {
+      t = start;
+      if (shaped.status !== "not_found" && forcedStatus !== "refused") {
+        at((t += 150), () => emit({ type: "stage", stage: "answering" }));
+        at((t += 50), () => emit({ type: "turn_start", turn: 1 }));
+        // the model's words, streamed without markers
+        const words = shaped.sentences
+          .map((s) => s.text)
+          .join(" ")
+          .split(/(\s+)/);
+        let so_far = "";
+        for (const w of words) {
+          at((t += step / 3), () => {
+            if (cancelledNow()) return;
+            so_far += w;
+            emit({ type: "frame", turn: 1, text: so_far });
+          });
+        }
+        at((t += 200), () => emit({ type: "stage", stage: "checking" }));
+      }
+      at((t += 300), () => {
+        if (cancelledNow()) return;
+        const status =
+          forcedStatus === "unverified" || forcedStatus === "refused"
+            ? forcedStatus
+            : shaped.status;
+        const sentences =
+          status === "unverified"
+            ? shaped.sentences.map((s) => ({
+                ...s,
+                citations: [],
+                status: "flagged",
+                flags: [{ kind: "uncited_claim" }],
+              }))
+            : status === "refused"
+              ? []
+              : shaped.sentences;
+        const text =
+          status === "not_found"
+            ? "Not found in your meetings."
+            : status === "refused"
+              ? "There's nothing to search here."
+              : sentences
+                  .map((s, i) => (i && s.text.startsWith("- ") ? "\n" : i ? " " : "") + s.text)
+                  .join("");
+        if (text) emit({ type: "frame", turn: 0, text });
+        const toolCalls =
+          tier === "C" && status === "answered"
+            ? [
+                { tool: "tool_search_passages", ok: true },
+                { tool: "tool_read_segments", ok: true },
+              ]
+            : [];
+        resolve({
+          status,
+          text,
+          sentences,
+          sources: status === "answered" || status === "unverified" ? shaped.sources : [],
+          proposals: status === "answered" ? mockAskProposals(question) : [],
+          refusals:
+            status === "answered" && /\b(add|create|make)\b.*action items?/i.test(question)
+              ? [{ tool: "add_action_item", reason: "unknown_owner" }]
+              : [],
+          insert_id: mockInsertId(status, sentences as MockSentence[], shaped.sources, insertNote),
+          trace: {
+            tier,
+            scope: scope.kind,
+            kept_local_not_searched: keptLocalOut,
+            meetings_in_scope: wide ? 4 : 1,
+            passages: status === "not_found" ? 0 : 6,
+            items: status === "not_found" ? 0 : 2,
+            tool_calls: toolCalls,
+            retried: false,
+            context_truncated: false,
+            floor_not_found: status === "not_found",
+            budget_forced: false,
+            connectors_off_keep_local: mockFlag("fotwMockAskConnectorsOff") === "1",
+          },
+          failure: null,
+          timing: { first_token_ms: 1100, total_ms: t + 600 },
+          trace_lines: [wide ? "Searched 4 meetings" : "Searched this meeting"],
+          on_device: local,
+          run_log: {
+            tier,
+            reach: local ? "reach_on_device" : "reach_cloud",
+            provider: `provider_${["ollama", "openai", "anthropic", "nim"].includes(provider) ? provider : "other"}`,
+            prefetch: {
+              searches: wide ? 3 : 2,
+              semantic: true,
+              memory_facts: /dana/.test(question.toLowerCase()) ? 3 : 0,
+            },
+          },
+        });
+      });
+    };
+    // A cloud model asking about the CRM proposes a connector call (tier C,
+    // connectors beta): the turn waits on its card, shown in the turn.
+    const crm = /\bcrm\b|look (it )?up/i.test(question) && !local && askId !== null;
+    const acme = mockConnectors.find((c) => c.id === "c-acme");
+    if (crm && acme) {
+      at((t += 150), () => {
+        if (cancelledNow()) return;
+        emit({ type: "stage", stage: "reading" });
+        void mockPropose(
+          acme,
+          mockConnectorTool(acme, "search_contacts"),
+          { query: "Acme", limit: 5 },
+          askId!,
+        ).then(() => rest(0));
+      });
+    } else {
+      rest(t);
+    }
+  });
 }
 
 /** build_provider's missing-consent refusal for the saved provider, or null
@@ -2219,7 +2590,9 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       ) {
         return null;
       }
-      return transcript;
+      // One fixture for every meeting, labelled with the one asked for (an
+      // Ask source in another note highlights there).
+      return { ...transcript, meeting_id: String(args.meetingId ?? transcript.meeting_id) };
     case "get_cleaned_transcript":
       if (
         typeof localStorage !== "undefined" &&
@@ -2230,6 +2603,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       // Polished variant: same ids/speakers/timestamps, tidied text.
       return {
         ...transcript,
+        meeting_id: String(args.meetingId ?? transcript.meeting_id),
         segments: transcript.segments.map((s) => ({
           ...s,
           text: s.text.replace(/\b(um|uh),?\s*/gi, "").replace(/^\w/, (c) => c.toUpperCase()),
@@ -2420,33 +2794,48 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "ask_meeting":
       return mockAsk(args);
     case "cancel_ask":
-      // Like the backend: an id that isn't running does nothing.
+      // Like the backend: stops the running answer with this id; an id
+      // that isn't running does nothing.
+      mockAskCancelled.add(String(args.askId));
       return null;
     case "list_ask_people":
-      return ["Dana Osei", "You"];
+      // Everyone the router can match (attendees, speakers, item owners).
+      return ["Dana Osei", "Marc Reyes", "Priya N.", "You"];
     case "insert_ask_answer": {
-      // Like the backend: only an id it handed out, applied once (links
-      // dropped); a second click returns the note unchanged.
+      // Like the backend: only an id it handed out (an answer's insert_id
+      // or an insert proposal's id), applied once; a second click returns
+      // the note unchanged.
       const held = mockApprovals.get(String(args.proposalId));
-      if (!held) throw "This suggestion has expired. Ask again to get a fresh one.";
+      if (!held || held.kind !== "insert")
+        throw "This suggestion has expired. Ask again to get a fresh one.";
       if (!held.applied) {
-        const md = held.markdown
-          .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
-          .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-          .trim();
-        if (!md) throw "nothing to insert";
         blocks.push({
           id: `ask-${blocks.length + 1}`,
-          origin: { kind: "ai", source_segment_ids: [] },
-          markdown: md,
+          origin: { kind: "ai", source_segment_ids: held.segmentIds },
+          markdown: held.markdown,
         });
         held.applied = true;
       }
       return JSON.parse(JSON.stringify(note(held.noteId)));
     }
-    case "add_action_item":
-      // The mock's answers carry no proposals, so no id is ever valid.
-      throw "This suggestion has expired. Ask again to get a fresh one.";
+    case "add_action_item": {
+      const held = mockApprovals.get(String(args.proposalId));
+      if (!held || held.kind !== "action")
+        throw "This suggestion has expired. Ask again to get a fresh one.";
+      held.applied = true;
+      return {
+        id: `item-${held.id}`,
+        meeting_id: held.meetingId,
+        kind: "action_item",
+        text: held.text,
+        owner: held.owner,
+        status: "open",
+        speaker_key: null,
+        segment_ids: held.segmentIds,
+        created_at: new Date().toISOString(),
+        extracted_by: "user:ask",
+      };
+    }
     case "test_llm_connection": {
       const refused = mockConsentRefusal();
       if (refused) throw refused;
