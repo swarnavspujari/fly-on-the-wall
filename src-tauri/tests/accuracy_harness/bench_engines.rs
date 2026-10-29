@@ -235,10 +235,13 @@ pub fn build(
             let (gguf, extra): (&str, &[&str]) = if name == "nemocpp-parakeet" {
                 ("parakeet-tdt-0.6b-v3.q8_0.gguf", &[])
             } else {
-                // 1.12 s chunks, the same operating point as nemotron-live
+                // 1.12 s chunks, the same operating point as nemotron-live.
+                // --no-warmup: v0.2.0's warmup trips GGML_ASSERT(ne3 == ne13)
+                // in the cache-aware encoder on Vulkan (upstream issue #48);
+                // real requests decode fine.
                 (
                     "nemotron-speech-streaming-en-0.6b.q8_0.gguf",
-                    &["--asr.streaming.rnnt_right_context", "13"],
+                    &["--asr.streaming.rnnt_right_context", "13", "--no-warmup"],
                 )
             };
             let model = dir.need(&format!("models/nemo-speech/{gguf}"))?;

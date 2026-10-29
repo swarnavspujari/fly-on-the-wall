@@ -100,6 +100,13 @@ fn diarize(arm: &str, wav: &Path, gpu: bool) -> Result<Vec<SpeakerTurn>, String>
             if let Some(d) = exe.parent() {
                 cmd.current_dir(d);
             }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt as _;
+                // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, as the
+                // shipped diarizer sidecar
+                cmd.creation_flags(0x0800_0000 | 0x0000_4000);
+            }
             let o = cmd
                 .output()
                 .map_err(|e| format!("launch nemo-speech: {e}"))?;

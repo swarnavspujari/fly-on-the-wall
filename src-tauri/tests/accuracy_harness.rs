@@ -2400,6 +2400,24 @@ fn run_results(
     results.insert("asr_cpu_secs".into(), serde_json::json!(asr_cpu_secs));
     results.insert("call_cpu_pct".into(), serde_json::json!(call_cpu_pct));
     if let Some(b) = &out.bench {
+        // decode time alone (every *_decode_secs, timing anchor included),
+        // without server start / model load / warmup
+        let decode: f64 = b
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter(|(k, _)| k.ends_with("_decode_secs"))
+                    .filter_map(|(_, v)| v.as_f64())
+                    .sum()
+            })
+            .unwrap_or(0.0);
+        if decode > 0.0 {
+            results.insert("decode_secs".into(), serde_json::json!(decode));
+            results.insert(
+                "speed_x_decode".into(),
+                serde_json::json!(out.audio_secs / decode),
+            );
+        }
         results.insert("bench".into(), b.clone());
     }
     let loops = run_stats::loops_json(&out.loops);
