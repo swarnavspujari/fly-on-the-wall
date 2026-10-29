@@ -121,7 +121,15 @@ fn golden() -> Golden {
     s.replace_meeting_items(
         &w1,
         &[
-            item(&w1, ItemKind::Decision, "Beta moves to October", None, None, Some("mic"), &["a1"]),
+            item(
+                &w1,
+                ItemKind::Decision,
+                "Beta moves to October",
+                None,
+                None,
+                Some("mic"),
+                &["a1"],
+            ),
             item(
                 &w1,
                 ItemKind::ActionItem,
@@ -131,14 +139,30 @@ fn golden() -> Golden {
                 Some("spk_0"),
                 &["a2"],
             ),
-            item(&w1, ItemKind::Question, "Who signs off on PR?", None, None, Some("spk_1"), &["a3"]),
+            item(
+                &w1,
+                ItemKind::Question,
+                "Who signs off on PR?",
+                None,
+                None,
+                Some("spk_1"),
+                &["a3"],
+            ),
         ],
     )
     .unwrap();
     s.replace_meeting_items(
         &w2,
         &[
-            item(&w2, ItemKind::Decision, "Pricing tiers are final", None, None, Some("mic"), &["b1"]),
+            item(
+                &w2,
+                ItemKind::Decision,
+                "Pricing tiers are final",
+                None,
+                None,
+                Some("mic"),
+                &["b1"],
+            ),
             item(
                 &w2,
                 ItemKind::ActionItem,
@@ -157,7 +181,15 @@ fn golden() -> Golden {
                 Some("spk_0"),
                 &["b2"],
             ),
-            item(&w2, ItemKind::Figure, "Three pricing tiers", None, None, None, &[]),
+            item(
+                &w2,
+                ItemKind::Figure,
+                "Three pricing tiers",
+                None,
+                None,
+                None,
+                &[],
+            ),
         ],
     )
     .unwrap();
@@ -199,9 +231,13 @@ fn golden() -> Golden {
 
 fn tool(g: &Golden, name: &str, args: Value) -> String {
     let msg = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
-    let resp: Value = serde_json::from_str(&g.server.handle_message(&msg.to_string()).unwrap()).unwrap();
+    let resp: Value =
+        serde_json::from_str(&g.server.handle_message(&msg.to_string()).unwrap()).unwrap();
     assert_ne!(resp["result"]["isError"], true, "{name} errored: {resp}");
-    let mut text = resp["result"]["content"][0]["text"].as_str().unwrap().to_string();
+    let mut text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     for (placeholder, id) in &g.ids {
         text = text.replace(id.as_str(), placeholder);
     }
@@ -289,7 +325,11 @@ Participants: You, Dana
 ";
     assert_eq!(fallback, format!("{want_fallback}{FOOTER}"));
 
-    let miss = tool(&g, "get_context", json!({"query": "zebra", "since": "2026-01-02"}));
+    let miss = tool(
+        &g,
+        "get_context",
+        json!({"query": "zebra", "since": "2026-01-02"}),
+    );
     assert_eq!(
         miss,
         "No meetings matched \"zebra\" since 2026-01-02. Try search_notes for a broader text search."
@@ -310,7 +350,10 @@ fn whats_changed_text_is_pinned() {
         "whats_changed",
         json!({"series": "launch weekly", "since": "2026-09-08"}),
     );
-    assert!(text.starts_with("# Context: launch weekly\n2 meeting(s), 2026-09-08 → 2026-09-15\n"), "{text}");
+    assert!(
+        text.starts_with("# Context: launch weekly\n2 meeting(s), 2026-09-08 → 2026-09-15\n"),
+        "{text}"
+    );
     assert!(!text.contains("<w1>"), "{text}");
     let miss = tool(
         &g,

@@ -1,127 +1,36 @@
-//! Deterministic context assembly: recurring-series detection over meeting
-//! titles + participants, and the chronologically threaded briefing that
-//! `get_context` / `whats_changed` / `open_items` return. No LLM runs at
-//! query time — everything is assembled from stored meetings, transcripts,
-//! and the extraction table, and every claim carries provenance
-//! (meeting_id + source segment ids).
-
-use std::collections::BTreeMap;
+//! The MCP server's text for the context layer. The logic — series
+//! detection, the threaded briefing, open items — lives in
+//! `fly_context::memory`, shared with Ask; this module only renders its
+//! results in the wording MCP clients already parse (pinned by
+//! `tests/context_golden.rs`). No LLM runs at query time, and every claim
+//! carries provenance (meeting_id + source segment ids).
 
 use chrono::{DateTime, Utc};
-use fly_core::{ItemKind, Meeting, MeetingItem};
-use fly_storage::{ItemFilter, Storage};
+use fly_context::{Briefing, MemoryFact, OpenItems};
+use fly_core::ItemKind;
 
-/// Normalize a meeting title into its series key: lowercase, digits and
-/// punctuation stripped (dates, "#12", "(3/4)" all collapse), whitespace
-/// folded. "Weekly Sync 2026-07-01" and "weekly sync #2" → "weekly sync".
-pub fn normalize_title(title: &str) -> String {
-    let mut out = String::with_capacity(title.len());
-    for c in title.to_lowercase().chars() {
-        if c.is_alphabetic() {
-            out.push(c);
-        } else if c.is_whitespace() || c.is_numeric() || c.is_ascii_punctuation() {
-            out.push(' ');
-        }
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Attendee-overlap (Jaccard) between two meetings; 1.0 when either side has
-/// no attendee data (manual recordings) so the title match alone decides.
-fn participant_overlap(a: &Meeting, b: &Meeting) -> f64 {
-    if a.attendees.is_empty() || b.attendees.is_empty() {
-        return 1.0;
-    }
-    // Match on the stable identity (email when present) so renaming an
-    // attendee in the editor doesn't break series detection.
-    let sa: std::collections::HashSet<String> = a.attendees.iter().map(|s| s.match_key()).collect();
-    let sb: std::collections::HashSet<String> = b.attendees.iter().map(|s| s.match_key()).collect();
-    let inter = sa.intersection(&sb).count() as f64;
-    let union = sa.union(&sb).count() as f64;
-    if union == 0.0 {
-        1.0
-    } else {
-        inter / union
-    }
-}
-
-/// A detected recurring series: same normalized title AND sufficient
-/// participant overlap with the rest of the group.
-pub struct Series {
-    pub key: String,
-    /// Chronological (oldest → newest).
-    pub meetings: Vec<Meeting>,
-}
-
-/// Group meetings into series. Deterministic: meetings sort chronologically,
-/// grouping is by normalized title, then a meeting only joins the group when
-/// it overlaps (≥ 0.34 Jaccard) with the group's first member — enough that
-/// "Weekly sync" with a disjoint set of people forms its own thread.
-pub fn detect_series(mut meetings: Vec<Meeting>) -> Vec<Series> {
-    meetings.sort_by_key(|m| m.started_at);
-    let mut groups: BTreeMap<String, Vec<Vec<Meeting>>> = BTreeMap::new();
-    for m in meetings {
-        let key = normalize_title(&m.title);
-        let buckets = groups.entry(key).or_default();
-        match buckets
-            .iter_mut()
-            .find(|b| participant_overlap(&b[0], &m) >= 0.34)
-        {
-            Some(bucket) => bucket.push(m),
-            None => buckets.push(vec![m]),
-        }
-    }
-    let mut out = Vec::new();
-    for (key, buckets) in groups {
-        for (i, meetings) in buckets.into_iter().enumerate() {
-            let key = if i == 0 {
-                key.clone()
-            } else {
-                format!("{key} ({})", i + 1)
-            };
-            out.push(Series { key, meetings });
-        }
-    }
-    out
-}
-
-/// Series whose key or member titles match the query tokens (all tokens must
-/// appear in the key). Used to route `get_context`/`whats_changed`.
-pub fn series_matching<'a>(series: &'a [Series], query: &str) -> Vec<&'a Series> {
-    let q = normalize_title(query);
-    let tokens: Vec<&str> = q.split_whitespace().collect();
-    if tokens.is_empty() {
-        return Vec::new();
-    }
-    series
-        .iter()
-        .filter(|s| tokens.iter().all(|t| s.key.contains(t)))
-        .collect()
-}
+pub use fly_context::memory::{detect_series, normalize_title, series_matching, Series};
 
 fn fmt_date(t: DateTime<Utc>) -> String {
     t.format("%Y-%m-%d").to_string()
 }
 
-fn item_line(storage: &Storage, item: &MeetingItem, date: DateTime<Utc>) -> String {
-    let mut line = format!("- {} ", item.text);
+fn item_line(f: &MemoryFact) -> String {
+    let mut line = format!("- {} ", f.text);
     let mut meta = Vec::new();
-    if let Some(owner) = &item.owner {
+    if let Some(owner) = &f.owner {
         meta.push(format!("owner: {owner}"));
     }
-    if let Some(status) = &item.status {
+    if let Some(status) = &f.status {
         meta.push(format!("status: {status}"));
     }
-    if let Some(key) = &item.speaker_key {
-        // resolve the display label for the speaker at render time
-        if let Ok(Some(t)) = storage.get_transcript(&item.meeting_id) {
-            meta.push(format!("said by: {}", t.label_for(key)));
-        }
+    if let Some(by) = &f.said_by {
+        meta.push(format!("said by: {by}"));
     }
-    meta.push(fmt_date(date));
-    meta.push(format!("meeting: {}", item.meeting_id));
-    if !item.segment_ids.is_empty() {
-        meta.push(format!("segments: {}", item.segment_ids.join(",")));
+    meta.push(fmt_date(f.started_at));
+    meta.push(format!("meeting: {}", f.meeting_id));
+    if !f.segment_ids.is_empty() {
+        meta.push(format!("segments: {}", f.segment_ids.join(",")));
     }
     line.push_str(&format!("({})", meta.join(" · ")));
     line
@@ -138,149 +47,64 @@ fn section(out: &mut String, heading: &str, lines: Vec<String>) {
     }
 }
 
-/// The `get_context` briefing: participants, timeline, then every extracted
-/// item grouped by kind, chronologically, each line carrying provenance.
-pub fn build_briefing(
-    storage: &Storage,
-    series_list: &[&Series],
-    since: Option<DateTime<Utc>>,
-    query: &str,
-) -> Result<String, String> {
-    // Defense in depth: callers already build series without keep-local
-    // meetings, but a briefing goes to an external AI client, so re-check
-    // here (fail closed on a lookup error).
-    let hidden = storage
-        .keep_local_note_ids()
-        .map_err(|e| format!("couldn't check Keep local settings, so nothing was returned: {e}"))?;
-    let mut meetings: Vec<&Meeting> = series_list
-        .iter()
-        .flat_map(|s| s.meetings.iter())
-        .filter(|m| !hidden.contains(&m.note_id))
-        .filter(|m| since.map(|s| m.started_at >= s).unwrap_or(true))
-        .collect();
-    meetings.sort_by_key(|m| m.started_at);
-    if meetings.is_empty() {
-        return Ok(format!(
-            "No meetings matched \"{query}\"{}. Try search_notes for a broader text search.",
-            since
-                .map(|s| format!(" since {}", fmt_date(s)))
-                .unwrap_or_default()
-        ));
-    }
+/// The "no meetings" reply shared by `get_context` and `whats_changed`.
+fn no_meetings(query: &str, since: Option<DateTime<Utc>>) -> String {
+    format!(
+        "No meetings matched \"{query}\"{}. Try search_notes for a broader text search.",
+        since
+            .map(|s| format!(" since {}", fmt_date(s)))
+            .unwrap_or_default()
+    )
+}
 
+/// The `get_context` / `whats_changed` briefing: participants, timeline,
+/// then every extracted item grouped by kind, chronologically, each line
+/// carrying provenance.
+pub fn render_briefing(b: &Briefing, query: &str, since: Option<DateTime<Utc>>) -> String {
+    if b.meetings.is_empty() {
+        return no_meetings(query, since);
+    }
     let mut out = String::new();
-    out.push_str(&format!(
-        "# Context: {}\n",
-        series_list
-            .iter()
-            .map(|s| s.key.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    out.push_str(&format!("# Context: {}\n", b.series.join(", ")));
     out.push_str(&format!(
         "{} meeting(s), {} → {}\n",
-        meetings.len(),
-        fmt_date(meetings[0].started_at),
-        fmt_date(meetings.last().unwrap().started_at)
+        b.meetings.len(),
+        fmt_date(b.meetings[0].started_at),
+        fmt_date(b.meetings[b.meetings.len() - 1].started_at)
     ));
-
-    // participants: attendee union + speaker labels seen in transcripts
-    let mut participants: Vec<String> = Vec::new();
-    for m in &meetings {
-        for a in &m.attendees {
-            let name = a.display_name();
-            if !name.is_empty() && !participants.iter().any(|p| p.eq_ignore_ascii_case(name)) {
-                participants.push(name.to_string());
-            }
-        }
-        if let Ok(Some(t)) = storage.get_transcript(&m.id) {
-            for s in &t.speakers {
-                if !s.label.starts_with("Speaker ")
-                    && !participants
-                        .iter()
-                        .any(|p| p.eq_ignore_ascii_case(&s.label))
-                {
-                    participants.push(s.label.clone());
-                }
-            }
-        }
-    }
-    if !participants.is_empty() {
-        out.push_str(&format!("Participants: {}\n", participants.join(", ")));
+    if !b.participants.is_empty() {
+        out.push_str(&format!("Participants: {}\n", b.participants.join(", ")));
     }
 
-    // timeline
     out.push_str("\n## Timeline\n");
-    for m in &meetings {
-        let has_transcript = storage.get_transcript(&m.id).ok().flatten().is_some();
-        let n_items = storage
-            .get_meeting_items(&m.id)
-            .map(|i| i.len())
-            .unwrap_or(0);
+    for m in &b.meetings {
         out.push_str(&format!(
             "- {} — {} (meeting: {}{}, {} extracted item(s))\n",
             fmt_date(m.started_at),
             m.title,
-            m.id,
-            if has_transcript {
+            m.meeting_id,
+            if m.has_transcript {
                 ", transcript ✓"
             } else {
                 ", no transcript"
             },
-            n_items,
+            m.item_count,
         ));
     }
 
-    // items by kind, chronological within kind
-    let meeting_ids: Vec<String> = meetings.iter().map(|m| m.id.clone()).collect();
-    let date_of: std::collections::HashMap<&str, DateTime<Utc>> = meetings
-        .iter()
-        .map(|m| (m.id.as_str(), m.started_at))
-        .collect();
-    let mut items = storage
-        .query_items(&ItemFilter {
-            meeting_ids: Some(meeting_ids),
-            limit: 500,
-            exclude_keep_local: true,
-            ..Default::default()
-        })
-        .map_err(|e| e.to_string())?;
-    items.sort_by_key(|i| date_of.get(i.meeting_id.as_str()).copied());
-
-    let lines_of = |kind: ItemKind, items: &[MeetingItem]| -> Vec<String> {
-        items
+    let lines_of = |kind: ItemKind| -> Vec<String> {
+        b.facts
             .iter()
-            .filter(|i| i.kind == kind)
-            .map(|i| {
-                item_line(
-                    storage,
-                    i,
-                    date_of
-                        .get(i.meeting_id.as_str())
-                        .copied()
-                        .unwrap_or_default(),
-                )
-            })
+            .filter(|f| f.kind == kind)
+            .map(item_line)
             .collect()
     };
-    section(&mut out, "Decisions", lines_of(ItemKind::Decision, &items));
-    section(
-        &mut out,
-        "Action items",
-        lines_of(ItemKind::ActionItem, &items),
-    );
-    section(
-        &mut out,
-        "Commitments",
-        lines_of(ItemKind::Commitment, &items),
-    );
-    section(
-        &mut out,
-        "Open questions",
-        lines_of(ItemKind::Question, &items),
-    );
-    section(&mut out, "Key figures", lines_of(ItemKind::Figure, &items));
-    if items.is_empty() {
+    section(&mut out, "Decisions", lines_of(ItemKind::Decision));
+    section(&mut out, "Action items", lines_of(ItemKind::ActionItem));
+    section(&mut out, "Commitments", lines_of(ItemKind::Commitment));
+    section(&mut out, "Open questions", lines_of(ItemKind::Question));
+    section(&mut out, "Key figures", lines_of(ItemKind::Figure));
+    if b.facts.is_empty() {
         out.push_str(
             "\n(No extracted items yet for these meetings — run item extraction in the app, \
              or read the transcripts directly with get_transcripts.)\n",
@@ -291,75 +115,70 @@ pub fn build_briefing(
         "\nEvery line above cites its meeting and transcript segment ids — verify any claim \
          with get_transcript(meeting_id) before relying on it.\n",
     );
-    Ok(out)
+    out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn meeting(title: &str, attendees: &[&str], days_ago: i64) -> Meeting {
-        Meeting {
-            id: format!("m-{title}-{days_ago}"),
-            title: title.into(),
-            note_id: "n".into(),
-            attendees: attendees
-                .iter()
-                .map(|s| fly_core::Attendee::from_legacy(s))
-                .collect(),
-            attendees_confirmed: false,
-            started_at: Utc::now() - chrono::Duration::days(days_ago),
-            ended_at: None,
-            recording: None,
-        }
+/// `whats_changed`: a series miss names the series; otherwise the briefing.
+pub fn render_whats_changed(b: &Briefing, series: &str, since: DateTime<Utc>) -> String {
+    if b.series.is_empty() {
+        return format!("No series matches \"{series}\". get_context(query) lists series names.");
     }
+    render_briefing(b, series, Some(since))
+}
 
-    #[test]
-    fn titles_normalize_dates_numbers_and_case_away() {
-        assert_eq!(normalize_title("Weekly Sync 2026-07-01"), "weekly sync");
-        assert_eq!(normalize_title("weekly sync #2"), "weekly sync");
-        assert_eq!(
-            normalize_title("Acme <> Us: Renewal (3/4)"),
-            "acme us renewal"
+/// One item with its kind, owner, status, date and provenance (the
+/// `query_items` / `open_items` line).
+pub fn render_item_line(
+    text: &str,
+    kind: ItemKind,
+    owner: Option<&str>,
+    status: Option<&str>,
+    date: String,
+    meeting_id: &str,
+    segment_ids: &[String],
+) -> String {
+    let mut meta = vec![format!("kind: {}", kind.as_str())];
+    if let Some(o) = owner {
+        meta.push(format!("owner: {o}"));
+    }
+    if let Some(s) = status {
+        meta.push(format!("status: {s}"));
+    }
+    meta.push(date);
+    meta.push(format!("meeting: {meeting_id}"));
+    if !segment_ids.is_empty() {
+        meta.push(format!("segments: {}", segment_ids.join(",")));
+    }
+    format!("- {text} ({})\n", meta.join(" · "))
+}
+
+/// `open_items`.
+pub fn render_open_items(o: &OpenItems) -> String {
+    let scope = &o.scope;
+    if !o.scope_found {
+        return format!(
+            "No series matches \"{scope}\" — pass \"all\" or a series name from get_context."
         );
     }
-
-    #[test]
-    fn series_groups_by_title_and_participant_overlap() {
-        let series = detect_series(vec![
-            meeting("Weekly Sync 2026-06-01", &["a@x.com", "b@x.com"], 30),
-            meeting("Weekly Sync 2026-06-08", &["a@x.com", "b@x.com"], 23),
-            // same title, disjoint people → its own thread
-            meeting("Weekly Sync", &["p@y.com", "q@y.com"], 20),
-            meeting("Board prep", &["a@x.com"], 10),
-        ]);
-        let keys: Vec<&str> = series.iter().map(|s| s.key.as_str()).collect();
-        assert_eq!(keys, vec!["board prep", "weekly sync", "weekly sync (2)"]);
-        let weekly = series.iter().find(|s| s.key == "weekly sync").unwrap();
-        assert_eq!(weekly.meetings.len(), 2);
-        // chronological inside the series
-        assert!(weekly.meetings[0].started_at < weekly.meetings[1].started_at);
+    if o.facts.is_empty() {
+        return format!("No open action items or commitments in scope \"{scope}\".");
     }
-
-    #[test]
-    fn empty_attendees_join_on_title_alone() {
-        let series = detect_series(vec![
-            meeting("1:1 Dana", &[], 14),
-            meeting("1:1 Dana", &["dana@x.com"], 7),
-        ]);
-        assert_eq!(series.len(), 1);
-        assert_eq!(series[0].meetings.len(), 2);
+    let mut lines = String::new();
+    for f in &o.facts {
+        lines.push_str(&render_item_line(
+            &f.text,
+            f.kind,
+            f.owner.as_deref(),
+            f.status.as_deref(),
+            fmt_date(f.started_at),
+            &f.meeting_id,
+            &f.segment_ids,
+        ));
     }
-
-    #[test]
-    fn matching_requires_all_query_tokens() {
-        let series = detect_series(vec![
-            meeting("Acme renewal sync", &[], 7),
-            meeting("Beta kickoff", &[], 6),
-        ]);
-        let hits = series_matching(&series, "acme renewal");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].key, "acme renewal sync");
-        assert!(series_matching(&series, "gamma").is_empty());
-    }
+    format!(
+        "{} open item(s) in scope \"{scope}\" (newest meeting first; status is as stated \
+         in that meeting — verify against later meetings before chasing anyone):\n{}",
+        o.facts.len(),
+        lines
+    )
 }

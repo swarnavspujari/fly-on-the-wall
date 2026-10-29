@@ -19,8 +19,8 @@
 pub mod context;
 
 use chrono::{DateTime, Utc};
+use fly_context::{Context, SearchPassagesArgs, Visibility};
 use fly_core::ItemKind;
-use std::collections::HashSet;
 
 use fly_storage::{ItemFilter, SearchFilter, Storage, StorageError};
 use serde_json::{json, Value};
@@ -40,7 +40,7 @@ const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 /// clients cache them for an hour (they contain no user data → public).
 const CACHE_TTL_MS: u64 = 3_600_000;
 
-const INSTRUCTIONS: &str = "Fly on the Wall: the user's local meeting notes, transcripts, and a structured context layer extracted from them.\n\nIntended workflow:\n1. START with get_context(query) for any question about a project, customer, or recurring meeting — it returns a deterministic briefing (participants, meeting timeline, decisions, action items, commitments, open questions, key figures) assembled from stored data. Every claim carries its meeting_id and transcript segment ids.\n2. For targeted facts use query_items (filter by type/owner/status/since), open_items (what's still open), or whats_changed (what's new in a series since a date).\n3. Drill into raw material only to VERIFY or quote: get_transcript / get_transcripts for diarized transcripts, get_note for the user's own notes, search_notes for full-text search.\n4. Speakers appear by label ('You', 'Dana', 'Speaker 1'). If the user tells you who a speaker is, persist it with set_speaker_label — the only write this server allows.\n\nProvenance rule: extracted items are machine-generated. When a claim matters, verify it against the cited segment ids in the transcript before presenting it as fact.";
+const INSTRUCTIONS: &str = "Fly on the Wall: the user's local meeting notes, transcripts, and a structured context layer extracted from them.\n\nIntended workflow:\n1. START with get_context(query) for any question about a project, customer, or recurring meeting — it returns a deterministic briefing (participants, meeting timeline, decisions, action items, commitments, open questions, key figures) assembled from stored data. Every claim carries its meeting_id and transcript segment ids.\n2. For targeted facts use query_items (filter by type/owner/status/since), open_items (what's still open), or whats_changed (what's new in a series since a date).\n3. Drill into raw material only to VERIFY or quote: search_passages for the transcript passages about a topic (each line carries its segment id), get_transcript / get_transcripts for diarized transcripts, get_note for the user's own notes, search_notes for full-text search.\n4. Speakers appear by label ('You', 'Dana', 'Speaker 1'). If the user tells you who a speaker is, persist it with set_speaker_label — the only write this server allows.\n\nProvenance rule: extracted items are machine-generated. When a claim matters, verify it against the cited segment ids in the transcript before presenting it as fact.";
 
 /// JSON-RPC error: code, message, optional `data`.
 type RpcError = (i32, String, Option<Value>);
@@ -258,6 +258,7 @@ impl Server {
             "query_items" => self.tool_query_items(&args),
             "get_meeting_items" => self.tool_get_meeting_items(&args),
             "search_notes" => self.tool_search(&args),
+            "search_passages" => self.tool_search_passages(&args),
             "list_folders" => self.tool_list_folders(),
             "get_note" => self.tool_get_note(&args),
             "get_transcript" => self.tool_get_transcript(&args),
@@ -404,13 +405,6 @@ impl Server {
     // local-only folder — must never appear in a result. A meeting counts as
     // keep-local when its note does (own flag, a sibling meeting's flag, or
     // the folder chain). Lookup errors fail closed.
-
-    /// Notes hidden from AI tools (one query; see `keep_local_note_ids`).
-    fn hidden_notes(&self) -> Result<HashSet<String>, String> {
-        self.storage
-            .keep_local_note_ids()
-            .map_err(keep_local_lookup_error)
-    }
 
     fn guard_note(&self, note_id: &str) -> Result<(), String> {
         if self.storage.note_keep_local(note_id) {
@@ -667,19 +661,15 @@ impl Server {
                 .get_meeting(&i.meeting_id)
                 .map(|m| m.started_at.format("%Y-%m-%d").to_string())
                 .unwrap_or_default();
-            let mut meta = vec![format!("kind: {}", i.kind.as_str())];
-            if let Some(o) = &i.owner {
-                meta.push(format!("owner: {o}"));
-            }
-            if let Some(s) = &i.status {
-                meta.push(format!("status: {s}"));
-            }
-            meta.push(date);
-            meta.push(format!("meeting: {}", i.meeting_id));
-            if !i.segment_ids.is_empty() {
-                meta.push(format!("segments: {}", i.segment_ids.join(",")));
-            }
-            out.push_str(&format!("- {} ({})\n", i.text, meta.join(" · ")));
+            out.push_str(&context::render_item_line(
+                &i.text,
+                i.kind,
+                i.owner.as_deref(),
+                i.status.as_deref(),
+                date,
+                &i.meeting_id,
+                &i.segment_ids,
+            ));
         }
         out
     }
@@ -740,44 +730,23 @@ impl Server {
         ))
     }
 
-    // ---- context layer ----
+    // ---- context layer (fly_context::memory, under ShareableOnly) ----
+    //
+    // Everything here goes to the MCP client's (cloud) model, so the shared
+    // memory code runs with Visibility::ShareableOnly: Keep-local meetings
+    // never shape a series, a participant list or an item, and a failed
+    // Keep-local lookup refuses the whole result.
 
-    fn all_series(&self) -> Result<Vec<context::Series>, String> {
-        let meetings = self
-            .storage
-            .list_meetings(None, 2000)
-            .map_err(|e| e.to_string())?;
-        // keep-local meetings never join a series: their titles would leak
-        // through series keys and timelines
-        let hidden = self.hidden_notes()?;
-        Ok(context::detect_series(
-            meetings
-                .into_iter()
-                .filter(|m| !hidden.contains(&m.note_id))
-                .collect(),
-        ))
+    fn shared(&self) -> Context<'_> {
+        Context::new(&self.storage, Visibility::ShareableOnly)
     }
 
     fn tool_get_context(&self, args: &Value) -> Result<String, String> {
         let query = arg_query(args, "query")?;
         let since = arg_time(args, "since")?;
-        let series = self.all_series()?;
-        let mut matched = context::series_matching(&series, query);
-        if matched.is_empty() {
-            // fall back to full-text: meetings whose transcript/note matches
-            let hits = self.storage.search(query, 20).map_err(|e| e.to_string())?;
-            let hidden = self.hidden_notes()?;
-            let meeting_ids: HashSet<String> = hits
-                .iter()
-                .filter(|h| !hidden.contains(&h.note_id))
-                .filter_map(|h| h.meeting_id.clone())
-                .collect();
-            matched = series
-                .iter()
-                .filter(|s| s.meetings.iter().any(|m| meeting_ids.contains(&m.id)))
-                .collect();
-        }
-        context::build_briefing(&self.storage, &matched, since, query)
+        let b = fly_context::memory::mcp::get_context(&self.shared(), query, since)
+            .map_err(context_error)?;
+        Ok(context::render_briefing(&b, query, since))
     }
 
     fn tool_whats_changed(&self, args: &Value) -> Result<String, String> {
@@ -787,60 +756,64 @@ impl Server {
             .ok_or("missing required argument: series (a series name from get_context)")?;
         let since = arg_time(args, "since")?
             .ok_or("missing required argument: since (YYYY-MM-DD or RFC 3339)")?;
-        let series = self.all_series()?;
-        let matched = context::series_matching(&series, series_key);
-        if matched.is_empty() {
-            return Ok(format!(
-                "No series matches \"{series_key}\". get_context(query) lists series names."
-            ));
-        }
-        context::build_briefing(&self.storage, &matched, Some(since), series_key)
+        let b = fly_context::memory::mcp::whats_changed(&self.shared(), series_key, since)
+            .map_err(context_error)?;
+        Ok(context::render_whats_changed(&b, series_key, since))
     }
 
     fn tool_open_items(&self, args: &Value) -> Result<String, String> {
         let scope = arg_str(args, "scope").unwrap_or_else(|| "all".into());
-        let meeting_ids = if scope == "all" {
-            None
-        } else {
-            let series = self.all_series()?;
-            let matched = context::series_matching(&series, &scope);
-            if matched.is_empty() {
-                return Ok(format!(
-                    "No series matches \"{scope}\" — pass \"all\" or a series name from get_context."
-                ));
-            }
-            Some(
-                matched
+        let o =
+            fly_context::memory::mcp::open_items(&self.shared(), &scope).map_err(context_error)?;
+        Ok(context::render_open_items(&o))
+    }
+
+    /// Passage-level search on fly-context, keyword only (this server has
+    /// no embedding model). Transcript lines carry `[seg:ID]`.
+    fn tool_search_passages(&self, args: &Value) -> Result<String, String> {
+        let query = arg_query(args, "query")?;
+        let meeting_ids = match args.get("meeting_ids") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_array()
+                    .ok_or("meeting_ids must be an array of strings")?
                     .iter()
-                    .flat_map(|s| s.meetings.iter().map(|m| m.id.clone()))
-                    .collect::<Vec<_>>(),
-            )
+                    .map(|id| id.as_str().map(String::from))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or("meeting_ids must be an array of strings")?,
+            ),
         };
-        // open = action items / commitments not marked done in their meeting
-        let mut items = self
-            .storage
-            .query_items(&ItemFilter {
-                meeting_ids,
-                limit: 200,
-                exclude_keep_local: true,
-                ..Default::default()
-            })
-            .map_err(|e| e.to_string())?;
-        items.retain(|i| {
-            matches!(i.kind, ItemKind::ActionItem | ItemKind::Commitment)
-                && i.status.as_deref() != Some("done")
-        });
-        if items.is_empty() {
-            return Ok(format!(
-                "No open action items or commitments in scope \"{scope}\"."
-            ));
+        // Dates are checked here so the error names this server's forms.
+        let date = |key: &str| -> Result<Option<String>, String> {
+            arg_time(args, key)?;
+            Ok(arg_str(args, key))
+        };
+        // Fields added to the args later keep their defaults.
+        #[allow(clippy::needless_update)]
+        let search = SearchPassagesArgs {
+            query: query.to_string(),
+            meeting_ids,
+            folder_id: arg_str(args, "folder_id"),
+            since: date("since")?,
+            until: date("until")?,
+            limit: args
+                .get("limit")
+                .and_then(|l| l.as_u64())
+                .map(|l| l.min(u64::from(u32::MAX)) as u32),
+            ..Default::default()
+        };
+        let r = self
+            .shared()
+            .search_passages(&search, None)
+            .map_err(context_error)?;
+        let mut out = fly_context::render::passages(&r);
+        if !r.passages.is_empty() {
+            out.push_str(
+                "\nTranscript lines read [seg:ID] Speaker (m:ss): text. Check one in context \
+                 with get_transcript(meeting_id, with_segment_ids: true).\n",
+            );
         }
-        Ok(format!(
-            "{} open item(s) in scope \"{scope}\" (newest meeting first; status is as stated \
-             in that meeting — verify against later meetings before chasing anyone):\n{}",
-            items.len(),
-            self.render_items(&items)
-        ))
+        Ok(out)
     }
 
     // ---- the one write ----
@@ -909,6 +882,15 @@ pub const KEEP_LOCAL_NOTE_MESSAGE: &str =
 /// A failed keep-local lookup refuses the whole result (fail closed).
 fn keep_local_lookup_error(e: StorageError) -> String {
     format!("couldn't check Keep local settings, so nothing was returned: {e}")
+}
+
+/// A fly-context error as tool text. A storage error may be a failed
+/// Keep-local lookup, so it says nothing was returned (fail closed).
+fn context_error(e: fly_context::ContextError) -> String {
+    match e {
+        fly_context::ContextError::Storage(e) => keep_local_lookup_error(e),
+        other => other.to_string(),
+    }
 }
 
 /// Longest speaker label `set_speaker_label` accepts, in characters.
@@ -1123,6 +1105,22 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "search_passages",
+            "description": "Passage-level search: the transcript passages (speaker-turn windows of about 160 words) that best match the query, each line carrying its segment id as [seg:ID], plus matching paragraphs of the user's notes. Use it to find what was actually said about a topic and to quote it with ids; get_context gives the structured overview. Keyword ranking (no embeddings).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for, in plain words" },
+                    "meeting_ids": { "type": "array", "items": { "type": "string" }, "maxItems": 50, "description": "Only search these meetings" },
+                    "folder_id": { "type": "string" },
+                    "since": { "type": "string", "description": time_desc },
+                    "until": { "type": "string", "description": time_desc },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Passages to return (default 8)" }
+                },
+                "required": ["query"]
+            }
+        },
+        {
             "name": "list_folders",
             "description": "List all note folders (with ids and parent relationships), for search_notes/list_recent folder filters.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -1276,6 +1274,7 @@ mod tests {
                 "query_items",
                 "get_meeting_items",
                 "search_notes",
+                "search_passages",
                 "list_folders",
                 "get_note",
                 "get_transcript",
@@ -1371,7 +1370,7 @@ mod tests {
         assert_eq!(tools["result"]["resultType"], "complete");
         assert!(tools["result"]["ttlMs"].as_u64().unwrap() > 0);
         assert_eq!(tools["result"]["cacheScope"], "public");
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 13);
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 14);
     }
 
     #[test]

@@ -14,11 +14,18 @@
 //!   what was excluded — not even a count (see
 //!   [`Context::excluded_keep_local_meetings`]).
 //! * **Every function is a tool contract:** typed args with a JSON schema
-//!   ([`tools::tool_defs`]), a serializable result, and a compact text
+//!   ([`tool_defs`]), a serializable result, and a compact text
 //!   rendering for a model ([`render`]) that cites transcript lines as
 //!   `[seg:ID]`.
+//! * **Memory** ([`memory`]): recurring series, people and the facts
+//!   already extracted from meetings (decisions, action items, …), each
+//!   with its meeting and segment ids — as tools, as a deterministic
+//!   per-question prefetch, and as the MCP server's context layer.
+//! * **Fan-out** ([`fanout`]): a broad question split into sub-queries
+//!   searched in parallel and merged, within a budget (Ask tier C).
 //!
-//! Dormant in v2.5: nothing calls it yet. Keyword passages are still
+//! The MCP server uses it for its context layer (memory) and passage
+//! search; the Ask harness is the other caller. Keyword passages are still
 //! localized in memory (see [`passages`]); vector hits map onto windows by
 //! the chunk's segment ids (storage schema v3).
 //! `crates/fly-storage/SCHEMA_V3.md` records the v3 schema and what is
@@ -28,16 +35,55 @@ use std::collections::HashSet;
 
 use fly_storage::{Storage, StorageError};
 
+pub mod fanout;
+pub mod memory;
 pub mod passages;
 pub mod render;
 pub mod tools;
 
-pub use tools::{
-    call, tool_defs, EventInfo, GetEventArgs, GetItemsArgs, GetNoteArgs, ItemList,
-    ListMeetingsArgs, MeetingList, MeetingSummary, NoteKind, NoteView, Passage, PassageResults,
-    PassageSource, ReadSegmentsArgs, SearchPassagesArgs, SegmentView, SegmentWindow, ToolDef,
-    ToolOutput,
+pub use fanout::{decompose, fan_out, FannedPassage, Fanout, FanoutBudget, OpenPerWorker, Readers};
+pub use memory::{
+    Briefing, CitedSegment, GetBriefingArgs, MatchedBy, MemoryFact, MemoryPrefetch, OpenItems,
+    OpenItemsArgs, TimelineEntry, WhatsChangedArgs,
 };
+pub use tools::{
+    EventInfo, GetEventArgs, GetItemsArgs, GetNoteArgs, ItemList, ListMeetingsArgs, MeetingList,
+    MeetingSummary, NoteKind, NoteView, Passage, PassageResults, PassageSource, ReadSegmentsArgs,
+    SearchPassagesArgs, SegmentView, SegmentWindow, ToolDef, ToolOutput,
+};
+
+/// Every tool a model may call, in a stable order: the six read tools
+/// ([`tools::tool_defs`]), then the three memory tools
+/// ([`memory::tool_defs`]).
+pub fn tool_defs() -> Vec<ToolDef> {
+    let mut defs = tools::tool_defs();
+    defs.extend(memory::tool_defs());
+    defs
+}
+
+/// Run any tool from [`tool_defs`] by name with JSON arguments (a model's
+/// tool call). `query_vector` is used by `search_passages` only.
+pub fn call(
+    ctx: &Context<'_>,
+    name: &str,
+    args: &serde_json::Value,
+    query_vector: Option<QueryVector<'_>>,
+) -> Result<ToolOutput> {
+    if let Some(out) = memory::call(ctx, name, args) {
+        return out;
+    }
+    match tools::call(ctx, name, args, query_vector) {
+        Err(ContextError::UnknownTool { name, .. }) => Err(ContextError::UnknownTool {
+            name,
+            available: tool_defs()
+                .iter()
+                .map(|d| d.name)
+                .collect::<Vec<_>>()
+                .join(", "),
+        }),
+        other => other,
+    }
+}
 
 /// Who will see the results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

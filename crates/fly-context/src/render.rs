@@ -4,10 +4,13 @@
 
 use std::fmt::Write;
 
+use crate::fanout::Fanout;
+use crate::memory::{Briefing, MatchedBy, MemoryFact, OpenItems};
 use crate::tools::{
     EventInfo, ItemList, MeetingList, NoteView, PassageResults, PassageSource, SegmentView,
     SegmentWindow,
 };
+use fly_core::ItemKind;
 
 /// `m:ss` or `h:mm:ss`.
 pub fn clock(ms: u64) -> String {
@@ -213,6 +216,307 @@ pub fn items(l: &ItemList) -> String {
             i.meeting_id,
             cites
         );
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Memory and fan-out (meeting content goes through `safe`)
+// ---------------------------------------------------------------------------
+
+/// Meeting-derived text for a model: fence tags defused and no `[seg:` a
+/// model could take for a citation (same rule as the Ask harness).
+pub fn safe(text: &str) -> String {
+    fly_core::enhance::fence_safe(text)
+        .replace("[seg:", "[seg-")
+        .replace("[SEG:", "[SEG-")
+}
+
+fn day(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.format("%Y-%m-%d").to_string()
+}
+
+const KIND_SECTIONS: [(ItemKind, &str); 5] = [
+    (ItemKind::Decision, "Decisions"),
+    (ItemKind::ActionItem, "Action items"),
+    (ItemKind::Commitment, "Commitments"),
+    (ItemKind::Question, "Open questions"),
+    (ItemKind::Figure, "Key figures"),
+];
+
+/// `[seg:ID]` markers for the ids of `f` that resolved (`cited`), or
+/// `None` when none did (the fact can't be cited, so it isn't shown).
+fn fact_cites(f: &MemoryFact, cited: impl Fn(&str, &str) -> bool) -> Option<String> {
+    let ids: Vec<String> = f
+        .segment_ids
+        .iter()
+        .filter(|id| cited(&f.meeting_id, id))
+        .map(|id| format!(" [seg:{id}]"))
+        .collect();
+    (!ids.is_empty()).then(|| ids.concat())
+}
+
+fn fact_line(f: &MemoryFact, cites: &str, with_kind: bool) -> String {
+    let mut line = String::from("- ");
+    if with_kind {
+        line.push_str(f.kind.as_str());
+        line.push_str(": ");
+    }
+    line.push_str(&safe(f.text.trim()));
+    if let Some(o) = &f.owner {
+        let _ = write!(line, " — owner: {}", safe(o));
+    }
+    if let Some(s) = &f.status {
+        let _ = write!(line, " [{}]", safe(s));
+    }
+    if let Some(by) = &f.said_by {
+        if f.owner
+            .as_deref()
+            .is_none_or(|o| !o.eq_ignore_ascii_case(by))
+        {
+            let _ = write!(line, " — said by {}", safe(by));
+        }
+    }
+    let _ = write!(
+        line,
+        " ({}, {}){}",
+        day(f.started_at),
+        safe(&f.meeting_title),
+        cites
+    );
+    line
+}
+
+/// A briefing for a model, all of it.
+pub fn briefing(b: &Briefing) -> String {
+    briefing_within(b, usize::MAX)
+}
+
+/// A briefing for a model in about `max_chars`: the header, the newest
+/// meetings, then as many facts as fit, newest first (shown oldest first,
+/// grouped by kind). Facts whose cited segments no longer exist are left
+/// out: they can't be cited.
+pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
+    let mut out = String::new();
+    if b.meetings.is_empty() {
+        let since = b
+            .since
+            .map(|s| format!(" since {}", day(s)))
+            .unwrap_or_default();
+        if !b.series.is_empty() {
+            let _ = writeln!(
+                out,
+                "No meetings of \"{}\"{since}.",
+                safe(&b.series.join(", "))
+            );
+        } else if let (MatchedBy::Person, Some(p)) = (b.matched_by, &b.person) {
+            let _ = writeln!(out, "No meetings with {}{since}.", safe(p));
+        } else {
+            let _ = writeln!(
+                out,
+                "No recurring meeting, project or person in the user's meetings matches \"{}\".",
+                safe(&b.query)
+            );
+        }
+        return out;
+    }
+    let first = &b.meetings[0];
+    let last = &b.meetings[b.meetings.len() - 1];
+    let subject = match b.matched_by {
+        MatchedBy::Person => b.person.as_deref().map(safe).unwrap_or_default(),
+        _ => format!("\"{}\" (recurring meeting)", safe(&b.series.join("\", \""))),
+    };
+    let _ = writeln!(
+        out,
+        "Memory: {subject} — {} meeting(s), {} → {}{}",
+        b.meetings.len(),
+        day(first.started_at),
+        day(last.started_at),
+        b.since
+            .map(|s| format!(", since {}", day(s)))
+            .unwrap_or_default()
+    );
+    if b.matched_by != MatchedBy::Person {
+        if let Some(p) = &b.person {
+            let _ = writeln!(out, "Only what {} owns or said.", safe(p));
+        }
+    }
+    if !b.participants.is_empty() {
+        let names: Vec<String> = b.participants.iter().map(|p| safe(p)).collect();
+        let _ = writeln!(out, "Participants: {}", names.join(", "));
+    }
+    out.push_str("Meetings:\n");
+    let shown = b.meetings.len().min(8);
+    if shown < b.meetings.len() {
+        let _ = writeln!(out, "- … {} earlier meeting(s)", b.meetings.len() - shown);
+    }
+    for m in &b.meetings[b.meetings.len() - shown..] {
+        let _ = writeln!(
+            out,
+            "- {} {} (meeting {}){}",
+            day(m.started_at),
+            safe(&m.title),
+            m.meeting_id,
+            if m.has_transcript {
+                ""
+            } else {
+                ", no transcript yet"
+            }
+        );
+    }
+
+    // Facts that can be cited, newest first, while they fit.
+    let cited = |m: &str, id: &str| b.cited(m, id).is_some();
+    let lines: Vec<Option<String>> = b
+        .facts
+        .iter()
+        .map(|f| fact_cites(f, cited).map(|c| fact_line(f, &c, false)))
+        .collect();
+    // (no literal marker here: a model could copy it as a citation)
+    let footer =
+        "Cite an item by the segment markers after it. Each item's status is as stated in its \
+         meeting.\n";
+    let mut budget = max_chars.saturating_sub(out.len() + footer.len() + 120);
+    let mut keep = vec![false; lines.len()];
+    for i in (0..lines.len()).rev() {
+        if let Some(l) = &lines[i] {
+            if l.len() + 1 > budget {
+                break;
+            }
+            budget -= l.len() + 1;
+            keep[i] = true;
+        }
+    }
+    let mut any = false;
+    for (kind, heading) in KIND_SECTIONS {
+        let mut section = String::new();
+        for (i, f) in b.facts.iter().enumerate() {
+            if keep[i] && f.kind == kind {
+                section.push_str(lines[i].as_deref().unwrap_or_default());
+                section.push('\n');
+            }
+        }
+        if !section.is_empty() {
+            let _ = write!(out, "{heading}:\n{section}");
+            any = true;
+        }
+    }
+    let sourced = lines.iter().filter(|l| l.is_some()).count();
+    let not_shown = b.facts_omitted + sourced - keep.iter().filter(|k| **k).count();
+    if !any {
+        out.push_str("No extracted decisions, action items or other facts with a source yet.\n");
+    }
+    if not_shown > 0 {
+        let _ = writeln!(out, "({not_shown} older item(s) not shown.)");
+    }
+    out.push_str(footer);
+    out
+}
+
+/// Open items for a model.
+pub fn open_items(o: &OpenItems) -> String {
+    let mut out = String::new();
+    if !o.scope_found {
+        let _ = writeln!(
+            out,
+            "No recurring meeting matches \"{}\". Use \"all\" or a name from get_briefing.",
+            safe(&o.scope)
+        );
+        return out;
+    }
+    let who = o
+        .owner
+        .as_deref()
+        .map(|w| format!(" owned by {}", safe(w)))
+        .unwrap_or_default();
+    let scope = if o.scope == "all" {
+        String::new()
+    } else {
+        format!(" in \"{}\"", safe(&o.scope))
+    };
+    let cited = |m: &str, id: &str| o.cited(m, id).is_some();
+    let lines: Vec<String> = o
+        .facts
+        .iter()
+        .filter_map(|f| fact_cites(f, cited).map(|c| fact_line(f, &c, true)))
+        .collect();
+    if lines.is_empty() {
+        let _ = writeln!(out, "No open action items or commitments{who}{scope}.");
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "{} open item(s){who}{scope}, newest meeting first (status as stated in that meeting; \
+         a later meeting may have closed it):",
+        lines.len()
+    );
+    for l in lines {
+        out.push_str(&l);
+        out.push('\n');
+    }
+    out
+}
+
+/// Fan-out results for a model: the queries run, then the merged passages
+/// (transcript lines with `[seg:ID]`), each saying which queries found it.
+pub fn fanout(f: &Fanout) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Searched {} {}:",
+        f.queries.len(),
+        if f.queries.len() == 1 {
+            "query"
+        } else {
+            "queries"
+        }
+    );
+    for (i, q) in f.queries.iter().enumerate() {
+        let _ = writeln!(out, "{}. {}", i + 1, safe(q));
+    }
+    if f.passages.is_empty() {
+        out.push_str("No matching passages found in the user's meetings.\n");
+        return out;
+    }
+    let _ = writeln!(out, "{} passage(s):", f.passages.len());
+    for fp in &f.passages {
+        let p = &fp.passage;
+        let found: Vec<String> = fp.found_by.iter().map(|i| (i + 1).to_string()).collect();
+        out.push('\n');
+        match p.source {
+            PassageSource::Transcript => {
+                let _ = writeln!(
+                    out,
+                    "## {}{} (meeting {}; found by query {})",
+                    safe(&p.title),
+                    p.started_at
+                        .map(|d| format!(" — {}", day(d)))
+                        .unwrap_or_default(),
+                    p.meeting_id.as_deref().unwrap_or("?"),
+                    found.join(", ")
+                );
+                for s in &p.segments {
+                    let _ = writeln!(
+                        out,
+                        "[seg:{}] {} ({}): {}",
+                        s.id,
+                        safe(&s.speaker),
+                        clock(s.start_ms),
+                        safe(&s.text)
+                    );
+                }
+            }
+            PassageSource::Note => {
+                let _ = writeln!(
+                    out,
+                    "## Notes: {} (note {}; found by query {})",
+                    safe(&p.title),
+                    p.note_id,
+                    found.join(", ")
+                );
+                let _ = writeln!(out, "{}", safe(p.text.trim()));
+            }
+        }
     }
     out
 }
