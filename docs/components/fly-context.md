@@ -34,15 +34,16 @@ A `Context` is built with a `Visibility`. Under `ShareableOnly` (any cloud model
   - Memory and fan-out renderers pass meeting content through `safe()`, which defuses fence tags and `[seg:`.
 - `crates/fly-context/tests/context.rs`: the read tools against a real temporary SQLite database.
 - `crates/fly-context/tests/memory.rs`: memory and fan-out against a real temporary database.
+- `crates/fly-context/tests/memory_cost.rs`: the cost benchmark (ignored in CI; `FLY_MEMORY_COST_DIR` keeps the built library between runs).
 
 ## Surface area
 ### Public API
 | Group | Items |
 |---|---|
 | Context | `Context::new(&Storage, Visibility)`, `visibility()`, `excluded_keep_local_meetings()` (for the *user's* Ask trace only, never tool output) |
-| Types | `Visibility::{All, ShareableOnly}`, `QueryVector { vector, model }` (embedding computed by the caller), `ContextError::{InvalidArgs, NotFound, KeepLocal, UnknownTool, Storage}`, `KEEP_LOCAL_MEETING`, `KEEP_LOCAL_NOTE`, `Result<T>` |
+| Types | `Visibility::{All, ShareableOnly}`, `QueryVector { vector, model }` (embedding computed by the caller), `ContextError::{InvalidArgs, NotFound, KeepLocal, UnknownTool, KeepLocalCheck, Storage}`, `KEEP_LOCAL_MEETING`, `KEEP_LOCAL_NOTE`, `Result<T>` |
 | Read tools | `search_passages(&SearchPassagesArgs, Option<QueryVector>)`, `read_segments`, `list_meetings`, `get_event`, `get_note`, `get_items` |
-| Memory | `get_briefing(&GetBriefingArgs)`, `open_items(&OpenItemsArgs)`, `whats_changed(&WhatsChangedArgs)`, `memory_prefetch(question, &MemoryPrefetch) -> Option<Briefing>`; results `Briefing`, `MemoryFact`, `CitedSegment`, `TimelineEntry`, `OpenItems`, `MatchedBy`; `Briefing::retain_meetings` / `cited`, the same on `OpenItems`; `memory::{normalize_title, detect_series, series_matching, Series}`; `memory::mcp::{get_context, whats_changed, open_items}` |
+| Memory | `get_briefing(&GetBriefingArgs)`, `open_items(&OpenItemsArgs)`, `whats_changed(&WhatsChangedArgs)` and their scoped forms `get_briefing_in` / `open_items_in` / `whats_changed_in(&args, Option<&[String]>)`, `memory_prefetch(question, &MemoryPrefetch) -> Option<Briefing>` (`MemoryPrefetch::meetings` = scope); `render::{briefing_rendered, open_items_rendered} -> Rendered { text, shown }`; results `Briefing`, `MemoryFact`, `CitedSegment`, `TimelineEntry`, `OpenItems`, `MatchedBy`; `Briefing::retain_meetings` / `cited`, the same on `OpenItems`; `memory::{normalize_title, detect_series, series_matching, Series}`; `memory::mcp::{get_context, whats_changed, open_items}` |
 | Fan-out | `decompose(question, max_sub_queries) -> Vec<String>` (original first), `fan_out(&impl Readers, Visibility, queries, base: &SearchPassagesArgs, vectors, &FanoutBudget) -> Fanout`, `FanoutBudget::TIER_C`, `Fanout`, `FannedPassage`, `Readers` (impls for `Mutex<Storage>` and `OpenPerWorker`) |
 | Tool plumbing | `tool_defs() -> Vec<ToolDef { name, description, input_schema, strict_input_schema }>` (all nine), `call(&Context, name, &Value, Option<QueryVector>) -> ToolOutput { json, text }`, name constants (`tools::SEARCH_PASSAGES` …, `memory::GET_BRIEFING`, `OPEN_ITEMS`, `WHATS_CHANGED`), `MAX_QUERY_CHARS = 1000`, `MAX_MEETING_IDS = 50` |
 | Helpers | `passages::{transcript_windows, window_text, query_terms, lexical_score, fuse, Window, PassageKey, Via}`, `render::{clock, segment_line, passages, segments, meetings, event, note, items, briefing, briefing_within, open_items, fanout, safe}` |
@@ -83,32 +84,55 @@ What "memory" means here is the knowledge the app has already extracted, offered
     - Router-supplied `people` / `since` / `until` win.
   - Ask-facing calls cap at the newest 12 meetings and 40 facts (`DEFAULT_MAX_MEETINGS`, `DEFAULT_MAX_FACTS`). `facts_omitted` counts the cut.
 - **Scoping:** `retain_meetings` filters the timeline, facts and evidence, then rebuilds participants (from each `TimelineEntry.people`) and series names (from `TimelineEntry.series`). Nothing out of scope remains.
-- **Cost:** each meeting in a briefing loads its transcript once per call (participants, `said_by`, evidence), with word timings dropped on load. A person briefing reads at most the 30 newest candidate meetings, plus at most 30 transcripts for speaker labels.
+- **Cost:**
+  - Memory considers the newest 2,000 meetings the view may see (`MAX_MEETINGS`, as the old MCP did). A scope of ≤ 500 ids is read by id instead, so it can reach older meetings.
+  - Speaker legends (participants, `said_by`, person matching) come from `Storage::transcript_speakers`, where SQLite extracts `$.speakers` and nothing else.
+  - Full transcripts are parsed only for meetings whose facts are quoted, with word timings dropped on load.
+  - A person briefing reads at most the 30 newest candidate meetings, and speaker labels of at most the 30 newest meetings.
+  - Measured numbers are in the Tests section.
 - **The MCP entry points** (`memory::mcp::*`) keep fly-mcp's historical routing: no person routing, no caps, and no evidence for `open_items`. Their text is rendered by fly-mcp.
 
 ### Using it from the Ask harness
+**Pass the Ask scope in; don't filter afterwards.** Memory applies the scope before series detection and before every cap (meetings, facts, open-item limit), so caps and "N older item(s) not shown" counts are about in-scope meetings only. `retain_meetings` still exists for defense in depth: it recounts what was omitted, but it can't bring back facts a cap dropped.
+
 **Tier S (no model tool calls):**
-1. Call `ctx.memory_prefetch(question, &MemoryPrefetch { people, since, until, max_facts, max_meetings })`.
-   - Pass the router's validated `people` and dates.
+1. Call `ctx.memory_prefetch(question, &MemoryPrefetch { meetings, people, since, until, max_facts, max_meetings })`.
+   - `meetings: Option<Vec<String>>` is the resolved scope (`None` = every meeting this view may see).
+   - `people` takes the router's validated names. The first one who takes part in a visible, in-scope meeting is used: one person per briefing.
    - A `0` cap means the defaults: 40 facts and 12 meetings.
-2. If it returns `Some(b)`, call `b.retain_meetings(|m| resolved.allows_meeting(m))`.
-3. Register every `c` in `b.evidence` with `evidence::info(&c.segment, &c.meeting_id, &c.meeting_title, Some(c.started_at))`.
-4. Add `render::briefing_within(&b, item_budget)` to the prompt.
+2. If it returns `Some(b)`, render with `let r = render::briefing_rendered(&b, item_budget)`.
+3. Put `r.text` in the prompt.
+4. Register exactly `r.shown` with `evidence::info(&c.segment, &c.meeting_id, &c.meeting_title, Some(c.started_at))`.
+   - Register `r.shown`, not `b.evidence`.
+   - `shown` holds only the segments whose `[seg:ID]` markers are in `r.text`, each with the text the model saw (a clipped quote's visible part only).
 
 **Tiers M/C:** `get_briefing`, `open_items` and `whats_changed` arrive through `fly_context::tool_defs()`. `agent.rs` dispatches by name, so it needs one arm per tool:
-1. Parse `GetBriefingArgs` / `OpenItemsArgs` / `WhatsChangedArgs` and call the method.
-2. Call `retain_meetings`.
-3. Register `evidence`.
-4. Render with `render::briefing_within(&b, observation_chars)` or `render::open_items(&o)`.
+1. Parse `GetBriefingArgs` / `OpenItemsArgs` / `WhatsChangedArgs` and call the scoped form with the resolved scope:
+   - `ctx.get_briefing_in(&args, scope)`;
+   - `ctx.open_items_in(&args, scope)`;
+   - `ctx.whats_changed_in(&args, scope)`.
+
+   `scope: Option<&[String]>`; the unscoped `get_briefing` / `open_items` / `whats_changed` (and `fly_context::call`) see every visible meeting.
+2. Render with `render::briefing_rendered(&b, observation_chars)` or `render::open_items_rendered(&o, observation_chars)`.
+3. Register `.shown` and return `.text`.
+
+**Errors:** a failed Keep-local lookup is `ContextError::KeepLocalCheck` ("couldn't check Keep local settings, so nothing was returned"); other storage failures are `ContextError::Storage`. An unreadable transcript of a visible meeting is not an error: that meeting reads as having no transcript, and its facts can't be cited.
 
 **What the renderers guarantee the claim check:**
-- Every printed `[seg:ID]` is in `evidence`.
-- A fact whose sources are gone is not printed.
-- Each fact is followed by its cited segments verbatim (`> Speaker: "…"`, at most 2, each clipped at a word boundary to ~220 chars).
+- Each printed fact is followed by up to 2 of its cited segments, quoted verbatim as `> Speaker: "…"`.
+- A quote longer than ~400 chars is cut at a word boundary and marked " …". `shown` holds the visible part.
+- Only the quoted segments get a `[seg:ID]` marker.
+- A fact with no resolvable source is not printed, but it is counted, so "none" is never claimed falsely.
+- Status is printed only when it is `open` or `done`.
 
-Facts are extraction paraphrases ("Launch budget is $40k" from "forty thousand dollars"). The footer tells the model to take numbers, names and quotes from the source lines, and the claim check compares against the segments.
+Facts are extraction paraphrases ("Launch budget is $40k" from "forty thousand dollars"). The footer tells the model to take numbers, names and quotes from the quoted lines, and the claim check compares against the segments.
 
-**Tier C:** `decompose(question, 4)`, then `fan_out(&readers, visibility, &queries, &scope_args, &vectors, &budget)`, with `budget.max_searches` set to what is left of the tier's tool calls. `render::fanout(&f)` prints every passage's lines with `[seg:ID]`, so register those segments too.
+**Tier C:** `decompose(question, 4)`, then `fan_out(&readers, visibility, &queries, &scope_args, &vectors, &budget)`.
+- Set `budget.max_searches` to what is left of the tier's tool calls. The budget is clamped to `FanoutBudget::TIER_C`.
+- Put the scope in `scope_args.meeting_ids` (≤ 50) or `folder_id`.
+- `render::fanout(&f)` prints every passage's lines with `[seg:ID]`; register those segments.
+- With no searches left it says nothing was searched.
+- Don't call it while holding the `Mutex<Storage>` lock you pass as `readers`: that deadlocks.
 
 ### Fan-out (tier C)
 - **`decompose`:**
@@ -117,13 +141,16 @@ Facts are extraction paraphrases ("Launch budget is $40k" from "forty thousand d
   - Keeps the original first and returns at most 4 sub-queries.
   - A cloud model may supply its own sub-queries instead.
 - **`fan_out`:**
+  - Clamps the caller's budget to `TIER_C`: `max_searches` ≤ 1 + `MAX_SUB_QUERIES` (5), and `max_parallel`, `max_passages` and `max_chars` ≤ `TIER_C`'s.
   - Runs at most `max_searches` searches (duplicates and blanks cost nothing), `max_parallel` at a time, on scoped threads. Each thread builds its own `Context` with the caller's `Visibility`.
   - Any failed search fails the whole call.
   - Merges by RRF (k = 60) after a coverage pass that gives each query its best passage not already picked, then applies `max_passages`, `per_meeting` and `max_chars`.
   - Under `ShareableOnly`, re-checks the merged set against the Keep-local sets (fail closed).
 - **Readers:**
   - `Mutex<Storage>` (the app's handle) runs searches one at a time.
-  - `OpenPerWorker(data_dir)` opens a read connection per search with `Storage::open_existing`, which never migrates, so searches run in parallel under WAL.
+  - `OpenPerWorker(data_dir)` opens a connection per search with `Storage::open_existing`, so searches run in parallel under WAL.
+    - The connection never migrates, and fan-out only reads through it.
+    - fly-storage has no read-only open yet, so the connection itself is read-write.
 - **`FanoutBudget::TIER_C`:** 5 searches, 8 passages per search, 16 merged, 3 per meeting, 24k chars, 4 at a time.
 
 ### Tauri commands
@@ -169,7 +196,7 @@ None.
   - The Ask harness (`fly-ask`, PR 3.3) is next.
   - `fly-app` doesn't depend on it directly.
 - **Outbound:**
-  - [fly-storage](fly-storage.md): `Storage`, `SearchFilter`, `ItemFilter`, `MeetingFilter`, `SearchHitKind`, `embeddings::{chunk_transcript, chunk_note}`, `Storage::open_existing` (fan-out readers), and `keep_local_note_ids` / `keep_local_meeting_ids` / `meeting_keep_local` / `note_keep_local`.
+  - [fly-storage](fly-storage.md): `Storage`, `SearchFilter`, `ItemFilter`, `MeetingFilter`, `SearchHitKind`, `embeddings::{chunk_transcript, chunk_note}`, `Storage::open_existing` (fan-out readers), `Storage::transcript_speakers` (speaker legends without segments or word timings), and `keep_local_note_ids` / `keep_local_meeting_ids` / `meeting_keep_local` / `note_keep_local`.
   - [fly-core](fly-core.md): `Meeting`, `Attendee`, `Transcript`, `MeetingItem`, `ItemKind`, `BlockOrigin`, `enhance::fence_safe`.
   - chrono, serde(_json), thiserror.
 
@@ -205,7 +232,30 @@ None.
 | unit | `src/memory.rs` | 7 | title normalization, series grouping and matching, person keys, people found only when named and known (common-word names, ambiguity), series/project words in a question |
 | unit | `src/fanout.rs` | 5 | `decompose`: no split, clauses, noun lists and shared last words, Oxford comma, caps and dedupe |
 | integration (runs in CI) | `tests/context.rs` | 13 | the six read tools on a real SQLite fixture: Keep-local exclusion per path and in aggregate, no metadata leak, vector-pool starvation, schemas for all nine tools, argument limits |
-| integration (runs in CI) | `tests/memory.rs` | 21 | briefings with provenance, source quotes and current labels, relabel flow, a person known only as a relabeled speaker, first-person narrowing only on owning phrasing, router names that must be visible, "Q3"-style series names, scoped rebuild of participants and series, no false "none" when items are left out, person and narrowed briefings, what-changed default, open items (owner, scope, done), budgeted rendering, citation-planting defense, prefetch routing; Keep local on every memory path, including the tool path and a hidden-only person; fail-closed with a broken Keep-local lookup; fan-out merge/attribution, every budget, real parallelism (`OpenPerWorker`) vs serialized `Mutex<Storage>`, Keep-local exclusion |
+| integration (runs in CI) | `tests/memory.rs` | 28 | the Ask scope applied before every cap (prefetch, tools, a large scope, a hidden-only scope), omitted recount, a series cut by the meeting cap, an unreadable transcript, a person filter before the item cap, rendered text vs `shown` evidence (markers only for quoted segments, clipped quotes, unknown statuses), fan-out budget clamps and "nothing was searched"; briefings with provenance, source quotes and current labels, relabel flow, a person known only as a relabeled speaker, first-person narrowing only on owning phrasing, router names that must be visible, "Q3"-style series names, scoped rebuild of participants and series, no false "none" when items are left out, person and narrowed briefings, what-changed default, open items (owner, scope, done), budgeted rendering, citation-planting defense, prefetch routing; Keep local on every memory path, including the tool path and a hidden-only person; fail-closed with a broken Keep-local lookup (`KeepLocalCheck` on every memory path, the `memory::mcp` entry points and `search_passages`); fan-out merge/attribution, every budget, real parallelism (`OpenPerWorker`) vs serialized `Mutex<Storage>`, Keep-local exclusion |
+
+| benchmark (ignored in CI) | `tests/memory_cost.rs` | 1 | cost of every memory path on a synthetic library; see below |
+
+**Cost on 1,000 meetings.**
+
+Setup:
+- 40 weekly series, 30-minute transcripts with word timings, and 8 items per meeting, under `ShareableOnly`.
+- Release build, median of 5 runs.
+- A shared Windows laptop with other builds running. Ranges are across 4 runs; reproduce with `cargo test --release -p fly-context --test memory_cost -- --ignored --nocapture`.
+
+| Path | ms |
+|---|---|
+| `memory_prefetch`, no match | 84–120 |
+| `memory_prefetch`, unknown capitalized name (reads 30 speaker legends) | 120–140 |
+| `memory_prefetch`, person (12 meetings, quotes) | 260–335 |
+| `memory_prefetch`, series "what changed" | 130–190 |
+| `get_briefing`, series (12 meetings) | 70–90 |
+| `open_items`, all (with evidence) | 145–155 |
+| MCP `get_context`, series (all 25 meetings) | 150–240 |
+| MCP `open_items`, all | 95–155 |
+| 30 speaker legends: `transcript_speakers` vs `get_transcript` | 55–95 vs 105–155 |
+
+The fixed floor is `query_items` (~50 ms: it sorts every item, whatever the limit) and the meeting list (~10 ms).
 
 **Known gaps:**
 - **The fail-closed path is tested for memory and fan-out only.** No test makes the lookups fail for the six read tools.
@@ -216,7 +266,9 @@ None.
   - Status is as stated in each meeting. A later meeting saying "done" doesn't close an earlier item.
 - **`decompose` is English-only.** It has no semantic check, and a junk sub-query only costs one search.
 - **Cost:** `list_meetings` and memory load every meeting row per call; briefings load one transcript per meeting shown.
-- **Error handling:** a corrupt transcript or item row now fails a memory call. The old MCP code skipped such rows silently.
+- **Error handling:**
+  - An unreadable transcript is skipped: its meeting reads as having no transcript, as the old MCP did. Tests: `one_unreadable_transcript_does_not_fail_the_series`, and fly-mcp's `one_unreadable_transcript_does_not_fail_get_context`.
+  - A failed items or meetings query still fails the call.
 
 ## Changing it safely
 - Run `cargo test -p fly-context`, plus `cargo test -p fly-mcp` when you touch `memory.rs`: fly-mcp's `tests/context_golden.rs` pins the MCP's briefing and open-items text byte for byte. Also run `cargo test -p fly-storage` when you touch chunking, search or privacy SQL.

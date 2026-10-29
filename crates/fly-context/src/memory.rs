@@ -728,6 +728,8 @@ struct Reader<'c, 'a> {
     speakers: HashMap<String, Option<Vec<Speaker>>>,
     /// Full transcripts, read only to quote cited segments.
     transcripts: HashMap<String, Option<Transcript>>,
+    /// Meetings where a person (by name) owns an item, per call.
+    owned: HashMap<String, HashSet<String>>,
 }
 
 /// A speaker key's display label (the key itself when unlabelled), as
@@ -763,6 +765,7 @@ impl<'c, 'a> Reader<'c, 'a> {
             scope: scope.map(|ids| ids.iter().map(|id| id.trim().to_string()).collect()),
             speakers: HashMap::new(),
             transcripts: HashMap::new(),
+            owned: HashMap::new(),
         })
     }
 
@@ -1088,20 +1091,24 @@ impl<'c, 'a> Reader<'c, 'a> {
         until: Option<DateTime<Utc>>,
         limit: usize,
     ) -> Result<Vec<Meeting>> {
-        let ids: HashSet<&str> = visible.iter().map(|m| m.id.as_str()).collect();
-        let owned: HashSet<String> = self
-            .items(
-                ItemFilter {
-                    owner: Some(person.tokens[0].clone()),
-                    limit: OPEN_SCAN,
-                    ..Default::default()
-                },
-                &ids,
-            )?
-            .into_iter()
-            .filter(|i| i.owner.as_deref().is_some_and(|o| person.matches(o)))
-            .map(|i| i.meeting_id)
-            .collect();
+        if !self.owned.contains_key(&person.name) {
+            let ids: HashSet<&str> = visible.iter().map(|m| m.id.as_str()).collect();
+            let owned: HashSet<String> = self
+                .items(
+                    ItemFilter {
+                        owner: Some(person.tokens[0].clone()),
+                        limit: OPEN_SCAN,
+                        ..Default::default()
+                    },
+                    &ids,
+                )?
+                .into_iter()
+                .filter(|i| i.owner.as_deref().is_some_and(|o| person.matches(o)))
+                .map(|i| i.meeting_id)
+                .collect();
+            self.owned.insert(person.name.clone(), owned);
+        }
+        let owned = self.owned[&person.name].clone();
         let mut out = Vec::new();
         let mut scanned = 0;
         for m in visible {
@@ -1116,6 +1123,15 @@ impl<'c, 'a> Reader<'c, 'a> {
                     person.matches(&a.name) || a.email.as_deref().is_some_and(|e| person.matches(e))
                 });
             if !hit && scanned < PERSON_LABEL_SCAN {
+                if scanned == 0 {
+                    // the label scan reads its legends in one query
+                    let scan: Vec<String> = visible
+                        .iter()
+                        .take(PERSON_LABEL_SCAN)
+                        .map(|m| m.id.clone())
+                        .collect();
+                    self.load_speakers(&scan)?;
+                }
                 scanned += 1;
                 hit = self
                     .speakers_of(&m.id)?
