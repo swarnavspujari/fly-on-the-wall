@@ -1492,6 +1492,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fly-evals"
+version = "2.4.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fly-context",
+ "fly-core",
+ "fly-llm",
+ "fly-storage",
+ "futures-util",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+]
+
+[[package]]
 name = "fly-llm"
 version = "2.4.0"
 dependencies = [

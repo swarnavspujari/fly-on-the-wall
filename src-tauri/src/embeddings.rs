@@ -20,8 +20,9 @@ use tauri::Manager;
 use crate::ollama;
 use crate::state::AppState;
 
-/// Embedding model tag pulled into the managed Ollama runtime.
-pub const EMBED_MODEL: &str = "embeddinggemma:300m";
+/// The model and its prompts live in fly-core so the retrieval eval
+/// (evals/runner) embeds exactly what the app does.
+pub use fly_core::embed_prompt::{doc_prompt, query_prompt, EMBED_MODEL};
 
 /// Chunks per `/api/embed` call. Small enough to keep each request quick on
 /// CPU, large enough to amortize HTTP overhead across a backfill.
@@ -30,20 +31,6 @@ const BATCH_SIZE: usize = 16;
 const IDLE_POLL: Duration = Duration::from_secs(30);
 /// Backoff after an embed/availability failure (Ollama down, pull failed).
 const RETRY_DELAY: Duration = Duration::from_secs(60);
-
-/// EmbeddingGemma's document prompt. The owning note/meeting title rides in
-/// the `title:` slot, so "the airline deal meeting" can match a chunk whose
-/// text never says "airline". (Pub for the search-quality eval harness.)
-pub fn doc_prompt(title: &str, text: &str) -> String {
-    let title = title.trim();
-    let title = if title.is_empty() { "none" } else { title };
-    format!("title: {title} | text: {text}")
-}
-
-/// EmbeddingGemma's retrieval query prompt (asymmetric to `doc_prompt`).
-pub fn query_prompt(query: &str) -> String {
-    format!("task: search result | query: {query}")
-}
 
 /// POST /api/embed. Returns one vector per input, in order.
 pub async fn embed_raw(root: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>, String> {

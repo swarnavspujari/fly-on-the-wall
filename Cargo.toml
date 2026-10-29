@@ -13,6 +13,8 @@ members = [
     "crates/fly-mcp",
     "crates/fly-secrets",
     "src-tauri",
+    # System evals (immutable to AI agents; see evals/README.md).
+    "evals/runner",
 ]
 
 [workspace.package]

@@ -1,0 +1,49 @@
+{
+  "id": "m03",
+  "title": "Atlas launch weekly",
+  "started_at": "2026-09-28T15:00:00Z",
+  "folder": "Atlas launch",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Ines Carvalho", "email": "ines@quillmark.example" },
+    { "name": "Marcus Webb", "email": "marcus@quillmark.example" },
+    { "name": "Jun Park", "email": "jun@quillmark.example" },
+    { "name": "Hana Kobayashi", "email": "hana@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Ines Carvalho", "spk_1": "Marcus Webb", "spk_2": "Jun Park", "spk_4": "Hana Kobayashi" },
+  "scratchpad": "webinar booked\nspanish docs - need quote first\nload test thu",
+  "segments": [
+    ["m03-01", "mic", "0:04", "Three weeks to launch. Ines, start with the webinar."],
+    ["m03-02", "spk_0", "0:09", "It's booked. The invite went to about four hundred contacts this morning."],
+    ["m03-03", "spk_0", "0:15", "The webinar is on November third at ten Pacific, one week after the launch."],
+    ["m03-04", "mic", "0:23", "Perfect. How's spend tracking against the cap?"],
+    ["m03-05", "spk_0", "0:27", "We haven't turned on search yet, so it's just the newsletter deposits."],
+    ["m03-06", "spk_0", "0:33", "So far we've spent twenty one hundred of the ninety two hundred."],
+    ["m03-07", "mic", "0:40", "Good. Hana, you had something on documentation?"],
+    ["m03-08", "spk_4", "0:45", "Yes. Two of our pilot customers run crews that mostly read Spanish."],
+    ["m03-09", "spk_4", "0:51", "I'd like to translate the getting started guide and the technician app help before launch."],
+    ["m03-10", "mic", "0:59", "How long would that take?"],
+    ["m03-11", "spk_4", "1:02", "Probably two weeks with a contractor. I don't have a quote yet."],
+    ["m03-12", "mic", "1:08", "Let's get the quote first and decide next week. I don't want to commit without a number."],
+    ["m03-13", "spk_1", "1:15", "On tiers: after Tuesday's pricing review the names are final. Starter, Team and Fleet."],
+    ["m03-14", "mic", "1:22", "Yes, those are locked. Put them on the page."],
+    ["m03-15", "spk_2", "1:27", "Engineering wants a load test before we flip the flag in production."],
+    ["m03-16", "spk_2", "1:33", "I'll run it Thursday at five times our current peak traffic."],
+    ["m03-17", "mic", "1:40", "Do it. Marcus, can you own the launch checklist so nothing falls through?"],
+    ["m03-18", "spk_1", "1:46", "Sure, I'll keep the checklist and run through it every morning launch week."]
+  ],
+  "items": [
+    { "kind": "question", "text": "Translate the getting started guide and technician app help into Spanish before launch?", "segments": ["m03-09", "m03-12"] },
+    { "kind": "action_item", "text": "Get a quote for the Spanish translation", "owner": "Hana Kobayashi", "segments": ["m03-11", "m03-12"] },
+    { "kind": "decision", "text": "Tier names are final: Starter, Team and Fleet", "segments": ["m03-13", "m03-14"] },
+    { "kind": "action_item", "text": "Run a load test on Thursday at 5x current peak traffic", "owner": "Jun Park", "segments": ["m03-16"] },
+    { "kind": "action_item", "text": "Own the launch checklist", "owner": "Marcus Webb", "segments": ["m03-17", "m03-18"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Webinar and spend:** The webinar is booked for November 3 at 10 Pacific, one week after the launch; the invite went to about 400 contacts. Spend so far is $2,100 of the $9,200 cap, just the newsletter deposits since search isn't on yet.", "sources": ["m03-02", "m03-03", "m03-05", "m03-06"] },
+    { "markdown": "**Spanish docs:** Two pilot customers run crews that mostly read Spanish. Hana wants to translate the getting started guide and the technician app help before launch, probably two weeks with a contractor. No quote yet, so the decision waits until next week.", "sources": ["m03-08", "m03-09", "m03-11", "m03-12"] },
+    { "markdown": "**Tiers, load test, checklist:** Tier names are locked: Starter, Team and Fleet. Jun runs a load test on Thursday at five times current peak traffic before the production flag flips. Marcus owns the launch checklist and runs through it every morning of launch week.", "sources": ["m03-13", "m03-14", "m03-15", "m03-16", "m03-17", "m03-18"] },
+    { "markdown": "Spanish docs: decide next week, once Hana has a quote." }
+  ]
+}

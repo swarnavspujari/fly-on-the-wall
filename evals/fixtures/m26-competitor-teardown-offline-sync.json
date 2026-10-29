@@ -1,0 +1,48 @@
+{
+  "id": "m26",
+  "title": "Competitor teardown: offline sync in field apps",
+  "started_at": "2026-10-02T19:00:00Z",
+  "folder": "Product",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Wren Castellano", "email": "wren@quillmark.example" },
+    { "name": "Marcus Webb", "email": "marcus@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Wren Castellano", "spk_1": "Marcus Webb" },
+  "scratchpad": "Brackenrow: offline banner, merge screen per field (techs hate it), map-first + blank offline\nFieldsparrow: last write wins silently -> lost signatures; list-first\nWren write-up Tue",
+  "segments": [
+    ["m26-01", "mic", "0:05", "This is the competitor teardown Wren offered to do. It's input, nothing more. I want to know how other field apps behave when the signal drops."],
+    ["m26-02", "spk_0", "0:20", "I installed two of them on an old Android phone and used them for a week, switching airplane mode on and off at random. Brackenrow and Fieldsparrow."],
+    ["m26-03", "spk_1", "0:37", "Those are the two that come up most in deals with smaller shops. Brackenrow especially, their sales team is everywhere this year."],
+    ["m26-04", "spk_0", "0:51", "Brackenrow first. When the signal drops, a yellow banner appears at the top saying you're offline, and every change you make gets a small clock badge until it syncs."],
+    ["m26-05", "spk_0", "1:06", "Their job list keeps working offline. Photos queue up and upload later, and you can see the queue in a little tray at the bottom."],
+    ["m26-06", "mic", "1:21", "What happens when two people edit the same job while one of them is offline?"],
+    ["m26-07", "spk_0", "1:32", "Brackenrow shows a merge screen. When you reconnect, it puts your version and the office's version side by side and makes you pick, field by field."],
+    ["m26-08", "spk_1", "1:49", "That sounds thorough. Do people actually use it?"],
+    ["m26-09", "spk_0", "1:58", "The reviews are mixed. Technicians hate being asked questions in a driveway. A few reviews say they just tap whichever button is bigger."],
+    ["m26-10", "spk_0", "2:13", "Fieldsparrow is the opposite. It doesn't show conflicts at all. Last write wins, silently. Whoever syncs last overwrites the other person's changes."],
+    ["m26-11", "spk_1", "2:26", "That's the one with the angry reviews, right? I remember a thread about lost signatures."],
+    ["m26-12", "spk_0", "2:37", "Yes. The app store reviews are full of it. A technician collects a signature offline, the office edits the job in the meantime, and the signature is just gone."],
+    ["m26-13", "mic", "2:52", "So one asks too many questions and the other quietly loses data. Neither is something I'd want to copy as it is."],
+    ["m26-14", "spk_0", "3:06", "There's a middle ground hidden in Brackenrow's notes field. Notes from both sides are kept and stacked, and only the structured fields go to the merge screen."],
+    ["m26-15", "spk_1", "3:20", "That's clever. I'd guess most conflicts are in the notes anyway, so the merge screen rarely shows up."],
+    ["m26-16", "mic", "3:33", "How do they show the offline state on the home screen?"],
+    ["m26-17", "spk_0", "3:43", "Brackenrow opens on a map, and the map is blank when you're offline, which is confusing. Fieldsparrow opens on a list of jobs, which works fine without signal."],
+    ["m26-18", "spk_1", "3:58", "Interesting. So the map-first one is the one that falls apart when the signal goes."],
+    ["m26-19", "spk_0", "4:08", "For them, yes. Caching the map tiles would fix it, but they don't cache anything."],
+    ["m26-20", "mic", "4:18", "Anything about how long they let people stay offline?"],
+    ["m26-21", "spk_0", "4:25", "Fieldsparrow warns you after a day offline. Brackenrow never warns, it just keeps queueing. At one point I had forty changes queued, and it synced them all fine."],
+    ["m26-22", "spk_1", "4:41", "What about their pricing pages? Do either of them charge extra for offline?"],
+    ["m26-23", "spk_0", "4:51", "Neither of them sells offline separately. It's just part of the app, on every plan they have."],
+    ["m26-24", "mic", "5:04", "Good to know. Wren, can you write this up with screenshots? It should feed into the Q1 roadmap discussion."],
+    ["m26-25", "spk_0", "5:17", "Yes. I'll put the screenshots and the review quotes in a doc by Tuesday."],
+    ["m26-26", "spk_1", "5:27", "Include the signature story. That one will stick with people far better than any chart."],
+    ["m26-27", "mic", "5:38", "Thanks, Wren. This is exactly the kind of ground truth I wanted before anyone argues about our own design."]
+  ],
+  "items": [
+    { "kind": "figure", "text": "Brackenrow resolves offline edit conflicts with a field-by-field merge screen; notes from both sides are stacked", "segments": ["m26-07", "m26-14"] },
+    { "kind": "figure", "text": "Fieldsparrow uses silent last-write-wins; app store reviews report lost signatures", "segments": ["m26-10", "m26-12"] },
+    { "kind": "action_item", "text": "Write up the teardown with screenshots and review quotes by Tuesday", "owner": "Wren Castellano", "segments": ["m26-25"] }
+  ]
+}

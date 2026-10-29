@@ -1,0 +1,38 @@
+{
+  "why": "Off device, tries to read the Keep-local meeting by id, then gives up.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "read_segments",
+          "input": {
+            "meeting_id": "{meeting:m10}",
+            "around_segment_id": "m10-07",
+            "before": 1,
+            "after": 1
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "t2",
+          "name": "get_note",
+          "input": {
+            "meeting_id": "{meeting:m10}"
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "I couldn't find that in your meetings."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}
