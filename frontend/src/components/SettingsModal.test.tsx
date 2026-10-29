@@ -372,6 +372,16 @@ describe("Settings overlay", () => {
     expect(row.textContent).toContain("Groq, then this computer");
   });
 
+  it("deep link 'llm-key' lands on Ask and Enhance with the key field focused", async () => {
+    await open({ initialFocus: "llm-key" });
+    const row = $("#settings-row-llm")!;
+    expect(row.className).toContain("fly-settings-flash");
+    expect(row.textContent).toContain("Runs on");
+    const key = row.querySelector<HTMLInputElement>("input[type=password]");
+    expect(key).not.toBeNull();
+    expect(document.activeElement).toBe(key);
+  });
+
   it("switching Made on back to this computer drops a typed Groq key", async () => {
     await open();
     await click(byText('[role="radio"]', "Groq"));
@@ -585,7 +595,8 @@ describe("Settings › asking again for cloud consent", () => {
     vi.spyOn(api, "pendingBackfillCount").mockResolvedValue(3);
     const backfill = vi.spyOn(api, "backfillMeetingItems");
     await open();
-    const index = () => $$("button").find((b) => b.textContent?.startsWith("Index ")) ?? null;
+    const index = () =>
+      $$("button").find((b) => b.textContent?.startsWith("Extract from ")) ?? null;
     nextConsent(false);
     await click(index());
     expect(consentText()).toContain("Use Anthropic for Ask and Enhance?");
@@ -600,23 +611,25 @@ describe("Settings › asking again for cloud consent", () => {
     expect(backfill).toHaveBeenCalledTimes(1);
   });
 
-  it("says why when every meeting failed to index", async () => {
+  it("says why when every meeting failed to extract", async () => {
     vi.spyOn(api, "pendingBackfillCount").mockResolvedValue(3);
     vi.spyOn(api, "backfillMeetingItems").mockResolvedValue({
       processed: 3,
       extracted: 0,
       failed: 3,
-      first_error: "no API key stored for anthropic — add one in Settings",
+      first_error: "No API key for Anthropic yet. Add one in Settings › Ask and Enhance.",
     });
     await open();
-    await click($$("button").find((b) => b.textContent?.startsWith("Index ")) ?? null);
-    const status = $$("[role=status]").find((p) => p.textContent?.startsWith("Couldn't index"))!;
+    await click($$("button").find((b) => b.textContent?.startsWith("Extract from ")) ?? null);
+    const status = $$("[role=status]").find((p) => p.textContent?.startsWith("Couldn't extract"))!;
     // plain words first; the backend's own text muted under them
     expect(status.firstChild?.textContent).toBe(
-      "Couldn't index any of the 3 meetings. Check Ask and Enhance in Settings, then try again.",
+      "Couldn't extract from any of the 3 meetings. Check Ask and Enhance in Settings, then try again.",
     );
     const detail = status.querySelector(".text-text-3")!;
-    expect(detail.textContent).toBe("no API key stored for anthropic — add one in Settings");
+    expect(detail.textContent).toBe(
+      "No API key for Anthropic yet. Add one in Settings › Ask and Enhance.",
+    );
   });
 });
 

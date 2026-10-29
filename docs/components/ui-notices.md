@@ -32,6 +32,7 @@ Every app-wide notice in one bottom-right corner: a failed user action, the macO
 | `UpdateBanner` | `UpdateBanner.tsx:15` | `updater: Updater`. |
 
 ### Tauri commands
+- The skipped-cleanup notice reads "Review and allow" (consent missing), "Run them now", or, while the saved cloud provider has no API key, "Add a key", which calls the `onOpenLlmKeySettings` prop (App opens Settings at the key field).
 - Calls through `useConsentSkips` (mounted by `AppNotices.tsx:59`): `consent_skipped_meetings`, `get_llm_settings`, `get_app_setting`, `retry_consent_skipped`, and `request_cloud_consent` (the backend asks in a native dialog and records a yes).
 - `RemindNoticeRow`: `get_app_setting`, `set_app_setting` for `ui.recording.remind_notice` (`RemindNoticeRow.tsx:13-32`).
 - `RestartRequired`: `delete_all_data` on "Try again" (`RestartRequired.tsx:75`); `relaunch()` from `@tauri-apps/plugin-process`.

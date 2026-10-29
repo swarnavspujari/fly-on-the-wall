@@ -4,6 +4,7 @@ import type {
   Attachment,
   CaptureTarget,
   Folder,
+  ImportFile,
   ImportStaged,
   Meeting,
   MeetingPrivacy,
@@ -40,6 +41,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import { PRIVACY_CHANGED_EVENT, isKeptLocal, keepLocalTitle } from "../privacy";
 import { templateSections } from "../enhancedTrust";
+import { followedImportTitle } from "../importProgress";
 import { fmtElapsed } from "./RecordingBar";
 import { Button, Modal, SectionLabel } from "./ui";
 import AttendeeEditor from "./AttendeeEditor";
@@ -48,6 +50,9 @@ import ImportQueue from "./ImportQueue";
 import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
+
+/** The title a new note starts with (App.tsx `newNote`). */
+const UNTITLED = "Untitled";
 import EnhancedDoc from "./EnhancedDoc";
 import { AskComposer, AskSheet, useAskChat, useWideWindow } from "./AskPanel";
 
@@ -1103,6 +1108,15 @@ export default function Editor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [note.scratchpad]);
 
+  // An imported note is titled after its first file. Until it's renamed,
+  // the title follows the queue's first file as files are removed or moved.
+  const followImportTitle = (before: ImportFile[], after: ImportFile[]) => {
+    const to = followedImportTitle(title, before, after);
+    if (to == null) return;
+    setTitle(to);
+    scheduleSave(to, scratchpad);
+  };
+
   const scheduleSave = (nextTitle: string, nextScratchpad: string) => {
     setSaveState("saving");
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
@@ -1381,7 +1395,9 @@ export default function Editor({
         <div className="px-6 pb-3.5 pt-5">
           <div className="mx-auto max-w-[var(--content-max)]">
             <input
-              value={title}
+              // A new note's "Untitled" is shown as the placeholder, so
+              // typing replaces it instead of adding to it.
+              value={title === UNTITLED ? "" : title}
               onChange={(e) => {
                 setTitle(e.target.value);
                 scheduleSave(e.target.value, scratchpad);
@@ -1434,6 +1450,7 @@ export default function Editor({
                 onTranscribe={onImportTranscribe}
                 onRetry={onTranscribe}
                 onCancel={onImportCancel}
+                onFilesChange={followImportTitle}
               />
             )}
 

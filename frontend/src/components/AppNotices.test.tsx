@@ -148,6 +148,7 @@ function props(over: Partial<Props> = {}): Props {
     onRetryFailure: vi.fn(),
     onDismissPipelineFailure: vi.fn(),
     onOpenEngineSettings: vi.fn(),
+    onOpenLlmKeySettings: vi.fn(),
     updater: fakeUpdater("idle"),
     ...over,
   };
@@ -441,6 +442,30 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
     });
     await flush();
     expect(notice(host)!.textContent).toContain("OpenAI needs your OK");
+  });
+
+  it("a provider with no API key: Add a key opens Settings, then it offers to run them", async () => {
+    skipped = ["m1"];
+    consents["consent.cloud_llm.anthropic"] = "true";
+    llm.providers[1].has_key = false;
+    const p = props();
+    const { host } = render(<AppNotices {...p} />);
+    await flush();
+    expect(notice(host)!.textContent).toContain(
+      "There's no API key for Anthropic yet, so 1 meeting kept the raw transcript and got no action items. Add one in Settings › Ask and Enhance, then run them.",
+    );
+    click(button(host, "Add a key"));
+    expect(p.onOpenLlmKeySettings).toHaveBeenCalledTimes(1);
+    expect(api.retryConsentSkipped).not.toHaveBeenCalled();
+    // the key is saved in Settings
+    llm.providers[1].has_key = true;
+    act(() => {
+      window.dispatchEvent(new Event(LLM_SETTINGS_CHANGED_EVENT));
+    });
+    await flush();
+    click(button(host, "Run them now"));
+    await flush();
+    expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
   });
 
   it("follows the backend's list, waits out a recording, and Dismiss hides it", async () => {

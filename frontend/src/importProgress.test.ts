@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { fmtSize, mapProgress, parseTranscribingDetail, rollingStatus } from "./importProgress";
+import {
+  fmtSize,
+  followedImportTitle,
+  importTitle,
+  mapProgress,
+  parseTranscribingDetail,
+  rollingStatus,
+} from "./importProgress";
 import type { ImportFile } from "./types";
 
 const file = (id: string): ImportFile => ({
@@ -123,5 +130,33 @@ describe("fmtSize", () => {
     expect(fmtSize(12_400_000)).toBe("12.4 MB");
     expect(fmtSize(340_000)).toBe("340 KB");
     expect(fmtSize(200)).toBe("1 KB");
+  });
+});
+
+describe("import title", () => {
+  const named = (id: string, file_name: string): ImportFile => ({ ...file(id), file_name });
+  const a = named("a", "Planning sync.m4a");
+  const b = named("b", "Planning sync part 2.mp3");
+  const c = named("c", "notes.v2.final.wav");
+
+  it("is the first file's name without its extension, like the backend", () => {
+    expect(importTitle([a, b])).toBe("Planning sync");
+    expect(importTitle([c])).toBe("notes.v2.final");
+    expect(importTitle([named("d", "no-extension")])).toBe("no-extension");
+    expect(importTitle([named("e", ".hidden")])).toBe(".hidden");
+    expect(importTitle([])).toBeNull();
+  });
+
+  it("follows the first file while the note still has the import's title", () => {
+    // the first file removed: the next one names the note
+    expect(followedImportTitle("Planning sync", [a, b, c], [b, c])).toBe("Planning sync part 2");
+    // reordered: the new first file names it
+    expect(followedImportTitle("Planning sync", [a, b, c], [c, a, b])).toBe("notes.v2.final");
+    // another file removed: the first is unchanged, nothing to do
+    expect(followedImportTitle("Planning sync", [a, b, c], [a, c])).toBeNull();
+    // renamed by the user: left alone
+    expect(followedImportTitle("Budget review", [a, b, c], [b, c])).toBeNull();
+    // the last file gone: keep whatever it was
+    expect(followedImportTitle("Planning sync", [a], [])).toBeNull();
   });
 });

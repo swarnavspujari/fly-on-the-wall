@@ -95,3 +95,26 @@ export function rollingStatus(
 
 export const fmtSize = (b: number): string =>
   b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1e3))} KB`;
+
+/** The title an import gives its note: the first file's name without its
+ *  extension (import_commands.rs import_stage, `file_stem`), or null for an
+ *  empty queue. */
+export function importTitle(files: readonly ImportFile[]): string | null {
+  const name = files[0]?.file_name;
+  if (!name) return null;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+/** The note's new title after the queue went from `before` to `after`, or
+ *  null to leave it: the title follows the first file only while it is
+ *  still the one the import gave it (the user hasn't renamed the note). */
+export function followedImportTitle(
+  title: string,
+  before: readonly ImportFile[],
+  after: readonly ImportFile[],
+): string | null {
+  const from = importTitle(before);
+  const to = importTitle(after);
+  return to && from != null && title === from && to !== title ? to : null;
+}

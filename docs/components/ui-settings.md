@@ -17,7 +17,7 @@ The full-window Settings overlay: seven sections (Recording, Transcripts, Ask an
 ### Public API
 | Export | File | Notes |
 |---|---|---|
-| `SettingsModal` (default) | `SettingsModal.tsx:213` | Props `modelProgress`, `updater`, `recordingActive`, `appVersion`, `initialFocus: "engine" \| "groq" \| null`, `onClose` (`:61-71`). |
+| `SettingsModal` (default) | `SettingsModal.tsx:213` | Props `modelProgress`, `updater`, `recordingActive`, `appVersion`, `initialFocus: SettingsFocus \| null` (`"engine" \| "groq" \| "llm-key"`, `settingsModel.ts`; `"llm-key"` scrolls to Ask and Enhance › Runs on, flashes it and focuses the API key field), `onClose` (`:61-71`). |
 | `PrivacySection` (default) | `PrivacySection.tsx:25` | `recordingActive`, `children` (caller rows go between the notice and retention). |
 | `SETTINGS_SECTIONS`, `matchSections`, `activeSectionAt` | `settingsModel.ts:18-89` | |
 | `asrDraftFrom`, `asrUpdateFrom`, `isAsrDirty`, `defaultModelForTier`, `effectiveModel`, `qualityHelper`, `madeOnHelper` | `settingsModel.ts:109-197` | `asrUpdateFrom` sends `groq_key` only when typed, because an empty string would delete the saved key (`:125-145`). `defaultModelForTier` mirrors `src-tauri/src/hw.rs:130-140`. |
@@ -48,7 +48,7 @@ The full-window Settings overlay: seven sections (Recording, Transcripts, Ask an
 | Calendars › More | Your own OAuth app Save | `set_calendar_settings` (client secret only when typed) | none | `:833-846`, `:2030-2068` |
 | Files and privacy | Disk-encryption Dismiss | `set_app_setting("ui.privacy.disk_encryption_banner_dismissed")` | none | `PrivacySection.tsx:160-172` |
 | Files and privacy | Show folder | `reveal_data_dir` | none | `SettingsModal.tsx:2093` |
-| Files and privacy | Search index (Index N meetings) | consent → `backfill_meeting_items` | `useCloudConsent` | `:555-589`, `:2107` |
+| Files and privacy | Search index (Extract from N meetings) | consent → `backfill_meeting_items`; all failed → "Couldn't extract from …" with the backend's first error under it | `useCloudConsent` | `:555-589`, `:2107` |
 | Files and privacy | Delete audio after | `preview_audio_retention`, then `set_audio_retention(days \| null)`; a change that deletes now shows a confirm card first | in-card confirm | `PrivacySection.tsx:66-105`, `:182-237` |
 | Files and privacy | Delete all… | `delete_all_data(includeModels, "delete everything")`, then `localStorage.clear()` and a `fotw:restart-required` event | checkbox + typed phrase; disabled while recording | `PrivacySection.tsx:107-130`, `:249-341` |
 | Files and privacy | Dismiss the last wipe report | `dismiss_wipe_report` | none | `PrivacySection.tsx:291-300` |
@@ -103,7 +103,7 @@ None from the webview. The backend may run Ollama, open the browser for OAuth, o
 Entered here and passed to commands that store them in the keychain: the Groq API key (`set_asr_settings.groq_key`), LLM API keys (`set_llm_settings.api_key`), the Google client secret (`set_calendar_settings.google_client_secret`). Inputs are `type="password"` and cleared after a successful save (`SettingsModal.tsx:502`, `:719`, `:790`, `:840`).
 
 ## Dependencies
-- **Inbound:** `App.tsx` (opens Settings, the deep links from `TranscriptPanel` via `onOpenSettings`, the `updater` hook).
+- **Inbound:** `App.tsx` (opens Settings, the deep links from `TranscriptPanel` via `onOpenSettings` and from the skipped-cleanup notice's "Add a key", the `updater` hook).
 - **Outbound:** [ui-confirm-consent](ui-confirm-consent.md), `ui.tsx` (`SettingsGroup`, `SettingsRow`, `Switch`, `Segmented`, `Select`, `Input`, `Modal`, `useEscapeLayer`, `useDialogFocus`), `theme.ts`, `pipelineNotice.ts` (`briefError`), `updater.ts`, `RemindNoticeRow.tsx`, `RestartRequired.tsx` (via the event).
 
 ## Invariants

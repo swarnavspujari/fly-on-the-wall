@@ -89,9 +89,18 @@ export function appErrorCopy(error: string): NoticeCopy {
 export function consentSkipsCopy(
   count: number,
   vendor: string | null,
+  keyVendor: string | null = null,
 ): { title: string; cause: string; action: string } {
   const meetings = count === 1 ? "1 meeting" : `${count} meetings`;
   const kept = `${meetings} kept the raw transcript and got no action items`;
+  // A missing key comes first: allowing the provider alone can't run them.
+  if (keyVendor) {
+    return {
+      title: "Transcript cleanup and action items were skipped",
+      cause: `There's no API key for ${keyVendor} yet, so ${kept}. Add one in Settings › Ask and Enhance, then run them.`,
+      action: "Add a key",
+    };
+  }
   return vendor
     ? {
         title: "Transcript cleanup and action items were skipped",
