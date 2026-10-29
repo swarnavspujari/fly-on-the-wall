@@ -799,6 +799,11 @@ pub fn sweep_partly_deleted(data_dir: &Path) {
     let Some(_guard) = models::try_install_lock() else {
         return;
     };
+    finish_partly_deleted(data_dir);
+}
+
+/// [`sweep_partly_deleted`] without the install lock (the caller holds it).
+fn finish_partly_deleted(data_dir: &Path) {
     let (leftovers, _) = scan_leftovers(data_dir, std::process::id());
     for e in leftovers
         .iter()
@@ -1565,7 +1570,9 @@ mod tests {
             .iter()
             .any(|e| e.path == "models/diarize/notes.deleting-soon"));
 
-        sweep_partly_deleted(d);
+        // The lock-free core: other tests may hold the global install lock,
+        // which makes the launch wrapper skip.
+        finish_partly_deleted(d);
         let (leftovers, unrecognised) = scan_leftovers(d, 1);
         assert!(leftovers.is_empty(), "{leftovers:?}");
         assert_eq!(unrecognised.len(), 1, "unknown folders stay");
