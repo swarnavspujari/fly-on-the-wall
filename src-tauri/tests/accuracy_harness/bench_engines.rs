@@ -21,6 +21,8 @@
 //!   parakeet-sherpa on the same piece).
 //! - `nemocpp-parakeet`  parakeet-tdt-0.6b-v3 q8_0 via NVIDIA NeMo-Speech.cpp
 //!   (alternative runtime to the shipped parakeet-cli path).
+//! - `nemocpp-parakeet-whole` the same, the whole channel in one request
+//!   (NeMo-Speech.cpp's own long-form chunking, not the shipped VAD batches).
 //! - `nemocpp-nemotron`  nemotron-speech-streaming-en q8_0 via NeMo-Speech.cpp
 //!   at 1.12 s right context (its offline/file path).
 //!
@@ -80,6 +82,7 @@ pub const BENCH_ENGINES: &[&str] = &[
     "cohere",
     "granite",
     "nemocpp-parakeet",
+    "nemocpp-parakeet-whole",
     "nemocpp-nemotron",
 ];
 
@@ -230,10 +233,10 @@ pub fn build(
             }));
             Ok(Box::new(e))
         }
-        "nemocpp-parakeet" | "nemocpp-nemotron" => {
+        "nemocpp-parakeet" | "nemocpp-parakeet-whole" | "nemocpp-nemotron" => {
             let device = if gpu { "vulkan" } else { "cpu" };
             let exe = dir.need(&format!("bin/nemo-speech-{device}/bin/nemo-speech{EXE}"))?;
-            let (gguf, extra): (&str, &[&str]) = if name == "nemocpp-parakeet" {
+            let (gguf, extra): (&str, &[&str]) = if name.starts_with("nemocpp-parakeet") {
                 ("parakeet-tdt-0.6b-v3.q8_0.gguf", &[])
             } else {
                 // 1.12 s chunks, the same operating point as nemotron-live.
@@ -266,10 +269,10 @@ pub fn build(
             args.push("--asr-model".into());
             args.push(model.to_string_lossy().into_owned());
             args.extend(extra.iter().map(|s| s.to_string()));
-            let label: &'static str = if name == "nemocpp-parakeet" {
-                "nemocpp-parakeet"
-            } else {
-                "nemocpp-nemotron"
+            let label: &'static str = match name {
+                "nemocpp-parakeet" => "nemocpp-parakeet",
+                "nemocpp-parakeet-whole" => "nemocpp-parakeet-whole",
+                _ => "nemocpp-nemotron",
             };
             Ok(Box::new(crate::bench_servers::ServerEngine {
                 label,
@@ -279,6 +282,9 @@ pub fn build(
                 ready_path: "/ready",
                 // NeMo-Speech.cpp splits > 400 s itself; batches are ≤ 120 s
                 max_piece_ms: None,
+                // -whole: the channel in one request, NeMo-Speech's own
+                // long-form chunking instead of the shipped VAD batches
+                whole_file: name == "nemocpp-parakeet-whole",
                 flavor: crate::bench_servers::ServerFlavor::NemoSpeech,
                 anchor: None,
             }))
@@ -326,6 +332,7 @@ pub fn build(
                 args,
                 ready_path: "/health",
                 max_piece_ms: Some(piece_secs * 1000),
+                whole_file: false,
                 flavor: crate::bench_servers::ServerFlavor::GraniteChat,
                 anchor: Some(Box::new(SherpaEngine {
                     label: "parakeet-sherpa",

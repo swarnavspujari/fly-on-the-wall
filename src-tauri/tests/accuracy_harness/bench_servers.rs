@@ -143,6 +143,10 @@ pub struct ServerEngine {
     pub args: Vec<String>,
     pub ready_path: &'static str,
     pub max_piece_ms: Option<u64>,
+    /// Send the whole channel in one request and let the runtime chunk it
+    /// (NeMo-Speech.cpp splits past its 400 s encoder limit itself) instead
+    /// of the shipped VAD batches.
+    pub whole_file: bool,
     pub flavor: ServerFlavor,
     /// Timing anchor for decoders without timestamps (Granite).
     pub anchor: Option<Box<SherpaEngine>>,
@@ -300,6 +304,21 @@ impl TranscriptionEngine for ServerEngine {
         };
         let server_ref = &server;
         let anchor_ref = &anchor;
+        if self.whole_file {
+            let whole = async {
+                let (samples, rate) = fly_audio::mix::read_wav_mono(wav_path)
+                    .map_err(|e| AsrError::BadAudio(format!("{}: {e}", wav_path.display())))?;
+                let words = self.post_piece(server_ref, None, &samples, rate).await?;
+                Ok::<_, AsrError>(RawTranscript {
+                    language: Some("en".into()),
+                    words: fly_asr::drop_non_speech_spans(words),
+                    segments: vec![],
+                })
+            }
+            .await;
+            server.stop().await;
+            return whole;
+        }
         let raw = fly_asr::batch::transcribe_batched(
             self.label,
             &self.exe,
