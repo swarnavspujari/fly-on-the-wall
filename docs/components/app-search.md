@@ -1,15 +1,14 @@
 # Search and embedding indexer (`app-search`)
 
-> Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0).
-> In flight: **PR #92** (draft, v2.5, storage schema v3). Adds `transcript_segments` + `segments_fts` (per-segment FTS, polished text when present); `segment_ids_json` / `end_ms` / `variant` columns on `embedding_chunks` with label-free chunk text; and a keep-local filter inside SQL for `Storage::vector_search`, which today ignores `SearchFilter.exclude_keep_local`. Chunk text changes there, so every chunk re-embeds after that migration (inferred). The commands below keep their signatures (inferred from the PR description).
+> Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0); the search half refreshed for the v2.5 search-quality PR (FTS fallback for questions, similarity floor, vector cache). Schema v3 (#92) has merged: `vector_search` filters Keep local in SQL, and chunk text is label-free (the corpus re-embeds once). The commands keep their signatures.
 
 ## Purpose
-Search-as-you-type over notes and transcripts. `search` is plain SQLite FTS5. `search_semantic` fuses FTS with a vector search (reciprocal rank fusion, grouped by note). Its vectors come from a background worker that chunks every note and transcript and embeds the chunks through Ollama's `/api/embed` with `embeddinggemma:300m`. Everything semantic is best-effort: no Ollama, no model or a dead server means FTS-only, never an error.
+Search-as-you-type over notes and transcripts. `search` is SQLite FTS5: a keyword search must match every word (the last as a prefix); when that finds nothing, as with a typed question, any content word matches and bm25 ranks the rows sharing the rarest words first (`fly_storage::query`). `search_semantic` fuses that with a vector search (reciprocal rank fusion, grouped by note). The vector list has no similarity floor: it is ranked, the user decides, and a short keyword search scores low cosines even against the note it is after ("cost cuts" 0.30 vs 0.49 for the same topic asked as a question). Its vectors come from a background worker that chunks every note and transcript and embeds the chunks through Ollama's `/api/embed` with `embeddinggemma:300m`. Everything semantic is best-effort: no Ollama, no model or a dead server means FTS-only, never an error.
 
 ## Files it owns
-- `src-tauri/src/commands.rs` (part) — `search` (651-659), `search_semantic` (661-702).
+- `src-tauri/src/commands.rs` (part) — `search` (651-660), `search_semantic` (662-715).
 - `src-tauri/src/embeddings.rs` — the indexer (`spawn`), `embed_raw`, `embed_query`, prompts, model constant.
-- Storage halves live in [fly-storage](fly-storage.md): `search.rs` (`search`, `search_split`, `SearchFilter`), `embeddings.rs` (chunking, queue, `vector_search`), `hybrid.rs` (`fuse`), `privacy.rs:303-338` (shareable queue).
+- Storage halves live in [fly-storage](fly-storage.md): `query.rs` (terms, stopwords, the AND / OR expressions), `search.rs` (`search`, `search_split`, `SearchFilter`), `embeddings.rs` (chunking, queue, `vector_search_floor`, `similarity_floor`), `cache.rs` (in-memory vectors), `hybrid.rs` (`fuse`), `privacy.rs:303-338` (shareable queue).
 
 ## Surface area
 ### Public API
@@ -17,23 +16,49 @@ Search-as-you-type over notes and transcripts. `search` is plain SQLite FTS5. `s
 
 | Item | Line | Used by |
 |---|---|---|
-| `EMBED_MODEL = "embeddinggemma:300m"` | 24 | worker, `search_semantic`, `tests/search_eval.rs` |
+| `EMBED_MODEL`, `doc_prompt`, `query_prompt`, re-exported from `fly_core::embed_prompt` (`"embeddinggemma:300m"`, shared with the retrieval eval; `fly_storage::embeddings::EMBEDDINGGEMMA` is the same tag, and its similarity floor lives in fly-storage) | 25 | worker, `search_semantic`, `tests/search_eval.rs` |
 | `doc_prompt(title, text)` → `"title: {title} \| text: {text}"`; `query_prompt(q)` → `"task: search result \| query: {q}"` | 37-46 | worker, `embed_query`, `search_eval` |
 | `embed_raw(root, &[String]) -> Result<Vec<Vec<f32>>, String>`: `POST {root}/api/embed`, 300 s timeout, count-checked | 49-77 | worker, `embed_query`, `search_eval` |
 | `embed_query(&AppState, q) -> Option<Vec<f32>>`: only if `GET {root}/api/version` answers; never spawns a server or pulls | 83-96 | `search_semantic` |
-| `spawn(AppHandle)`: the background indexer (called once, `lib.rs:177`) | 151-240 | app setup |
+| `spawn(AppHandle)`: the background indexer (called once, from `startup::finish`, `startup.rs:252`) | 322-414 | app setup |
+| `yield_reason(&AppState) -> Option<BackgroundYield>`, `rest_after(Duration)`, `settle(&Notify, quiet, max)`, `rest_between_batches(…)`, `embed_next_batch(&Mutex<Storage>, &impl Embedder, shareable_only, size)`, `embed_batch_unless(…, should_yield)`, `Embedder` trait (crate-private; tested with fake embedders) | 171-292 | the worker, tests |
 
-#### Indexer loop (`embeddings.rs:151-240`)
-1. Once at start: `Storage::backfill_embedding_chunks` (chunk rows for every note and transcript; idempotent).
-2. Loop. `root = ollama::root_url` (`llm.ollama.base_url`, else `http://localhost:11434`). If the root is **not** loopback, count only the *shareable* backlog (keep-local owners excluded); otherwise the full backlog (172-181).
-3. Backlog 0 → wait for `embed_notify` or 30 s (183).
-4. `ensure_ready` (126-142): `ollama::ensure_running` (may spawn the managed `ollama serve`), then `GET /api/tags`; if the model is missing, **pull it** (`POST /api/pull`, progress on `model:progress`). Failure → wait 60 s or a nudge.
-5. Re-derive remote/local from the URL actually used (198), take 16 pending chunks (shareable queue when remote), embed `doc_prompt(title, text)`, store vectors (`store_chunk_embeddings`). Failure → sleep 60 s.
+#### Indexer loop (`embeddings.rs:145-414`)
+1. Once at start, on a blocking thread: the chunk backfill (`Storage::chunk_owners`, **oldest first**, then `sync_owner_chunks` for 8 owners per storage-lock hold, waiting between groups while `AppState::background_should_yield()`). Oldest first because a re-chunk gives the owner's new rows the next ids and the queue takes the highest ids first, so the newest content is embedded first; the v3 upgrade re-chunks in the same order (`ORDER BY started_at`). Idempotent; a library already chunked costs one JSON parse per owner and never holds the lock for long.
+2. Loop. **Yield** first (`yield_reason` → `AppState::background_yield_reason`, the rule every background job shares): while a recording or screen recording runs (live captions), while a transcription job is running (any `pipeline_stage` other than `"waiting"`, which includes the polish), or while a model request holds `AppState::foreground_ai()` (Ask, Enhance, transcript polish, item extraction: `run_polish` and `run_extraction` take it, so every caller of those does), the worker logs `embedding index paused` once and checks back every 5 s or on a nudge. Priority: live captions > transcription > Ask / Enhance > backlog.
+3. `root = ollama::root_url` (`llm.ollama.base_url`, else `http://localhost:11434`). If the root is **not** loopback, count only the *shareable* backlog (keep-local owners excluded); otherwise the full backlog.
+4. Backlog 0 → wait for `embed_notify` or 30 s.
+5. `ensure_ready`: `ollama::ensure_running` (may spawn the managed `ollama serve`), then `GET /api/tags`; if the model is missing, **pull it** (`POST /api/pull`, progress on `model:progress`). Failure → wait 60 s or a nudge.
+6. Check the yield again (readiness can take a while), then `embed_batch_unless` → `embed_next_batch`: re-derive remote/local from the URL actually used, take the 16 **most recently written** pending chunks (shareable queue when remote) under the lock, embed `doc_prompt(title, text)` with no lock held, then `store_pending_embeddings`, which stores a vector only where the row still holds the text that was embedded (a chunk re-chunked meanwhile, possibly under the same id, stays pending). While the batch is in flight the worker re-checks the yield every 500 ms and **abandons** the batch when a recording (or transcription, or Ask) starts: no lock is held, nothing is stored, the chunks stay pending. Dropping the request doesn't stop Ollama from finishing the batch it already received, so the runtime can stay busy for that one batch (at most 16 short chunks). Failure → sleep 60 s.
+7. **Rest** after each batch for as long as it took (at least 250 ms): a large backlog (the one-time re-embed after the v3 upgrade, a model change) uses at most about half of what the embedding runtime can do. A content write (`embed_notify`) may end a rest early, but only every other rest (`rest_between_batches`): the rest after a batch a write started is served in full, so steady writes can't run batches back to back. After a write wakes it (from a rest or idle), the worker first waits for writes to pause for 2 s (at most 20 s, `settle`): autosave fires every few hundred ms while the user types, and each save re-chunks the note, so the note is embedded once per pause, not once per save. Whether anything is pending is a newest-first `LIMIT 1` probe (`has_pending_embeddings`), not a count.
 
-The storage lock is never held across HTTP. `embed_notify` is nudged by `update_note_scratchpad` (`commands.rs:256`), Enhance/block edits (`llm_commands.rs:738,756`) and each finished transcription (`scheduler.rs:171`).
+New content first: chunk ids grow with every (re)chunk, so the queue is "newest write first" and a meeting that was just transcribed is embedded ahead of any backlog, as soon as its transcription and polish are done.
 
-#### `search_semantic` (`commands.rs:666-702`)
-`SearchFilter { limit: 30, ..Default }`, so `exclude_keep_local = false`. Runs `search_split` (FTS notes, FTS transcripts), then `embed_query`. With a vector it calls `vector_search(…, EMBED_MODEL, &filter, 30)`; a failure there is logged and treated as empty. Then `hybrid::fuse`. Keep-local notes **are** returned. That's correct for the user's own UI. But `vector_search` would ignore `exclude_keep_local` even if it were set (`crates/fly-storage/src/embeddings.rs:391-418`). fly-context post-filters it itself (`crates/fly-context/src/tools.rs:738-749`); PR #92 moves the filter into SQL.
+Polish never re-embeds: chunk boundaries come from the raw text, so polishing changes a chunk's text but not its span, and `sync_chunks` keeps the vector of a chunk whose span and title are unchanged when the change is between raw and polished text. Combined with the yield (the worker waits out the polish), a new meeting is embedded once.
+
+The storage lock is never held across HTTP. `embed_notify` is nudged by `update_note_scratchpad` (`commands.rs:256`), Enhance/block edits (`llm_commands.rs:738,756`) and each finished transcription, after its AI pass (`scheduler.rs`: nudged before the pass, the worker would start a batch the pass's marker abandons at once).
+
+#### `search_semantic` (`commands.rs:662-715`)
+`SearchFilter { limit: 30, ..Default }`, so `exclude_keep_local = false`: Keep-local notes **are** returned, which is right for the user's own UI. Runs `search_split` (FTS notes, FTS transcripts, with the AND → OR fallback), then `embed_query`. With a vector it calls `vector_search(…, EMBED_MODEL, &filter, 30)` (no floor); a failure there is logged and treated as empty. Then `hybrid::fuse`.
+
+Measured on the eval gold set (63 questions; a hit = a note of the meeting holding the answer), before → after: **without Ollama** (FTS only) the right meeting is in the top 5 for 2 → 55 questions (MRR 0.03 → 0.77; FTS returned nothing for 53 of them before); **with** `embeddinggemma` 61 → 61 (MRR 0.86 → 0.82: a few answers moved from rank 1 to 2 now that the FTS lists contribute). Every unanswerable question now returns something in both modes (FTS shares a common word), as a search box should.
+
+#### Cost at library size
+A synthetic library of 1,016 meetings (34,990 chunks, 768-d vectors), minimum of 5 runs per query, 21 questions, on a shared and busy dev machine (treat as relative):
+
+| Path (p50 / p95, ms) | main `ccca11b` | this change |
+|---|---|---|
+| `search_passages`, hybrid | 2,465 / 3,922 | 672 / 1,074 |
+| `search_passages`, keyword only | 181 / 764 (it found nothing for most questions, so did little work) | 532 / 1,159 |
+| `vector_search`, 200 hits | 1,835 / 3,170 | 106 / 355 |
+| Search UI (`search_split` + vector + fuse) | 1,978 / 3,288 | 133 / 319 |
+
+Where the time went on main: the vector scan read every 3 KB vector (and walked its overflow pages just to check `model`) per query, and keyword statistics read each matching segment's row. Now vectors come from an in-memory cache and visibility is decided per note and meeting.
+
+What's left:
+- **The cache rebuild.** A write to `embedding_chunks` (a stored vector, an edited note or transcript re-chunked) or any commit by another process drops the vector cache, so the next search re-reads every vector (about 1-3 s at 35k chunks on this machine; ~0.1-0.3 s for a few hundred meetings). Other writes (settings, job progress, items) keep it. During a bulk re-embed, when the worker stores a batch every few seconds, searches pay it about as often as main paid its scan.
+- **Transcript parsing.** The keyword pass parses up to 40 transcripts per query (most of the remaining keyword-only time); caching parsed windows is the next cut.
+- **Brute force.** Every in-scope vector is still scored (~35k dot products); an ANN index is the step past ~100k chunks.
 
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
@@ -57,7 +82,7 @@ devMock mirrors both (`devMock.ts:1203-1208`). It returns the same two canned hi
 | Table | Columns | Read / write |
 |---|---|---|
 | `notes_fts`, `transcripts_fts` | `note_id/meeting_id`, `title`, `body` | read (`search`, `search_split`) |
-| `embedding_chunks` | `id, owner_kind, owner_id, chunk_index, title, text, start_ms, embedding, model` (`crates/fly-storage/src/lib.rs:535-546`) | worker: backfill rows, read pending, write `embedding`/`model`; `search_semantic`: read |
+| `embedding_chunks` | `id, owner_kind, owner_id, chunk_index, title, text, start_ms, embedding, model, segment_ids_json, end_ms, variant` | worker: backfill rows, read pending, write `embedding`/`model`; `search_semantic`: read (ids for the filter, vectors via the cache, details for the winners) |
 | `notes`, `meetings`, `folders` | `folder_id`, `updated_at`, `started_at`, `keep_local` | read (joins; shareable-queue CTE) |
 
 ### Files and directories written
@@ -76,37 +101,44 @@ devMock mirrors both (`devMock.ts:1203-1208`). It returns the same two canned hi
 None.
 
 ## Dependencies
-- **Inbound:** `lib.rs:177` (`embeddings::spawn`), `lib.rs:212-213` (registration), `commands.rs:256`, `llm_commands.rs:738,756`, `scheduler.rs:171` (`embed_notify`), `tests/search_eval.rs`.
-- **Outbound:** [fly-storage](fly-storage.md) (`search_split`, `vector_search`, `hybrid::fuse`, chunk queue incl. `*_shareable`), [app-ollama](app-ollama.md) (`root_url`, `server_alive`, `ensure_running`, `pull_model`), [app-llm](app-llm.md) (`is_loopback_url`), `AppState::embed_notify`.
+- **Inbound:** `startup.rs:252` (`embeddings::spawn`), `lib.rs:212-213` (registration), `commands.rs:256`, `llm_commands.rs:738,756`, `scheduler.rs:171` (`embed_notify`), `tests/search_eval.rs`.
+- **Outbound:** [fly-storage](fly-storage.md) (`search_split`, `vector_search`, `hybrid::fuse`, chunk queue incl. `*_shareable`), [app-ollama](app-ollama.md) (`root_url`, `server_alive`, `ensure_running`, `pull_model`), [app-llm](app-llm.md) (`is_loopback_url`), `AppState::{embed_notify, foreground_ai_active, pipeline_stage}`, `scheduler::recording_active`.
 
 ## Invariants
 - Semantic search degrades to FTS and never fails a search or blocks the UI (`embeddings.rs:10-13`; `commands.rs:683-694`).
 - The query path never spawns a server or pulls a model (`embeddings.rs:79-85`).
 - Keep-local notes and transcripts are never sent to an Ollama on another machine for indexing; the decision is made from the URL actually used (THREAT_MODEL T10; `embeddings.rs:168-207`, `crates/fly-storage/src/privacy.rs:303-338`).
-- The storage lock is never held across an HTTP call (`embeddings.rs:149-150`).
+- The storage lock is never held across an HTTP call, and the startup pass holds it for 8 owners at a time (test `new_content_is_embedded_before_the_backlog_and_the_lock_is_free`).
+- The backlog yields to recording, transcription (incl. polish) and model requests (Ask, Enhance, polish, extraction; `yield_reason`), and so does the startup chunk pass; a vector is stored only on a row still holding the embedded text (`store_pending_embeddings`).
+- Ask, Enhance, `run_polish` and `run_extraction` hold `AppState::foreground_ai()` for their whole run; any new model request should too.
 - The `model` column records which model produced each vector, so a model change re-queues everything (`crates/fly-storage/src/lib.rs:531-534`).
-- Not an invariant today: `vector_search` honouring `exclude_keep_local`. Any non-UI caller must post-filter until PR #92 lands.
+- `vector_search` / `vector_search_floor` honour `exclude_keep_local` inside SQL, before the limit and the floor (#92). The in-memory vector cache never decides visibility: each search asks the database which chunk ids it may see.
+- A keyword search that matches anything keeps AND semantics; the OR fallback is chosen from the query and filter only, never the page offset, so MCP `search_notes` cursors stay consistent.
 
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| unit | `src-tauri/src/embeddings.rs`, `commands.rs` (search) | 0 | nothing in the app crate |
-| unit (crate) | `crates/fly-storage/src/embeddings.rs:495-716` | 9 | chunking, pending/store/search round trip, re-sync, filters, backfill |
+| unit | `src-tauri/src/embeddings.rs` | 10 | newest-first batches with the lock free during embedding (fake embedder), a chunk rewritten mid-embed stays pending, an in-flight batch abandoned when a recording starts (nothing stored), the startup pass and its yield, a remote embedder getting only shareable chunks, yielding to transcription and model requests, pacing, writes settling and not cutting every rest |
+| unit | `src-tauri/src/startup.rs` | 2 | the library-status shape, a panic while opening becomes the error dialog's error |
+| integration (crate) | `crates/fly-storage/tests/migration_v3.rs` | `the_v3_re_embed_queue_starts_with_the_newest_meeting` | after the v3 re-chunk, the queue hands out meetings newest first whatever their ids |
+| unit (crate) | `crates/fly-storage/src/embeddings.rs` | 15 | chunking, pending/store/search round trip, re-sync, filters, backfill, the floor and exact best score; queue order, guarded store, polish keeps vectors, `chunk_owners` |
+| unit (crate) | `crates/fly-storage/src/{query,search,segments,cache}.rs` | 6 + 6 + 2 (search-related) + 2 | stopwords, AND / OR expressions, hostile input, the fallback and its paging, term statistics with keep-local, the vector cache's invalidation and quantization error |
 | unit (crate) | `crates/fly-storage/src/hybrid.rs:129-185` | 5 | RRF fusion, grouping, FTS-only degrade, limit |
 | unit (crate) | `crates/fly-storage/src/privacy.rs:834` | 1 | shareable queue skips keep-local owners |
 | env-gated | `src-tauri/tests/search_eval.rs` | 1 | 22 natural-language queries, FTS vs hybrid; asserts only hybrid ≥ FTS; **skips (passes) without a local Ollama + `embeddinggemma`**, which is every CI runner |
 
 **Known gaps:**
-- CI never exercises any semantic path: `search_eval` early-returns there, and the app crate has no test for `search_semantic`, `embed_query` or the worker.
+- CI never exercises a real embedding path: `search_eval` early-returns there, and the app crate has no test for `search_semantic` or `embed_query`. The worker's loop itself (Ollama readiness, remote root) is untested; its steps are.
+- `yield_reason`'s recording branch reuses `scheduler::recording_active`; no unit test builds an `ActiveRecording`. Checked in the real app instead.
 - No test pins "degrade to FTS": Ollama down, model missing, `vector_search` error.
 - No test covers the remote-root decision in the worker (`embeddings.rs:172,198`): a keep-local chunk reaching a non-loopback root would go unnoticed.
-- No test that `vector_search` respects `exclude_keep_local`. It doesn't, by design until PR #92. Neither `search_eval` nor fly-storage sets the flag.
+- `vector_search`'s `exclude_keep_local` is covered in `crates/fly-storage/tests/migration_v3.rs` and the floor test; `search_eval` doesn't set it.
 - `search_eval`'s "22/22 hybrid vs 4/22 FTS" headline is printed, not asserted; there is no committed absolute floor (spec §4.2a item 2).
 - No test for the automatic model pull or its `model:progress` events.
 
 ## Changing it safely
 - Run `cargo test -p fly-storage` (chunking, fusion, shareable queue) and, with Ollama + `embeddinggemma:300m` running locally, `cargo test -p fly-app --test search_eval -- --nocapture`. Read the printed table; a pass in CI means nothing.
-- Changing `doc_prompt` / `query_prompt` / chunking changes every vector's meaning. Bump or re-queue (the `model` column only re-queues on a model-name change), then re-run `search_eval`.
-- Any new caller that serves results to an external tool (MCP, agentic Ask) must set `exclude_keep_local` **and** post-filter vector hits until PR #92 lands.
+- Changing `doc_prompt` / `query_prompt` / chunking changes every vector's meaning. Bump or re-queue (the `model` column only re-queues on a model-name change), re-run `search_eval`, and re-measure `similarity_floor` (fly-context's Ask search uses it): it is calibrated for these prompts.
+- Any new caller that serves results to an external tool (MCP, agentic Ask) must set `exclude_keep_local`; keep a by-id re-check as defense in depth (fly-context does).
 - Keep `search` cheap: it is a synchronous command (`commands.rs:651-652`), so it runs on the main thread per keystroke (see `commands.rs:36-40`).
 - devMock: keep `search` / `search_semantic` returning the `SearchHit` shape (`kind`, `note_id`, `title`, `snippet` with `[[match]]`, `start_ms`).

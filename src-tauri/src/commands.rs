@@ -664,7 +664,10 @@ pub fn search(state: State<'_, AppState>, query: String) -> CmdResult<Vec<Search
 /// the list reads "most relevant meetings", best snippet first. Best-effort
 /// semantic: when the query can't be embedded (Ollama not running/installed,
 /// model missing) this degrades to grouped FTS — never an error, and never a
-/// server spawn on the search path.
+/// server spawn on the search path. FTS matches every word of a keyword
+/// search and falls back to any content word for a question. Vector hits
+/// have no similarity floor here: the list is ranked and the user decides
+/// (short keyword searches score low cosines even against the right note).
 #[tauri::command]
 pub async fn search_semantic(
     state: State<'_, AppState>,
@@ -683,15 +686,18 @@ pub async fn search_semantic(
         .map_err(err_str)?;
 
     let vector = match crate::embeddings::embed_query(&state, &query).await {
-        Some(qvec) => state
-            .storage
-            .lock()
-            .unwrap()
-            .vector_search(&qvec, crate::embeddings::EMBED_MODEL, &filter, LIMIT)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "vector search failed, using FTS only");
-                vec![]
-            }),
+        Some(qvec) => {
+            let model = crate::embeddings::EMBED_MODEL;
+            state
+                .storage
+                .lock()
+                .unwrap()
+                .vector_search(&qvec, model, &filter, LIMIT)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "vector search failed, using FTS only");
+                    vec![]
+                })
+        }
         None => vec![],
     };
 

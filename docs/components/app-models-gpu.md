@@ -19,7 +19,7 @@
 - Registry: `registry()`, `artifact(id)` (`models.rs:270-276`); `WHISPER_ENGINE_ID = "whisper-bin"`, `WHISPER_CLI_NAMES` (`models.rs:281-282`).
 - Resolution: `ensure(progress, data_dir, id)`, `ensure_with(…, effort)` (`models.rs:608-767`); `ensure_tool` / `ensure_tool_with` — installed managed copy → PATH → managed download → "`<name>` is not installed — `<guidance>`" (`models.rs:338-381`); `installed_path` (probe file exists) (`models.rs:383-386`); `tool_installed` (`models.rs:300-307`); `find_on_path` (also `/opt/homebrew/bin`, `/usr/local/bin` on macOS) (`models.rs:314-333`).
 - `best_installed_asr_model(data_dir, wanted)` — largest installed whisper model at or below the wanted one, else the smallest larger one (`models.rs:405-422`; used by `pipeline.rs:403`).
-- `sweep_stale_downloads(data_dir, max_age)` — called once per launch with 1 h (`lib.rs:132-143`) (`models.rs:432-466`).
+- `sweep_stale_downloads(data_dir, max_age)` — called once per launch with 1 h (`startup.rs:210-220`) (`models.rs:432-466`).
 - Markers shared with `scheduler.rs:80-81` and `frontend/src/pipelineNotice.ts:36`: `ENGINE_MISSING_MARKER = "is not installed"`, `DOWNLOAD_FAILED_MARKER = "download failed for"` (`models.rs:292-293`).
 - `NO_HF_MIRROR_ENV = "FLYONTHEWALL_NO_HF_MIRROR"` (`models.rs:472`).
 
@@ -29,7 +29,7 @@
 - `is_apple_silicon()` — `sysctlbyname("hw.optional.arm64")`, any failure = Intel = CPU (`gpu.rs:92-120`, macOS only).
 - `plan(state, on_model, notify, PlanRequest)` → `Option<PathBuf>` of the Vulkan exe (`gpu.rs:157-283`, Windows only).
 
-**hw.rs** (callers: `lib.rs:127`, `asr_commands.rs:257-268`, `pipeline.rs:229-230`, `pipeline.rs:327`, `pipeline.rs:387`)
+**hw.rs** (callers: `startup.rs:205`, `asr_commands.rs:257-268`, `pipeline.rs:229-230`, `pipeline.rs:327`, `pipeline.rs:387`)
 - `HwInfo { ram_gb, cpu_cores, gpu_name, vram_mb, recommended_tier }`, `CACHE_KEY = "hw.cache"`, `cached`, `detect_and_cache`, `detect`, `default_model_for_tier(tier, max_quality)` (`hw.rs:12-140`).
 - Tier rule: VRAM ≥ 8,192 MB or (RAM ≥ 16 GB and ≥ 12 cores) → `best`; RAM ≤ 8.5 GB → `light`; else `balanced` (`hw.rs:60-66`). `light` → `ggml-small-q5_1`, others → `ggml-large-v3-turbo-q5_0`, max quality → `ggml-large-v3-q5_0` (`hw.rs:130-140`).
 
@@ -84,7 +84,7 @@ Keep-local doesn't apply: nothing about the user's meetings is sent. Downloads g
 ### External processes
 | Process | When | Notes |
 |---|---|---|
-| `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits` | `hw::detect`: each launch in the background (`lib.rs:121-130`), or on the first `get_asr_settings` before the cache exists | Resolved from PATH; spawned **without** `CREATE_NO_WINDOW` (`hw.rs:78-83`), unlike the PowerShell call, so it may flash a console window on Windows (inferred) |
+| `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits` | `hw::detect`: each launch in the background (`startup.rs:198-209`), or on the first `get_asr_settings` before the cache exists | Resolved from PATH; spawned **without** `CREATE_NO_WINDOW` (`hw.rs:78-83`), unlike the PowerShell call, so it may flash a console window on Windows (inferred) |
 | `powershell -NoProfile -Command "(Get-CimInstance Win32_VideoController …)"` | Windows, when nvidia-smi finds nothing | `CREATE_NO_WINDOW` (`hw.rs:106-115`) |
 | `whisper-cli` (Vulkan build, then CPU build) | `gpu::plan` benchmark on the 60 s sample, once per (machine, model) | Spawned through `fly_asr::whisper_cpp::WhisperCppEngine` with `resume: false` (`gpu.rs:210-228`) |
 | none for extraction | Archives are extracted in-process (zip, tar.bz2, tgz, tar.xz) | Deliberately no bsdtar (`models.rs:955-990`) |
@@ -106,7 +106,7 @@ None.
 - **Pruning stays inside `bin/<tool>` and never follows links** (`models.rs:895-935`). Ollama is never pruned (its archive root is `bin/ollama`, `models.rs:876-880`).
 - **CPU is canon; the GPU is used only when measured faster on this machine, per model.** DECISIONS.md 2026-07-08; docs/MODELS.md "GPU transcription". `gpu.rs:153-283`. A failed GPU benchmark pins CPU; a failed CPU benchmark stores nothing; an unavailable Vulkan download stores nothing (`gpu.rs:184-192`, `230-258`). A GPU failure mid-pipeline pins CPU (`gpu.rs:66-82`, called at `pipeline.rs:672`).
 - **Intel Macs never use Metal** (silent corruption seen on the Intel smoke test) (`gpu.rs:84-120`, `pipeline.rs:1272`).
-- **Detection never sits on a command path.** `hw::detect` runs in the background at launch and is cached (`hw.rs:1-7`, `lib.rs:121-130`); `get_asr_settings` runs it off the IPC thread only on the very first launch (`asr_commands.rs:249-270`).
+- **Detection never sits on a command path.** `hw::detect` runs in the background at launch and is cached (`hw.rs:1-7`, `startup.rs:198-209`); `get_asr_settings` runs it off the IPC thread only on the very first launch (`asr_commands.rs:249-270`).
 - **Tool releases on this repo stay prerelease** so `/releases/latest` keeps pointing at the app (`.github/workflows/build-whisper-sidecar.yml:16-17`); see [app-updater](app-updater.md).
 - **Markers are shared, not copied.** `ENGINE_MISSING_MARKER` / `DOWNLOAD_FAILED_MARKER` are matched by `scheduler.rs:80-81`; the frontend matches the same phrase (`pipelineNotice.ts:36`) (`models.rs:284-293`).
 

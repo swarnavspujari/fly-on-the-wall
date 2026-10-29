@@ -73,12 +73,31 @@ Table: `citation_locators(owner_kind, owner_id, note_id, meeting_id, seg_id, sta
 
 The step runs in **one transaction**. A crash or a fatal error rolls it back completely: the version isn't stamped and the next open runs it again. Version 2 is stamped right after `to_v2`, so a v3 failure never re-runs the file-layout step.
 
-1. Rebuild `transcript_segments` through the triggers (`UPDATE transcripts SET json = json`), after dropping rows whose transcript is gone.
+1. Rebuild `transcript_segments` through the triggers (`UPDATE transcripts SET json = json WHERE meeting_id = ?`, one transcript at a time: the same trigger firing for the same rows as a table-wide `UPDATE`, so progress can follow it), after dropping rows whose transcript is gone.
 2. Re-chunk every transcript: label-free, with spans, polished where it exists. **The transcript corpus re-embeds once.** Note chunks don't change. Orphan transcript chunks are dropped.
 3. Reconcile and record locators.
 4. Rebuild `segments_fts`.
 
-A meeting or note that fails in step 2 or 3 is logged and skipped, never fatal. The duration is logged. Timing: about 9,000 segments take 0.25–0.45 s in a release build and about 1 s in debug. A fresh database gets the schema and is stamped 3 without running the step. The step also runs when a NEWER-stamped file is opened (see the contract).
+A meeting or note that fails in step 2 or 3 is logged and skipped, never fatal. The duration is logged with each stage's share. A fresh database gets the schema and is stamped 3 without running the step. The step also runs when a NEWER-stamped file is opened (see the contract).
+
+**Timing.** About 9,000 segments without word timings take 0.25–0.45 s in a release build and about 1 s in debug. A realistic large library is much slower per segment, because every segment carries its word timings and the triggers parse that JSON. `tests/migration_v3.rs::v3_step_timing` (ignored; run it with `--release -- --ignored --nocapture`) builds 1,000 meetings × 300 segments (14 timed words each, a third polished, 6 AI blocks and 8 items per meeting, 768-dim v2 vectors; 478 MB). Release build on a busy 20-thread Windows machine:
+
+| Stage | Before the locator-lookup fix (2 runs) | After (2 runs) |
+| --- | --- | --- |
+| 1. Segment rebuild (triggers) | 23.6–24.1 s | 22.0–26.2 s |
+| 2. Re-chunk | 6.3–12.9 s | 6.3–6.6 s |
+| 3. Locators | 21.5–22.1 s | 7.8–8.0 s |
+| 4. Index rebuild + commit | 3.5–4.2 s | 3.8–4.9 s |
+| Total | 56–62 s | 41–44 s |
+
+The machine was shared with other builds throughout (the fixture took 6.5–9.5 s to build, against about 4 s when idle), so treat these as upper bounds.
+
+- Stage 1 is mostly the triggers' JSON work. A select-only pass of the trigger's `json_each` + `json_extract` over the same library took 12.4 s by itself. Dropping the per-row `segments_fts` triggers during the rebuild (the closing `rebuild` recreates the index anyway) saved nothing measurable. Making stage 1 cheaper means changing the trigger SELECT in `segments.rs`, which every build runs.
+- Stage 3 was quadratic. The per-note and per-meeting "stale owner" lookups (`SELECT DISTINCT owner_id … WHERE owner_kind = ? AND note_id = ?`) used the primary key's `owner_kind` prefix, so each scanned every locator of its kind. They now force the note/meeting index (`+owner_kind`, pinned by `owner_lookups_use_the_note_and_meeting_indexes`), which also speeds up every runtime blocks save.
+
+### First-launch progress
+
+`Storage::pending_upgrade(dir)` says, read-only, whether the next open will run this step (`runs_v3_step`, the same condition `migrate` uses) and how many transcripts it re-indexes. `Storage::open_with_progress` / `open_with_retry_and_progress` report `UpgradeProgress { stage, done, total }` from inside the step. `done` and `total` are units weighted per stage from the benchmark (8 / 2 / 2 / 1 per transcript). Reports are throttled to one per 100 ms within a stage, plus every stage start and a final `done == total` after the commit. The app uses these to open the library off the main thread and show an "Upgrading your library" screen (`src-tauri/src/startup.rs`, `frontend/src/components/LibraryGate.tsx`). Plain `open` behaves as before.
 
 ## When an older app opens a v3 database
 
@@ -99,14 +118,10 @@ Every released build (v1.0.3 through v2.4.0) has `SCHEMA_VERSION = 2`, stamps `u
 
 ## Known follow-ups
 
-- **First-launch progress for large libraries (v2.5 release item, tracked with the re-embed throttling).** The v3 step runs inside `Storage::open` at about 30–50 µs per segment, so about 300k segments take 10–15 s with no progress shown. It needs a splash or progress state.
+- **First-launch progress for large libraries: done** (see [First-launch progress](#first-launch-progress)). The step still takes about 40 s on a 300k-segment library with word timings (release build, busy machine). Stage 1 is the remaining lever: the trigger SELECT's per-segment `json_extract` calls over objects that carry word timings.
 
-- **Re-embed pacing (v2.5 release blocker, tracked separately):**
-  - the one-time re-embed runs at the worker's normal priority, oldest chunks first (`ORDER BY id`);
-  - polish changes re-embed;
-  - the startup chunk pass holds the storage lock.
-  - Spec §4.2a #3 wants the backfill at lowest priority and throttled.
-- **fly-context keyword path:** switch to `search_segments`, and add `meeting_items` as a third ranked list.
+- **Re-embed pacing (v2.5 release blocker): done** in the v2.5 indexing PR. The worker yields to recordings, transcriptions (incl. polish) and Ask/Enhance, rests after each batch as long as the batch took, and takes the most recently written chunks first (`ORDER BY id DESC`), so new content isn't stuck behind the one-time re-embed. Chunk spans follow the raw text and a polish keeps each chunk's vector, so polishing re-embeds nothing. The startup chunk pass takes the storage lock for 8 owners at a time. See `docs/components/app-search.md`.
+- **fly-context keyword path:** it now ranks on `segments_fts` statistics (`segment_term_stats`, v2.5 search-quality PR); adding `meeting_items` as a third ranked list is still open.
 - **FTS5 `secure-delete`** for `notes_fts` and `transcripts_fts`, which still keep deleted terms in their pages.
 - **Trigger optimization:** skip the segment rebuild when `$.segments` is unchanged (a relabel currently rebuilds that meeting's rows).
 - **Dev tooling:** warn about a stale `flyonthewall-mcp` sidecar.
