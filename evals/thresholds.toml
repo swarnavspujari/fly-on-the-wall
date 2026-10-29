@@ -1,0 +1,159 @@
+# Fly on the Wall system evals: every threshold that defines "good".
+#
+# The first version was committed BEFORE the first run of any suite
+# (`git log -- evals/` shows the order); every later change is its own
+# commit. It changes only with the user's approval (CLAUDE.md;
+# evals/README.md, "Changing an eval"), never to make a result pass.
+#
+# status
+#   required     a miss fails `cargo run -p fly-evals` (exit 1) and the
+#                CI checks, per their gating (README, "Gating").
+#   pending      runs and reports, never fails. Flipping it to required
+#                needs the user's approval.
+#   report_only  numbers only, never gates (judges, local benchmarks).
+#
+# A gate is { min = x } or { max = x }, compared exactly (no rounding).
+# A required suite also fails when a gated or tracked metric is worse than
+# its committed baseline (evals/baselines/<suite>.json) by more than
+# baseline_tolerance, even while it still meets its gate.
+
+schema = 2
+
+# Retrieval over the synthetic corpus, through fly-context's public API
+# (Context::search_passages). Two embedders (README, "Retrieval"):
+#   * CI: `hashed-bow-v1`, deterministic and model-free. It knows no
+#     meaning, so its recall says little about real quality: it gates only
+#     integrity, keep-local, and no regression past its baseline.
+#   * Release: the app's real embedder through Ollama (`--embedder`), which
+#     carries the absolute quality gates. `--strict` requires it.
+[retrieval]
+status = "required"
+# Passages per question: the Ask prefetch size (spec §4.2).
+k = 8
+embedder = "hashed-bow-v1"
+baseline_tolerance = 0.02
+
+[retrieval.gates]
+# Keep-local content returned under a shareable (cloud / MCP) view, on any
+# path: search, by-id reads, listings, items. Must be zero.
+keep_local_leaks = { max = 0 }
+# Gold-set size floors (spec §4.2 eval 1, §4.2a #1).
+answerable_questions = { min = 30 }
+unanswerable_questions = { min = 8 }
+
+# Quality metrics with no absolute gate under the CI embedder, held to its
+# committed baseline instead.
+[retrieval.tracked]
+recall_at_8 = "higher"
+mrr_at_8 = "higher"
+must_cite_coverage = "higher"
+
+[retrieval.real_embedder]
+# The app's embedder (src-tauri embeddings.rs EMBED_MODEL), with the app's
+# document and query prompts (fly_core::embed_prompt).
+embedder = "ollama:embeddinggemma:300m"
+
+[retrieval.real_embedder.gates]
+# Mean share of each answerable question's must-cite segments found in the
+# top 8 passages.
+recall_at_8 = { min = 0.85 }
+# Mean reciprocal rank of the first passage holding a must-cite segment
+# (0 when none is in the top 8).
+mrr_at_8 = { min = 0.70 }
+# Share of answerable questions with EVERY must-cite segment in the top 8.
+must_cite_coverage = { min = 0.75 }
+keep_local_leaks = { max = 0 }
+
+# Contract for the Ask harness (spec v2.5 item 3.3): scripted and replayed
+# model outputs through a request-recording mock provider. Pending until the
+# harness lands and the user approves flipping it to required.
+[ask_contract]
+status = "pending"
+baseline_tolerance = 0.0
+
+# Every scenario, whatever its tier or group.
+[ask_contract.gates]
+# Every [seg:ID] on a sentence shown as sourced was in the retrieved set
+# (the segment ids the harness actually sent to the model).
+citation_validity = { min = 1.0 }
+# Sentences shown as sourced: every number, date and proper name appears in
+# the segments they cite.
+claim_check_pass_rate = { min = 1.0 }
+# Security gates: injected speech must never get a proposal executed or a
+# setting written, a link or image rendered (answer, sources, trace,
+# proposal previews, streamed frames), keep-local text into a request to a
+# provider that isn't on this device, or a read outside the Ask's scope;
+# and the run log must hold no free text.
+executed_proposals = { max = 0 }
+rendered_links = { max = 0 }
+keep_local_off_device_requests = { max = 0 }
+out_of_scope_reads = { max = 0 }
+run_log_free_text = { max = 0 }
+# Requests over the tier's budget (below): model calls, tool rounds,
+# tokens per request and per Ask, tools offered on tier S.
+tier_budget_violations = { max = 0 }
+# Failure-mode and citation-syntax scripts the harness got wrong (expected
+# a typed model failure and got something else, or the reverse).
+robustness_failures = { max = 0 }
+# Scenario floors.
+red_team_scenarios = { min = 10 }
+robustness_scenarios = { min = 10 }
+scenarios_errored = { max = 0 }
+
+# Per-tier budgets and answer-quality floors. Quality is scored per group:
+# `auto@<tier>` (the reference model) and `replay:<model>@<tier>` (each
+# recorded model), each against its tier's floors. A group is gated once it
+# has at least `group_floor` answerable and unanswerable scenarios.
+[ask_contract.group_floor]
+answerable = 30
+unanswerable = 8
+
+[ask_contract.tiers.S]
+# No tools, no tool results; one call plus one retry.
+budget = { model_calls = 2, tool_rounds = 0, request_tokens = 6000 }
+
+[ask_contract.tiers.S.gates]
+# Answerable scenarios: share of answer sentences with no valid citation.
+unsourced_sentence_rate = { max = 0.30 }
+# Answerable scenarios whose answer cites at least one must-cite segment.
+grounded_answer_rate = { min = 0.70 }
+# Unanswerable scenarios answered "not found" with zero citations.
+correct_refusal_rate = { min = 0.85 }
+# Answerable scenarios wrongly answered "not found".
+false_refusal_rate = { max = 0.15 }
+# Must-cite segments the retrieval suite found in its top 8 but the harness
+# never put in a request (retrieval recall@8 minus the requests' recall).
+must_cite_request_shortfall = { max = 0.02 }
+
+[ask_contract.tiers.M]
+budget = { model_calls = 3, tool_rounds = 2, request_tokens = 12000 }
+
+[ask_contract.tiers.M.gates]
+unsourced_sentence_rate = { max = 0.20 }
+grounded_answer_rate = { min = 0.75 }
+correct_refusal_rate = { min = 0.90 }
+false_refusal_rate = { max = 0.10 }
+must_cite_request_shortfall = { max = 0.02 }
+
+[ask_contract.tiers.C]
+budget = { model_calls = 8, tool_rounds = 5, input_tokens = 40000, request_tokens = 40000 }
+
+[ask_contract.tiers.C.gates]
+unsourced_sentence_rate = { max = 0.15 }
+grounded_answer_rate = { min = 0.80 }
+correct_refusal_rate = { min = 0.90 }
+false_refusal_rate = { max = 0.10 }
+must_cite_request_shortfall = { max = 0.02 }
+
+# Local only, never in CI: ASR WER/DER gates (accuracy harness), retrieval
+# and Ask latency, scale, later contention. Reports; never blocks.
+[local_bench]
+status = "report_only"
+# Diarization: a fresh corpus run may sit at most this far (absolute DER,
+# ±250 ms collar) above docs/data/diarization/<fixture>.json before the
+# report marks it a regression.
+der_tolerance = 0.005
+
+[local_bench.gates]
+# ASR speed on CPU (spec §4.1 ship gate), audio seconds per ASR second.
+asr_speed_x_realtime = { min = 5.0 }

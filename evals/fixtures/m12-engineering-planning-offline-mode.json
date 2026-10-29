@@ -1,0 +1,41 @@
+{
+  "id": "m12",
+  "title": "Engineering planning: offline mode",
+  "started_at": "2026-10-09T16:00:00Z",
+  "folder": "Engineering",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Jun Park", "email": "jun@quillmark.example" },
+    { "name": "Hana Kobayashi", "email": "hana@quillmark.example" },
+    { "name": "Odette Nwosu", "email": "odette@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Jun Park", "spk_1": "Hana Kobayashi", "spk_2": "Odette Nwosu" },
+  "scratchpad": "Hana leads offline\nbeta Feb\nconflicts: undecided, look at logs\nSMS later",
+  "segments": [
+    ["m12-01", "mic", "0:04", "Blue Tansy confirmed it yesterday: offline mode is the feature that unlocks their pilot."],
+    ["m12-02", "mic", "0:10", "I'd like a plan for an offline beta. Jun, how big is it?"],
+    ["m12-03", "spk_0", "0:15", "The hard part is the local store on the phone and syncing it safely."],
+    ["m12-04", "spk_0", "0:21", "My estimate is six weeks for a beta with two engineers."],
+    ["m12-05", "mic", "0:27", "Who should lead it?"],
+    ["m12-06", "spk_0", "0:30", "Hana. She built the current sync layer, so she knows where the bodies are buried."],
+    ["m12-07", "spk_1", "0:36", "I'm happy to lead it."],
+    ["m12-08", "mic", "0:39", "Great, Hana leads offline mode. Let's aim for a beta in February, so their January pilot can start on it soon after."],
+    ["m12-09", "spk_1", "0:48", "The big open question is conflicts. Two technicians edit the same job while offline."],
+    ["m12-10", "spk_1", "0:55", "We can do last write wins, which is simple, or show a manual merge screen."],
+    ["m12-11", "spk_0", "1:02", "Last write wins will lose data eventually. I'd rather not decide today without looking at real edit patterns."],
+    ["m12-12", "mic", "1:09", "Agreed, let's look at the logs first. Hana, bring options next week."],
+    ["m12-13", "spk_2", "1:15", "What about SMS reminders? Blue Tansy asked for those too."],
+    ["m12-14", "mic", "1:20", "Not this quarter. Offline mode first, SMS goes on the roadmap for later."],
+    ["m12-15", "spk_2", "1:26", "Then I'll set up a device lab for offline testing."],
+    ["m12-16", "spk_2", "1:30", "Twelve phones, a mix of older Android and iPhone models, ready by the end of the month."]
+  ],
+  "items": [
+    { "kind": "figure", "text": "Offline beta estimate: six weeks with two engineers", "segments": ["m12-04"] },
+    { "kind": "decision", "text": "Hana leads offline mode; beta targeted for February", "segments": ["m12-08"] },
+    { "kind": "question", "text": "Offline sync conflicts: last write wins or a manual merge screen?", "segments": ["m12-09", "m12-10", "m12-11"] },
+    { "kind": "action_item", "text": "Bring conflict-handling options next week, based on real edit logs", "owner": "Hana Kobayashi", "segments": ["m12-12"] },
+    { "kind": "decision", "text": "SMS reminders are not planned this quarter", "segments": ["m12-14"] },
+    { "kind": "action_item", "text": "Set up a twelve-phone device lab for offline testing by the end of the month", "owner": "Odette Nwosu", "segments": ["m12-15", "m12-16"] }
+  ]
+}

@@ -1,0 +1,632 @@
+# Retrieval gold set (spec §4.2 eval 1, §4.2a #1 and #14). Written before
+# the first run; questions are phrased the way a user would type them, not
+# tuned to the retriever.
+#
+# [[answerable]]
+#   id          stable id (also used by ask_contract scenarios)
+#   question    the text passed to search_passages as `query`
+#   must_cite   segments a complete answer needs. Each entry is one segment
+#               id, or a list of alternative ids (any one satisfies it).
+#   evidence    words the must-cite segments contain (checked against the
+#               fixture text, case-insensitive), so a wrong id fails loudly
+#   answer      the gold answer in plain words (the `auto` script's reply)
+#   category    reported breakdowns
+#   scope       optional: { meeting = "m05" } or { folder = "Customers/Harrowgate" }
+#   keep_local  optional: true when the answer lives only in the keep-local
+#               meeting (answerable under Visibility::All only)
+#
+# [[unanswerable]]
+#   id, question, why (what the corpus does and doesn't say), and optional
+#   visibility = "shareable" when only the shareable view must find nothing.
+
+# --- launch series: numbers that change week to week ----------------------
+
+[[answerable]]
+id = "q01"
+question = "What paid launch budget did Ines ask for in the first Atlas launch meeting?"
+must_cite = ["m01-05"]
+evidence = ["eighty four hundred dollars"]
+answer = "Ines asked for eighty four hundred dollars for the first month of paid launch spend."
+category = ["numbers", "series"]
+
+[[answerable]]
+id = "q02"
+question = "What is the current cap on the Atlas launch budget?"
+must_cite = ["m02-06", "m02-07"]
+evidence = ["ninety two hundred", "cap"]
+answer = "The cap is ninety two hundred dollars for the first month, agreed with Greta."
+category = ["numbers", "series", "near_duplicate"]
+
+[[answerable]]
+id = "q03"
+question = "Why did the launch budget go up?"
+must_cite = ["m02-03", "m02-04"]
+evidence = ["podcast", "ninety two hundred"]
+answer = "A podcast sponsorship was added, taking the first month from eighty four hundred to ninety two hundred dollars."
+category = ["cross_meeting", "series"]
+
+[[answerable]]
+id = "q04"
+question = "When is the Atlas launch now?"
+must_cite = ["m02-10"]
+evidence = ["October twenty-seventh"]
+answer = "October twenty-seventh, one week later than first planned."
+category = ["dates", "series", "near_duplicate"]
+
+[[answerable]]
+id = "q05"
+question = "Why did we push the launch date?"
+must_cite = ["m02-09", "m02-10"]
+evidence = ["security review", "twenty-seventh"]
+answer = "The security review on the scheduler API won't finish until the twenty-second, so the launch moved to October twenty-seventh."
+category = ["dates", "series"]
+
+[[answerable]]
+id = "q06"
+question = "What launch date did we originally target?"
+must_cite = ["m01-08"]
+evidence = ["October twentieth"]
+answer = "October twentieth."
+category = ["dates", "series", "near_duplicate"]
+
+[[answerable]]
+id = "q07"
+question = "When is the launch webinar?"
+must_cite = ["m03-03"]
+evidence = ["November third"]
+answer = "November third at ten Pacific, one week after the launch."
+category = ["dates", "series"]
+
+[[answerable]]
+id = "q08"
+question = "How much of the launch budget have we spent so far?"
+must_cite = ["m03-06"]
+evidence = ["twenty one hundred"]
+answer = "Twenty one hundred of the ninety two hundred dollars."
+category = ["numbers", "series"]
+
+[[answerable]]
+id = "q09"
+question = "Who is drafting the press release, and when is it due?"
+must_cite = ["m01-10"]
+evidence = ["press release", "Wednesday"]
+answer = "Ines is drafting it and will have it in the shared folder by next Wednesday."
+category = ["names", "action_items"]
+
+[[answerable]]
+id = "q10"
+question = "Who is updating the pricing page countdown after the date change?"
+must_cite = ["m02-12"]
+evidence = ["countdown"]
+answer = "Marcus will change the countdown and the announcement banner to the twenty-seventh by Friday."
+category = ["names", "action_items", "near_duplicate"]
+
+[[answerable]]
+id = "q11"
+question = "What rate limit did Jun propose for the scheduler API?"
+must_cite = ["m01-13"]
+evidence = ["two hundred requests per minute"]
+answer = "Two hundred requests per minute per customer."
+category = ["numbers", "names"]
+
+[[answerable]]
+id = "q12"
+question = "Is the API rate limit live yet?"
+must_cite = ["m02-17"]
+evidence = ["feature flag", "staging"]
+answer = "It's merged and running behind a feature flag in staging."
+category = ["series"]
+
+# --- pricing: near-duplicates of the launch series ------------------------
+
+[[answerable]]
+id = "q13"
+question = "What are the final names of the Atlas tiers?"
+must_cite = [["m03-13", "m07-07"]]
+evidence = ["Starter", "Fleet"]
+answer = "Starter, Team and Fleet."
+category = ["decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q14"
+question = "How much does the Starter tier cost per technician?"
+must_cite = ["m07-04", "m07-07"]
+evidence = ["nineteen dollars", "Starter"]
+answer = "Starter is nineteen dollars per technician per month."
+category = ["numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q15"
+question = "What did we decide about the free tier?"
+must_cite = ["m07-09", "m07-10"]
+evidence = ["drop", "free tier"]
+answer = "It's dropped at launch; the demo request stays."
+category = ["decisions"]
+
+[[answerable]]
+id = "q16"
+question = "What discount do annual plans get?"
+must_cite = ["m07-12"]
+evidence = ["two months free"]
+answer = "Two months free on annual plans."
+category = ["numbers", "decisions"]
+
+[[answerable]]
+id = "q17"
+question = "What happens to existing customers' pricing when the new tiers launch?"
+must_cite = ["m07-16"]
+evidence = ["twelve months"]
+answer = "They keep their current price for twelve months, then move to the new tiers."
+category = ["decisions"]
+
+[[answerable]]
+id = "q18"
+question = "Who is modeling the revenue impact of dropping the free tier?"
+must_cite = ["m07-14"]
+evidence = ["model it"]
+answer = "Greta will model it and send the numbers by next Tuesday."
+category = ["names", "action_items"]
+
+# --- Harrowgate renewal: two calls ----------------------------------------
+
+[[answerable]]
+id = "q19"
+question = "How much does Harrowgate pay us today?"
+must_cite = ["m04-03"]
+evidence = ["forty two thousand dollars"]
+answer = "Forty two thousand dollars a year for sixty technician seats."
+category = ["numbers"]
+
+[[answerable]]
+id = "q20"
+question = "What discount did Colm ask for on the renewal?"
+must_cite = ["m04-06"]
+evidence = ["fifteen percent"]
+answer = "Colm asked for fifteen percent off."
+category = ["numbers", "names"]
+
+[[answerable]]
+id = "q21"
+question = "What renewal terms did Harrowgate agree to?"
+must_cite = ["m05-09"]
+evidence = ["two year", "twelve percent"]
+answer = "A two year term at twelve percent off, with the route optimization module included for six months."
+category = ["decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q22"
+question = "How did the Harrowgate discount change between the first call and the follow-up?"
+must_cite = ["m04-06", "m05-09"]
+evidence = ["fifteen", "twelve"]
+answer = "Colm first asked for fifteen percent on one year; they agreed to twelve percent on a two year term."
+category = ["cross_meeting", "numbers"]
+
+[[answerable]]
+id = "q23"
+question = "When does Harrowgate need to sign the renewal?"
+must_cite = ["m05-12"]
+evidence = ["October thirtieth"]
+answer = "By October thirtieth."
+category = ["dates", "near_duplicate"]
+
+[[answerable]]
+id = "q24"
+question = "Who is sending the Harrowgate redlines?"
+must_cite = ["m05-14"]
+evidence = ["redlines", "Monday"]
+answer = "Elena, by Monday."
+category = ["names", "action_items"]
+
+[[answerable]]
+id = "q25"
+question = "Which competitor did Harrowgate bring up?"
+must_cite = ["m04-07"]
+evidence = ["Routewise"]
+answer = "Routewise, which quoted them lower."
+category = ["names"]
+
+# --- hiring ---------------------------------------------------------------
+
+[[answerable]]
+id = "q26"
+question = "Who did we decide to hire as support lead?"
+must_cite = ["m06-10"]
+evidence = ["offer to Nadia"]
+answer = "Nadia."
+category = ["decisions", "names"]
+
+[[answerable]]
+id = "q27"
+question = "What's the salary band for the support lead role?"
+must_cite = ["m06-12"]
+evidence = ["a hundred and ten thousand", "a hundred and twenty five thousand"]
+answer = "A hundred and ten thousand to a hundred and twenty five thousand, opening at a hundred and eighteen thousand."
+category = ["numbers"]
+
+[[answerable]]
+id = "q28"
+question = "What did we say about Tomasz?"
+must_cite = ["m06-11"]
+evidence = ["Tomasz", "integrations"]
+answer = "Keep him warm: he'd be a good fit for the integrations role next year."
+category = ["names"]
+
+# --- outage ---------------------------------------------------------------
+
+[[answerable]]
+id = "q29"
+question = "How long was the scheduler outage?"
+must_cite = ["m08-03"]
+evidence = ["forty seven minutes"]
+answer = "Forty seven minutes."
+category = ["numbers"]
+
+[[answerable]]
+id = "q30"
+question = "What caused the scheduler outage?"
+must_cite = ["m08-05"]
+evidence = ["TLS certificate"]
+answer = "An expired TLS certificate on the job queue."
+category = ["decisions"]
+
+[[answerable]]
+id = "q31"
+question = "What are the action items from the outage review?"
+must_cite = ["m08-11", "m08-13", "m08-15", "m08-18", "m08-09"]
+evidence = ["thirty days", "October sixteenth", "status page", "team calendar", "Elena"]
+answer = "Odette adds certificate expiry alerts thirty days ahead, Jun automates certificate renewal by October sixteenth and puts the on-call schedule in the team calendar, Hana writes the status page post, and you tell Elena that Harrowgate was affected."
+category = ["action_items", "decisions_vs_actions"]
+
+[[answerable]]
+id = "q32"
+question = "Did the outage affect Harrowgate?"
+must_cite = ["m08-08"]
+evidence = ["Harrowgate opened a ticket"]
+answer = "Yes, Harrowgate opened a ticket."
+category = ["cross_meeting", "near_duplicate"]
+
+# --- board prep -----------------------------------------------------------
+
+[[answerable]]
+id = "q33"
+question = "What was our ARR at the end of Q3?"
+must_cite = ["m09-03"]
+evidence = ["three point two million"]
+answer = "Three point two million."
+category = ["numbers"]
+
+[[answerable]]
+id = "q34"
+question = "How many people are we hiring in Q4?"
+must_cite = ["m09-10"]
+evidence = ["Six hires"]
+answer = "Six: four in engineering and two in support."
+category = ["numbers", "decisions"]
+
+[[answerable]]
+id = "q35"
+question = "What's our runway if we make all the Q4 hires?"
+must_cite = ["m09-12"]
+evidence = ["Nineteen months"]
+answer = "Nineteen months."
+category = ["numbers"]
+
+# --- Blue Tansy and offline mode: near-duplicates --------------------------
+
+[[answerable]]
+id = "q36"
+question = "What did Blue Tansy ask us to build?"
+must_cite = ["m11-03", "m11-06"]
+evidence = ["offline", "SMS"]
+answer = "Offline mode for technicians, and SMS reminders for patients the day before a visit."
+category = ["near_duplicate"]
+
+[[answerable]]
+id = "q37"
+question = "How many clinics would Blue Tansy pilot, and when?"
+must_cite = ["m11-08", "m11-09"]
+evidence = ["forty clinics", "January"]
+answer = "Forty clinics, starting in January, if offline mode lands."
+category = ["numbers", "dates"]
+
+[[answerable]]
+id = "q38"
+question = "Who is leading offline mode?"
+must_cite = ["m12-08"]
+evidence = ["Hana leads offline mode"]
+answer = "Hana."
+category = ["names", "decisions"]
+
+[[answerable]]
+id = "q39"
+question = "How long will the offline beta take to build?"
+must_cite = ["m12-04"]
+evidence = ["six weeks"]
+answer = "About six weeks with two engineers."
+category = ["numbers"]
+
+[[answerable]]
+id = "q40"
+question = "Have we decided how to handle sync conflicts in offline mode?"
+must_cite = ["m12-11", "m12-12"]
+evidence = ["not decide today", "logs"]
+answer = "No. It's still open: the team will look at real edit logs first, and Hana brings options next week."
+category = ["decisions_vs_actions"]
+
+[[answerable]]
+id = "q41"
+question = "Are SMS reminders planned for this quarter?"
+must_cite = ["m12-14"]
+evidence = ["Not this quarter"]
+answer = "No, not this quarter; offline mode comes first."
+category = ["decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q42"
+question = "Are we translating the docs into Spanish?"
+must_cite = ["m03-09", "m03-12"]
+evidence = ["translate", "quote"]
+answer = "Not decided yet: Hana is getting a quote first, and the decision waits for it."
+category = ["decisions_vs_actions"]
+
+[[answerable]]
+id = "q47"
+question = "Who is setting up the device lab for offline testing?"
+must_cite = ["m12-15", "m12-16"]
+evidence = ["device lab", "Twelve phones"]
+answer = "Odette: twelve phones, ready by the end of the month."
+category = ["names", "action_items"]
+
+# --- scoped (Ask from inside a note or a folder) --------------------------
+
+[[answerable]]
+id = "q43"
+question = "What did we decide in this meeting?"
+scope = { meeting = "m08" }
+must_cite = ["m08-17"]
+evidence = ["on-call rotation"]
+answer = "A weekly on-call rotation, starting next Monday."
+category = ["scoped", "decisions_vs_actions"]
+
+[[answerable]]
+id = "q44"
+question = "What do I need to do after this call?"
+scope = { meeting = "m05" }
+must_cite = ["m05-16"]
+evidence = ["onboarding"]
+answer = "Schedule the route module onboarding once the contract is signed."
+category = ["scoped", "action_items"]
+
+[[answerable]]
+id = "q45"
+question = "When does the contract need to be signed?"
+scope = { folder = "Customers/Harrowgate" }
+must_cite = ["m05-12"]
+evidence = ["signed by October thirtieth"]
+answer = "By October thirtieth."
+category = ["scoped", "dates"]
+
+# --- keep local (answerable on this machine only) -------------------------
+
+[[answerable]]
+id = "q46"
+question = "What retention bonus did I propose for Felix?"
+must_cite = ["m10-07"]
+evidence = ["fifteen thousand"]
+answer = "Fifteen thousand, paid in two halves."
+category = ["keep_local", "numbers"]
+keep_local = true
+
+# --- not discussed --------------------------------------------------------
+
+[[unanswerable]]
+id = "u01"
+question = "What did we decide about the Berlin office lease?"
+why = "No office or lease is discussed anywhere."
+
+[[unanswerable]]
+id = "u02"
+question = "What's the budget for the Q1 team offsite?"
+why = "Budgets are discussed (launch ads, salary band) but never an offsite."
+
+[[unanswerable]]
+id = "u03"
+question = "What price did Routewise quote Harrowgate?"
+why = "Colm says Routewise quoted lower, but no amount is ever given."
+
+[[unanswerable]]
+id = "u04"
+question = "Which contractor is doing the Spanish translation?"
+why = "Hana has no quote yet and no contractor is named."
+
+[[unanswerable]]
+id = "u05"
+question = "What did the board decide at Friday's meeting?"
+why = "Only the board prep is recorded, not the board meeting."
+
+[[unanswerable]]
+id = "u06"
+question = "How many technician seats does Blue Tansy have?"
+why = "Seats are only mentioned for Harrowgate (sixty)."
+
+[[unanswerable]]
+id = "u07"
+question = "What were the results of Jun's load test?"
+why = "The load test is planned for Thursday; no result is ever reported."
+
+[[unanswerable]]
+id = "u08"
+question = "Did we agree on a discount for the Blue Tansy pilot?"
+why = "Discounts are discussed only for Harrowgate."
+
+[[unanswerable]]
+id = "u09"
+question = "What was our churn rate in Q3?"
+why = "Growth, ARR and net revenue retention are given; churn never is."
+
+[[unanswerable]]
+id = "u10"
+question = "What is Project Kestrel?"
+why = "Discussed only in the keep-local 1:1, so a shareable view must find nothing."
+visibility = "shareable"
+
+[[unanswerable]]
+id = "u11"
+question = "Who replaced Ines as marketing lead?"
+why = "Nobody replaces Ines; it's never discussed."
+
+# --- long meetings (review item 8): answers deep inside ~100-segment meetings ---
+
+# --- long meetings: Q4 roadmap planning (m13) ------------------------------
+
+[[answerable]]
+id = "q13a"
+question = "Which calendar company did we end up picking for the partner integration?"
+must_cite = ["m13-066"]
+evidence = ["Larkspan", "not Orchardly"]
+answer = "Larkspan, not Orchardly; the earlier lean toward Orchardly was reversed."
+category = ["names", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q13b"
+question = "What cold start time are we aiming for on the technician app?"
+must_cite = ["m13-093"]
+evidence = ["under four seconds", "stretch goal"]
+answer = "Under four seconds on the reference Android phone; under three seconds is now only a stretch goal."
+category = ["numbers", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q13c"
+question = "When are we shutting off the old job export endpoint?"
+must_cite = ["m13-084"]
+evidence = ["thirty-first of March"]
+answer = "On the thirty-first of March, moved out from December."
+category = ["dates", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q13d"
+question = "Who's writing up the API versioning proposal, and when is it due?"
+must_cite = ["m13-077"]
+evidence = ["API versioning proposal", "ninth of October"]
+answer = "Jun is writing it himself, due Friday the ninth of October."
+category = ["names", "action_items", "near_duplicate"]
+
+[[unanswerable]]
+id = "u13"
+question = "How much is the Larkspan partnership going to cost us?"
+why = "Larkspan is picked as the calendar partner, but no fees, revenue share or other commercial terms are discussed anywhere."
+
+# --- long meetings: support operations review (m14) ------------------------
+
+[[answerable]]
+id = "q14a"
+question = "How many support tickets did we really get in September?"
+must_cite = ["m14-073"]
+evidence = ["a thousand and eighty"]
+answer = "A thousand and eighty, after Lotte took out merged duplicates and spam."
+category = ["numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q14b"
+question = "When is the switch to the new helpdesk happening?"
+must_cite = ["m14-050"]
+evidence = ["Tidepost goes live", "sixteenth of November"]
+answer = "Tidepost goes live on Monday the sixteenth of November, two weeks later than planned, with Burrowdesk read-only for a week after."
+category = ["dates", "names", "near_duplicate"]
+
+[[answerable]]
+id = "q14c"
+question = "How quickly do urgent tickets get escalated to engineering now?"
+must_cite = ["m14-084"]
+evidence = ["after two hours", "three days"]
+answer = "After two hours without a fix, shorter than the four hours first floated; everything else stays at three days."
+category = ["decisions", "numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q14d"
+question = "Who's cleaning up the support macros, and by when?"
+must_cite = ["m14-058"]
+evidence = ["ninety days", "twenty-third of October"]
+answer = "Callum, by Friday the twenty-third of October: he archives every macro unused for ninety days and rewrites the top twenty."
+category = ["names", "action_items", "near_duplicate"]
+
+[[unanswerable]]
+id = "u14"
+question = "What was our customer satisfaction score in September?"
+why = "The September support review covers volume, response times, categories, macros, escalation, staffing and the helpdesk move, but no satisfaction or CSAT score is given anywhere."
+
+# --- long meetings: answers deep inside, superseded values earlier --------
+
+[[answerable]]
+id = "q15a"
+question = "How long do we have to tell Calder Water after a security incident?"
+must_cite = ["m15-079"]
+evidence = ["forty eight hours", "old template"]
+answer = "Forty eight hours from when we confirm an incident; the seventy two hours mentioned first was our old template."
+category = ["numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q15b"
+question = "Which firm ran our most recent penetration test?"
+must_cite = ["m15-073"]
+evidence = ["Larkspire Assurance", "two years ago"]
+answer = "Larkspire Assurance did this year's test, finished in May; Ormsby Kade did the test two years ago."
+category = ["names", "near_duplicate"]
+
+[[answerable]]
+id = "q15c"
+question = "Is Calder getting its own dedicated instance for data residency?"
+must_cite = ["m15-087"]
+evidence = ["drop the dedicated instance", "residency addendum"]
+answer = "No. They stay on the shared environment, with a residency addendum stating that production data and backups stay in the US."
+category = ["decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q15d"
+question = "Who is sending Calder the corrected security questionnaire, and by when?"
+must_cite = ["m15-096"]
+evidence = ["revised questionnaire", "fourteenth of October"]
+answer = "Elena will send the revised questionnaire to Beatrix by Wednesday the fourteenth of October."
+category = ["names", "action_items", "dates"]
+
+[[unanswerable]]
+id = "u15"
+question = "How much would a dedicated single-tenant instance for Calder Water cost?"
+why = "Elena floats a dedicated instance and it is then dropped in favour of a residency addendum; no cost is ever mentioned."
+
+[[answerable]]
+id = "q16a"
+question = "Will the technician app open on the map or on a list of jobs?"
+must_cite = ["m16-057"]
+evidence = ["opens on the list", "one tap away"]
+answer = "It opens on the list, with the next job pinned at the top, and the map is one tap away on its own tab."
+category = ["decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q16b"
+question = "In the bigger usability round, how many technicians found their next job on the map layout?"
+must_cite = ["m16-047"]
+evidence = ["eight of fourteen", "thirteen of fourteen"]
+answer = "Eight of fourteen on the map, against thirteen of fourteen with the list."
+category = ["numbers", "near_duplicate"]
+
+[[answerable]]
+id = "q16c"
+question = "Which icon set did we pick for the technician app?"
+must_cite = ["m16-068"]
+evidence = ["Marlpit icons", "instead of Pennyroyal"]
+answer = "Marlpit icons, instead of Pennyroyal."
+category = ["names", "decisions", "near_duplicate"]
+
+[[answerable]]
+id = "q16d"
+question = "What are the rollout dates for the new home screen, and who is running it?"
+must_cite = ["m16-083"]
+evidence = ["ten percent of technicians", "twenty first of October", "eleventh of November"]
+answer = "Marcus runs it: internal crews on Wednesday the fourteenth, ten percent of technicians on the twenty first of October, and everyone on the eleventh of November."
+category = ["dates", "action_items", "near_duplicate"]
+
+[[unanswerable]]
+id = "u16"
+question = "How much does the licence for the new icon set cost?"
+why = "Marlpit is chosen and its licence is described as one-off and perpetual, with finance happy with the terms, but no price is ever given."

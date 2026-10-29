@@ -1,0 +1,41 @@
+{
+  "id": "m07",
+  "title": "Pricing review: Atlas tiers",
+  "started_at": "2026-09-22T18:00:00Z",
+  "folder": "Atlas launch",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Marcus Webb", "email": "marcus@quillmark.example" },
+    { "name": "Greta Holm", "email": "greta@quillmark.example" },
+    { "name": "Elena Duarte", "email": "elena@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_1": "Marcus Webb", "spk_2": "Greta Holm", "spk_3": "Elena Duarte" },
+  "scratchpad": "",
+  "segments": [
+    ["m07-01", "mic", "0:04", "This is the pricing review for Atlas. I want prices, names and a decision on the free tier."],
+    ["m07-02", "spk_1", "0:11", "I'll share my screen. Three tiers, and I've been calling them plan one, two and three."],
+    ["m07-03", "spk_2", "0:18", "Let's start with the numbers, the names are easy."],
+    ["m07-04", "spk_1", "0:22", "Plan one is nineteen dollars per technician per month. That's the self-serve tier."],
+    ["m07-05", "spk_1", "0:29", "Plan two is thirty nine dollars per technician, with route optimization and the reporting pack."],
+    ["m07-06", "spk_1", "0:36", "Plan three is custom pricing for fleets over two hundred technicians."],
+    ["m07-07", "mic", "0:42", "For names, I like Starter, Team and Fleet. Any objections? No? Then those are the names."],
+    ["m07-08", "spk_3", "0:50", "What happens to the free tier?"],
+    ["m07-09", "mic", "0:53", "I want to drop it. It brings sign-ups but almost nobody converts, and support pays for it."],
+    ["m07-10", "spk_2", "1:01", "I agree. We drop the free tier at launch and keep the demo request."],
+    ["m07-11", "spk_3", "1:07", "Then annual billing should feel generous. Two months free if you pay yearly?"],
+    ["m07-12", "mic", "1:13", "Yes, two months free on annual plans."],
+    ["m07-13", "spk_2", "1:17", "Before we announce, I want to see what dropping free does to the revenue forecast."],
+    ["m07-14", "spk_2", "1:23", "I'll model it and send the numbers by next Tuesday."],
+    ["m07-15", "spk_3", "1:28", "What about current customers on the old pricing?"],
+    ["m07-16", "mic", "1:32", "They keep their current price for twelve months. After that they move to the new tiers."]
+  ],
+  "items": [
+    { "kind": "decision", "text": "Tier prices: Starter $19 and Team $39 per technician per month; Fleet custom", "segments": ["m07-04", "m07-05", "m07-06"] },
+    { "kind": "decision", "text": "Tier names: Starter, Team and Fleet", "segments": ["m07-07"] },
+    { "kind": "decision", "text": "Drop the free tier at launch", "segments": ["m07-09", "m07-10"] },
+    { "kind": "decision", "text": "Annual plans get two months free", "segments": ["m07-12"] },
+    { "kind": "action_item", "text": "Model the revenue impact of dropping the free tier by next Tuesday", "owner": "Greta Holm", "segments": ["m07-13", "m07-14"] },
+    { "kind": "decision", "text": "Existing customers keep their price for twelve months", "segments": ["m07-16"] }
+  ]
+}

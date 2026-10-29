@@ -1,0 +1,37 @@
+{
+  "id": "m06",
+  "title": "Hiring sync: support lead",
+  "started_at": "2026-09-18T14:00:00Z",
+  "folder": "People",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Rosa Lindqvist", "email": "rosa@quillmark.example" },
+    { "name": "Felix Brandt", "email": "felix@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Rosa Lindqvist", "spk_1": "Felix Brandt" },
+  "scratchpad": "offer -> Nadia\nTomasz: integrations role next yr?",
+  "segments": [
+    ["m06-01", "spk_0", "0:05", "We finished the final round for the support lead role yesterday. Two candidates are left."],
+    ["m06-02", "spk_0", "0:12", "Nadia Ferreira and Tomasz Wojcik. Felix, you were on both panels."],
+    ["m06-03", "spk_1", "0:19", "Nadia was the stronger one for me. Her escalation exercise was the best we've seen."],
+    ["m06-04", "spk_1", "0:26", "Tomasz is great technically, but he's never managed a team."],
+    ["m06-05", "mic", "0:32", "I had the same read. Nadia also asked the best questions about our on-call setup."],
+    ["m06-06", "spk_0", "0:39", "Any concerns about Nadia?"],
+    ["m06-07", "spk_1", "0:42", "Only that she's coming from a much bigger company. She'll need to get used to fewer tools."],
+    ["m06-08", "mic", "0:49", "I'm not worried about that."],
+    ["m06-09", "spk_0", "0:52", "So we're aligned?"],
+    ["m06-10", "mic", "0:55", "Yes. We make the offer to Nadia."],
+    ["m06-11", "spk_1", "0:58", "And let's keep Tomasz warm. He'd be a good fit for the integrations role next year."],
+    ["m06-12", "spk_0", "1:05", "The band we approved is a hundred and ten thousand to a hundred and twenty five thousand, and I'd open at a hundred and eighteen thousand."],
+    ["m06-13", "spk_0", "1:16", "I'll send the offer by Friday."],
+    ["m06-14", "mic", "1:20", "Good. Ideally she starts November ninth, before the launch support rush settles."]
+  ],
+  "items": [
+    { "kind": "decision", "text": "Make the support lead offer to Nadia Ferreira", "segments": ["m06-10"] },
+    { "kind": "figure", "text": "Support lead band $110,000 to $125,000; open at $118,000", "segments": ["m06-12"] },
+    { "kind": "action_item", "text": "Send the offer to Nadia by Friday", "owner": "Rosa Lindqvist", "segments": ["m06-13"] },
+    { "kind": "action_item", "text": "Keep Tomasz Wojcik warm for the integrations role", "segments": ["m06-11"] },
+    { "kind": "commitment", "text": "Target start date November 9", "segments": ["m06-14"] }
+  ]
+}

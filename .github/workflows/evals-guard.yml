@@ -1,0 +1,245 @@
+name: Evals lock
+
+# The CI half of the eval lock (evals/README.md, "How it's enforced").
+# Eval changes need the user's approval (CLAUDE.md). The hard lock is
+# optional: it's on once the user sets EVALS_LOCK_SHA256 (and requires this
+# check); until then this job passes and only reports the hash.
+#
+# `pull_request_target` runs THIS file as it is on the base branch (main),
+# so a pull request can't change the check that judges it. The job hashes
+# the protected paths at the PR head and compares the hash with the
+# repository variable EVALS_LOCK_SHA256, which only the user sets:
+#
+#   evals/**   .github/workflows/evals.yml   .github/workflows/evals-guard.yml
+#   .claude/settings.json   .claude/hooks/**
+#
+# The hash is the SHA-256 of `git -c core.quotePath=true ls-tree -r` over
+# those paths (mode, type, blob id, path), sorted: blob ids make it
+# independent of line endings. evals/lock-hash.sh computes the same value.
+# On push to main it checks main itself, so drift there shows up too.
+#
+# It also fails when any other workflow at the PR head defines a job with
+# one of the eval check names (evals-lock, evals-security, evals-quality),
+# which could otherwise satisfy a required check with a different job.
+#
+# It never executes PR code. The PR head is checked out only so its git
+# objects can be read with `git ls-tree`, `git grep` and `git diff
+# --name-only`; nothing from it is built, sourced or run, credentials aren't
+# persisted, and the token is read-only. The only PR-derived values used are
+# commit SHAs, passed through env.
+#
+# Fails when the variable is set and the hash differs from it, and always
+# on an impostor. With the variable unset it passes with a "lock not
+# enabled" notice. The computed hash is always printed to the job summary
+# so the user can copy it after reviewing an eval change. Job name:
+# evals-lock.
+on:
+  # zizmor: ignore[dangerous-triggers] -- read-only lock check: it hashes the PR head's protected paths with git ls-tree and never builds or runs PR code (see the header).
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: evals-lock-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  evals-lock:
+    name: evals-lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Compare the lock hash
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EXPECTED: ${{ vars.EVALS_LOCK_SHA256 }}
+        run: |
+          set -euo pipefail
+          paths=(evals .github/workflows/evals.yml .github/workflows/evals-guard.yml .claude/settings.json .claude/hooks)
+          hash=$(git -c core.quotePath=true ls-tree -r --full-tree "$HEAD_SHA" -- "${paths[@]}" | LC_ALL=C sort | sha256sum | cut -d' ' -f1)
+          expected=$(printf '%s' "$EXPECTED" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+          echo "Lock hash at $HEAD_SHA: $hash"
+
+          # Which protected files change (diagnostics only; the base
+          # commit's objects are fetched anonymously, the repo is public).
+          changed=""
+          if [ -n "$BASE_SHA" ] && ! [[ "$BASE_SHA" =~ ^0*$ ]] &&
+            git fetch --quiet --depth=1 --no-tags origin "$BASE_SHA" 2>/dev/null; then
+            changed=$(git -c core.quotePath=true diff --name-only "$BASE_SHA" "$HEAD_SHA" -- "${paths[@]}" || true)
+          fi
+
+          # Another workflow must not impersonate an eval check. A tripwire,
+          # not a proof (GitHub matches required checks by name, and
+          # expressions can't be fully evaluated here): the literal names
+          # anywhere, plus each parsed job's id and name, with the string
+          # pieces inside expressions joined, and its matrix values.
+          impostors=$(git grep -nE 'evals-(lock|security|quality)\b|evals-\$\{\{' "$HEAD_SHA" -- \
+            '.github/workflows/*.yml' '.github/workflows/*.yaml' \
+            ':!.github/workflows/evals.yml' ':!.github/workflows/evals-guard.yml' || true)
+          # The workflow files are copied out of the PR's git objects into a
+          # temp folder and parsed there by isolated interpreters (python3 -I:
+          # no cwd or script dir on sys.path), so nothing from the PR is imported
+          # or run.
+          wfdir="$RUNNER_TEMP/pr-workflows"
+          rm -rf "$wfdir"
+          mkdir -p "$wfdir"
+          # NUL-separated, unquoted names; anything we can't copy out is
+          # reported as an impostor (fail closed), never skipped.
+          unreadable="$RUNNER_TEMP/pr-workflows-unreadable.txt"
+          : >"$unreadable"
+          git -c core.quotePath=false ls-tree -z --name-only "$HEAD_SHA" -- .github/workflows/ |
+            while IFS= read -r -d '' f; do
+              case "$f" in
+                .github/workflows/evals.yml | .github/workflows/evals-guard.yml) ;;
+                *.yml | *.yaml)
+                  name=$(basename -- "$f")
+                  if [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] && git show "$HEAD_SHA:$f" >"$wfdir/$name"; then
+                    :
+                  else
+                    printf '%s: workflow file with an unusual name or unreadable content\n' "$f" >>"$unreadable"
+                  fi
+                  ;;
+              esac
+            done
+          # YAML → JSON with whatever parser the runner has (none of them
+          # loads code from the folder); the detector then needs only the
+          # standard library.
+          parser=""
+          if (cd "$wfdir" && python3 -I -c 'import yaml') 2>/dev/null; then
+            parser=pyyaml
+          elif command -v yq >/dev/null 2>&1; then
+            parser=yq
+          elif command -v ruby >/dev/null 2>&1; then
+            parser=ruby
+          fi
+          for f in "$wfdir"/*.yml "$wfdir"/*.yaml; do
+            [ -f "$f" ] || continue
+            case "$parser" in
+              pyyaml) (cd "$wfdir" && python3 -I -c 'import json, sys, yaml; json.dump(yaml.safe_load(open(sys.argv[1], encoding="utf-8")), open(sys.argv[2], "w"), default=str)' "$f" "$f.json") || echo '"unparseable"' >"$f.json" ;;
+              yq) yq -o=json '.' "$f" >"$f.json" 2>/dev/null || echo '"unparseable"' >"$f.json" ;;
+              ruby) (cd "$wfdir" && ruby -ryaml -rjson -e 'puts JSON.dump(YAML.safe_load(File.read(ARGV[0]), aliases: true, permitted_classes: [Date, Time, Symbol]))' "$f" >"$f.json") || echo '"unparseable"' >"$f.json" ;;
+            esac
+          done
+          if [ -z "$parser" ]; then
+            echo "::warning title=Eval lock::No YAML parser on the runner: job names were checked by literal text only."
+          fi
+          parsed=$(cd "$wfdir" && python3 -I - <<'PY'
+          import glob, json, re
+
+          NAMES = ("evals-lock", "evals-security", "evals-quality")
+
+          def strings(x):
+              if isinstance(x, str):
+                  yield x
+              elif isinstance(x, dict):
+                  for k, v in x.items():
+                      yield from strings(str(k))
+                      yield from strings(v)
+              elif isinstance(x, list):
+                  for v in x:
+                      yield from strings(v)
+
+          # Contexts an expression could read a PR-controlled or computed
+          # value from (a branch named evals-lock via github.head_ref).
+          CONTEXTS = re.compile(r"\b(github|env|vars|job|jobs|steps|runner|secrets|strategy|needs|inputs)\b")
+
+          def suspicious(text, matrix):
+              t = text.lower()
+              literals = "".join(re.findall(r"'([^']*)'", t))
+              bare = re.sub(r"\$\{\{.*?\}\}", "", t)
+              if any(n in s for n in NAMES for s in (t, literals, bare, bare + literals)):
+                  return True
+              # ("$" + "{{": a literal one here would be an Actions expression.)
+              if ("$" + "{{") not in t:
+                  return False
+              exprs = re.findall(r"\$\{\{(.*?)\}\}", t)
+              # Any context other than matrix: the value isn't ours to know.
+              if any(CONTEXTS.search(e) for e in exprs):
+                  return True
+              # Literal pieces that spell part of an eval check name.
+              pieces = bare + literals
+              if any(w in pieces for w in ("lock", "security", "quality")):
+                  return True
+              # An expression name next to anything spelling "eval".
+              return "eval" in (t + literals + matrix)
+
+          for path in sorted(glob.glob("*.json")):
+              name_of_file = path[: -len(".json")]
+              try:
+                  wf = json.load(open(path, encoding="utf-8"))
+              except Exception as e:
+                  print(f"{name_of_file}: not parseable ({e})")
+                  continue
+              if wf == "unparseable":
+                  print(f"{name_of_file}: not parseable")
+                  continue
+              jobs = wf.get("jobs") if isinstance(wf, dict) else None
+              for jid, job in (jobs or {}).items() if isinstance(jobs, dict) else []:
+                  job = job if isinstance(job, dict) else {}
+                  name = str(job.get("name", jid))
+                  matrix = "".join(strings((job.get("strategy") or {}).get("matrix"))).lower()
+                  if suspicious(str(jid), matrix) or suspicious(name, matrix):
+                      print(f"{name_of_file}: job {jid} (name: {name})")
+          PY
+          )
+          impostors=$(printf '%s\n%s\n%s' "$impostors" "$parsed" "$(cat "$unreadable")" | sed '/^$/d')
+
+          {
+            echo "### Eval lock"
+            echo
+            echo "Lock hash at \`$HEAD_SHA\`:"
+            echo
+            echo '```'
+            echo "$hash"
+            echo '```'
+            if [ -n "$changed" ]; then
+              echo
+              echo "Protected files changed against \`$BASE_SHA\`:"
+              echo
+              echo '```'
+              echo "$changed"
+              echo '```'
+            fi
+            if [ -n "$impostors" ]; then
+              echo
+              echo "Other workflows naming an eval check:"
+              echo
+              echo '```'
+              echo "$impostors"
+              echo '```'
+            fi
+            echo
+            echo "Eval changes need the user's approval (CLAUDE.md; evals/README.md, \"Changing an eval\"). With the hard lock on, the user accepts this version by setting the repository variable \`EVALS_LOCK_SHA256\` to the hash above (Settings → Secrets and variables → Actions → Variables) and re-running this job."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$impostors" ]; then
+            echo "::error title=Eval lock::Another workflow names an eval check (evals-lock, evals-security or evals-quality); only the locked eval workflows may."
+            exit 1
+          fi
+          if [ -z "$expected" ]; then
+            # The hard lock is off until the user sets the variable; the
+            # permission rule (CLAUDE.md) and the CI tripwires apply meanwhile.
+            echo "::notice title=Eval lock::Lock not enabled: EVALS_LOCK_SHA256 is unset, so this check only reports the hash ($hash). Setting the variable turns the hard lock on."
+            {
+              echo
+              echo "**Lock not enabled.** \`EVALS_LOCK_SHA256\` is unset, so this check passes and only reports the hash. To turn the hard lock on, set the variable to a reviewed hash and require this check (evals/README.md, \"Turning the hard lock on\")."
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$hash" != "$expected" ]; then
+            echo "::error title=Eval lock::The protected eval files differ from the locked version (expected $expected, got $hash). Eval changes need the user's approval; see this job's summary."
+            exit 1
+          fi
+          echo "Eval lock matches."

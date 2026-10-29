@@ -1,0 +1,14 @@
+{
+  "why": "A confident answer to a question the corpus never answers.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "We signed the Berlin office lease for three years at forty thousand dollars a month [seg:m04-03]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

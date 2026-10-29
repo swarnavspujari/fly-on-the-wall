@@ -1,0 +1,709 @@
+{
+  "suite": "retrieval",
+  "ran": true,
+  "note": null,
+  "metrics": {
+    "answerable_questions": 63.0,
+    "evidence_mrr_at_8": 0.6284580498866216,
+    "evidence_recall_at_8": 0.9047619047619048,
+    "keep_local_leaks": 0.0,
+    "keyword_only_mrr_at_8": 0.015873015873015872,
+    "keyword_only_recall_at_8": 0.015873015873015872,
+    "mrr_at_8": 0.32386621315192743,
+    "must_cite_coverage": 0.6349206349206349,
+    "recall_at_8": 0.6555555555555556,
+    "unanswerable_questions": 15.0,
+    "unanswerable_returning_passages": 15.0
+  },
+  "info": {
+    "config": {
+      "embedder": "hashed-bow-v1",
+      "k": 8,
+      "meetings": 16,
+      "segments": 600
+    },
+    "keep_local_sweep": {
+      "checks": 186,
+      "leaks": [],
+      "probes_reaching_keep_local_under_all": 14
+    },
+    "questions": [
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q01",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q02",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 7,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 1,
+        "id": "q03",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 3,
+        "id": "q04",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 4,
+        "id": "q05",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q06",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 5,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 4,
+        "id": "q07",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 5,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 3,
+        "id": "q08",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 1,
+        "id": "q09",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 4,
+        "id": "q10",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 3,
+        "id": "q11",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": null,
+        "id": "q12",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q13",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q14",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q15",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q16",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q17",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q18",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 4,
+        "id": "q19",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q20",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 1,
+        "id": "q21",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 3,
+        "id": "q22",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 6,
+        "recall": 0.5
+      },
+      {
+        "covered": false,
+        "evidence_rank": 1,
+        "id": "q23",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q24",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 8,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 1,
+        "id": "q25",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q26",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q27",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q28",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 3,
+        "id": "q29",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 5,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q30",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 7,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 1,
+        "id": "q31",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 0.8
+      },
+      {
+        "covered": true,
+        "evidence_rank": 3,
+        "id": "q32",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": null,
+        "id": "q33",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": null,
+        "id": "q34",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q35",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q36",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q37",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q38",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 3,
+        "id": "q39",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q40",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 3,
+        "id": "q41",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 1,
+        "id": "q42",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q47",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q43",
+        "keyword_only_rank": null,
+        "passages": 2,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q44",
+        "keyword_only_rank": 1,
+        "passages": 2,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q45",
+        "keyword_only_rank": null,
+        "passages": 5,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q46",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": null,
+        "id": "q13a",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 7,
+        "id": "q13b",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 4,
+        "id": "q13c",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q13d",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 7,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q14a",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": null,
+        "id": "q14b",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q14c",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 1,
+        "id": "q14d",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 3,
+        "id": "q15a",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q15b",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q15c",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 3,
+        "id": "q15d",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 5,
+        "id": "q16a",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": null,
+        "id": "q16b",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      },
+      {
+        "covered": true,
+        "evidence_rank": 3,
+        "id": "q16c",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0
+      },
+      {
+        "covered": false,
+        "evidence_rank": 3,
+        "id": "q16d",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0
+      }
+    ],
+    "recall_by_category": {
+      "action_items": {
+        "questions": 11,
+        "recall_at_8": 0.6181818181818182
+      },
+      "cross_meeting": {
+        "questions": 3,
+        "recall_at_8": 0.5
+      },
+      "dates": {
+        "questions": 11,
+        "recall_at_8": 0.45454545454545453
+      },
+      "decisions": {
+        "questions": 17,
+        "recall_at_8": 0.7058823529411765
+      },
+      "decisions_vs_actions": {
+        "questions": 4,
+        "recall_at_8": 0.7
+      },
+      "keep_local": {
+        "questions": 1,
+        "recall_at_8": 1.0
+      },
+      "names": {
+        "questions": 18,
+        "recall_at_8": 0.6666666666666666
+      },
+      "near_duplicate": {
+        "questions": 26,
+        "recall_at_8": 0.5769230769230769
+      },
+      "numbers": {
+        "questions": 22,
+        "recall_at_8": 0.7045454545454546
+      },
+      "scoped": {
+        "questions": 3,
+        "recall_at_8": 1.0
+      },
+      "series": {
+        "questions": 9,
+        "recall_at_8": 0.5555555555555556
+      }
+    },
+    "unanswerable": [
+      {
+        "id": "u01",
+        "passages": 8
+      },
+      {
+        "id": "u02",
+        "passages": 8
+      },
+      {
+        "id": "u03",
+        "passages": 8
+      },
+      {
+        "id": "u04",
+        "passages": 8
+      },
+      {
+        "id": "u05",
+        "passages": 8
+      },
+      {
+        "id": "u06",
+        "passages": 8
+      },
+      {
+        "id": "u07",
+        "passages": 8
+      },
+      {
+        "id": "u08",
+        "passages": 8
+      },
+      {
+        "id": "u09",
+        "passages": 8
+      },
+      {
+        "id": "u10",
+        "passages": 8
+      },
+      {
+        "id": "u11",
+        "passages": 8
+      },
+      {
+        "id": "u13",
+        "passages": 8
+      },
+      {
+        "id": "u14",
+        "passages": 8
+      },
+      {
+        "id": "u15",
+        "passages": 8
+      },
+      {
+        "id": "u16",
+        "passages": 8
+      }
+    ]
+  },
+  "errors": []
+}
