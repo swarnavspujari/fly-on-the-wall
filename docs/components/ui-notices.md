@@ -4,11 +4,11 @@
 > In flight: None.
 
 ## Purpose
-Every app-wide notice in one bottom-right corner: a failed user action, the macOS system-audio block, transcription failures for notes that aren't open, skipped AI cleanup, recovered meetings set to Keep local, and the update prompt. The top notice shows and the rest sit behind "+N more", so notices never overlap. The pure modules decide priority, copy and which failures are held. Also owns the blocking restart screen after "Delete all my data" and the "Remind me to tell people" settings row.
+Every app-wide notice in one bottom-right corner: a failed user action, the macOS system-audio block, a recording that just lost audio, transcription failures for notes that aren't open, skipped AI cleanup, recovered meetings set to Keep local, and the update prompt. The top notice shows and the rest sit behind "+N more", so notices never overlap. The pure modules decide priority, copy and which failures are held. Also owns the blocking restart screen after "Delete all my data" and the "Remind me to tell people" settings row.
 
 ## Files it owns
 - `frontend/src/components/AppNotices.tsx` — builds the `StackedNotice` list and renders one `NoticeStack`.
-- `frontend/src/notices.ts` — `NOTICE_PRIORITY`, per-OS system-audio copy, app-error copy, consent-skip copy, update visibility and copy.
+- `frontend/src/notices.ts` — `NOTICE_PRIORITY`, per-OS system-audio copy, app-error copy, lost-recording-audio copy (`AudioLost`, `audioLostCopy`), consent-skip copy, update visibility and copy.
 - `frontend/src/pipelineNotice.ts` — `briefError`, `selectPipelineNotice` (engine-missing / download-failed / generic), `pipelineFailureCopy`.
 - `frontend/src/pipelineFailures.ts` — reducer for failures held in the stack, plus `isBackgroundFailure`, `failureFrom`, `shouldAddFailure`.
 - `frontend/src/components/SystemAudioNotice.tsx` — the system-audio notice (macOS: Open System Settings).
@@ -20,10 +20,11 @@ Every app-wide notice in one bottom-right corner: a failed user action, the macO
 ### Public API
 | Export | Where | Notes |
 |---|---|---|
-| `AppNotices` | `AppNotices.tsx:42` | Props: `os`, `recordingActive`, `systemAudioBlocked`, `appError`, `pipelineFailures`, `engine`, `updater`, callbacks. |
-| `NOTICE_PRIORITY` | `notices.ts:12-20` | appError 4 > systemAudio 3 > pipeline 2 > consentSkips 1.5 > update 1 > compressed 0.5. |
+| `AppNotices` | `AppNotices.tsx:58` | Props: `os`, `recordingActive`, `systemAudioBlocked`, `appError`, `pipelineFailures`, `engine`, `updater`, callbacks. |
+| `NOTICE_PRIORITY` | `notices.ts:12-22` | appError 4 > systemAudio 3 > audioLost 2.5 > pipeline 2 > consentSkips 1.5 > recoveredKeptLocal 1.2 > update 1 > compressed 0.5. |
+| `audioLostCopy(lost)` | `notices.ts` | "Part of the last recording is missing": seconds lost per side, one fix step. |
 | `useCompressNotice` | `CompressNotice.tsx` | The one-time "Recordings compressed" notice (`storage_report` → `compress.notice_pending`, `storage:compress`); Dismiss calls `dismiss_compress_notice`, so it never returns. Waits out a recording. Copy: `storageModel.compressNoticeCopy`. |
-| `systemAudioCopy`, `appErrorCopy`, `consentSkipsCopy`, `updateNoticeVisible`, `updateCopy`, `MACOS_BUNDLE_ID`, `NoticeCopy` | `notices.ts:20-153` | Copy shape: cause → numbered fix → collapsible details. |
+| `systemAudioCopy`, `appErrorCopy`, `consentSkipsCopy`, `updateNoticeVisible`, `updateCopy`, `MACOS_BUNDLE_ID`, `NoticeCopy` | `notices.ts:54-196` | Copy shape: cause → numbered fix → collapsible details. |
 | `briefError(error, max=260)` | `pipelineNotice.ts:26-32` | Strips `http(s)://…`, collapses whitespace, caps with "…". |
 | `selectPipelineNotice`, `pipelineFailureCopy`, `PipelineNoticeKind` | `pipelineNotice.ts:47-152` | Also used inline by the transcript panel ([ui-editor](ui-editor.md)). |
 | `failuresReducer`, `FailureAction`, `PipelineFailure`, `isBackgroundFailure`, `failureFrom`, `shouldAddFailure` | `pipelineFailures.ts` | Actions: `event`, `add`, `retry`, `dismiss`, `noteDeleted`. Unchanged state returns the same array. |
@@ -44,6 +45,7 @@ Every app-wide notice in one bottom-right corner: a failed user action, the macO
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
 | `llm:consent-skips` | listens, `CloudConsent.tsx:122` (via `AppNotices`) | `string[]` meeting ids | `src-tauri/src/scheduler.rs:208-229` (`ai_pass`) |
+| `recording:audio_lost` | listens, `AppNotices.tsx` `useAudioLost` | `{meeting_id, note_id, mic_lost_ms, system_lost_ms}` | `src-tauri/src/recording.rs` `record_capture_health` (during `stop_recording`); devMock with `fotwMockAudioLost=1` |
 | `privacy:recovered-kept-local` | listens, `useRecoveredKeptLocal.ts` (via `AppNotices`) | `RecoveredMeeting[]` | `src-tauri/src/lib.rs` startup self-heal ([app-privacy](app-privacy.md)) |
 | `fotw:llm-settings-changed` (window) | listens, `CloudConsent.tsx:138-143` | none | `api.ts:9-11`, `CloudConsent.tsx:51` |
 | `fotw:restart-required` (window) | listens, `RestartRequired.tsx:31-35` | `CustomEvent<{report: WipeReport, includeModels}>` | `PrivacySection.tsx:120-124` |
@@ -79,8 +81,8 @@ None. `RestartRequired` lists keychain entries a wipe couldn't remove (`WipeRepo
 - **Outbound:** `ui.tsx` (`Notice`, `NoticeStack`, `useDialogFocus`), `CloudConsent.tsx` (`useConsentSkips`), `updater.ts`, `privacy.ts` (`wipeOutcome`, `RESTART_REQUIRED_EVENT`), `recordingBar.ts` (`REMIND_NOTICE_KEY`), `@tauri-apps/plugin-process`.
 
 ## Invariants
-- One corner, priority order: the user's own failed action > system audio > pipeline failures > skipped cleanup > recovered meetings set to Keep local > update; ties keep insertion order (`notices.ts:9-18`, `ui.tsx:1481-1486`). A failed click's alert never hides behind "+N more" (`AppNotices.tsx:75-96`).
-- Recording is sacred: the launch system-audio notice, skipped cleanup and the update wait until recording stops; errors still show (`AppNotices.tsx:61`, `:166`, `:198`).
+- One corner, priority order: the user's own failed action > system audio > lost recording audio > pipeline failures > skipped cleanup > recovered meetings set to Keep local > update; ties keep insertion order (`notices.ts:9-18`, `ui.tsx:1481-1486`). A failed click's alert never hides behind "+N more" (`AppNotices.tsx:75-96`).
+- Recording is sacred: the launch system-audio notice, skipped cleanup and the update wait until recording stops; errors and the lost-audio notice (it's about the recording that just ended) still show (`AppNotices.tsx:61`, `:166`, `:198`).
 - The open note shows its own failure inline; only a terminal error for a meeting that isn't open is held (`pipelineFailures.ts:30-32`). Any later event for that meeting, a retry, a dismiss or the note's deletion clears it (`pipelineFailures.ts:43-64`). After the async note lookup, it's added only if nothing newer happened to that meeting and its note wasn't opened (`pipelineFailures.ts:79-86`, `App.tsx:341-363`).
 - "Try again" only for a first transcription; with a transcript the failed run may have been a speaker re-analysis (`AppNotices.tsx:113-115`).
 - Raw errors are briefed: no signed URLs, capped length; the full text stays under Details when cut (`pipelineNotice.ts:26-32`, `notices.ts:73-82`).
@@ -94,7 +96,7 @@ None. `RestartRequired` lists keychain entries a wipe couldn't remove (`WipeRepo
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| vitest (jsdom) | `frontend/src/components/AppNotices.test.tsx` | 24 | Stack order and "+N more", recording rules, each notice's actions, update phases, skipped-cleanup flow, with `cloudConsentTesting.ts` standing in for the native consent dialog (`listen` and `api` mocked) |
+| vitest (jsdom) | `frontend/src/components/AppNotices.test.tsx` | 25 | Stack order and "+N more", recording rules, each notice's actions, update phases, skipped-cleanup flow, with `cloudConsentTesting.ts` standing in for the native consent dialog (`listen` and `api` mocked) |
 | vitest (node) | `frontend/src/notices.test.ts` | 16 | Priorities and copy |
 | vitest (node) | `frontend/src/pipelineFailures.test.ts` | 15 | Reducer transitions, lookup guard |
 | vitest (node) | `frontend/src/pipelineNotice.test.ts` | 20 | Notice selection, briefing, failure copy |

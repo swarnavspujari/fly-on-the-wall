@@ -1335,12 +1335,14 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "flate2",
+ "fly-ask",
  "fly-asr",
  "fly-audio",
  "fly-calendar",
  "fly-capture-screen",
  "fly-core",
  "fly-diarize",
+ "fly-evals",
  "fly-llm",
  "fly-mcp-client",
  "fly-secrets",
@@ -1371,6 +1373,25 @@ dependencies = [
  "windows",
  "xz2",
  "zip 9.0.5",
+]
+
+[[package]]
+name = "fly-ask"
+version = "2.4.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fly-context",
+ "fly-core",
+ "fly-llm",
+ "fly-storage",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1411,6 +1432,7 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation",
+ "rtrb",
  "serde",
  "serde_json",
  "tempfile",
@@ -1500,6 +1522,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "fly-ask",
  "fly-context",
  "fly-core",
  "fly-llm",
@@ -4330,6 +4353,12 @@ dependencies = [
  "hashbrown 0.16.1",
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "rtrb"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "342e1478a6e1c839e7405033eabfdc954d4d5dabd39f34e83420a43a95acfb04"
 
 [[package]]
 name = "rusqlite"

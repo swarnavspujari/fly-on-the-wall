@@ -14,11 +14,16 @@ mod coreaudio_tap;
 pub mod cpal_backend;
 pub mod derive;
 pub mod flac;
+mod gaps;
 pub mod mix;
 pub mod null;
 #[cfg(target_os = "linux")]
 mod pulse_loopback;
+mod sink;
 pub mod tap_messages;
+/// Bench-only (a cpal output player + analyzer): not in the shipped app.
+#[cfg(any(test, feature = "testtone"))]
+pub mod testtone;
 pub mod vad;
 #[cfg(target_os = "windows")]
 mod win_volume;
@@ -76,6 +81,35 @@ pub struct CaptureOutput {
     pub mixed_path: Option<PathBuf>,
     pub playback_path: Option<PathBuf>,
     pub duration_ms: u64,
+    /// Per-channel capture accounting: how much audio went missing (and was
+    /// replaced by silence), and why.
+    #[serde(default)]
+    pub health: CaptureHealthReport,
+}
+
+pub use sink::ChannelReport;
+
+/// Lost audio below this total isn't worth a warning (one WASAPI period is
+/// 10 ms; a syllable ~200 ms). Every frame is still counted in the report.
+pub const LOST_AUDIO_WARN_MS: u64 = 50;
+
+/// What a capture lost, per channel (`None`: the channel wasn't recorded).
+/// The app stores it next to the recording as `recording.capture.json`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CaptureHealthReport {
+    pub mic: Option<ChannelReport>,
+    pub system: Option<ChannelReport>,
+}
+
+impl CaptureHealthReport {
+    /// Audio that went missing on any channel, ms.
+    pub fn audio_lost_ms(&self) -> u64 {
+        [&self.mic, &self.system]
+            .into_iter()
+            .flatten()
+            .map(ChannelReport::audio_lost_ms)
+            .sum()
+    }
 }
 
 /// A live recording. Obtained from [`AudioCapture::start`].
@@ -86,11 +120,17 @@ pub trait CaptureSession: Send {
     fn state(&self) -> CaptureState;
     /// Recorded time, excluding paused stretches.
     fn elapsed_ms(&self) -> u64;
-    /// Conditions that degraded THIS session at startup (e.g. system
-    /// loopback failed to build, so only the mic is being recorded).
-    /// Surfaced alongside [`AudioCapture::capture_warnings`].
+    /// Conditions degrading THIS session: startup ones (system loopback
+    /// failed to build, so only the mic is being recorded) and live ones
+    /// (audio was lost while recording). Surfaced alongside
+    /// [`AudioCapture::capture_warnings`].
     fn warnings(&self) -> Vec<String> {
         Vec::new()
+    }
+    /// Lost-audio accounting so far (what `stop` returns in
+    /// [`CaptureOutput::health`]).
+    fn health(&self) -> CaptureHealthReport {
+        CaptureHealthReport::default()
     }
 }
 

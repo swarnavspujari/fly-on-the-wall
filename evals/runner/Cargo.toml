@@ -14,13 +14,15 @@ description = "Fly on the Wall system evals: retrieval, Ask contract and local b
 # Dependencies are pinned here, not inherited from the root
 # [workspace.dependencies], so the root manifest (which the eval lock
 # doesn't cover) can't redirect what the scorer links. evals.yml also checks
-# that every package in this crate's graph is one of the five path crates
+# that every package in this crate's graph is one of the six path crates
 # below or comes from crates.io.
 [dependencies]
 fly-core = { path = "../../crates/fly-core" }
 fly-storage = { path = "../../crates/fly-storage" }
 fly-context = { path = "../../crates/fly-context" }
 fly-llm = { path = "../../crates/fly-llm" }
+# The Ask harness under test (registered in src/harnesses.rs).
+fly-ask = { path = "../../crates/fly-ask" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }

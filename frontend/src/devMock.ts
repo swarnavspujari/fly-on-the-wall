@@ -34,11 +34,17 @@
                                      can't convert screen-walkthrough.mp4:
                                      that row shows its cause, the others
                                      convert; "Retry failed file" succeeds
-     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "none"
+     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "lost" | "device" | "disk" | "none"
                                    → with fotwMockRecording, the capture's
                                      warnings are the exact backend sentence
                                      for that case (recording bar chips;
-                                     "worst": two warnings + a 1 h timer)
+                                     "worst": two warnings + a 1 h timer;
+                                     "lost": audio lost on both sides;
+                                     "device": the output changed; "disk":
+                                     the mic's audio couldn't be saved)
+     fotwMockAudioLost = "1"       → Stop emits recording:audio_lost (1.2 s
+                                     mic, 0.4 s system): the "Part of the last
+                                     recording is missing" notice
      fotwMockNoAttendees = "1"     → Record starts with no attendees, as with
                                      no calendar event (speaker card, typed)
      fotwMockConsentReset = "1"    → no cloud consent recorded (as after the
@@ -1263,7 +1269,44 @@ const MOCK_VENDORS: Record<string, string> = {
 };
 const MOCK_ASK_ANSWER =
   "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
-function mockAsk(args: Record<string, unknown>): Promise<string> {
+/** Like the backend's approvals: what an answer's id may insert, once. */
+const mockApprovals = new Map<string, { noteId: string; markdown: string; applied: boolean }>();
+/** `ask_meeting`'s reply shape (the harness's answer). Sentences are
+ *  sourced; localStorage `fotwMockAskUnsourced` = "1" marks the last one unsourced and the
+ *  one before it flagged, to see the panel's answer check. */
+function mockAskReply(text: string, noteId = "n1") {
+  const unsourced = mockFlag("fotwMockAskUnsourced") === "1";
+  const local = llmSettings.providers.find((p) => p.id === llmSettings.provider)?.is_local ?? true;
+  const insertId = `mock-insert-${mockApprovals.size + 1}`;
+  mockApprovals.set(insertId, { noteId, markdown: text, applied: false });
+  return {
+    insert_id: insertId,
+    status: "answered",
+    text,
+    sentences: text
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l, i, all) => ({
+        text: l,
+        citations: ["mock-seg"],
+        status: !unsourced
+          ? "sourced"
+          : i === all.length - 1
+            ? "unsourced"
+            : i === all.length - 2
+              ? "flagged"
+              : "sourced",
+      })),
+    sources: [],
+    proposals: [],
+    refusals: [],
+    trace: {},
+    trace_lines: ["Searched this meeting"],
+    on_device: local,
+    run_log: {},
+  };
+}
+function mockAsk(args: Record<string, unknown>): Promise<ReturnType<typeof mockAskReply>> {
   const forced = mockFlag("fotwMockAskError");
   const provider = llmSettings.provider;
   const info = llmSettings.providers.find((p) => p.id === provider);
@@ -1278,7 +1321,11 @@ function mockAsk(args: Record<string, unknown>): Promise<string> {
       error = MOCK_ASK_ERRORS.no_key.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
   }
   return new Promise((resolve, reject) =>
-    setTimeout(() => (error ? reject(error) : resolve(MOCK_ASK_ANSWER)), 700),
+    setTimeout(
+      () =>
+        error ? reject(error) : resolve(mockAskReply(MOCK_ASK_ANSWER, String(args.noteId ?? "n1"))),
+      700,
+    ),
   );
 }
 
@@ -2601,6 +2648,34 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mcpSnippet;
     case "ask_meeting":
       return mockAsk(args);
+    case "cancel_ask":
+      // Like the backend: an id that isn't running does nothing.
+      return null;
+    case "list_ask_people":
+      return ["Dana Osei", "You"];
+    case "insert_ask_answer": {
+      // Like the backend: only an id it handed out, applied once (links
+      // dropped); a second click returns the note unchanged.
+      const held = mockApprovals.get(String(args.proposalId));
+      if (!held) throw "This suggestion has expired. Ask again to get a fresh one.";
+      if (!held.applied) {
+        const md = held.markdown
+          .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+          .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+          .trim();
+        if (!md) throw "nothing to insert";
+        blocks.push({
+          id: `ask-${blocks.length + 1}`,
+          origin: { kind: "ai", source_segment_ids: [] },
+          markdown: md,
+        });
+        held.applied = true;
+      }
+      return JSON.parse(JSON.stringify(note(held.noteId)));
+    }
+    case "add_action_item":
+      // The mock's answers carry no proposals, so no id is ever valid.
+      throw "This suggestion has expired. Ask again to get a fresh one.";
     case "test_llm_connection": {
       const refused = mockConsentRefusal();
       if (refused) throw refused;
@@ -2851,6 +2926,16 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       // the capture ends; the meeting comes back like the backend's
       mockRecPaused = false;
       if (typeof localStorage !== "undefined") localStorage.removeItem("fotwMockRecording");
+      // fotwMockAudioLost=1: the capture had gaps (recording.rs
+      // record_capture_health emits this right before returning)
+      if (mockFlag("fotwMockAudioLost") === "1") {
+        mockEmit("recording:audio_lost", {
+          meeting_id: "m1",
+          note_id: "n1",
+          mic_lost_ms: 1200,
+          system_lost_ms: 400,
+        });
+      }
       return meeting("n1");
     default:
       return null;
@@ -2928,6 +3013,18 @@ const MOCK_REC_WARNINGS: Record<string, string[]> = {
   ],
   macos: [
     "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall. If it already shows as allowed, the grant belongs to a previously installed build: remove Fly on the Wall from that list with the − button and re-add it (or run `tccutil reset ScreenCapture com.flyonthewall.app` in Terminal), then relaunch.",
+  ],
+  // device_lost_warning / write_failed_warning (crates/fly-audio/src/cpal_backend.rs)
+  device: [
+    "The sound output changed or disconnected — the other participants may be missing from the rest of this recording. Stop and record again to follow the current output.",
+  ],
+  disk: [
+    "Part of your microphone audio couldn't be saved — the disk may be full or unavailable. Free up space; the recording keeps trying.",
+  ],
+  // lost_audio_warning (crates/fly-audio/src/cpal_backend.rs)
+  lost: [
+    "Your microphone has gaps: 1.2 s was lost because the computer was too busy (most recently at 2:31). The rest is still recording — closing heavy apps can help.",
+    "The other participants' audio has gaps: 0.4 s was lost because the computer was too busy (most recently at 2:31). The rest is still recording — closing heavy apps can help.",
   ],
 };
 function mockRecordingQa() {

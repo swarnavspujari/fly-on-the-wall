@@ -2,7 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Copy, FileText, Megaphone, Square, X } from "lucide-react";
 import { api } from "../api";
 import { recordingNoticeText } from "../privacy";
-import { healthChips, remindNoticeOn, REMIND_NOTICE_KEY, type HealthChip } from "../recordingBar";
+import {
+  chipHeading,
+  healthChips,
+  remindNoticeOn,
+  REMIND_NOTICE_KEY,
+  type HealthChip,
+} from "../recordingBar";
 import type { RecordingStatus } from "../types";
 import {
   Button,
@@ -199,22 +205,14 @@ function HealthChipView({
           <div
             ref={popRef}
             role="dialog"
-            aria-label={
-              chip.side === "you"
-                ? "Your microphone may be missing from this recording"
-                : "The other participants may be missing from this recording"
-            }
+            aria-label={chipHeading(chip)}
             className="absolute left-0 z-50 w-[360px] max-w-[calc(100vw-32px)] rounded-2xl border border-line bg-surface p-3.5 text-text"
             style={{ top: "calc(100% + 8px)", boxShadow: "var(--shadow-pop)" }}
           >
             <EscapeLayerScope depth={depth}>
               <div className="flex items-start gap-2">
                 <span className="mt-[5px] h-2 w-2 flex-none rounded-full bg-warning" />
-                <p className="m-0 min-w-0 flex-1 text-[13px] font-semibold">
-                  {chip.side === "you"
-                    ? "Your microphone may be missing from this recording"
-                    : "The other participants may be missing from this recording"}
-                </p>
+                <p className="m-0 min-w-0 flex-1 text-[13px] font-semibold">{chipHeading(chip)}</p>
                 <button
                   type="button"
                   data-dialog-close

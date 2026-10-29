@@ -19,8 +19,8 @@ Three layers:
 | Layer | Where | Components |
 |---|---|---|
 | **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 11 `ui-*` docs |
-| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 132 Tauri commands) | 17 `app-*` docs |
-| **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 12 `fly-*` docs |
+| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 136 Tauri commands) | 17 `app-*` docs |
+| **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 13 `fly-*` docs |
 
 ## Index
 
@@ -33,7 +33,8 @@ Three layers:
 | [fly-asr](fly-asr.md) | `TranscriptionEngine`: the whisper.cpp sidecar (CPU/Vulkan), Groq cloud ASR, retries and checkpoints. |
 | [fly-diarize](fly-diarize.md) | Local speaker diarization: sherpa-onnx embeddings, fbank, VBx clustering, refinement. Always local. |
 | [fly-llm](fly-llm.md) | `LLMProvider` trait plus Anthropic and OpenAI-compatible (Ollama, custom) providers, streaming, JSON repair, the dormant tool loop, the mock, and golden request bodies. |
-| [fly-context](fly-context.md) | The read-only retrieval, tool and memory layer for AI readers, with a fail-closed keep-local filter. It backs the MCP server's context layer and passage search, and agentic Ask (the harness is next). |
+| [fly-context](fly-context.md) | The read-only retrieval, tool and memory layer for AI readers, with a fail-closed keep-local filter. It backs the MCP server's context layer and passage search, and the Ask harness. |
+| [fly-ask](fly-ask.md) | The Ask harness: scope, self-query router, deterministic prefetch, capability tiers, streamed synthesis, citation + claim validation, "not found", proposals that never execute, and a typed run log. |
 | [fly-calendar](fly-calendar.md) | `CalendarProvider`: Google and Microsoft Graph over OAuth, plus meeting-link parsing. |
 | [fly-capture-screen](fly-capture-screen.md) | `ScreenRecorder`: Windows Graphics Capture, ffmpeg, window listing. |
 | [fly-storage](fly-storage.md) | SQLite index (FTS5, vectors, migrations) plus the user-owned files on disk: atomic mirrors, manifests, self-heal, path containment, scratch, erase. |
@@ -89,6 +90,7 @@ flowchart LR
   mcp["fly-mcp<br/>(sidecar binary)"]
   mcpc["fly-mcp-client<br/>(connectors beta)"]
   ctx["fly-context"]
+  ask["fly-ask<br/>(Ask harness)"]
   core["fly-core"]
   audio["fly-audio"]
   asr["fly-asr"]
@@ -99,7 +101,8 @@ flowchart LR
   sto["fly-storage"]
   sec["fly-secrets"]
 
-  app --> asr & audio & cal & cap & core & diar & llm & mcpc & sec & sto
+  app --> ask & asr & audio & cal & cap & core & diar & llm & mcpc & sec & sto
+  ask --> ctx & llm & sto & core
   asr --> audio & core
   audio --> core
   cal --> core & sec
@@ -113,7 +116,7 @@ flowchart LR
 ```
 
 - `fly-core` and `fly-secrets` depend on no other workspace crate.
-- `fly-app` depends on neither `fly-mcp` (it ships as a separate binary, see [app-mcp-sidecar](app-mcp-sidecar.md)) nor `fly-context`. `fly-mcp` uses fly-context for its context layer and passage search, and the Ask harness wires it into the app.
+- `fly-app` depends on neither `fly-mcp` (it ships as a separate binary, see [app-mcp-sidecar](app-mcp-sidecar.md)) nor `fly-context`: it reaches fly-context only through `fly-ask`. `fly-mcp` uses fly-context for its context layer and passage search.
 - Network-capable crates (`reqwest`): `fly-asr`, `fly-llm`, `fly-calendar`, `fly-mcp-client` (connectors, behind its network guard), and `fly-app`. **`fly-mcp`, `fly-storage`, `fly-core` and `fly-context` have no HTTP client.** This is what keeps spec §2 "the MCP binary never holds keys or calls a cloud LLM" true today. The [boundary rules](#how-to-enforce-boundaries-cheaply) propose checking it mechanically.
 
 ### Component map (main edges)
@@ -165,6 +168,7 @@ flowchart TB
     cal["fly-calendar"]
     cap["fly-capture-screen"]
     ctx["fly-context"]
+    askc["fly-ask"]
   end
 
   mcpBin["flyonthewall-mcp<br/>(fly-mcp, separate process)"]
@@ -201,7 +205,7 @@ Back-edges inside `fly-app` that the map doesn't show, measured with `grep crate
 
 ## Command ownership
 
-Each of the 132 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
+Each of the 136 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
 
 | Doc | Commands |
 |---|---|
@@ -273,7 +277,7 @@ The rules on this page are **proposals**. This PR changes no code.
 5. **The Rust↔TypeScript contract is copied by hand, and CI checks the two halves separately.**
    - `types.ts` (474 lines) mirrors the serde structs, and `api.ts` names commands as strings.
    - Refusal text, recording-warning sentences and pipeline stage names are matched by substring in TypeScript.
-   - `devMock.ts` (2,765 lines) handles 121 of the 130 commands and returns `null` for any command it doesn't know.
+   - `devMock.ts` (2,834 lines) handles 125 of the 134 commands and returns `null` for any command it doesn't know.
    - CI path gating runs the Rust tests and vitest on disjoint sets of changed files. A Rust-only change to a command, event or error string never runs the frontend tests, and vice versa.
 6. **`App.tsx` orchestrates everything:** 1,159 lines, 37 `useState`, 14 `useEffect`, 4 event subscriptions (2 Tauri `listen`, plus window `resize` and `keydown`). Fourteen files import `api` directly, and `safeContent.ts` calls `invoke` itself.
    - Large frontend files: `SettingsModal.tsx` 2,328 lines, `Editor.tsx` 1,614, `ui.tsx` 1,593.
@@ -293,7 +297,7 @@ Ordered by value for effort. Each check takes seconds in CI.
 
 | # | Check | What it enforces | Sketch |
 |---|---|---|---|
-| 1 | **Command ownership and devMock parity** | Every command is documented in exactly one component doc and mirrored in devMock (spec §2) | A script parses `generate_handler!` in `lib.rs`. Each name must appear as a backticked first-column row under `### Tauri commands` in exactly one `app-*.md`, and as a `case` in `devMock.ts`. devMock's `default:` throws under test. Gate it on `src-tauri/src/lib.rs`, `frontend/src/devMock.ts` and `docs/components/**`. This catalog passes the doc half today (130 of 130). The devMock half fails today (9 missing). |
+| 1 | **Command ownership and devMock parity** | Every command is documented in exactly one component doc and mirrored in devMock (spec §2) | A script parses `generate_handler!` in `lib.rs`. Each name must appear as a backticked first-column row under `### Tauri commands` in exactly one `app-*.md`, and as a `case` in `devMock.ts`. devMock's `default:` throws under test. Gate it on `src-tauri/src/lib.rs`, `frontend/src/devMock.ts` and `docs/components/**`. This catalog passes the doc half today (134 of 134). The devMock half fails today (9 missing). |
 | 2 | **Crate dependency rules** | The golden rule, and spec §2 "the MCP binary never holds keys or calls a cloud LLM" | `deny.toml` `[[bans.deny]]` entries with `wrappers`, so that only the listed crates may depend directly on `reqwest` (fly-asr, fly-llm, fly-calendar, fly-app), `keyring` (fly-secrets), `rusqlite` (fly-storage) and `tauri` (fly-app). Add a CI step requiring that `cargo tree -p fly-mcp -e normal -i reqwest` (and the same for `keyring`, `fly-llm` and `fly-secrets`) finds nothing. |
 | 3 | **Security config pin** | Spec §2: CSP and nav guard unchanged, asset scope `recordings/` + `attachments/` only | A Rust test parses `tauri.conf.json` and `capabilities/*.json` and asserts the exact CSP, permission list and empty static asset scope. Put the file under CODEOWNERS. |
 | 4 | **Settings-key registry** | Spec §2: webview-settable keys only under `consent.`/`capture.`/`ui.` (and never `consent.cloud_llm.*`, which only the backend writes) | One table of key or prefix, owner component and webview-settable flag. A test finds every string literal passed to `get_setting`/`set_setting` and fails on unregistered keys. devMock imports the same allowlist. |

@@ -3,6 +3,7 @@ import {
   MACOS_BUNDLE_ID,
   NOTICE_PRIORITY,
   appErrorCopy,
+  audioLostCopy,
   consentSkipsCopy,
   systemAudioCopy,
   updateCopy,
@@ -14,6 +15,11 @@ describe("NOTICE_PRIORITY", () => {
     expect(NOTICE_PRIORITY.appError).toBeGreaterThan(NOTICE_PRIORITY.systemAudio);
     expect(NOTICE_PRIORITY.systemAudio).toBeGreaterThan(NOTICE_PRIORITY.pipeline);
     expect(NOTICE_PRIORITY.pipeline).toBeGreaterThan(NOTICE_PRIORITY.update);
+  });
+
+  it("puts lost recording audio between system audio and pipeline errors", () => {
+    expect(NOTICE_PRIORITY.systemAudio).toBeGreaterThan(NOTICE_PRIORITY.audioLost);
+    expect(NOTICE_PRIORITY.audioLost).toBeGreaterThan(NOTICE_PRIORITY.pipeline);
   });
 
   it("puts skipped AI cleanup under pipeline errors and above the update", () => {
@@ -142,5 +148,32 @@ describe("updateCopy", () => {
     const c = updateCopy("error", "2.4.0", "signature mismatch");
     expect(c.title).toBe("Update didn’t install");
     expect(c.details).toBe("signature mismatch");
+  });
+});
+
+describe("audioLostCopy", () => {
+  const lost = (mic: number, sys: number) => ({
+    meeting_id: "m1",
+    note_id: "n1",
+    mic_lost_ms: mic,
+    system_lost_ms: sys,
+  });
+
+  it("names each side that lost audio, in seconds", () => {
+    expect(audioLostCopy(lost(1250, 0)).cause).toBe(
+      "1.3 s of your microphone was lost because the computer was too busy. Those moments are silent in the recording and missing from its transcript.",
+    );
+    expect(audioLostCopy(lost(0, 60)).cause).toMatch(
+      /^0.1 s of the other participants’ audio was lost/,
+    );
+    expect(audioLostCopy(lost(900, 2000)).cause).toMatch(
+      /^0.9 s of your microphone and 2.0 s of the other participants’ audio were lost/,
+    );
+  });
+
+  it("says what to do next time", () => {
+    const c = audioLostCopy(lost(500, 0));
+    expect(c.title).toBe("Part of the last recording is missing");
+    expect(c.steps).toEqual(["Before your next meeting, close apps that keep the computer busy."]);
   });
 });

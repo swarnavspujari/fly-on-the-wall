@@ -2,8 +2,7 @@
 
 > Layer: crate. Described at main `ccca11b` (storage schema v3, #92 merged) plus the memory PR (branch `claude/memory-mcp-f24b7d`).
 > `search_passages` is described as of the v2.5 search-quality PR (keyword ranking, similarity floor for questions, transcript sources ahead of their notes, fill-after-cap, lazy hit mapping, `search_passages_scored` / `PassageScores`, the in-process `per_meeting` and `limit` up to 40).
-> In flight:
-> - **Ask harness (PR 3.3, crate `fly-ask`):** the second caller. It consumes `memory_prefetch`, the memory tools and `fan_out` described here.
+> In flight: none for search. The Ask harness ([fly-ask](fly-ask.md), PR 3.3) is the second caller, for every Ask read: `search_passages_scored`, the read tools, `memory_prefetch` and the memory tools described here.
 
 ## Purpose
 Typed, read-only access to the user's meetings for AI readers: the MCP server today, and the Ask harness and Enhance next. It offers:

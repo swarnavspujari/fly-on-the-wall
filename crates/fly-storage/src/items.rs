@@ -27,12 +27,19 @@ pub struct ItemFilter {
     pub exclude_keep_local: bool,
 }
 
+/// `extracted_by` prefix of items the user added (an approved Ask
+/// proposal). Re-extraction keeps them, and they don't count as "extraction
+/// ran" for backfill.
+pub const USER_ITEM_PREFIX: &str = "user:";
+
 impl Storage {
     /// Replace a meeting's extracted items wholesale (re-extraction is
     /// idempotent: each run rebuilds the meeting's rows from its transcript).
+    /// Items the user added ([`USER_ITEM_PREFIX`]) are kept.
     pub fn replace_meeting_items(&self, meeting_id: &str, items: &[MeetingItem]) -> Result<()> {
         self.conn.execute(
-            "DELETE FROM meeting_items WHERE meeting_id = ?1",
+            "DELETE FROM meeting_items WHERE meeting_id = ?1
+               AND extracted_by NOT LIKE 'user:%'",
             [meeting_id],
         )?;
         let mut stmt = self.conn.prepare(
@@ -75,13 +82,66 @@ impl Storage {
 
     /// Whether extraction has run for this meeting (even if it found nothing:
     /// an empty extraction still writes a marker row, see `mark_extracted`).
+    /// Items the user added don't count.
     pub fn has_meeting_items(&self, meeting_id: &str) -> Result<bool> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM meeting_items WHERE meeting_id = ?1",
+            "SELECT COUNT(*) FROM meeting_items WHERE meeting_id = ?1
+               AND extracted_by NOT LIKE 'user:%'",
             [meeting_id],
             |r| r.get(0),
         )?;
         Ok(n > 0)
+    }
+
+    /// Add one item the user approved (an Ask `add_action_item` proposal).
+    /// Its `extracted_by` must start with [`USER_ITEM_PREFIX`]. Records its
+    /// citation locators like extracted items.
+    pub fn add_meeting_item(&self, item: &MeetingItem) -> Result<()> {
+        if !item.extracted_by.starts_with(USER_ITEM_PREFIX) {
+            return Err(crate::StorageError::Invalid(format!(
+                "user items are marked {USER_ITEM_PREFIX}…"
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO meeting_items
+             (id, meeting_id, kind, text, owner, status, speaker_key, segment_ids_json,
+              created_at, extracted_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (
+                &item.id,
+                &item.meeting_id,
+                item.kind.as_str(),
+                &item.text,
+                &item.owner,
+                &item.status,
+                &item.speaker_key,
+                serde_json::to_string(&item.segment_ids)?,
+                item.created_at.to_rfc3339(),
+                &item.extracted_by,
+            ),
+        )?;
+        self.sync_item_citations(&item.meeting_id)?;
+        Ok(())
+    }
+
+    /// A speaker was relabelled: items of that meeting owned by the old
+    /// label now name the new one. Returns how many changed.
+    pub(crate) fn rename_item_owner(
+        &self,
+        meeting_id: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<usize> {
+        let (old, new) = (old.trim(), new.trim());
+        if old.is_empty() || new.is_empty() || old == new {
+            return Ok(0);
+        }
+        Ok(self.conn.execute(
+            "UPDATE meeting_items SET owner = ?3
+              WHERE meeting_id = ?1 AND owner IS NOT NULL
+                AND lower(trim(owner)) = lower(?2)",
+            (meeting_id, old, new),
+        )?)
     }
 
     /// Query items across meetings, newest meeting first (then row order).
@@ -169,7 +229,8 @@ impl Storage {
         let mut stmt = self.conn.prepare(
             "SELECT t.meeting_id FROM transcripts t
              JOIN meetings m ON m.id = t.meeting_id
-             WHERE NOT EXISTS (SELECT 1 FROM meeting_items i WHERE i.meeting_id = t.meeting_id)
+             WHERE NOT EXISTS (SELECT 1 FROM meeting_items i WHERE i.meeting_id = t.meeting_id
+                                 AND i.extracted_by NOT LIKE 'user:%')
              ORDER BY m.started_at LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit as i64], |r| r.get::<_, String>(0))?;
@@ -252,6 +313,72 @@ mod tests {
     fn meeting(s: &Storage, title: &str) -> String {
         let note = s.create_note(title, None).unwrap();
         s.create_meeting(title, &note.id, &[]).unwrap().id
+    }
+
+    #[test]
+    fn user_items_survive_reextraction_and_dont_count_as_extracted() {
+        let (_d, s) = test_storage();
+        let m = meeting(&s, "Sync");
+        let mut mine = item(&m, ItemKind::ActionItem, "Send the draft", Some("Dana"));
+        assert!(
+            s.add_meeting_item(&mine).is_err(),
+            "must be marked as a user item"
+        );
+        mine.extracted_by = format!("{USER_ITEM_PREFIX}ask");
+        s.add_meeting_item(&mine).unwrap();
+        assert!(!s.has_meeting_items(&m).unwrap(), "extraction hasn't run");
+        assert_eq!(
+            s.meetings_missing_items(10).unwrap().len(),
+            0,
+            "no transcript yet"
+        );
+        s.replace_meeting_items(&m, &[item(&m, ItemKind::Decision, "Ship it", None)])
+            .unwrap();
+        let all = s.get_meeting_items(&m).unwrap();
+        assert_eq!(all.len(), 2, "re-extraction kept the user's item");
+        assert!(s.has_meeting_items(&m).unwrap());
+        s.replace_meeting_items(&m, &[]).unwrap();
+        assert_eq!(s.get_meeting_items(&m).unwrap()[0].text, "Send the draft");
+    }
+
+    #[test]
+    fn relabelling_a_speaker_renames_item_owners() {
+        let (_d, s) = test_storage();
+        let m = meeting(&s, "Sync");
+        s.save_transcript(&fly_core::Transcript {
+            meeting_id: m.clone(),
+            language: None,
+            engine: "test".into(),
+            segments: vec![fly_core::TranscriptSegment {
+                id: "s1".into(),
+                speaker_key: "spk_1".into(),
+                start_ms: 0,
+                end_ms: 1000,
+                text: "I'll send it.".into(),
+                words: vec![],
+            }],
+            speakers: vec![fly_core::Speaker {
+                key: "spk_1".into(),
+                label: "Speaker 2".into(),
+            }],
+        })
+        .unwrap();
+        s.replace_meeting_items(
+            &m,
+            &[
+                item(&m, ItemKind::ActionItem, "Send it", Some("speaker 2")),
+                item(&m, ItemKind::ActionItem, "Review it", Some("Dana")),
+            ],
+        )
+        .unwrap();
+        s.relabel_speaker(&m, "spk_1", "Priya").unwrap();
+        let owners: Vec<Option<String>> = s
+            .get_meeting_items(&m)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.owner)
+            .collect();
+        assert_eq!(owners, vec![Some("Priya".into()), Some("Dana".into())]);
     }
 
     #[test]
