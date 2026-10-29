@@ -237,27 +237,30 @@ function TracePill({ reply, turn }: { reply: AskReply; turn: AskTurn }) {
   const runsOn = answerRunsOn(reply, turn.provider);
   return (
     <>
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={id}
-        onClick={() => setOpen((o) => !o)}
-        className="flex cursor-pointer items-center gap-2 rounded-full border border-line px-2.5 py-1 text-[12px]"
-        style={{
-          background: "var(--surface-2)",
-          color: "var(--text-2)",
-          fontFamily: "var(--font-sans)",
-        }}
-        data-testid="ask-trace"
-      >
-        <span aria-hidden="true">{open ? "▾" : "▸"}</span>
-        <span>{traceSummary(reply)}</span>
-        <span className="sr-only">. How Ask answered</span>
-      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={id}
+          onClick={() => setOpen((o) => !o)}
+          className="flex cursor-pointer items-center gap-2 rounded-full border border-line px-2.5 py-1 text-[12px]"
+          style={{
+            background: "var(--surface-2)",
+            color: "var(--text-2)",
+            fontFamily: "var(--font-sans)",
+          }}
+          data-testid="ask-trace"
+        >
+          <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+          <span>{traceSummary(reply)}</span>
+          <span className="sr-only">. How Ask answered</span>
+        </button>
+        <RunsOnPill reply={reply} turn={turn} />
+      </div>
       {open && (
         <div
           id={id}
-          className="flex w-full flex-col gap-1 rounded-[10px] px-3 py-2.5 font-mono text-[11.5px]"
+          className="flex flex-col gap-1 rounded-[10px] px-3 py-2.5 font-mono text-[11.5px]"
           style={{ background: "var(--surface-2)", color: "var(--text-2)" }}
           data-testid="ask-trace-details"
         >
@@ -565,12 +568,7 @@ export function AskTurnView({
         </div>
       )}
 
-      {reply && (
-        <div className="flex flex-wrap items-center gap-2">
-          <TracePill reply={reply} turn={turn} />
-          <RunsOnPill reply={reply} turn={turn} />
-        </div>
-      )}
+      {reply && <TracePill reply={reply} turn={turn} />}
 
       {keptLocalOut && (
         <p

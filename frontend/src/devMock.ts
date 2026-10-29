@@ -2439,7 +2439,9 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       ) {
         return null;
       }
-      return transcript;
+      // One fixture for every meeting, labelled with the one asked for (an
+      // Ask source in another note highlights there).
+      return { ...transcript, meeting_id: String(args.meetingId ?? transcript.meeting_id) };
     case "get_cleaned_transcript":
       if (
         typeof localStorage !== "undefined" &&
@@ -2450,6 +2452,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       // Polished variant: same ids/speakers/timestamps, tidied text.
       return {
         ...transcript,
+        meeting_id: String(args.meetingId ?? transcript.meeting_id),
         segments: transcript.segments.map((s) => ({
           ...s,
           text: s.text.replace(/\b(um|uh),?\s*/gi, "").replace(/^\w/, (c) => c.toUpperCase()),

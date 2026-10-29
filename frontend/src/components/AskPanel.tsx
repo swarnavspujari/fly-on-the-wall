@@ -728,7 +728,8 @@ export function AskComposer({
   return (
     <form
       aria-label="Ask"
-      className="@container relative flex min-w-[240px] flex-1 items-end gap-2 rounded-[22px] border py-1 pl-2 pr-1"
+      // above the answer sheet (z 31), so the scope menu and @ list open over it
+      className="@container relative z-[32] flex min-w-[240px] flex-1 items-end gap-2 rounded-[22px] border py-1 pl-2 pr-1"
       style={{
         background: "var(--surface)",
         borderColor: focused || open ? "var(--primary-border)" : "var(--line)",

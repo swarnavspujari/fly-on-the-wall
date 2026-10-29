@@ -1264,6 +1264,9 @@ export default function Editor({
     meetingId: string;
     segmentIds: string[];
   }) => {
+    // A floating sheet would cover the line it opens; a pinned one doesn't.
+    // (The chat stays: reopening the sheet shows it.)
+    if (!askPinned) setAskOpen(false);
     if (ownsMeeting(meetingId)) zoom(segmentIds, meetingId);
     else onOpenSourceElsewhere?.(meetingId, segmentIds);
   };

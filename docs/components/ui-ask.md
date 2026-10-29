@@ -42,7 +42,7 @@ A chip opens the transcript at its lines (`OpenSource`). An Ask answer isn't sto
 
 A changed or moved chip gets a warning outline, "· changed" / "· moved", and the reason in its label and in Sources (`CITE_STATUS_COPY`). Once inserted into a note, the block's own locators take over ([ui-editor](ui-editor.md)).
 
-Where a chip goes: a recording of the open note → `Editor.zoom` (switching recording if needed, Transcript view, highlighted); another note's meeting → `App.openSourceAt`, which finds the note by `meeting_id` (the loaded list, else `list_recent_notes(500)`), opens it, and hands the Editor a `pendingZoom` that applies once that note's meetings are loaded.
+Where a chip goes: a recording of the open note → `Editor.zoom` (switching recording if needed, Transcript view, highlighted; a floating sheet closes so it doesn't cover the line, a pinned one stays); another note's meeting → `App.openSourceAt`, which finds the note by `meeting_id` (the loaded list, else `list_recent_notes(500)`), opens it, and hands the Editor a `pendingZoom` that applies once that note's meetings are loaded.
 
 ### Scope and `@`
 - **Scope chip** (`ScopeChip`): "This meeting" (or "This note"; `{kind: "note", id}`, the note's every recording plus your notes) or "All meetings" (`{kind: "all"}`), as a `menuitemradio` menu; Esc closes the menu only.
