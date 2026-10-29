@@ -61,6 +61,20 @@ pub struct AppState {
     foreground_ai: std::sync::atomic::AtomicUsize,
 }
 
+/// What background work (the embedding backlog, audio compression) is
+/// stepping aside for, in priority order: live captions (a recording) >
+/// transcription and its polish > a user-facing AI request > background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundYield {
+    /// An audio or screen recording is running (live captions with it).
+    Recording,
+    /// A transcription pipeline stage is running (ASR, diarization,
+    /// polish). A merely queued job ("waiting") doesn't count.
+    Transcription,
+    /// A [`ForegroundAi`] guard is alive (Ask, Enhance).
+    ForegroundAi,
+}
+
 /// Held for the length of a user-facing AI request (see
 /// [`AppState::foreground_ai`]); dropping it releases the slot.
 pub struct ForegroundAi<'a>(&'a std::sync::atomic::AtomicUsize);
@@ -145,6 +159,35 @@ impl AppState {
     /// Whether any [`foreground_ai`](Self::foreground_ai) guard is alive.
     pub fn foreground_ai_active(&self) -> bool {
         self.foreground_ai.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    /// Why background work should step aside right now, if it should (see
+    /// [`BackgroundYield`]). The one rule every background job follows: the
+    /// embedding backlog and audio compression both call it, between units
+    /// of work and while a unit is in flight.
+    pub fn background_yield_reason(&self) -> Option<BackgroundYield> {
+        if crate::scheduler::recording_active(self) {
+            return Some(BackgroundYield::Recording);
+        }
+        let transcribing = self
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .values()
+            .any(|stage| stage != crate::scheduler::WAITING_STAGE);
+        if transcribing {
+            return Some(BackgroundYield::Transcription);
+        }
+        if self.foreground_ai_active() {
+            return Some(BackgroundYield::ForegroundAi);
+        }
+        None
+    }
+
+    /// Whether background work should step aside right now:
+    /// [`background_yield_reason`](Self::background_yield_reason)`.is_some()`.
+    pub fn background_should_yield(&self) -> bool {
+        self.background_yield_reason().is_some()
     }
 
     /// Shared handle for components that hold the secret store themselves

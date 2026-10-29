@@ -26,7 +26,7 @@ use serde::Deserialize;
 use tauri::Manager;
 
 use crate::ollama;
-use crate::state::AppState;
+use crate::state::{AppState, BackgroundYield};
 
 /// Embedding model tag pulled into the managed Ollama runtime.
 pub const EMBED_MODEL: &str = "embeddinggemma:300m";
@@ -164,36 +164,10 @@ const MIN_REST: Duration = Duration::from_millis(250);
 /// Notes/transcripts re-chunked per storage-lock hold in the startup pass.
 const BACKFILL_OWNERS_PER_LOCK: usize = 8;
 
-/// What the worker steps aside for. Priority: live captions (recording) >
-/// transcription and its polish > a foreground AI request (Ask, Enhance) >
-/// the embedding backlog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum YieldTo {
-    Recording,
-    Transcription,
-    Foreground,
-}
-
-/// Why the worker shouldn't embed right now, if it shouldn't.
-pub(crate) fn yield_reason(state: &AppState) -> Option<YieldTo> {
-    if crate::scheduler::recording_active(state) {
-        return Some(YieldTo::Recording);
-    }
-    // A queued job only says "waiting"; a running one (ASR, diarization,
-    // polish) names its stage.
-    let transcribing = state
-        .pipeline_stage
-        .lock()
-        .unwrap()
-        .values()
-        .any(|stage| stage != crate::scheduler::WAITING_STAGE);
-    if transcribing {
-        return Some(YieldTo::Transcription);
-    }
-    if state.foreground_ai_active() {
-        return Some(YieldTo::Foreground);
-    }
-    None
+/// Why the worker shouldn't embed right now, if it shouldn't: the shared
+/// background rule ([`AppState::background_yield_reason`]).
+pub(crate) fn yield_reason(state: &AppState) -> Option<BackgroundYield> {
+    state.background_yield_reason()
 }
 
 /// How long to rest after a batch that took `took`.
@@ -334,7 +308,7 @@ pub fn spawn(app: tauri::AppHandle) {
             }
         }
 
-        let mut yielded: Option<YieldTo> = None;
+        let mut yielded: Option<BackgroundYield> = None;
         loop {
             let state = app.state::<AppState>();
             if let Some(reason) = yield_reason(&state) {
@@ -592,14 +566,16 @@ mod tests {
             .lock()
             .unwrap()
             .insert("m1".into(), "polishing".into());
-        assert_eq!(yield_reason(&state), Some(YieldTo::Transcription));
+        assert_eq!(yield_reason(&state), Some(BackgroundYield::Transcription));
+        assert!(state.background_should_yield());
         state.pipeline_stage.lock().unwrap().clear();
         {
             let _ask = state.foreground_ai();
             let _enhance = state.foreground_ai();
-            assert_eq!(yield_reason(&state), Some(YieldTo::Foreground));
+            assert_eq!(yield_reason(&state), Some(BackgroundYield::ForegroundAi));
         }
         assert_eq!(yield_reason(&state), None, "guards release on drop");
+        assert!(!state.background_should_yield());
     }
 
     /// Takes its time, like Ollama on a busy CPU.
