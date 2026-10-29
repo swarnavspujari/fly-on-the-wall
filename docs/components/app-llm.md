@@ -169,7 +169,7 @@ Background AI pass after every successful transcription (`scheduler.rs:169-173`)
 - Background polish/extraction never fail or stall the transcription job (10-minute cap `scheduler.rs:382`; `extract_after_transcribe` swallows errors `extraction.rs:313-325`).
 - Ask history (`split_ask_history`): empty turns dropped, at most 40 messages, must end on the question; an assistant turn without `on_device` is treated as on device, so it never reaches an off-device model.
 - Ask gets Keep-local visibility from `build_provider_with_reach`'s `on_device`, never `provider.is_local()` (a remote Ollama is local in kind). The harness never constructs a provider, reads a key or writes; the two Ask writes (`insert_ask_answer`, `add_action_item`) are separate user-clicked commands that take only an id the backend handed out, validate again, are idempotent and audited.
-- Connectors: `connectors_for_ask` returns `None` until `connectors::turn_for_ask` lands (PR #113); the harness already follows the `ExternalTools` contract.
+- Connectors: `ask_meeting` gets the turn's tool set from `connectors::turn_for_ask(app, turn_id = ask_id, tier, keep_local_in_scope)` (beta; tiers M/C). A scope holding a Keep-local note gets none (the hub offers nothing and refuses calls); `trace.connectors_off_keep_local` says so when a non-Keep-local turn would have offered tools (a registry-only probe). The harness reads ShareableOnly while connectors are offered, drops on-device history, calls `mark_keep_local` if Keep-local content reaches the context, and proposes or calls nothing after `sealed()`.
 - The MCP binary never calls an LLM; it only reads `meeting_items` (spec §2 item 5; `extraction.rs:1-8`).
 
 ## Tests

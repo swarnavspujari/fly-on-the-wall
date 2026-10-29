@@ -414,6 +414,13 @@ fn history_messages(history: &[Turn], on_device: bool) -> Vec<Message> {
     out
 }
 
+/// Tell the connector turn when any of `meetings` is Keep local.
+pub fn mark_if_keep_local<S: StoreAccess>(x: &dyn ExternalTools, meetings: &[String], store: &S) {
+    if store.with(|s| meetings.iter().any(|m| s.meeting_keep_local(m))) {
+        x.mark_keep_local();
+    }
+}
+
 /// Each source with the note that holds its meeting.
 fn with_notes<S: StoreAccess>(
     mut views: Vec<SourceView>,
@@ -656,6 +663,13 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
             ))
         }
     };
+    // Backstop (the ExternalTools contract): the turn reads without
+    // Keep-local content when connectors are offered, but if a Keep-local
+    // meeting's line reached the context anyway, every connector call is
+    // refused from here on.
+    if let Some(x) = external {
+        mark_if_keep_local(x, pf.evidence.meetings(), env.store);
+    }
     run.log.prefetch = pf.stats.clone();
     run.trace.passages = pf.stats.transcript_passages;
     run.trace.items = pf.stats.items;

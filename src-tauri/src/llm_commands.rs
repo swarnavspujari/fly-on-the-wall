@@ -1250,17 +1250,6 @@ pub struct AskReply {
     pub insert_id: Option<String>,
 }
 
-/// Connector tools for one Ask turn (fly-llm `ExternalTools`). None until
-/// `connectors::turn_for_ask` lands (PR #113); it's built here then, and
-/// the harness already follows the contract (offered only on tool tiers and
-/// non-Keep-local scopes, the turn read without Keep-local content, no
-/// proposals once sealed).
-fn connectors_for_ask(
-    _state: &AppState,
-) -> Option<Box<dyn fly_llm::external_tools::ExternalTools>> {
-    None
-}
-
 /// An answer worth inserting: answered, with a sourced sentence. Its
 /// Markdown and the lines its sourced sentences cite.
 fn insertable(a: &fly_ask::AskAnswer) -> Option<(String, Vec<String>)> {
@@ -1396,7 +1385,23 @@ pub async fn ask_meeting(
             );
         }
     };
-    let external = connectors_for_ask(&state);
+    // Connectors for this turn (beta; tiers M and C only), keyed by the
+    // UI's ask_id so their approval cards land on this answer. A scope
+    // holding a Keep-local note gets none: the hub offers nothing and
+    // refuses every call; the harness reads ShareableOnly, drops on-device
+    // history and marks the turn if Keep-local content reaches it anyway.
+    let turn_id = ask_id.clone().unwrap_or_else(fly_core::new_id);
+    let keep_local_in_scope = {
+        let s = state.storage.lock().unwrap();
+        fly_ask::scope::explicit_keep_local(&s, &scope)
+    };
+    let external =
+        crate::connectors::turn_for_ask(&app, &turn_id, tier.code(), keep_local_in_scope);
+    // Connectors were there but off because of Keep local (for the trace):
+    // what a non-Keep-local turn would have offered (the registry only).
+    let connectors_off_keep_local = keep_local_in_scope
+        && crate::connectors::turn_for_ask(&app, &turn_id, tier.code(), false)
+            .is_some_and(|t| !t.specs().is_empty());
     let answer = fly_ask::ask(
         fly_ask::AskEnv {
             store: &state.storage,
@@ -1407,7 +1412,9 @@ pub async fn ask_meeting(
             embedder: Some(&embedder),
             events: ask_id.as_ref().map(|_| &sink as fly_ask::EventSink<'_>),
             cancel: Some(cancel.flag()),
-            external: external.as_deref(),
+            external: external
+                .as_deref()
+                .map(|x| x as &dyn fly_llm::external_tools::ExternalTools),
         },
         fly_ask::AskInput {
             question: &question,
@@ -1417,6 +1424,8 @@ pub async fn ask_meeting(
         },
     )
     .await;
+    let mut answer = answer;
+    answer.trace.connectors_off_keep_local |= connectors_off_keep_local;
     record_ask_run(&state, &answer.run_log);
     match answer.status {
         fly_ask::AnswerStatus::ModelFailed => Err(answer

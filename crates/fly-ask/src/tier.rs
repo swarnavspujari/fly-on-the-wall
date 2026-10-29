@@ -25,6 +25,17 @@ pub enum Tier {
     C,
 }
 
+impl Tier {
+    /// "S", "M" or "C".
+    pub fn code(self) -> &'static str {
+        match self {
+            Tier::S => "S",
+            Tier::M => "M",
+            Tier::C => "C",
+        }
+    }
+}
+
 /// The externally declared part of a budget (what the evals gate and the
 /// spec states): model calls, tool rounds, input tokens. Tokens are
 /// estimated as characters / 4 per content block (see

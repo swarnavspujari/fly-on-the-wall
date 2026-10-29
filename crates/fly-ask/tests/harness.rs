@@ -1056,6 +1056,7 @@ async fn an_items_source_lines_are_shown_so_citing_it_is_valid() {
 struct Connector {
     sealed: std::sync::atomic::AtomicBool,
     calls: std::sync::atomic::AtomicUsize,
+    marked: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -1080,7 +1081,9 @@ impl fly_llm::external_tools::ExternalTools for Connector {
                 .into(),
         )
     }
-    fn mark_keep_local(&self) {}
+    fn mark_keep_local(&self) {
+        self.marked.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     fn sealed(&self) -> bool {
         self.sealed.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -1214,6 +1217,20 @@ async fn with_connectors_offered_the_turn_reads_without_keep_local_content() {
         !sent_text(&reqs).contains("CANARY-OSPREY"),
         "even on this device"
     );
+    assert!(
+        !ext.marked.load(std::sync::atomic::Ordering::SeqCst),
+        "nothing Keep-local reached the context"
+    );
+}
+
+#[test]
+fn keep_local_content_in_the_context_trips_the_connector_turn() {
+    let f = fx();
+    let ext = Connector::default();
+    fly_ask::mark_if_keep_local(&ext, &[f.launch.clone()], &f.s);
+    assert!(!ext.marked.load(std::sync::atomic::Ordering::SeqCst));
+    fly_ask::mark_if_keep_local(&ext, &[f.launch.clone(), f.osprey.clone()], &f.s);
+    assert!(ext.marked.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 /// A scripted model whose user presses Stop as its first reply arrives.

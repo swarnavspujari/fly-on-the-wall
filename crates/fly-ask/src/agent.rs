@@ -194,6 +194,9 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
     fn register(&self, observation: &str, found: &[SegmentInfo]) {
         let mut ev = self.evidence.lock().unwrap_or_else(|p| p.into_inner());
         ev.add_shown(observation, found.iter().cloned());
+        if let Some(x) = self.external {
+            crate::mark_if_keep_local(x, ev.meetings(), self.store);
+        }
     }
 
     /// The scope's meeting ids, for the memory tools' `*_in` (`None` = all
