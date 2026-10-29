@@ -348,3 +348,45 @@ Running log of technical decisions, newest last. Format: date — decision — w
   the 12-month transition window. Tool list + discover results are marked cacheable
   (1 h, public — static per binary, no user data), sparing clients a `tools/list`
   round-trip per conversation.
+
+## v2.5 — Search and retrieval quality
+
+- **2026-10-29 — Keyword search: every word first, any word as the fallback.** The M1 sanitizer
+  ANDed every token, stopwords included, so a typed question ("What did Ines ask for in the
+  launch meeting?") found nothing: FTS was empty for 53 of 63 natural-language eval questions,
+  and the Search UI went vector-only (and blank without Ollama). Now stopwords are dropped and the
+  AND form runs first; only when it matches nothing under the filter does an OR of the content
+  terms run, ranked by bm25 (quoted phrases stay required, every word is still quoted). A
+  keyword search of at most two content words keeps its stopwords ("IT budget", "Will's
+  notes"), so it finds what it found before; the choice ignores the page offset so MCP cursors
+  stay consistent.
+- **2026-10-29 — Passage keyword ranking by IDF-weighted term coverage, plus a semantic floor,
+  shipped together.** `search_passages` scores each window by the BM25 IDF mass of the query
+  terms it holds (speaker labels and the meeting title count), keeps windows holding ≥ 40% of
+  the query's mass (unseen words count, so one shared common word isn't a match), and drops
+  vector hits under a per-model cosine floor (0.35 for embeddinggemma). The OR keyword fix alone
+  cut real-embedder recall from 0.98 to 0.79 because every keyword candidate also collected a
+  semantic RRF vote from an unfloored list; together they hold recall at 0.984 and lift MRR from
+  0.636 to 0.703. Tuned with the real embedder on the eval gold set, since CI's hashed embedder
+  ranks differently. The floor is for questions: it applies only to unscoped queries of 4+
+  content words (cut to their 1-3 rarest words, the gold questions' answer chunks fall under
+  0.35 for 39-90% of them), and the Search UI applies none. Raw cosines come back in a sibling
+  `PassageScores` (by `Passage::id()`) from `search_passages_scored`; `Passage` and
+  `PassageResults` keep their shapes (the eval runner builds them as literals). An unseen word
+  weighs like the rarest seen one, so a typo no longer wipes out keyword results.
+- **2026-10-29 — Transcript sources rank ahead of their own meeting's note.** On #103's
+  102-question set, a note passage sat at rank 1 above its own meeting's citable lines for 24
+  of the 33 questions answered at rank 2. A note summarizes its meeting; where one would rank
+  above every transcript passage of that meeting, the meeting's best passage moves to just
+  ahead of it. Real-embedder MRR 0.570 → 0.727 from this alone (0.743 with the other fixes,
+  main 0.525; gate 0.70). The per-meeting cap stays 3 (4 measured 0.761; the Ask harness can
+  pass `per_meeting`).
+- **2026-10-29 — In-memory vector cache keyed on `data_version` + this connection's
+  `embedding_chunks` writes.** Reading every vector from SQLite per query cost ~1.8 s at a
+  thousand meetings. Vectors are cached quantized to i8 (a quarter of the memory; winners are
+  re-scored exactly), and any commit by another connection or any row change to
+  `embedding_chunks` on this one (an update hook) drops the cache, so it can never serve a
+  replaced vector, while settings or job-progress writes no longer cost a rebuild. Each search
+  reads on one snapshot. Visibility
+  is never cached: each search asks SQL which chunk ids it may see. ANN is deferred until
+  libraries reach ~100k chunks.

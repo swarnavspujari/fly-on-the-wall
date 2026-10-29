@@ -1,0 +1,14 @@
+{
+  "why": "An empty reply.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": ""
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

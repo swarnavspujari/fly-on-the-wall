@@ -1,0 +1,14 @@
+{
+  "why": "The July bench failure: a spoken number turned into the wrong figure (eighty four hundred -> $84k).",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Ines asked for $84k for the first month of paid launch spend [seg:m01-05]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

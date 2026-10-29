@@ -1,0 +1,14 @@
+{
+  "why": "Citations in a trailing Sources line instead of inline.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "They keep their current price for twelve months, then move to the new tiers.\n\nSources: [seg:m07-16]"
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

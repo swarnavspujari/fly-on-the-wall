@@ -121,7 +121,7 @@ Every released build (v1.0.3 through v2.4.0) has `SCHEMA_VERSION = 2`, stamps `u
 - **First-launch progress for large libraries: done** (see [First-launch progress](#first-launch-progress)). The step still takes about 40 s on a 300k-segment library with word timings (release build, busy machine). Stage 1 is the remaining lever: the trigger SELECT's per-segment `json_extract` calls over objects that carry word timings.
 
 - **Re-embed pacing (v2.5 release blocker): done** in the v2.5 indexing PR. The worker yields to recordings, transcriptions (incl. polish) and Ask/Enhance, rests after each batch as long as the batch took, and takes the most recently written chunks first (`ORDER BY id DESC`), so new content isn't stuck behind the one-time re-embed. Chunk spans follow the raw text and a polish keeps each chunk's vector, so polishing re-embeds nothing. The startup chunk pass takes the storage lock for 8 owners at a time. See `docs/components/app-search.md`.
-- **fly-context keyword path:** switch to `search_segments`, and add `meeting_items` as a third ranked list.
+- **fly-context keyword path:** it now ranks on `segments_fts` statistics (`segment_term_stats`, v2.5 search-quality PR); adding `meeting_items` as a third ranked list is still open.
 - **FTS5 `secure-delete`** for `notes_fts` and `transcripts_fts`, which still keep deleted terms in their pages.
 - **Trigger optimization:** skip the segment rebuild when `$.segments` is unchanged (a relabel currently rebuilds that meeting's rows).
 - **Dev tooling:** warn about a stale `flyonthewall-mcp` sidecar.
