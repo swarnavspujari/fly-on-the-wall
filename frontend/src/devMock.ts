@@ -34,11 +34,17 @@
                                      can't convert screen-walkthrough.mp4:
                                      that row shows its cause, the others
                                      convert; "Retry failed file" succeeds
-     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "none"
+     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "lost" | "device" | "disk" | "none"
                                    → with fotwMockRecording, the capture's
                                      warnings are the exact backend sentence
                                      for that case (recording bar chips;
-                                     "worst": two warnings + a 1 h timer)
+                                     "worst": two warnings + a 1 h timer;
+                                     "lost": audio lost on both sides;
+                                     "device": the output changed; "disk":
+                                     the mic's audio couldn't be saved)
+     fotwMockAudioLost = "1"       → Stop emits recording:audio_lost (1.2 s
+                                     mic, 0.4 s system): the "Part of the last
+                                     recording is missing" notice
      fotwMockNoAttendees = "1"     → Record starts with no attendees, as with
                                      no calendar event (speaker card, typed)
      fotwMockConsentReset = "1"    → no cloud consent recorded (as after the
@@ -2612,6 +2618,16 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       // the capture ends; the meeting comes back like the backend's
       mockRecPaused = false;
       if (typeof localStorage !== "undefined") localStorage.removeItem("fotwMockRecording");
+      // fotwMockAudioLost=1: the capture had gaps (recording.rs
+      // record_capture_health emits this right before returning)
+      if (mockFlag("fotwMockAudioLost") === "1") {
+        mockEmit("recording:audio_lost", {
+          meeting_id: "m1",
+          note_id: "n1",
+          mic_lost_ms: 1200,
+          system_lost_ms: 400,
+        });
+      }
       return meeting("n1");
     default:
       return null;
@@ -2689,6 +2705,18 @@ const MOCK_REC_WARNINGS: Record<string, string[]> = {
   ],
   macos: [
     "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall. If it already shows as allowed, the grant belongs to a previously installed build: remove Fly on the Wall from that list with the − button and re-add it (or run `tccutil reset ScreenCapture com.flyonthewall.app` in Terminal), then relaunch.",
+  ],
+  // device_lost_warning / write_failed_warning (crates/fly-audio/src/cpal_backend.rs)
+  device: [
+    "The sound output changed or disconnected — the other participants may be missing from the rest of this recording. Stop and record again to follow the current output.",
+  ],
+  disk: [
+    "Part of your microphone audio couldn't be saved — the disk may be full or unavailable. Free up space; the recording keeps trying.",
+  ],
+  // lost_audio_warning (crates/fly-audio/src/cpal_backend.rs)
+  lost: [
+    "Your microphone has gaps: 1.2 s was lost because the computer was too busy (most recently at 2:31). The rest is still recording — closing heavy apps can help.",
+    "The other participants' audio has gaps: 0.4 s was lost because the computer was too busy (most recently at 2:31). The rest is still recording — closing heavy apps can help.",
   ],
 };
 function mockRecordingQa() {

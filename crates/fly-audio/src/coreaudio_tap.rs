@@ -10,7 +10,9 @@
 //! Mirrors the Pulse/WASAPI loopback discipline in `pulse_loopback` /
 //! `cpal_backend`: mono i16 WAV at the tap's native rate, pad-to-clock so
 //! the "them" channel timeline stays wall-clock aligned, and pause
-//! implemented by discarding while the shared clock is stopped.
+//! implemented by discarding while the shared clock is stopped. The IOProc
+//! only pushes samples into the channel's ring; the writer thread does the
+//! file I/O (`sink.rs`).
 //!
 //! The tap needs user consent (NSAudioCaptureUsageDescription, TCC "System
 //! Audio Recording Only") and a SIGNED binary — an unsigned/un-entitled
@@ -49,7 +51,8 @@ use objc2_core_audio::{
 use objc2_core_audio_types::{AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp};
 use objc2_foundation::NSArray;
 
-use crate::cpal_backend::{Clock, SharedWriter};
+use crate::cpal_backend::{idle_pad_frames, Clock};
+use crate::sink::{self, ChannelSink};
 use crate::{AudioError, Result};
 
 /// `kAudioFormatFlagIsFloat` (CoreAudioBaseTypes.h).
@@ -178,7 +181,9 @@ pub(crate) fn preflight(duration_ms: u64) -> crate::SystemAudioPreflight {
         return P::Unsupported;
     }
     let path = std::env::temp_dir().join(format!("fotw-tap-preflight-{}.wav", std::process::id()));
-    let mut recorder = match TapRecorder::start(path.clone(), Arc::new(Clock::new())) {
+    // No writer thread: the probe only reads the counters, and its ring
+    // holds far more than the probe's ~1.5 s.
+    let (mut recorder, sink) = match TapRecorder::start(path.clone(), Arc::new(Clock::new())) {
         Ok(r) => r,
         Err(AudioError::LoopbackUnsupported) => return P::Unsupported,
         Err(e) => return P::Error(e.to_string()),
@@ -194,6 +199,7 @@ pub(crate) fn preflight(duration_ms: u64) -> crate::SystemAudioPreflight {
     };
     recorder.shutdown();
     drop(recorder);
+    drop(sink);
     let _ = std::fs::remove_file(&path);
     if nonzero > 0 {
         P::Ok
@@ -205,9 +211,9 @@ pub(crate) fn preflight(duration_ms: u64) -> crate::SystemAudioPreflight {
 }
 
 pub struct TapRecorder {
-    pub writer: SharedWriter,
     pub path: PathBuf,
     pub rate: u32,
+    /// Frames on the channel's timeline (audio + idle padding).
     pub written: Arc<AtomicU64>,
     /// Samples that were not digital silence — an unsigned/un-entitled
     /// build's tap delivers only zeros, and this is the evidence.
@@ -230,7 +236,7 @@ impl TapRecorder {
     /// Build the tap → aggregate → IOProc chain and start capturing into
     /// `path`. Fails cleanly (mic-only fallback + banner upstream) on
     /// macOS < 14.2 or when any Core Audio step refuses.
-    pub fn start(path: PathBuf, clock: Arc<Clock>) -> Result<Self> {
+    pub fn start(path: PathBuf, clock: Arc<Clock>) -> Result<(Self, ChannelSink)> {
         if AnyClass::get(c"CATapDescription").is_none() {
             return Err(AudioError::LoopbackUnsupported);
         }
@@ -268,7 +274,7 @@ impl TapRecorder {
         tap_id: AudioObjectID,
         tap_uuid: String,
         destroy_tap: DestroyTapFn,
-    ) -> Result<Self> {
+    ) -> Result<(Self, ChannelSink)> {
         // ---- tap format: the IOProc will deliver this (Float32 LPCM) ----
         let format: AudioStreamBasicDescription =
             unsafe { get_property(tap_id, kAudioTapPropertyFormat) }?;
@@ -360,23 +366,16 @@ impl TapRecorder {
             err
         };
 
-        // ---- WAV writer + IOProc ----
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let writer: SharedWriter = Arc::new(Mutex::new(Some(
-            hound::WavWriter::create(&path, spec)
-                .map_err(|e| teardown_aggregate(AudioError::Backend(e.to_string())))?,
-        )));
+        // ---- channel (WAV + ring) + IOProc ----
+        let (producer, sink) = sink::channel(path.clone(), rate).map_err(teardown_aggregate)?;
+        // Only the IOProc (one serial queue) ever locks this, so try_lock
+        // never fails and the IOProc never waits.
+        let producer = Mutex::new(producer);
         let written = Arc::new(AtomicU64::new(0));
         let nonzero = Arc::new(AtomicU64::new(0));
         let callbacks = Arc::new(AtomicU64::new(0));
 
         let io_block = {
-            let writer = writer.clone();
             let written = written.clone();
             let nonzero = nonzero.clone();
             let callbacks = callbacks.clone();
@@ -394,8 +393,9 @@ impl TapRecorder {
                     if !clock.is_running() {
                         return;
                     }
-                    let mut guard = writer.lock().unwrap();
-                    let Some(w) = guard.as_mut() else { return };
+                    let Ok(mut w) = producer.try_lock() else {
+                        return;
+                    };
                     unsafe {
                         let abl = in_data.as_ref();
                         let buffers = std::slice::from_raw_parts(
@@ -414,15 +414,13 @@ impl TapRecorder {
                             return;
                         }
                         // pad-to-clock: taps go quiet with the render pipeline
-                        let expected = clock.elapsed_ms() * rate as u64 / 1000;
-                        let have = written.load(Ordering::Relaxed) + frames as u64;
-                        if expected > have + rate as u64 / 5 {
-                            let pad = expected - have;
-                            for _ in 0..pad {
-                                let _ = w.write_sample(0i16);
-                            }
-                            written.fetch_add(pad, Ordering::Relaxed);
-                        }
+                        let now_ms = clock.elapsed_ms();
+                        let pad = idle_pad_frames(
+                            clock.expected_frames(rate),
+                            w.timeline() + frames as u64,
+                            rate,
+                        );
+                        w.silence(pad, false, now_ms);
                         let mut had_signal = 0u64;
                         for frame in 0..frames {
                             let mut sum = 0f32;
@@ -442,9 +440,11 @@ impl TapRecorder {
                             if value != 0 {
                                 had_signal += 1;
                             }
-                            let _ = w.write_sample(value);
+                            w.push(value);
                         }
-                        written.fetch_add(frames as u64, Ordering::Relaxed);
+                        w.end_packet();
+                        w.note_time(now_ms);
+                        written.store(w.timeline(), Ordering::Relaxed);
                         if had_signal > 0 {
                             nonzero.fetch_add(had_signal, Ordering::Relaxed);
                         }
@@ -486,8 +486,7 @@ impl TapRecorder {
             aggregate = aggregate_id,
             "system-audio process tap capturing"
         );
-        Ok(Self {
-            writer,
+        let recorder = Self {
             path,
             rate,
             written,
@@ -501,7 +500,8 @@ impl TapRecorder {
             stopped: AtomicBool::new(false),
             _io_block: io_block,
             _queue: queue,
-        })
+        };
+        Ok((recorder, sink))
     }
 
     pub(crate) fn health(&self) -> TapHealth {
@@ -540,19 +540,6 @@ impl TapRecorder {
             );
         } else {
             tracing::info!(callbacks, written, nonzero, "system-audio tap stopped");
-        }
-    }
-
-    pub fn pad_tail_to(&self, target_ms: u64) {
-        let expected = target_ms * self.rate as u64 / 1000;
-        let have = self.written.load(Ordering::Relaxed);
-        if expected > have {
-            if let Some(w) = self.writer.lock().unwrap().as_mut() {
-                for _ in 0..(expected - have) {
-                    let _ = w.write_sample(0i16);
-                }
-            }
-            self.written.fetch_add(expected - have, Ordering::Relaxed);
         }
     }
 }

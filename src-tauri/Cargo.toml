@@ -73,5 +73,7 @@ windows = { version = "0.62", features = ["Win32_System_Threading"] }
 libc = "0.2"
 
 [dev-dependencies]
+# the contention bench's marker tone; not in the shipped app
+fly-audio = { workspace = true, features = ["testtone"] }
 tempfile = "3"
 async-trait.workspace = true

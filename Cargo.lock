@@ -1411,6 +1411,7 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation",
+ "rtrb",
  "serde",
  "serde_json",
  "tempfile",
@@ -4330,6 +4331,12 @@ dependencies = [
  "hashbrown 0.16.1",
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "rtrb"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "342e1478a6e1c839e7405033eabfdc954d4d5dabd39f34e83420a43a95acfb04"
 
 [[package]]
 name = "rusqlite"

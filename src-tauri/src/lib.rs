@@ -12,7 +12,7 @@ pub mod extraction;
 pub mod gpu;
 pub mod hw;
 mod import_commands;
-mod live;
+pub mod live;
 pub mod llm_commands;
 pub mod logging;
 pub mod models;

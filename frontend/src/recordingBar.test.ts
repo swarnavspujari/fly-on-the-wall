@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { classifyWarning, healthChips, remindNoticeOn, REMIND_NOTICE_KEY } from "./recordingBar";
+import {
+  chipHeading,
+  classifyWarning,
+  healthChips,
+  remindNoticeOn,
+  REMIND_NOTICE_KEY,
+} from "./recordingBar";
 
 // The exact sentences the backend sends today (fly-audio cpal_backend.rs,
 // win_volume, tap_messages.rs). The chip labels key off these.
@@ -11,8 +17,42 @@ const LOOPBACK =
   "System audio capture couldn't start (device busy) — only your microphone is being recorded, so the other participants won't be in this recording.";
 const MACOS =
   "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall.";
+// lost_audio_warning (cpal_backend.rs), pinned there by
+// lost_audio_warning_matches_the_recording_bar_classifier
+const MIC_LOST =
+  "Your microphone has gaps: 1.2 s was lost because the computer was too busy (most recently at 12:34). The rest is still recording — closing heavy apps can help.";
+const SYSTEM_LOST =
+  "The other participants' audio has gaps: 0.4 s was lost because the computer was too busy (most recently at 3:05). The rest is still recording — closing heavy apps can help.";
+
+// device_lost_warning / write_failed_warning (cpal_backend.rs)
+const DEVICE_MIC =
+  "Your microphone changed or disconnected — your side may be missing from the rest of this recording. Stop and record again to use the current microphone.";
+const DEVICE_SYS =
+  "The sound output changed or disconnected — the other participants may be missing from the rest of this recording. Stop and record again to follow the current output.";
+const DISK_MIC =
+  "Part of your microphone audio couldn't be saved — the disk may be full or unavailable. Free up space; the recording keeps trying.";
+const DISK_SYS =
+  "Part of the other participants' audio couldn't be saved — the disk may be full or unavailable. Free up space; the recording keeps trying.";
 
 describe("classifyWarning", () => {
+  it("labels a device change on the side it happened", () => {
+    expect(classifyWarning(DEVICE_MIC)).toMatchObject({ side: "you", label: "Device changed" });
+    expect(classifyWarning(DEVICE_SYS)).toMatchObject({ side: "others", label: "Device changed" });
+  });
+
+  it("labels audio the disk wouldn't take on the side it happened", () => {
+    expect(classifyWarning(DISK_MIC)).toMatchObject({ side: "you", label: "Not saving" });
+    expect(classifyWarning(DISK_SYS)).toMatchObject({ side: "others", label: "Not saving" });
+  });
+
+  it("puts lost microphone audio on the you chip", () => {
+    expect(classifyWarning(MIC_LOST)).toMatchObject({ side: "you", label: "Audio lost" });
+  });
+
+  it("puts lost system audio on the others chip", () => {
+    expect(classifyWarning(SYSTEM_LOST)).toMatchObject({ side: "others", label: "Audio lost" });
+  });
+
   it("labels a muted output on the others chip", () => {
     expect(classifyWarning(MUTED)).toMatchObject({
       side: "others",
@@ -97,5 +137,18 @@ describe("remind setting", () => {
     expect(remindNoticeOn(undefined)).toBe(true);
     expect(remindNoticeOn("true")).toBe(true);
     expect(remindNoticeOn("false")).toBe(false);
+  });
+});
+
+describe("chipHeading", () => {
+  it("says audio was lost when that's the only problem on a side", () => {
+    const [you, others] = healthChips([MIC_LOST, SYSTEM_LOST], false);
+    expect(chipHeading(you)).toBe("Part of your microphone audio was lost");
+    expect(chipHeading(others)).toBe("Part of the other participants’ audio was lost");
+  });
+
+  it("keeps the stronger heading when a side may be missing entirely", () => {
+    const others = healthChips([SYSTEM_LOST, MUTED], false)[1];
+    expect(chipHeading(others)).toBe("The other participants may be missing from this recording");
   });
 });

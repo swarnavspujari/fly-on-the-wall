@@ -12,6 +12,7 @@ import type { UpdatePhase } from "./updater";
 export const NOTICE_PRIORITY = {
   appError: 4,
   systemAudio: 3,
+  audioLost: 2.5,
   pipeline: 2,
   consentSkips: 1.5,
   recoveredKeptLocal: 1.2,
@@ -19,6 +20,36 @@ export const NOTICE_PRIORITY = {
   /** One-time "recordings compressed": good news, never urgent. */
   compressed: 0.5,
 } as const;
+
+/** Payload of the backend's `recording:audio_lost` event (recording.rs),
+ *  sent when a recording that just stopped had gaps. */
+export interface AudioLost {
+  meeting_id: string;
+  note_id: string;
+  mic_lost_ms: number;
+  system_lost_ms: number;
+}
+
+function seconds(ms: number): string {
+  return `${Math.max(0.1, Math.round(ms / 100) / 10).toFixed(1)} s`;
+}
+
+/** A recording that just stopped lost some audio (the capture couldn't keep
+ *  up). The gaps are silence in the file, so nothing after them shifted —
+ *  but what was said in them is gone from the recording and transcript. */
+export function audioLostCopy(lost: AudioLost): NoticeCopy {
+  const parts: string[] = [];
+  if (lost.mic_lost_ms > 0) parts.push(`${seconds(lost.mic_lost_ms)} of your microphone`);
+  if (lost.system_lost_ms > 0)
+    parts.push(`${seconds(lost.system_lost_ms)} of the other participants’ audio`);
+  const what = parts.length > 0 ? parts.join(" and ") : "Some audio";
+  return {
+    title: "Part of the last recording is missing",
+    cause: `${what} ${parts.length > 1 ? "were" : "was"} lost because the computer was too busy. Those moments are silent in the recording and missing from its transcript.`,
+    steps: ["Before your next meeting, close apps that keep the computer busy."],
+    details: null,
+  };
+}
 
 export interface NoticeCopy {
   title: string;
