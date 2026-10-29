@@ -16,13 +16,20 @@ use fly_core::Transcript;
 // Peak RSS + machine CPU sampler
 // ---------------------------------------------------------------------------
 
-/// Sidecar families whose peak resident memory is reported. Only direct
-/// children of this test process count, so another session's whisper-cli
-/// on the same machine never pollutes the number.
+/// Sidecar families whose peak resident memory is reported. Only
+/// descendants of this test process count, so another session's
+/// whisper-cli on the same machine never pollutes the number.
+/// First matching prefix wins, so the diarizer's sidecar is listed before
+/// the bench build's sherpa-onnx ASR binaries.
 const FAMILIES: &[(&str, &str)] = &[
     ("whisper-cli", "whisper"),
     ("parakeet-cli", "parakeet"),
-    ("sherpa-onnx", "sherpa"),
+    ("sherpa-onnx-offline-speaker-diarization", "sherpa"),
+    // bench-only engines (bench_engines.rs)
+    ("sherpa-onnx", "sherpa-asr"),
+    ("python", "sherpa-asr"),
+    ("llama-", "llama"),
+    ("nemo", "nemo-cpp"),
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -31,6 +38,11 @@ pub struct ResourceStats {
     pub peak_rss_mb: std::collections::BTreeMap<String, f64>,
     /// Peak RSS of the harness process itself (in-process VBx/ort), MB.
     pub peak_rss_self_mb: f64,
+    /// CPU time per sidecar family, seconds (summed over every process of
+    /// the family; sampled, so a process's last < 250 ms can be missed).
+    pub cpu_secs: std::collections::BTreeMap<String, f64>,
+    /// Logical CPUs on this machine (to turn CPU-seconds into a share).
+    pub logical_cpus: usize,
     /// Mean whole-machine CPU % over the run — high values mean other work
     /// competed for the cores and timings are pessimistic.
     pub machine_cpu_avg_pct: f64,
@@ -52,7 +64,11 @@ impl Sampler {
             let mut sys = System::new();
             let mut stats = ResourceStats::default();
             let mut cpu_sum = 0.0f64;
+            // pid → (family, accumulated CPU ms at its latest sample)
+            let mut cpu_ms: std::collections::HashMap<sysinfo::Pid, (&str, u64)> =
+                std::collections::HashMap::new();
             sys.refresh_cpu_usage();
+            stats.logical_cpus = sys.cpus().len();
             while !flag.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(250));
                 sys.refresh_cpu_usage();
@@ -65,17 +81,33 @@ impl Sampler {
                         stats.peak_rss_self_mb = stats.peak_rss_self_mb.max(mb);
                         continue;
                     }
-                    if me.is_none() || p.parent() != me {
+                    // children and grandchildren (a venv's python.exe on
+                    // Windows is a launcher that spawns the real interpreter)
+                    let ours = me.is_some() && {
+                        let mut at = p.parent();
+                        let mut hops = 0;
+                        while at.is_some() && at != me && hops < 3 {
+                            at = at.and_then(|q| sys.process(q)).and_then(|q| q.parent());
+                            hops += 1;
+                        }
+                        at.is_some() && at == me
+                    };
+                    if !ours {
                         continue;
                     }
                     let name = p.name().to_string_lossy().to_ascii_lowercase();
                     if let Some((_, fam)) = FAMILIES.iter().find(|(pre, _)| name.starts_with(pre)) {
                         let e = stats.peak_rss_mb.entry(fam.to_string()).or_default();
                         *e = e.max(mb);
+                        let c = cpu_ms.entry(*pid).or_insert((fam, 0));
+                        c.1 = c.1.max(p.accumulated_cpu_time());
                     }
                 }
             }
             stats.machine_cpu_avg_pct = cpu_sum / stats.samples.max(1) as f64;
+            for (fam, ms) in cpu_ms.into_values() {
+                *stats.cpu_secs.entry(fam.to_string()).or_default() += ms as f64 / 1000.0;
+            }
             stats
         });
         Self { stop, handle }
@@ -377,5 +409,118 @@ mod tests {
         c.observe("transcribing");
         c.observe("diarizing");
         assert!(c.asr_secs().unwrap() >= 0.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Speech holes (reference-free decoder-robustness check)
+// ---------------------------------------------------------------------------
+
+/// Word-free stretch that counts as a hole.
+const HOLE_MS: u64 = 5_000;
+const HOLE_FRAME_MS: usize = 100;
+/// Share of a stretch's frames that must carry speech-level energy.
+const HOLE_SPEECH_SHARE: f64 = 0.4;
+
+/// Stretches of ≥ 5 s with no transcribed word whose audio is mostly
+/// speech-level energy (≥ 40 % of 100 ms frames at ≥ ¼ of the median
+/// voiced RMS) — the same rule the shipped Parakeet engine uses to catch
+/// parakeet-cli's silent decoder, applied to the FINAL transcript of any
+/// engine over the whole recording. A nonzero count means speech was
+/// dropped (or a long unintelligible stretch); compare engines on the same
+/// audio. Returns (start_ms, end_ms) per hole.
+pub fn speech_holes(t: &Transcript, samples: &[f32], rate: u32) -> Vec<(u64, u64)> {
+    let per_frame = (rate as usize * HOLE_FRAME_MS / 1000).max(1);
+    let rms: Vec<f64> = samples
+        .chunks(per_frame)
+        .map(|c| (c.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / c.len() as f64).sqrt())
+        .collect();
+    let mut voiced: Vec<f64> = rms.iter().copied().filter(|r| *r > 1e-3).collect();
+    if voiced.is_empty() {
+        return Vec::new();
+    }
+    voiced.sort_by(|a, b| a.total_cmp(b));
+    let threshold = voiced[voiced.len() / 2] * 0.25;
+    let total_ms = (samples.len() as u64 * 1000) / rate.max(1) as u64;
+    let mut edges: Vec<(u64, u64)> = t
+        .segments
+        .iter()
+        .flat_map(|s| s.words.iter().map(|w| (w.start_ms, w.end_ms)))
+        .collect();
+    edges.sort_unstable();
+    edges.push((total_ms, total_ms));
+    let mut holes = Vec::new();
+    let mut covered_to = 0u64;
+    for (start, end) in edges {
+        if start >= covered_to + HOLE_MS {
+            let (a, b) = (
+                covered_to as usize / HOLE_FRAME_MS,
+                start as usize / HOLE_FRAME_MS,
+            );
+            let frames = &rms[a.min(rms.len())..b.min(rms.len())];
+            let speech = frames.iter().filter(|r| **r >= threshold).count();
+            if !frames.is_empty() && speech as f64 / frames.len() as f64 >= HOLE_SPEECH_SHARE {
+                holes.push((covered_to, start));
+            }
+        }
+        covered_to = covered_to.max(end);
+    }
+    holes
+}
+
+pub fn holes_json(holes: &[(u64, u64)]) -> serde_json::Value {
+    serde_json::json!({
+        "count": holes.len(),
+        "secs": holes.iter().map(|(a, b)| (b - a) as f64 / 1000.0).sum::<f64>(),
+        "spans_s": holes
+            .iter()
+            .take(20)
+            .map(|(a, b)| [*a as f64 / 1000.0, *b as f64 / 1000.0])
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[cfg(test)]
+mod hole_tests {
+    use super::*;
+
+    fn t_with_words(times: &[(u64, u64)]) -> Transcript {
+        Transcript {
+            meeting_id: "m".into(),
+            language: None,
+            engine: "e".into(),
+            segments: vec![fly_core::TranscriptSegment {
+                id: "s0".into(),
+                speaker_key: "spk_0".into(),
+                start_ms: times.first().map(|w| w.0).unwrap_or(0),
+                end_ms: times.last().map(|w| w.1).unwrap_or(0),
+                text: String::new(),
+                words: times
+                    .iter()
+                    .map(|&(s, e)| fly_core::Word {
+                        text: "w".into(),
+                        start_ms: s,
+                        end_ms: e,
+                    })
+                    .collect(),
+            }],
+            speakers: vec![],
+        }
+    }
+
+    #[test]
+    fn word_free_speech_is_a_hole_but_a_pause_is_not() {
+        let rate = 16_000u32;
+        // 0-20 s loud "speech"; 20-30 s silence
+        let mut s = vec![0.3f32; 30 * rate as usize];
+        for x in &mut s[20 * rate as usize..] {
+            *x = 0.0;
+        }
+        // words cover 0-8 s and resume at 15 s; nothing after 16 s
+        let t = t_with_words(&[(0, 8_000), (15_000, 16_000)]);
+        let holes = speech_holes(&t, &s, rate);
+        // 8-15 s is speech without words; 16-30 s is 4 s speech + 10 s
+        // silence (40 % threshold → 4/14 speech frames, not a hole)
+        assert_eq!(holes, vec![(8_000, 15_000)]);
     }
 }
