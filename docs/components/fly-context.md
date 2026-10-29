@@ -1,9 +1,8 @@
 # Meeting context for AI readers (`fly-context`)
 
-> Layer: crate. Described at main `ccca11b` (storage schema v3, #92 merged) plus the memory PR (#108).
-> In flight:
-> - **search-indexing (v2.5):** reworks `search_passages` internals in `tools.rs` / `passages.rs` (IDF keyword coverage, similarity floor, a `per_meeting` cap and a higher `limit` on `SearchPassagesArgs`).
-> - **Ask harness ([fly-ask](fly-ask.md), PR 3.3):** the second caller, for every Ask read. It consumes `search_passages`, the read tools, `memory_prefetch` and the memory tools described here.
+> Layer: crate. Described at main `ccca11b` (storage schema v3, #92 merged) plus the memory PR (branch `claude/memory-mcp-f24b7d`).
+> `search_passages` is described as of the v2.5 search-quality PR (keyword ranking, similarity floor for questions, transcript sources ahead of their notes, fill-after-cap, lazy hit mapping, `search_passages_scored` / `PassageScores`, the in-process `per_meeting` and `limit` up to 40).
+> In flight: none for search. The Ask harness ([fly-ask](fly-ask.md), PR 3.3) is the second caller, for every Ask read: `search_passages_scored`, the read tools, `memory_prefetch` and the memory tools described here.
 
 ## Purpose
 Typed, read-only access to the user's meetings for AI readers: the MCP server today, and the Ask harness and Enhance next. It offers:
@@ -28,7 +27,7 @@ A `Context` is built with a `Visibility`. Under `ShareableOnly` (any cloud model
   - the three memory tools;
   - the `memory::mcp` entry points.
 - `crates/fly-context/src/fanout.rs`: `decompose`, `fan_out`, `FanoutBudget`, `Readers` (`Mutex<Storage>`, `OpenPerWorker`).
-- `crates/fly-context/src/passages.rs`: speaker-turn windows (kept in lockstep with `fly_storage::embeddings::chunk_transcript`), query terms, lexical scoring, RRF fusion with a per-owner cap.
+- `crates/fly-context/src/passages.rs`: speaker-turn windows (kept in lockstep with `fly_storage::embeddings::chunk_transcript`), query terms (`fly_storage::query::query_terms`), IDF-weighted term matching, vector-hit anchors, RRF fusion with a per-owner cap that fills empty slots.
 - `crates/fly-context/src/render.rs`: model-facing text.
   - Read tools use `[seg:ID] Speaker (m:ss): text`.
   - Memory and fan-out renderers pass meeting content through `safe()`, which defuses fence tags and `[seg:`.
@@ -46,13 +45,13 @@ A `Context` is built with a `Visibility`. Under `ShareableOnly` (any cloud model
 | Memory | `get_briefing(&GetBriefingArgs)`, `open_items(&OpenItemsArgs)`, `whats_changed(&WhatsChangedArgs)` and their scoped forms `get_briefing_in` / `open_items_in` / `whats_changed_in(&args, Option<&[String]>)`, `memory_prefetch(question, &MemoryPrefetch) -> Option<Briefing>` (`MemoryPrefetch::meetings` = scope); `render::{briefing_rendered, open_items_rendered} -> Rendered { text, shown }`; results `Briefing`, `MemoryFact`, `CitedSegment`, `TimelineEntry`, `OpenItems`, `MatchedBy`; `Briefing::retain_meetings` / `cited`, the same on `OpenItems`; `memory::{normalize_title, detect_series, series_matching, Series}`; `memory::mcp::{get_context, whats_changed, open_items}` |
 | Fan-out | `decompose(question, max_sub_queries) -> Vec<String>` (original first), `fan_out(&impl Readers, Visibility, queries, base: &SearchPassagesArgs, vectors, &FanoutBudget) -> Fanout`, `FanoutBudget::TIER_C`, `Fanout`, `FannedPassage`, `Readers` (impls for `Mutex<Storage>` and `OpenPerWorker`) |
 | Tool plumbing | `tool_defs() -> Vec<ToolDef { name, description, input_schema, strict_input_schema }>` (all nine), `call(&Context, name, &Value, Option<QueryVector>) -> ToolOutput { json, text }`, name constants (`tools::SEARCH_PASSAGES` …, `memory::GET_BRIEFING`, `OPEN_ITEMS`, `WHATS_CHANGED`), `MAX_QUERY_CHARS = 1000`, `MAX_MEETING_IDS = 50` |
-| Helpers | `passages::{transcript_windows, window_text, query_terms, lexical_score, fuse, Window, PassageKey, Via}`, `render::{clock, segment_line, passages, segments, meetings, event, note, items, briefing, briefing_within, open_items, fanout, safe}` |
+| Helpers | `passages::{transcript_windows, window_text, query_terms, matched_terms, lexical_score, weighted_match, resolve_anchor, fuse, Window, PassageKey (Transcript / Note / Chunk), Via}`, `render::{clock, segment_line, passages, segments, meetings, event, note, items, briefing, briefing_within, open_items, fanout, safe}` |
 
 **The nine tools.** Bounds are clamped in code; strict schemas carry none.
 
 | Tool | Arguments | Keep-local enforcement under `ShareableOnly` |
 |---|---|---|
-| `search_passages` | `query` (required, ≤1,000 chars), `meeting_ids` (≤50), `folder_id`, `since`, `until`, `limit` 1-20 (default 8) | FTS and `vector_search` filter Keep local inside SQL, before their limits. The `Hidden` set is re-checked per meeting, note and vector hit. |
+| `search_passages` | `query` (required, ≤1,000 chars), `meeting_ids` (≤50), `folder_id`, `since`, `until`, `limit` 1-20 (default 8). In-process callers (the Ask harness) may ask for `limit` up to 40 and set `per_meeting` 1-12, which is not part of the schema (a model's call naming it is rejected as an unknown field); `call()` and the MCP server hold `limit` to 20. | Keyword statistics (`segment_term_stats` / `note_term_stats`) and `vector_search_floor` filter Keep local inside SQL, before their limits. The `Hidden` set is re-checked per meeting, note and vector hit. |
 | `read_segments` | `meeting_id`, `around_segment_id` (required), `before` / `after` 0-20 (default 3), `prefer_polished` | `guard_meeting` |
 | `list_meetings` | `since`, `until`, `folder_id`, `title_contains`, `attendee`, `limit` 1-50 (default 20) | `list_meetings_filtered` with `exclude_keep_local` in SQL, plus the `Hidden` post-filter |
 | `get_event` | `meeting_id` | `guard_meeting` |
@@ -61,6 +60,24 @@ A `Context` is built with a `Visibility`. Under `ShareableOnly` (any cloud model
 | `get_briefing` | `query` (required: a series, project, customer, topic or person), `person`, `since` | Every memory path. See [Memory](#memory). |
 | `open_items` | `scope` (`"all"` or a series name), `owner`, `limit` 1-100 (default 30) | Every memory path |
 | `whats_changed` | `series` (required), `since` (default: the series' newest meeting that has extracted items) | Every memory path |
+
+#### How `search_passages` ranks
+1. **Keyword list (transcripts).** The query's terms (`fly_storage::query::query_terms`: lowercase words with diacritics folded as the FTS tokenizer folds them, minus stopwords and lone letters; a query of at most two content words is a keyword search and keeps its stopwords, so "IT budget" looks for "it" too; a term of 4+ characters also matches as a prefix) get BM25 IDF weights from `Storage::segment_term_stats` over the segments in scope (`TermStats::coverage_weights`: a word no segment holds, such as a typo or a misheard name, weighs like the rarest word that does occur, not more). Unscoped, the 40 meetings holding the most weight are loaded (`owner_evidence` / `top_owners`); a meeting scope loads exactly those meetings. Each window scores the weight of the terms it holds, counting its speaker labels and the meeting title (`passages::window_matches`: one pass over its lines, the title once per meeting); a window qualifies at ≥ 40% of the query's total weight (`KEYWORD_MIN_COVERAGE`), so one shared common word doesn't make a match. Up to 3 windows per meeting (more with a larger `per_meeting`); ties within a meeting go to the window whose own text matches more, ties across meetings to the meeting with more keyword evidence, then the newer one (never the random ids, so the ranking is deterministic).
+2. **Keyword list (notes).** The same, over note paragraph chunks (`note_term_stats`, title counts).
+3. **Semantic list.** `vector_search_floor`. The model's floor (`fly_storage::embeddings::similarity_floor`: 0.35 for `embeddinggemma:300m`, none for unknown models such as test embedders) applies only to an unscoped query of at least 4 content words (`FLOOR_MIN_TERMS`). It is calibrated on questions; on the gold set, the chunk holding the answer reached 0.35 for 93% of the questions as asked but for only 61% / 36% / 10% of the same questions cut to their 3 / 2 / 1 rarest words, so shorter queries keep every ranked semantic hit. A meeting-scoped search applies no floor: the meeting is the question's subject. A hit in a meeting the keyword pass already loaded maps to its window now; any other becomes a `PassageKey::Chunk` and is only resolved (transcript parsed) if it makes the result.
+4. **Fusion.** Reciprocal-rank fusion, at most 3 passages per meeting or note; slots that cap would leave empty go to capped-out passages. A caller's own `per_meeting` (1-12) is a strict cap instead (no fill).
+5. **Sources before notes.** A note passage summarizes its meeting; the transcript is the citable source. Where a note would rank above every transcript passage of its own meeting, the best of those moves up to just ahead of it (from anywhere in the over-fetched list) and takes the note's score; the note stays, one place lower (`sources_before_notes`). This is the largest single gain below: 24 of the 33 questions answered at rank 2 had their own meeting's note at rank 1.
+6. **Result.** `PassageResults { passages, semantic }` (its shape is fixed: the eval runner builds it as a literal, like `Passage`). `search_passages_scored` returns `PassageScores` beside it: `similarity` (the raw cosine of each passage's best semantic hit, keyed by `Passage::id()`, absent when only keywords found it), `top_similarity` (best cosine of any in-scope chunk, floor or not) and `similarity_floor` (what this search applied). `search_passages` is the same search without the scores.
+
+Measured on #103's retrieval gold set (29 meetings, 102 answerable and 26 unanswerable questions), `search_passages` limit 8, main `56a7bb0` → this PR:
+
+| Path | recall@8 | MRR@8 | coverage |
+|---|---|---|---|
+| Real `embeddinggemma:300m` (the app; release gate MRR ≥ 0.70) | 0.882 → 0.912 | 0.525 → 0.743 | 0.882 → 0.912 |
+| CI's hashed embedder | 0.621 → 0.833 | 0.311 → 0.615 | 0.608 → 0.833 |
+| Keyword only (no Ollama) | 0.049 → 0.814 | 0.042 → 0.602 | not measured |
+
+Real embedder, per question against main: 52 better, 10 worse, 40 the same; rank 1 for 65 questions (34 on main); 6 found that main missed, 3 that main found are missed (q15d, q19d, q21b: each answer is the 4th-best window of a meeting that already has 3 passages). Evidence MRR (a note of the right meeting counts) 0.732 → 0.781. Unanswerables returning passages: 26 → 25 of 26. With `per_meeting: 4` the same set gives recall 0.941 and MRR 0.761 (only q21b missed); the default stays 3. Warm latency on this set: p50 ~12 ms (main ~19 ms); the first search on a fresh connection ~23 ms (main ~21 ms). Cost at library size: see [app-search](app-search.md#cost-at-library-size).
 
 ### Memory
 What "memory" means here is the knowledge the app has already extracted, offered as cited context. It is not free-form model memory. No model runs at query time.
@@ -170,8 +187,9 @@ All access goes through the fly-storage API, read-only.
 | `notes` | id, title, folder_id, scratchpad, blocks, meeting_id | read (`get_note`, Keep-local CTE) |
 | `folders` | id, parent_id, keep_local | read (Keep-local CTE) |
 | `transcripts` | meeting_id, transcript JSON, `cleaned_json` | read (`get_transcript`, `get_cleaned_transcript`) |
-| `notes_fts`, `transcripts_fts` | FTS5 | read (`search_split`, `search_filtered`) |
-| `embedding_chunks` | owner_kind, owner_id, segment_ids, start_ms, model, embedding | read (`vector_search`) |
+| `notes_fts`, `transcripts_fts` | FTS5 | read (`search_split`, `search_filtered`, `note_term_stats`) |
+| `segments_fts` + `transcript_segments` | FTS5 | read (`segment_term_stats`) |
+| `embedding_chunks` | owner_kind, owner_id, segment_ids, start_ms, model, embedding | read (`vector_search_floor`) |
 | `meeting_items` | kind, text, owner, status, speaker_key, segment_ids_json, meeting_id | read (`query_items`, `get_meeting_items`) |
 
 ### Files and directories written
@@ -196,7 +214,7 @@ None.
   - The Ask harness (`fly-ask`, PR 3.3) is next.
   - `fly-app` doesn't depend on it directly.
 - **Outbound:**
-  - [fly-storage](fly-storage.md): `Storage`, `SearchFilter`, `ItemFilter`, `MeetingFilter`, `SearchHitKind`, `embeddings::{chunk_transcript, chunk_note}`, `Storage::open_existing` (fan-out readers), `Storage::transcript_speakers` (speaker legends without segments or word timings), and `keep_local_note_ids` / `keep_local_meeting_ids` / `meeting_keep_local` / `note_keep_local`.
+  - [fly-storage](fly-storage.md): `Storage`, `SearchFilter`, `ItemFilter`, `MeetingFilter`, `SearchHitKind`, `segment_term_stats`, `note_term_stats`, `vector_search_floor`, `query::{query_terms, words, term_matches, TermStats}`, `embeddings::{chunk_transcript, chunk_note, similarity_floor}`, `Storage::open_existing` (fan-out readers), `Storage::transcript_speakers` (speaker legends without segments or word timings), and `keep_local_note_ids` / `keep_local_meeting_ids` / `meeting_keep_local` / `note_keep_local`.
   - [fly-core](fly-core.md): `Meeting`, `Attendee`, `Transcript`, `MeetingItem`, `ItemKind`, `BlockOrigin`, `enhance::fence_safe`.
   - chrono, serde(_json), thiserror.
 
@@ -219,7 +237,8 @@ None.
 - **`Visibility::All` is only for a model running on this machine.**
   - The caller chooses it.
   - fly-llm's `is_local()` is true even for a remote Ollama, so base the choice on `build_provider`'s on-device rule.
-- **Filter the vector candidate pool before capping it,** so Keep-local or out-of-scope chunks can't crowd out shareable ones (tests `keep_local_chunks_cannot_starve_the_vector_pool`, `out_of_scope_chunks_cannot_starve_a_scoped_search`).
+- **Filter the vector candidate pool before capping it,** so Keep-local or out-of-scope chunks can't crowd out shareable ones (tests `keep_local_chunks_cannot_starve_the_vector_pool`, `out_of_scope_chunks_cannot_starve_a_scoped_search`). `vector_search_floor` filters Keep local in SQL before its limit; a meeting-scoped search asks for every hit and applies the scope itself.
+- **Keyword statistics are scoped like the results.** IDF weights and candidate meetings come only from segments and notes the visibility and filters allow, so Keep-local text can't shift the ranking of shareable passages.
 - **Transcript windows mirror fly-storage's chunker exactly** (same turns, 160-word target, 30-word tail merge). Test: `windows_match_the_storage_chunker_exactly`.
 - **Arguments reject unknown fields.** Strict schemas carry no numeric or length keywords; bounds live in descriptions and are clamped in code (test `schemas_are_strict_compatible_and_args_round_trip`, all nine tools).
 - **Fan-out stays inside its budget.** It never runs more than `max_searches` searches and never returns more than `max_passages` passages or more than `per_meeting` passages per meeting. Tests: `fan_out_respects_every_budget`, `fan_out_runs_searches_in_parallel_with_one_connection_each`.
@@ -227,11 +246,11 @@ None.
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| unit | `src/passages.rs` | 4 | chunker lockstep, window coverage, query terms / lexical score, RRF fusion and per-owner cap |
+| unit | `src/passages.rs` | 5 | chunker lockstep, window coverage, query terms / lexical score, IDF-weighted matching, RRF fusion with the per-owner cap and fill |
 | unit | `src/render.rs` | 1 | `clock()` formatting |
 | unit | `src/memory.rs` | 7 | title normalization, series grouping and matching, person keys, people found only when named and known (common-word names, ambiguity), series/project words in a question |
 | unit | `src/fanout.rs` | 5 | `decompose`: no split, clauses, noun lists and shared last words, Oxford comma, caps and dedupe |
-| integration (runs in CI) | `tests/context.rs` | 13 | the six read tools on a real SQLite fixture: Keep-local exclusion per path and in aggregate, no metadata leak, vector-pool starvation, schemas for all nine tools, argument limits |
+| integration (runs in CI) | `tests/context.rs` | 19 | the six read tools on a real SQLite fixture: Keep-local exclusion per path and in aggregate, no metadata leak, vector-pool starvation, schemas for all nine tools, argument limits; questions finding keyword passages without vectors, the keyword coverage floor, a typo not wiping out keyword results, the similarity floor (questions only) and `PassageScores` keyed by `Passage::id()`; `per_meeting` and `limit` in process (raised, clamped, strict cap, Keep local never taking a slot) vs a tool call (held to 20, `per_meeting` rejected) |
 | integration (runs in CI) | `tests/memory.rs` | 28 | the Ask scope applied before every cap (prefetch, tools, a large scope, a hidden-only scope), omitted recount, a series cut by the meeting cap, an unreadable transcript, a person filter before the item cap, rendered text vs `shown` evidence (markers only for quoted segments, clipped quotes, unknown statuses), fan-out budget clamps and "nothing was searched"; briefings with provenance, source quotes and current labels, relabel flow, a person known only as a relabeled speaker, first-person narrowing only on owning phrasing, router names that must be visible, "Q3"-style series names, scoped rebuild of participants and series, no false "none" when items are left out, person and narrowed briefings, what-changed default, open items (owner, scope, done), budgeted rendering, citation-planting defense, prefetch routing; Keep local on every memory path, including the tool path and a hidden-only person; fail-closed with a broken Keep-local lookup (`KeepLocalCheck` on every memory path, the `memory::mcp` entry points and `search_passages`); fan-out merge/attribution, every budget, real parallelism (`OpenPerWorker`) vs serialized `Mutex<Storage>`, Keep-local exclusion |
 
 | benchmark (ignored in CI) | `tests/memory_cost.rs` | 1 | cost of every memory path on a synthetic library; see below |
@@ -265,7 +284,8 @@ The fixed floor is `query_items` (~50 ms: it sorts every item, whatever the limi
   - Speaker labels are read from only the newest 30 transcripts. An older meeting where someone only spoke is found only through attendees, owners or the router's `people`.
   - Status is as stated in each meeting. A later meeting saying "done" doesn't close an earlier item.
 - **`decompose` is English-only.** It has no semantic check, and a junk sub-query only costs one search.
-- **Cost:** `list_meetings` and memory load every meeting row per call; briefings load one transcript per meeting shown.
+- **Cost:** `list_meetings` and memory load every meeting row per call; briefings load one transcript per meeting shown. `search_passages` parses up to 40 transcripts for its keyword pass, plus those of the semantic hits that make the result.
+- **The search constants are tuned on #103's 29-meeting gold set** with the real embedder: `KEYWORD_MIN_COVERAGE` (0.4), 3 keyword windows per meeting, the 0.35 floor and `FLOOR_MIN_TERMS` (4). RRF k (20 / 30 / 60) made no difference there. Re-measure on a bigger corpus before trusting them further.
 - **Error handling:**
   - An unreadable transcript is skipped: its meeting reads as having no transcript, as the old MCP did. Tests: `one_unreadable_transcript_does_not_fail_the_series`, and fly-mcp's `one_unreadable_transcript_does_not_fail_get_context`.
   - A failed items or meetings query still fails the call.
@@ -273,6 +293,8 @@ The fixed floor is `query_items` (~50 ms: it sorts every item, whatever the limi
 ## Changing it safely
 - Run `cargo test -p fly-context`, plus `cargo test -p fly-mcp` when you touch `memory.rs`: fly-mcp's `tests/context_golden.rs` pins the MCP's briefing and open-items text byte for byte. Also run `cargo test -p fly-storage` when you touch chunking, search or privacy SQL.
 - Change `passages::transcript_windows` together with `fly_storage::embeddings::chunk_transcript`; the lockstep test fails otherwise.
+- **Judge retrieval changes with the real embedder,** not only CI's hashed one: the two disagree (a keyword change that raised hashed recall cut real-embedder recall from 0.98 to 0.79 until the similarity floor landed). Run the gold set through `search_passages` with `embeddinggemma:300m` and compare recall, MRR and unanswerables.
+- Don't add fields to `Passage`, `PassageResults`, `SegmentView` or `QueryVector`: the eval runner builds them as struct literals. Per-passage data goes in `PassageScores` (keyed by `Passage::id()`), or a sibling struct like it.
 - **New tool:**
   - Read tools go in `tools.rs`; memory tools go in `memory::tool_defs()` and `memory::call()`. The crate-level `tool_defs()` / `call()` pick both up.
   - Add it to the names in `schemas_are_strict_compatible_and_args_round_trip` and to the Keep-local call lists in both test files.
