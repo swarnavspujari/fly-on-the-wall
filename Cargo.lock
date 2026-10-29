@@ -1470,6 +1470,7 @@ dependencies = [
  "fly-context",
  "fly-core",
  "fly-storage",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
