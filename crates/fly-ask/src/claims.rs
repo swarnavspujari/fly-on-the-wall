@@ -2,10 +2,10 @@
 //! a sentence shown as sourced must appear in the segments it cites, and a
 //! quoted phrase must appear in them word for word.
 //!
-//! * **Numbers** compare by value, with spoken forms normalized: "eighty
-//!   four hundred" = 8400 = "$8,400", but not "$84k"; "three point two
-//!   million" = 3.2M; "twenty-seventh" = 27; "forty four seventy one" can
-//!   also mean 4471 (both readings are kept). A spoken number never runs
+//! * **Numbers** compare by value, with spoken forms normalized: "sixty
+//!   three hundred" = 6300 = "$6,300", but not "$63k"; "four point six
+//!   million" = 4.6M; "twenty-sixth" = 26; "fifty two eighty three" can
+//!   also mean 5283 (both readings are kept). A spoken number never runs
 //!   across punctuation. A lone "one", "first" or "second" is ordinary
 //!   English, not a claim.
 //! * **Dates** are month and weekday names.
@@ -263,7 +263,7 @@ fn words(text: &str) -> Vec<String> {
     clause_words(text).into_iter().map(|(w, _)| w).collect()
 }
 
-/// "8,400" / "$8,400" / "$84k" / "3.2M" / "108%" / "27th" → value.
+/// "6,300" / "$6,300" / "$63k" / "4.6M" / "106%" / "26th" → value.
 fn digit_value(w: &str) -> Option<f64> {
     let w = w.trim_start_matches('$').trim_end_matches('%');
     if !w.starts_with(|c: char| c.is_ascii_digit()) {
@@ -304,7 +304,7 @@ pub fn numbers(text: &str) -> BTreeSet<u64> {
         let w = ws[i].as_str();
         if let Some(v) = digit_value(w) {
             push(v);
-            // "$3.2 million": the scale word belongs to the digits.
+            // "$4.6 million": the scale word belongs to the digits.
             match ws.get(i + 1).map(String::as_str) {
                 Some("thousand") => {
                     push(v * 1e3);
@@ -328,7 +328,7 @@ pub fn numbers(text: &str) -> BTreeSet<u64> {
         let (mut decimal, mut dec) = (false, 0.1f64);
         let mut had_scale = false;
         let mut claim = false;
-        // Digit groups for "forty four seventy one" = 4471: (value, open
+        // Digit groups for "fifty two eighty three" = 5283: (value, open
         // for a unit after a tens word).
         let mut groups: Vec<(u64, bool)> = Vec::new();
         let mut j = i;
@@ -560,63 +560,63 @@ mod tests {
 
     #[test]
     fn spoken_numbers() {
-        assert_eq!(n("eighty four hundred dollars"), vec![8400.0]);
+        assert_eq!(n("sixty three hundred dollars"), vec![6300.0]);
         assert_eq!(
-            n("from eighty four hundred to ninety two hundred"),
-            vec![8400.0, 9200.0]
+            n("from sixty three hundred to seventy one hundred"),
+            vec![6300.0, 7100.0]
         );
         assert_eq!(
-            n("forty two thousand dollars a year for sixty seats"),
-            vec![60.0, 42000.0]
+            n("thirty eight thousand euros per season for fifty seats"),
+            vec![50.0, 38000.0]
         );
         assert_eq!(
-            n("a hundred and ten thousand to a hundred and twenty five thousand"),
-            vec![110000.0, 125000.0]
+            n("a hundred and thirty thousand, maybe a hundred and forty five thousand"),
+            vec![130000.0, 145000.0]
         );
-        assert_eq!(n("three point two million"), vec![3_200_000.0]);
+        assert_eq!(n("four point six million"), vec![4_600_000.0]);
         assert_eq!(n("one hundred and eight percent"), vec![108.0]);
-        assert_eq!(n("October twenty-seventh"), vec![27.0]);
-        assert_eq!(n("on November third at ten Pacific"), vec![3.0, 10.0]);
-        assert!(n("forty four seventy one").contains(&4471.0));
-        assert!(n("the first month, one of them").is_empty());
+        assert_eq!(n("March twenty-sixth"), vec![26.0]);
+        assert_eq!(n("on March ninth at four Eastern"), vec![4.0, 9.0]);
+        assert!(n("fifty two eighty three").contains(&5283.0));
+        assert!(n("the opening month, one of them").is_empty());
         assert!(n("one week later").is_empty());
         assert_eq!(n("two hundred requests"), vec![200.0]);
         assert_eq!(
-            n("Six: four in engineering and two in support."),
-            vec![2.0, 4.0, 6.0]
+            n("Five: three in design and two in sales."),
+            vec![2.0, 3.0, 5.0]
         );
         assert_eq!(n("two, four"), vec![2.0, 4.0]);
-        assert_eq!(n("forty four seventy one today."), vec![115.0, 4471.0]);
+        assert_eq!(n("fifty two eighty three today."), vec![135.0, 5283.0]);
     }
 
     #[test]
     fn digit_numbers() {
-        assert_eq!(n("$8,400"), vec![8400.0]);
-        assert_eq!(n("$84k"), vec![84000.0]);
-        assert_eq!(n("3.2M ARR"), vec![3_200_000.0]);
+        assert_eq!(n("$6,300"), vec![6300.0]);
+        assert_eq!(n("$63k"), vec![63000.0]);
+        assert_eq!(n("4.6M ARR"), vec![4_600_000.0]);
         assert_eq!(n("108% and 15%"), vec![15.0, 108.0]);
-        assert_eq!(n("October 27th."), vec![27.0]);
-        assert_eq!(n("$3.2 million"), vec![3.2, 3_200_000.0]);
+        assert_eq!(n("March 26th."), vec![26.0]);
+        assert_eq!(n("$4.6 million"), vec![4.6, 4_600_000.0]);
     }
 
     #[test]
-    fn the_july_bench_corruption_is_caught() {
+    fn a_scaled_number_is_caught() {
         let src = [Source {
-            text: "All in, I'm asking for eighty four hundred dollars for the first month.",
-            speaker: "Ines Carvalho",
+            text: "All told, I'd like sixty three hundred dollars for studio rental.",
+            speaker: "Priya Anand",
         }];
-        assert!(unsupported("Ines asked for $8,400.", &src).is_empty());
-        assert!(unsupported("Ines asked for eighty four hundred dollars.", &src).is_empty());
+        assert!(unsupported("Priya asked for $6,300.", &src).is_empty());
+        assert!(unsupported("Priya asked for sixty three hundred dollars.", &src).is_empty());
         assert_eq!(
-            kinds(&unsupported("Ines asked for $84k.", &src)),
-            vec![(ClaimKind::Number, "84000")]
+            kinds(&unsupported("Priya asked for $63k.", &src)),
+            vec![(ClaimKind::Number, "63000")]
         );
         assert_eq!(
-            kinds(&unsupported("Marcus asked for $8,400.", &src)),
-            vec![(ClaimKind::Name, "marcus")]
+            kinds(&unsupported("Ewan asked for $6,300.", &src)),
+            vec![(ClaimKind::Name, "ewan")]
         );
         assert_eq!(
-            kinds(&unsupported("By Friday, $8,400.", &src)),
+            kinds(&unsupported("By Friday, $6,300.", &src)),
             vec![(ClaimKind::Date, "friday")]
         );
     }
@@ -624,12 +624,12 @@ mod tests {
     #[test]
     fn quotes_must_appear_word_for_word() {
         let src = [Source {
-            text: "Honestly, we will ship the scheduler on the twenty-seventh.",
-            speaker: "Jun",
+            text: "Honestly, we will ship the planner on the twenty-sixth.",
+            speaker: "Ilka",
         }];
-        assert!(unsupported("Jun said \"we will ship the scheduler\".", &src).is_empty());
+        assert!(unsupported("Ilka said \"we will ship the planner\".", &src).is_empty());
         assert_eq!(
-            kinds(&unsupported("Jun said “we will not ship it”.", &src)),
+            kinds(&unsupported("Ilka said “we will not ship it”.", &src)),
             vec![(ClaimKind::Quote, "we will not ship it")]
         );
         // Two-word quotes are emphasis, not a quote claim.
@@ -639,8 +639,8 @@ mod tests {
     #[test]
     fn names_skip_common_words() {
         assert_eq!(
-            names("Starter, Team and Fleet. It's Hana's call, not API's."),
-            ["api", "fleet", "hana", "starter", "team"]
+            names("Juniper, Basalt and Lumen. It's Yuki's call, not API's."),
+            ["api", "basalt", "juniper", "lumen", "yuki"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect()

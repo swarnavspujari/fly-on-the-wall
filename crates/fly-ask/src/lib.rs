@@ -340,17 +340,9 @@ impl Run<'_> {
         self.log.proposal_refusals = o.refusals.iter().map(|r| r.reason).collect();
         self.log.cited_segment_ids = o.cited;
         let text = match o.status {
-            AnswerStatus::NotFound => {
-                let mut t = prompt::NOT_FOUND_REPLY.to_string();
-                let n = self.trace.kept_local_not_searched;
-                if n > 0 && !self.on_device {
-                    t.push_str(&format!(
-                        " ({n} kept-local meeting{} not searched.)",
-                        if n == 1 { " was" } else { "s were" }
-                    ));
-                }
-                t
-            }
+            // The kept-local count stays in `trace` (the user's view): the
+            // answer text becomes chat history, which can go to a model.
+            AnswerStatus::NotFound => prompt::NOT_FOUND_REPLY.to_string(),
             AnswerStatus::Refused => match self.log.scope_refusal {
                 Some(scope::ScopeRefusal::KeepLocal) => "This is marked Keep local, so it isn't sent to a model that runs off this computer.".into(),
                 _ => "There's nothing to search here.".into(),
@@ -402,11 +394,28 @@ fn history_messages(history: &[Turn], on_device: bool) -> Vec<Message> {
     let skip = allowed.len().saturating_sub(HISTORY_TURNS);
     let mut out = Vec::new();
     for t in allowed.into_iter().skip(skip) {
-        let (answer, _) = text::take_markers(&t.answer);
+        let (answer, _) = text::take_markers(&without_kept_local_note(&t.answer));
         out.push(Message::user(evidence::safe(&clip(&t.question))));
         out.push(Message::assistant(evidence::safe(&clip(&answer))));
     }
     out
+}
+
+/// An earlier answer without a "(N kept-local meetings were not searched.)"
+/// note (answers from builds that appended it to the text): the count
+/// never reaches a model.
+fn without_kept_local_note(answer: &str) -> String {
+    let mut out = answer.to_string();
+    while let Some(k) = out.to_lowercase().find("kept-local") {
+        let open = out[..k].rfind('(');
+        let close = out[k..].find(')').map(|j| k + j + 1);
+        match (open, close) {
+            (Some(o), Some(c)) => out.replace_range(o..c, ""),
+            // Not the note's shape: drop the whole sentence's word.
+            _ => out.replace_range(k..k + "kept-local".len(), ""),
+        }
+    }
+    out.trim().to_string()
 }
 
 /// What one synthesis phase produced.

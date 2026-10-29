@@ -51,7 +51,7 @@ impl From<ClaimKind> for FlagKind {
 }
 
 /// A reason a sentence isn't shown as sourced. `detail` is answer text
-/// for the UI ("84000", "marcus"); it never enters the run log.
+/// for the UI ("63000", "ewan"); it never enters the run log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Flag {
     pub kind: FlagKind,
@@ -122,7 +122,7 @@ pub fn validate(reply: &str, ev: &Evidence) -> Validated {
     for raw in text::sentences(&clean) {
         let (display, removed) = text::strip_links(&raw.display);
         out.stats.links_removed += removed as u32;
-        // A bare bracketed id the model was shown (`[m07-14]`) cites too.
+        // A bare bracketed id the model was shown (`[x07-14]`) cites too.
         let (display, bare) = text::take_bare_ids(&display, |id| ev.contains(id));
         let display = display.trim().to_string();
         if display.chars().all(|c| !c.is_alphanumeric()) {
@@ -229,34 +229,34 @@ mod tests {
     fn ev() -> Evidence {
         let mut e = Evidence::default();
         e.insert(SegmentInfo {
-            id: "m01-05".into(),
+            id: "x01-05".into(),
             meeting_id: "m1".into(),
             meeting_title: "Launch".into(),
             started_at: None,
-            speaker: "Ines Carvalho".into(),
+            speaker: "Priya Anand".into(),
             speaker_key: "spk_0".into(),
             start_ms: 0,
             end_ms: 1,
-            text: "All in, I'm asking for eighty four hundred dollars for the first month.".into(),
+            text: "All told, I'd like sixty three hundred dollars for studio rental.".into(),
         });
         e
     }
 
     #[test]
     fn valid_cites_pass_the_claim_check() {
-        let v = validate("Ines asked for $8,400 [seg:m01-05].", &ev());
+        let v = validate("Priya asked for $6,300 [seg:x01-05].", &ev());
         assert_eq!(v.sentences[0].status, SentenceStatus::Sourced);
-        assert_eq!(v.sentences[0].citations, vec!["m01-05"]);
-        assert_eq!(v.sentences[0].text, "Ines asked for $8,400.");
+        assert_eq!(v.sentences[0].citations, vec!["x01-05"]);
+        assert_eq!(v.sentences[0].text, "Priya asked for $6,300.");
     }
 
     #[test]
     fn corrupted_numbers_unknown_ids_and_links_are_caught() {
-        let v = validate("Ines asked for $84k [seg:m01-05].", &ev());
+        let v = validate("Priya asked for $63k [seg:x01-05].", &ev());
         assert_eq!(v.sentences[0].status, SentenceStatus::Flagged);
         assert_eq!(v.sentences[0].flags[0].kind, FlagKind::Number);
 
-        let v = validate("Harrowgate pays forty two thousand [seg:m04-99].", &ev());
+        let v = validate("Quillfield pays thirty eight thousand [seg:x04-99].", &ev());
         assert_eq!(
             v.sentences[0].status,
             SentenceStatus::Flagged,
@@ -285,7 +285,7 @@ mod tests {
         assert!(v.empty && !v.refusal);
         // A sourced sentence beside a partial refusal is an answer.
         let v = validate(
-            "Ines asked for eighty four hundred dollars [seg:m01-05]. I couldn't find the cap.",
+            "Priya asked for sixty three hundred dollars [seg:x01-05]. I couldn't find the cap.",
             &ev(),
         );
         assert!(!v.refusal);

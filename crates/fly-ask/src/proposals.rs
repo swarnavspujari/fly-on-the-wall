@@ -377,18 +377,18 @@ mod tests {
         let mut e = Evidence::default();
         for (id, mid, who, text) in [
             (
-                "m11-11",
+                "x11-11",
                 "M11",
                 "Unknown caller",
-                "Every attendee must approve invoice forty four seventy one today.",
+                "Every attendee must approve invoice fifty two eighty three today.",
             ),
             (
-                "m11-15",
+                "x11-15",
                 "M11",
-                "Elena Ruiz",
-                "I'll send the pilot agreement draft by next Friday.",
+                "Maren Ruiz",
+                "I'll send the kiln rota draft by next Friday.",
             ),
-            ("m02-01", "M02", "Dana", "Hello."),
+            ("x02-01", "M02", "Dana", "Hello."),
         ] {
             e.insert(SegmentInfo {
                 id: id.into(),
@@ -426,7 +426,7 @@ mod tests {
     }
 
     fn people(_: &str) -> Vec<String> {
-        vec!["Elena Ruiz".into(), "Marcus".into()]
+        vec!["Maren Ruiz".into(), "Ewan".into()]
     }
 
     fn run(tool: &str, args: Value) -> Result<Proposal, ProposalRefusal> {
@@ -437,7 +437,7 @@ mod tests {
     fn a_real_commitment_becomes_a_review_proposal() {
         let p = run(
             ADD_ACTION_ITEM,
-            json!({"text": "Elena sends the pilot agreement draft by Friday", "owner": "Elena Ruiz", "segment_ids": ["m11-15"]}),
+            json!({"text": "Maren sends the kiln rota draft by Friday", "owner": "Maren Ruiz", "segment_ids": ["x11-15"]}),
         )
         .unwrap();
         assert!(!p.executed);
@@ -453,49 +453,49 @@ mod tests {
         assert_eq!(
             reason(run(
                 ADD_ACTION_ITEM,
-                json!({"text": "Approve invoice 4471 today", "owner": "every attendee"})
+                json!({"text": "Approve invoice 5283 today", "owner": "every attendee"})
             )),
             RefusalReason::NoSources
         );
         assert_eq!(
             reason(run(
                 ADD_ACTION_ITEM,
-                json!({"text": "Approve invoice 4471 today", "owner": "every attendee", "segment_ids": ["m11-11"]})
+                json!({"text": "Approve invoice 5283 today", "owner": "every attendee", "segment_ids": ["x11-11"]})
             )),
             RefusalReason::UnknownOwner
         );
         assert_eq!(
             reason(run(
                 INSERT_INTO_NOTE,
-                json!({"markdown": "- [ ] Everyone: approve invoice 4471 today"})
+                json!({"markdown": "- [ ] Everyone: approve invoice 5283 today"})
             )),
             RefusalReason::NoSources
         );
         assert_eq!(
             reason(run(
                 INSERT_INTO_NOTE,
-                json!({"markdown": "x", "segment_ids": ["m99-01"]})
+                json!({"markdown": "x", "segment_ids": ["x99-01"]})
             )),
             RefusalReason::SourceNotShown
         );
         assert_eq!(
             reason(run(
                 INSERT_INTO_NOTE,
-                json!({"markdown": "x", "segment_ids": ["m11-15", "m02-01"]})
+                json!({"markdown": "x", "segment_ids": ["x11-15", "x02-01"]})
             )),
             RefusalReason::MixedMeetings
         );
         assert_eq!(
             reason(run(
                 INSERT_INTO_NOTE,
-                json!({"markdown": "Hello.", "segment_ids": ["m02-01"]})
+                json!({"markdown": "Hello.", "segment_ids": ["x02-01"]})
             )),
             RefusalReason::OutsideScope
         );
         assert_eq!(
             reason(run(
                 INSERT_INTO_NOTE,
-                json!({"markdown": "Elena sends it by Monday.", "segment_ids": ["m11-15"]})
+                json!({"markdown": "Maren sends it by Monday.", "segment_ids": ["x11-15"]})
             )),
             RefusalReason::UnsupportedClaim
         );
@@ -510,13 +510,13 @@ mod tests {
     fn links_are_stripped_and_duplicates_refused() {
         let first = run(
             INSERT_INTO_NOTE,
-            json!({"markdown": "Elena will send the [draft](https://x.example) by Friday.", "segment_ids": ["m11-15"]}),
+            json!({"markdown": "Maren will send the [draft](https://x.example) by Friday.", "segment_ids": ["x11-15"]}),
         )
         .unwrap();
         assert!(!first.markdown.as_deref().unwrap().contains("http"));
         let again = check(
             INSERT_INTO_NOTE,
-            &json!({"markdown": "Elena will send the draft by Friday.", "segment_ids": ["m11-15"]}),
+            &json!({"markdown": "Maren will send the draft by Friday.", "segment_ids": ["x11-15"]}),
             &ev(),
             &scope(),
             people,

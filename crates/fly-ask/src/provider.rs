@@ -112,7 +112,7 @@ fn looks_truncated(sent_tokens: u32, evaluated: Option<u32>) -> bool {
 pub fn frame(raw: &str) -> String {
     let t = crate::text::strip_reasoning(raw);
     let t = crate::text::take_markers(&t).0;
-    // A marker still being written ("… [seg:m09-1") isn't one yet.
+    // A marker still being written ("… [seg:x09-1") isn't one yet.
     let t = match t.rfind("[seg") {
         Some(i) if !t[i..].contains(']') => t[..i].trim_end().to_string(),
         _ => t,

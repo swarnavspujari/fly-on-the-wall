@@ -377,13 +377,13 @@ mod tests {
     fn known() -> Known {
         Known {
             people: vec![
-                "Ines Carvalho".into(),
+                "Priya Anand".into(),
                 "Dana".into(),
-                "Will Park".into(),
+                "Will Halden".into(),
                 "Speaker 2".into(),
                 "You".into(),
             ],
-            folders: vec![("f1".into(), "Customers".into())],
+            folders: vec![("f1".into(), "Clients".into())],
             earliest: Some(Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap()),
         }
     }
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(h.since.unwrap().date_naive().to_string(), "2026-09-28");
         assert_eq!(h.until.unwrap().date_naive().to_string(), "2026-10-04");
         let h = route(
-            "What did the board decide at Friday's meeting?",
+            "What did the panel settle at Friday's meeting?",
             now(),
             &known(),
             true,
@@ -406,7 +406,7 @@ mod tests {
         let h = route("Is the launch in October?", now(), &known(), true);
         assert_eq!(h.date_rule, None);
         let h = route(
-            "What came up in the September meetings?",
+            "What was raised in the September meetings?",
             now(),
             &known(),
             true,
@@ -435,8 +435,8 @@ mod tests {
 
     #[test]
     fn people_are_validated_against_known_names() {
-        let h = route("What did Ines ask for?", now(), &known(), true);
-        assert_eq!(h.people, vec!["Ines Carvalho"]);
+        let h = route("What did Priya ask for?", now(), &known(), true);
+        assert_eq!(h.people, vec!["Priya Anand"]);
         assert!(route("Who will own it?", now(), &known(), true)
             .people
             .is_empty());
@@ -465,7 +465,7 @@ mod tests {
         );
         assert_eq!(h.people, vec!["Dana"]);
         assert_eq!(
-            route("What did we decide about pricing?", now(), &known(), true)
+            route("What did we decide on pricing?", now(), &known(), true)
                 .items
                 .unwrap()
                 .kind,
@@ -475,7 +475,7 @@ mod tests {
             .items
             .is_none());
         assert_eq!(
-            route("Summarize @customers", now(), &known(), true)
+            route("Summarize @clients", now(), &known(), true)
                 .folder_id
                 .as_deref(),
             Some("f1")

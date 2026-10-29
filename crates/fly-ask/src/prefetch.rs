@@ -971,14 +971,14 @@ mod tests {
                 seg(
                     i,
                     if i == 6 {
-                        "the launch budget is ninety two hundred dollars"
+                        "the studio budget is seventy one hundred dollars"
                     } else {
                         "we talked about several other things for a while here"
                     },
                 )
             })
             .collect();
-        let lines = clip(&segs, &query_terms("launch budget"), 250);
+        let lines = clip(&segs, &query_terms("studio budget"), 250);
         assert!(lines.contains(&6), "{lines:?}");
         assert!(lines.len() < 10);
         assert!(lines.windows(2).all(|w| w[1] == w[0] + 1), "contiguous");
@@ -988,11 +988,15 @@ mod tests {
     #[test]
     fn salient_terms_drop_question_filler() {
         assert_eq!(
-            salient_terms("What did we decide about the Berlin office lease?"),
-            vec!["berlin", "office", "lease"]
+            salient_terms("What did we decide on the Lisbon greenhouse permit?"),
+            vec!["lisbon", "greenhouse", "permit"]
         );
         assert!(
-            (coverage(&salient_terms("Berlin office lease"), "the office moved") - 1.0 / 3.0).abs()
+            (coverage(
+                &salient_terms("Lisbon greenhouse permit"),
+                "the greenhouse moved"
+            ) - 1.0 / 3.0)
+                .abs()
                 < 1e-9
         );
         assert_eq!(coverage(&[], "x"), 1.0);

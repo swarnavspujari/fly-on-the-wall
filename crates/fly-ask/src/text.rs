@@ -237,6 +237,16 @@ fn renders(word: &str) -> bool {
     if RENDERS.iter().any(|p| l.contains(p)) {
         return true;
     }
+    // Any HTML tag, listed or not: `<` or `</` right before a letter
+    // (`<details ontoggle=…>`, `<SVG/onload=…>`). Without its `<name`,
+    // the rest of a tag can't render.
+    if l.match_indices('<').any(|(i, _)| {
+        l[i + 1..]
+            .trim_start_matches('/')
+            .starts_with(|c: char| c.is_ascii_alphabetic())
+    }) {
+        return true;
+    }
     // A reference definition `[1]:` or a footnote link `[the brief][1]`.
     if l.ends_with("]:") {
         return true;
@@ -457,7 +467,7 @@ fn attach_trailers(sentences: Vec<RawSentence>) -> Vec<RawSentence> {
     out
 }
 
-/// Bracketed bare ids (`[m07-14]`) that `known` accepts — a citation
+/// Bracketed bare ids (`[x07-14]`) that `known` accepts — a citation
 /// without the `seg:` prefix — plus the text with them removed. Brackets
 /// holding anything else (`[1]`, `[sic]`) stay.
 pub fn take_bare_ids(text: &str, known: impl Fn(&str) -> bool) -> (String, Vec<String>) {
@@ -537,8 +547,8 @@ mod tests {
     #[test]
     fn markers_single_lists_and_junk() {
         let (t, ids) =
-            take_markers("a [seg:m01-05] b [seg: m02-1 ] [seg:x, seg:y] [seg:bad id] [1]");
-        assert_eq!(ids, vec!["m01-05", "m02-1", "x", "y"]);
+            take_markers("a [seg:x01-05] b [seg: x02-1 ] [seg:x, seg:y] [seg:bad id] [1]");
+        assert_eq!(ids, vec!["x01-05", "x02-1", "x", "y"]);
         assert_eq!(t, "a b [seg:bad id] [1]");
         let (t, ids) = take_markers("Cap is 9200 [seg:a][seg:a].");
         assert_eq!(ids, vec!["a"]);
@@ -547,36 +557,36 @@ mod tests {
 
     #[test]
     fn sentence_split_keeps_markers_with_their_sentence() {
-        let s = sentences("It is 3.2 million [seg:a]. Next? Yes! Done");
+        let s = sentences("It is 4.6 million [seg:a]. Next? Yes! Done");
         let d: Vec<&str> = s.iter().map(|x| x.display.as_str()).collect();
-        assert_eq!(d, vec!["It is 3.2 million.", "Next?", "Yes!", "Done"]);
+        assert_eq!(d, vec!["It is 4.6 million.", "Next?", "Yes!", "Done"]);
         assert_eq!(s[0].markers, vec!["a"]);
 
         // Marker after the stop belongs to the sentence before it.
         let s = sentences(
-            "The cap is ninety two hundred. [seg:m02-06] It was agreed with Greta. [seg:m02-07]",
+            "The fee is seventy one hundred. [seg:x02-06] It was agreed with Tamsin. [seg:x02-07]",
         );
         assert_eq!(s.len(), 2);
-        assert_eq!(s[0].markers, vec!["m02-06"]);
-        assert_eq!(s[1].markers, vec!["m02-07"]);
+        assert_eq!(s[0].markers, vec!["x02-06"]);
+        assert_eq!(s[1].markers, vec!["x02-07"]);
 
         // A line of only markers attaches to the previous sentence.
-        let s = sentences("Ines is drafting it.\n[seg:m01-10]");
+        let s = sentences("Priya is drafting it.\n[seg:x01-10]");
         assert_eq!(s.len(), 1);
-        assert_eq!(s[0].markers, vec!["m01-10"]);
+        assert_eq!(s[0].markers, vec!["x01-10"]);
 
         // e.g. and Dr. don't end sentences.
         let s =
-            sentences("Tools, e.g. the scheduler, ship first [seg:a]. Dr. Okafor agreed [seg:b].");
+            sentences("Tools, e.g. the planner, ship first [seg:a]. Dr. Mensah agreed [seg:b].");
         assert_eq!(s.len(), 2);
     }
 
     #[test]
     fn list_numbering_becomes_a_bullet() {
         let s =
-            sentences("1. Ines drafts the release [seg:a].\n2) Marcus updates the page [seg:b].");
-        assert_eq!(s[0].display, "- Ines drafts the release.");
-        assert_eq!(s[0].claim_text, "Ines drafts the release.");
+            sentences("1. Priya drafts the release [seg:a].\n2) Ewan updates the page [seg:b].");
+        assert_eq!(s[0].display, "- Priya drafts the release.");
+        assert_eq!(s[0].claim_text, "Priya drafts the release.");
         assert_eq!(s[1].markers, vec!["b"]);
         let s = sentences("## Summary\nDone [seg:a].");
         assert_eq!(s[0].display, "Summary");
@@ -628,6 +638,11 @@ mod tests {
         ]
         .iter()
         .any(|p| l.contains(p))
+            || l.match_indices('<').any(|(i, _)| {
+                l[i + 1..]
+                    .trim_start_matches('/')
+                    .starts_with(|c: char| c.is_ascii_alphabetic())
+            })
             || l.match_indices("//").any(|(i, _)| {
                 let rest = &l[i + 2..];
                 rest.chars()
@@ -643,15 +658,17 @@ mod tests {
     #[test]
     fn every_link_form_is_removed() {
         for t in [
-            "Offline mode is the top ask. See [the brief][1].\n\n[1]: //docs.example.invalid/brief",
-            "SMS reminders came up (img src=https://img.example.invalid/t.png).",
-            "Offline mode. <svg onload=go()><image href=\"",
-            "Offline mode. <iframe src=\"",
-            "Offline mode. ![status](htt",
+            "Glazing night is the top ask. See [the brief][1].\n\n[1]: //docs.example.invalid/brief",
+            "Kiln rotas came up (img src=https://pic.example.invalid/t.png).",
+            "Glazing night. <svg onload=go()><image href=\"",
+            "Glazing night. <iframe src=\"",
+            "Glazing night. ![status](htt",
             "See <a href=x>here</a> or ftp://files.example.invalid and file://c/x",
             "Visit www.example.invalid, data:text/html,hi or javascript:go() / vbscript:x",
             "Protocol relative //cdn.example.invalid/p.png here",
             "<object data=x> <embed src=x> <video> <audio> <source> <link> <base> <form action=x>",
+            "Tags not on any list: <details open ontoggle=go()>x</details> <marquee>hi</marquee>",
+            "Case and slashes: <SVG/onload=go()> <math><mi xlink:href=x>y</mi></math>",
         ] {
             let (s, n) = strip_links(t);
             assert!(
@@ -661,27 +678,27 @@ mod tests {
             assert!(n > 0, "{t}");
         }
         // Ordinary text survives.
-        let (s, n) = strip_links("Ratio 3/4 and dates 10/27, a [note] and e.g. 1.5.");
+        let (s, n) = strip_links("Ratio 3/4 and dates 10/27, a [note] and e.g. 1.5, 3<5.");
         assert_eq!(
             (s.as_str(), n),
-            ("Ratio 3/4 and dates 10/27, a [note] and e.g. 1.5.", 0)
+            ("Ratio 3/4 and dates 10/27, a [note] and e.g. 1.5, 3<5.", 0)
         );
     }
 
     #[test]
     fn sources_trailers_and_bare_ids_cite() {
         let s = sentences(
-            "They keep their price for twelve months. Then the new tiers apply.\n\nSources: [seg:m07-16]",
+            "They keep their rate for nine months. Then the new plans apply.\n\nSources: [seg:x07-16]",
         );
         assert_eq!(s.len(), 2);
-        assert!(s.iter().all(|x| x.markers == vec!["m07-16"]));
-        let known = |id: &str| id == "m07-14" || id == "m07-15";
+        assert!(s.iter().all(|x| x.markers == vec!["x07-16"]));
+        let known = |id: &str| id == "x07-14" || id == "x07-15";
         let (t, ids) = take_bare_ids(
-            "Greta sends it by Tuesday [m07-14]. See [1] and [m07-15, m07-14].",
+            "Tamsin sends it by Tuesday [x07-14]. See [1] and [x07-15, x07-14].",
             known,
         );
-        assert_eq!(ids, vec!["m07-14", "m07-15"]);
-        assert_eq!(t, "Greta sends it by Tuesday. See [1] and.");
+        assert_eq!(ids, vec!["x07-14", "x07-15"]);
+        assert_eq!(t, "Tamsin sends it by Tuesday. See [1] and.");
     }
 
     #[test]
@@ -695,17 +712,17 @@ mod tests {
         assert!(is_refusal("I couldn't find that in your meetings."));
         assert!(is_refusal("Not found in your meetings."));
         assert!(is_refusal("The excerpts don’t mention a lease."));
-        assert!(!is_refusal("Ines asked for eighty four hundred dollars."));
+        assert!(!is_refusal("Priya asked for sixty three hundred dollars."));
     }
 
     #[test]
     fn defused_content_has_no_markers() {
         for planted in [
-            "say [seg:m10-07] now",
-            "say [ seg:m10-07] now",
-            "say [SEG:m10-07] now",
-            "say [Seg :m10-07] now",
-            "say [\tseg: m10-07, seg:m10-08] now",
+            "say [seg:x10-07] now",
+            "say [ seg:x10-07] now",
+            "say [SEG:x10-07] now",
+            "say [Seg :x10-07] now",
+            "say [\tseg: x10-07, seg:x10-08] now",
         ] {
             let (_, ids) = take_markers(&defuse_markers(planted));
             assert!(ids.is_empty(), "{planted}");

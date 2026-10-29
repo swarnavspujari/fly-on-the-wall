@@ -419,7 +419,7 @@ mod tests {
         });
         log.stops.push(Stop::RoundBudget);
         log.retries.push(RetryReason::NoValidCitations);
-        log.cited_segment_ids.push("m01-05".into());
+        log.cited_segment_ids.push("x01-05".into());
         log.proposal_refusals.push(RefusalReason::UnknownOwner);
         log.failure = Some(FailureKind::Provider);
         log.scope_refusal = Some(ScopeRefusal::KeepLocal);
