@@ -956,7 +956,7 @@ function mockModelReport(): ModelStorageReport {
         m.id === "whisper-bin-vulkan"
           ? "Only used when Use the graphics card is on. It downloads again if you turn it on."
           : m.id === "ffmpeg"
-            ? "Used to record your screen and import files. It downloads again the next time you do either."
+            ? "Used to record your screen, import files and make previews of videos in your notes. It downloads again the next time one of those needs it."
             : "Not used by your current settings. It downloads again if you need it.";
     }
     return {
@@ -969,6 +969,7 @@ function mockModelReport(): ModelStorageReport {
       note,
       can_delete: m.installed && blocked == null,
       blocked,
+      linked: false,
     };
   });
   const reclaimable =

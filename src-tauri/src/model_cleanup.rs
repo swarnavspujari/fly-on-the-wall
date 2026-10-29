@@ -63,6 +63,9 @@ pub struct Usage {
     pub screen_recording: bool,
     /// A staged media import hasn't transcribed yet.
     pub imports_waiting: bool,
+    /// The video storage job (#119) is running, or set to keep only the
+    /// audio of videos: both re-encode with ffmpeg. Wired in `read_usage`.
+    pub video_job: bool,
 }
 
 impl Default for Usage {
@@ -77,6 +80,7 @@ impl Default for Usage {
             live_enabled: true,
             screen_recording: false,
             imports_waiting: false,
+            video_job: false,
         }
     }
 }
@@ -89,8 +93,10 @@ impl Usage {
         recommended: Option<String>,
         engine_env: Option<String>,
     ) -> Self {
+        // Exactly pipeline.rs: a saved tier wins even when empty (an empty
+        // one then picks large-v3-turbo there too); only a missing one falls
+        // back to the machine's recommendation.
         let tier = get("asr.tier")
-            .filter(|t| !t.is_empty())
             .or(recommended)
             .unwrap_or_else(|| "balanced".into());
         // Same precedence as pipeline::use_parakeet: env wins over the
@@ -109,6 +115,7 @@ impl Usage {
             live_enabled: get("live.enabled").as_deref() != Some("false"),
             screen_recording: false,
             imports_waiting: false,
+            video_job: false,
         }
     }
 
@@ -171,8 +178,11 @@ pub struct ArtifactUsage {
     /// What it's for, when installed and not in use.
     pub note: Option<String>,
     pub can_delete: bool,
-    /// Why Delete is disabled on an installed row (in use, or busy).
+    /// Why Delete is disabled on an installed row (linked, in use, busy).
     pub blocked: Option<String>,
+    /// It sits in (or is) a linked folder: the app doesn't manage it, so it
+    /// has no size here and can't be deleted.
+    pub linked: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -184,6 +194,9 @@ pub enum EntryKind {
     OldVersion,
     /// A model file matching a known pattern that no current entry uses.
     UnusedModelFile,
+    /// A folder an earlier delete moved aside (`<name>.deleting-<ms>`) but
+    /// couldn't finish; swept at launch.
+    PartlyDeleted,
     /// Anything else: listed with its size, never deleted.
     NotRecognised,
 }
@@ -303,6 +316,9 @@ fn use_phrases(a: &Artifact, usage: &Usage, wanted: &str, stand_in: Option<&str>
             if usage.imports_waiting {
                 out.push("an import waiting to transcribe".into());
             }
+            if usage.video_job {
+                out.push("storing videos".into());
+            }
         }
         models::PARAKEET_MODEL_ID => {
             if usage.parakeet {
@@ -332,8 +348,8 @@ fn unused_note(a: &Artifact) -> String {
             "Only used when Use the graphics card is on. It downloads again if you turn it on."
                 .into()
         }
-        "ffmpeg" => "Used to record your screen and import files. It downloads again the next \
-                     time you do either."
+        "ffmpeg" => "Used to record your screen, import files and make previews of videos in \
+                     your notes. It downloads again the next time one of those needs it."
             .into(),
         _ => "Not used by your current settings. It downloads again if you need it.".into(),
     }
@@ -364,27 +380,44 @@ pub fn build_report(
     let mut artifacts = Vec::new();
     for a in listed_artifacts(data_dir) {
         let installed = models::installed_path(data_dir, a).is_some();
-        let root = data_dir.join(install_root(a));
-        let size_on_disk = if installed { disk_size(&root) } else { 0 };
+        let rel = install_root(a);
+        // `remove_contained` refuses anything reached through a link, so a
+        // linked install is shown as such and kept out of Free up.
+        let linked = installed && through_link(data_dir, &rel);
+        let size_on_disk = if installed && !linked {
+            disk_size(&data_dir.join(&rel))
+        } else {
+            0
+        };
         let phrases = use_phrases(a, usage, &wanted, stand_in);
         let in_use = (!phrases.is_empty()).then(|| format!("Used for {}.", join_phrases(&phrases)));
         let blocked = if !installed {
             None
+        } else if linked {
+            Some(LINKED.to_string())
         } else if let Some(sentence) = &in_use {
             Some(format!("In use, so it can't be deleted. {sentence}"))
         } else {
             busy.map(|b| b.message().to_string())
         };
+        let note = (installed && in_use.is_none()).then(|| {
+            if linked {
+                LINKED.to_string()
+            } else {
+                unused_note(a)
+            }
+        });
         artifacts.push(ArtifactUsage {
             id: a.id.to_string(),
             display: a.display.to_string(),
             installed,
             size_on_disk,
             download_bytes: a.bytes,
-            note: (installed && in_use.is_none()).then(|| unused_note(a)),
+            note,
             can_delete: installed && blocked.is_none(),
             in_use,
             blocked,
+            linked,
         });
     }
 
@@ -402,6 +435,29 @@ pub fn build_report(
         reclaimable_bytes,
         busy: busy.map(|b| b.message().to_string()),
     }
+}
+
+/// Row text for an install reached through a link.
+const LINKED: &str = "Linked folder, not managed by the app.";
+
+/// Marker of a folder a delete moved aside: `<name>.deleting-<unix ms>`.
+const DELETING_MARK: &str = ".deleting-";
+
+/// Whether `name` is a folder an earlier delete moved aside.
+fn is_deleting_name(name: &str) -> bool {
+    name.rsplit_once(DELETING_MARK).is_some_and(|(stem, ms)| {
+        !stem.is_empty() && !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// Whether `rel`, or any folder between the data dir and it, is a link,
+/// junction or other reparse point.
+fn through_link(data_dir: &Path, rel: &str) -> bool {
+    let mut p = data_dir.to_path_buf();
+    rel.split('/').any(|seg| {
+        p.push(seg);
+        std::fs::symlink_metadata(&p).is_ok_and(|m| is_link(&m))
+    })
 }
 
 /// `<id>.download.<pid>.<n>` (models.rs `download_tmp_path`) → (id, pid).
@@ -598,6 +654,11 @@ impl Scanner<'_> {
 
     /// Known leftover patterns for an entry `name` inside `parent`.
     fn classify(&self, parent: &str, name: &str, is_dir: bool) -> Option<(EntryKind, String)> {
+        // Before every other rule: in a versioned tool folder it would
+        // otherwise read as an older version.
+        if is_dir && is_deleting_name(name) {
+            return Some((EntryKind::PartlyDeleted, "Partly deleted earlier".into()));
+        }
         // `<dest>.partial`: the staging folder of an archive install.
         if let Some(stem) = name.strip_suffix(".partial") {
             let dest = format!("{parent}/{stem}");
@@ -650,9 +711,15 @@ impl Scanner<'_> {
 /// Delete `rel` (a `/`-separated data-dir-relative path from a fresh scan)
 /// without ever leaving the data dir's `bin/` and `models/` folders (or, for
 /// a single download-temp name, the data-dir root): plain-name components
-/// only, never inside `models/ollama`, no link or junction between the data
-/// dir and the target, and the target removed without following links.
-/// Returns the bytes freed (0 for a link, which is removed itself).
+/// only, never inside `models/ollama`, no link or junction on the way or as
+/// the target, and nothing followed.
+///
+/// A folder is first renamed aside (`<name>.deleting-<ms>`), so a file in
+/// use (Windows) can't leave a half-deleted install whose probe survives and
+/// reads as installed: the rename fails and nothing is touched, or it works
+/// and the original path is gone at once (the next use downloads afresh).
+/// Whatever the removal then can't finish is swept at the next launch
+/// ([`sweep_partly_deleted`]). Returns the bytes freed.
 pub(crate) fn remove_contained(data_dir: &Path, rel: &str) -> Result<u64, String> {
     let refuse = || format!("refused to delete {rel}: it isn't inside the models folders");
     let target: PathBuf = if rel.contains('/') {
@@ -682,13 +749,70 @@ pub(crate) fn remove_contained(data_dir: &Path, rel: &str) -> Result<u64, String
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(e) => return Err(e.to_string()),
     };
-    let bytes = if is_link(&meta) {
-        0
+    if is_link(&meta) {
+        return Err(format!(
+            "refused to delete {rel}: it's a link, which the app doesn't manage"
+        ));
+    }
+    let bytes = disk_size(&target);
+    if !meta.is_dir() {
+        // One file: removed whole or not at all.
+        models::remove_path(&target).map_err(|e| {
+            format!("{rel} is in use by another program, so it wasn't deleted ({e})")
+        })?;
+        return Ok(bytes);
+    }
+    let name = segments[segments.len() - 1];
+    let aside = if is_deleting_name(name) {
+        target.clone()
     } else {
-        disk_size(&target)
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let mut n = 0u32;
+        let aside = loop {
+            let candidate =
+                target.with_file_name(format!("{name}{DELETING_MARK}{}", ms + n as u128));
+            if std::fs::symlink_metadata(&candidate).is_err() {
+                break candidate;
+            }
+            n += 1;
+        };
+        std::fs::rename(&target, &aside).map_err(|e| {
+            format!(
+                "{rel} is in use by another program, so nothing was deleted. \
+                 Close it and try again ({e})"
+            )
+        })?;
+        aside
     };
-    models::remove_path(&target).map_err(|e| e.to_string())?;
+    models::remove_path(&aside).map_err(|e| {
+        format!("{rel} was only partly deleted ({e}). The rest goes the next time the app starts.")
+    })?;
     Ok(bytes)
+}
+
+/// Finish deletes a file in use interrupted: remove every leftover
+/// `<name>.deleting-<ms>` folder. Called once at launch, off the startup
+/// path; skipped while an install holds the lock.
+pub fn sweep_partly_deleted(data_dir: &Path) {
+    let Some(_guard) = models::try_install_lock() else {
+        return;
+    };
+    let (leftovers, _) = scan_leftovers(data_dir, std::process::id());
+    for e in leftovers
+        .iter()
+        .filter(|e| e.kind == EntryKind::PartlyDeleted)
+    {
+        match remove_contained(data_dir, &e.path) {
+            Ok(bytes) => {
+                tracing::info!(path = %e.path, bytes, "finished a partly deleted model folder")
+            }
+            Err(err) => {
+                tracing::warn!(path = %e.path, error = %err, "partly deleted model folder still there")
+            }
+        }
+    }
 }
 
 /// Delete the requested artifacts (by id) and leftovers (by path), each
@@ -721,6 +845,9 @@ pub fn delete_requested(
             Some(row) if !row.installed => outcome
                 .skipped
                 .push(format!("{}: already removed", row.display)),
+            Some(row) if row.linked => outcome
+                .skipped
+                .push(format!("{}: in a linked folder", row.display)),
             Some(row) => outcome.skipped.push(format!("{}: in use", row.display)),
             None => outcome
                 .skipped
@@ -772,6 +899,12 @@ fn read_usage(state: &AppState) -> (Usage, Option<Busy>) {
         u
     };
     usage.screen_recording = state.screen.lock().unwrap().is_some();
+    // CHECK POINT (#119, video storage): ffmpeg is also in use while the
+    // video job runs or is set to keep only the audio of videos. Whichever
+    // of #121 / #119 merges second sets `usage.video_job` here from the
+    // job's "needs ffmpeg" signal; the rule (`use_phrases`) and its test are
+    // already in place.
+    // TODO(#119): usage.video_job = <video job active || audio-only policy on>;
     let busy = if crate::scheduler::recording_active(state) {
         Some(Busy::Recording)
     } else if state
@@ -1015,6 +1148,18 @@ mod tests {
             busy.screen_recording = true;
             let r = build_report(tmp.path(), &busy, None, 1);
             assert!(!row(&r, "ffmpeg").can_delete);
+            busy.screen_recording = false;
+            busy.video_job = true;
+            let r = build_report(tmp.path(), &busy, None, 1);
+            assert_eq!(
+                row(&r, "ffmpeg").in_use.as_deref(),
+                Some("Used for storing videos.")
+            );
+            assert!(row(&on, "ffmpeg")
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("previews of videos"));
         }
         // The Ollama runtime is never listed here.
         assert!(on
@@ -1155,13 +1300,13 @@ mod tests {
         // Deleting through the linked folder is refused…
         assert!(remove_contained(&data, "models/asr/linked/ggml-old.bin").is_err());
         assert!(remove_contained(&data, "models/diarize/campplus.onnx").is_err());
-        // …and deleting the link itself removes only the link.
-        remove_contained(&data, "models/asr/linked").unwrap();
+        // …and so is deleting the link itself: links aren't the app's.
+        assert!(remove_contained(&data, "models/asr/linked").is_err());
+        assert!(data.join("models/asr/linked").exists());
         assert!(outside.join("ggml-old.bin").is_file());
         assert!(outside.join("precious.txt").is_file());
 
         // A delete request can't name a link: it's never a leftover.
-        assert!(make_dir_link(&outside, &data.join("models/asr/linked")));
         let out = delete_requested(
             &data,
             &Usage::default(),
@@ -1294,12 +1439,14 @@ mod tests {
                 "{unrecognised:?}"
             );
             let r = build_report(&d, &usage_with(&[]), None, 1);
-            assert_eq!(row(&r, MEDIUM).size_on_disk, 0, "never measured through");
-            // Deleting it removes the link, not the file it points at.
+            let medium = row(&r, MEDIUM);
+            assert!(medium.linked && !medium.can_delete);
+            assert_eq!(medium.size_on_disk, 0, "never measured through");
+            assert_eq!(r.reclaimable_bytes, 0);
             let out = delete_requested(&d, &usage_with(&[]), &[MEDIUM.into()], &[], 1);
-            assert_eq!(out.removed.len(), 1, "{out:?}");
+            assert!(out.removed.is_empty(), "{out:?}");
             assert!(outside.join("medium.bin").is_file());
-            assert!(std::fs::symlink_metadata(&linked).is_err());
+            assert!(std::fs::symlink_metadata(&linked).is_ok());
         } else {
             // File symlinks need Developer Mode on Windows; the directory
             // junction test covers link handling there.
@@ -1314,6 +1461,125 @@ mod tests {
             assert!(leftovers.is_empty(), "{leftovers:?}");
             assert!(unrecognised.is_empty(), "{unrecognised:?}");
         }
+    }
+
+    /// A whole `models/asr` linked elsewhere: its models show as linked,
+    /// not deletable, with no size and nothing toward Free up.
+    #[test]
+    fn models_in_a_linked_folder_are_not_managed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("data");
+        let outside = tmp.path().join("asr-elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("ggml-medium-q5_0.bin"), vec![0u8; 500]).unwrap();
+        // the Balanced model, so medium isn't the stand-in (in use)
+        std::fs::write(outside.join("ggml-large-v3-turbo-q5_0.bin"), vec![0u8; 9]).unwrap();
+        std::fs::create_dir_all(d.join("models")).unwrap();
+        assert!(make_dir_link(&outside, &d.join("models/asr")));
+
+        let r = build_report(&d, &usage_with(&[("asr.tier", "balanced")]), None, 1);
+        let medium = row(&r, MEDIUM);
+        assert!(medium.installed && medium.linked && !medium.can_delete);
+        assert_eq!(medium.size_on_disk, 0);
+        assert_eq!(medium.blocked.as_deref(), Some(LINKED));
+        assert_eq!(medium.note.as_deref(), Some(LINKED));
+        assert_eq!(r.reclaimable_bytes, 0);
+        let out = delete_requested(&d, &usage_with(&[]), &[MEDIUM.into()], &[], 1);
+        assert_eq!(
+            out.skipped,
+            vec![format!("{}: in a linked folder", medium.display)]
+        );
+        assert!(outside.join("ggml-medium-q5_0.bin").is_file());
+    }
+
+    /// A folder goes in one rename first; with a file in it held open
+    /// (Windows), nothing at all is deleted, so the probe can never survive
+    /// without the rest of the install.
+    #[test]
+    fn folders_are_renamed_aside_and_a_held_file_deletes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        install(d, "pyannote-seg", 10);
+        let root = "models/diarize/sherpa-onnx-pyannote-segmentation-3-0";
+        std::fs::write(d.join(root).join("LICENSE"), b"x").unwrap();
+        let probe = d.join(root).join("model.onnx");
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&probe)
+                .unwrap();
+            let err = remove_contained(d, root).unwrap_err();
+            assert!(err.contains("in use"), "{err}");
+            assert!(probe.is_file() && d.join(root).join("LICENSE").is_file());
+            let (leftovers, _) = scan_leftovers(d, 1);
+            assert!(leftovers.is_empty(), "nothing moved: {leftovers:?}");
+            drop(held);
+        }
+
+        assert_eq!(remove_contained(d, root).unwrap(), 11);
+        assert!(!d.join(root).exists());
+        let left: Vec<_> = std::fs::read_dir(d.join("models/diarize"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "no .deleting- folder stays behind: {left:?}"
+        );
+    }
+
+    #[test]
+    fn partly_deleted_folders_are_leftovers_and_swept_at_launch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        install(d, "campplus-embedding", 10);
+        let put = |rel: &str| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"rest").unwrap();
+        };
+        put("models/diarize/sherpa-onnx-pyannote-segmentation-3-0.deleting-1700000000000/a");
+        put("models/diarize/notes.deleting-soon/b"); // not our marker
+        if let Some(ffmpeg) = models::artifact("ffmpeg") {
+            let root = install_root(ffmpeg);
+            put(&format!("{root}.deleting-1700000000001/bin/ffmpeg.exe"));
+        }
+        let (leftovers, unrecognised) = scan_leftovers(d, 1);
+        let partly: Vec<&DiskEntry> = leftovers
+            .iter()
+            .filter(|e| e.kind == EntryKind::PartlyDeleted)
+            .collect();
+        let expected = if models::artifact("ffmpeg").is_some() {
+            2
+        } else {
+            1
+        };
+        assert_eq!(partly.len(), expected, "{leftovers:?}");
+        assert!(partly.iter().all(|e| e.label == "Partly deleted earlier"));
+        assert!(unrecognised
+            .iter()
+            .any(|e| e.path == "models/diarize/notes.deleting-soon"));
+
+        sweep_partly_deleted(d);
+        let (leftovers, unrecognised) = scan_leftovers(d, 1);
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        assert_eq!(unrecognised.len(), 1, "unknown folders stay");
+        assert!(d.join("models/diarize/campplus.onnx").is_file());
+    }
+
+    #[test]
+    fn an_empty_saved_tier_matches_the_pipeline() {
+        let get = |k: &str| (k == "asr.tier").then(String::new);
+        let u = Usage::from_settings(&get, Some("light".into()), None);
+        // pipeline.rs keeps the empty tier: default_model_for_tier("") is turbo
+        assert_eq!(u.wanted_model(), TURBO);
+        let missing = Usage::from_settings(&|_| None, Some("light".into()), None);
+        assert_eq!(missing.wanted_model(), SMALL);
     }
 
     #[test]

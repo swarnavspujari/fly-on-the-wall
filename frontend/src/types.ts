@@ -276,12 +276,14 @@ export interface ArtifactUsage {
   /** What it's for, when installed and not in use. */
   note: string | null;
   can_delete: boolean;
-  /** Why Delete is disabled on an installed row (in use, or busy). */
+  /** Why Delete is disabled on an installed row (linked, in use, busy). */
   blocked: string | null;
+  /** In (or is) a linked folder: not managed by the app, no size, no Delete. */
+  linked: boolean;
 }
 
 export type DiskEntryKind =
-  "unfinished_download" | "old_version" | "unused_model_file" | "not_recognised";
+  "unfinished_download" | "old_version" | "unused_model_file" | "partly_deleted" | "not_recognised";
 
 /** A leftover or unrecognised file under the models folders. */
 export interface DiskEntry {

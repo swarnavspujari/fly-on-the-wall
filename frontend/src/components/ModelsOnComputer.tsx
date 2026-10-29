@@ -61,6 +61,7 @@ function fallbackRow(m: ModelStatus): ArtifactUsage {
     note: null,
     can_delete: false,
     blocked: null,
+    linked: false,
   };
 }
 
@@ -178,6 +179,8 @@ export default function ModelsOnComputer({
           <Badge tone="success" dot>
             in use
           </Badge>
+        ) : status === "linked" ? (
+          <Badge tone="neutral">linked</Badge>
         ) : (
           <Badge tone="neutral">not in use</Badge>
         )}

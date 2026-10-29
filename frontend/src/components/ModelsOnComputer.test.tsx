@@ -199,6 +199,38 @@ describe("ModelsOnComputer", () => {
     expect(rowOf("ffmpeg").textContent).toContain("the screen recording in progress");
   });
 
+  it("a model in a linked folder says so, has no size and no working Delete", async () => {
+    const real = await api.modelStorageReport();
+    const linkedNote = "Linked folder, not managed by the app.";
+    const report = vi.spyOn(api, "modelStorageReport").mockResolvedValue({
+      ...real,
+      artifacts: real.artifacts.map((a) =>
+        a.id === "ggml-medium-q5_0"
+          ? {
+              ...a,
+              linked: true,
+              size_on_disk: 0,
+              note: linkedNote,
+              can_delete: false,
+              blocked: linkedNote,
+            }
+          : a,
+      ),
+      reclaimable_bytes: real.reclaimable_bytes - 539_212_467,
+    });
+    await render();
+    const medium = rowOf("ggml-medium-q5_0");
+    expect(medium.textContent).toContain("linked");
+    expect(medium.textContent).toContain(linkedNote);
+    expect(medium.textContent).not.toContain("on disk");
+    const btn = deleteIn(medium);
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toBe(linkedNote);
+    // not part of Free up
+    expect(freeUpButton().textContent).toBe("Free up 606 MB");
+    report.mockRestore();
+  });
+
   it("a backend refusal is shown, and the list refreshes", async () => {
     const del = vi
       .spyOn(api, "deleteModelFiles")

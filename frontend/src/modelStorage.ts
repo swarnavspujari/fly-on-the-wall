@@ -22,18 +22,22 @@ export function shortName(a: ArtifactUsage, all: readonly ArtifactUsage[]): stri
   return clash || !s ? a.display : s;
 }
 
-/** How a row reads: in use, installed but unused, or not on this computer. */
-export type RowStatus = "in_use" | "unused" | "not_installed";
+/** How a row reads: in use, in a linked folder the app doesn't manage,
+ *  installed but unused, or not on this computer. */
+export type RowStatus = "in_use" | "linked" | "unused" | "not_installed";
 
 export function rowStatus(a: ArtifactUsage): RowStatus {
   if (!a.installed) return "not_installed";
-  return a.in_use ? "in_use" : "unused";
+  if (a.in_use) return "in_use";
+  return a.linked ? "linked" : "unused";
 }
 
 /** The row's second line: size on disk and what it's for. */
 export function rowDetail(a: ArtifactUsage): string {
   if (!a.installed) return `${formatBytes(a.download_bytes)} download`;
   const why = a.in_use ?? a.note;
+  // A linked install isn't measured (its files live elsewhere).
+  if (a.linked) return why ?? "";
   return why
     ? `${formatBytes(a.size_on_disk)} on disk · ${why}`
     : `${formatBytes(a.size_on_disk)} on disk`;

@@ -19,6 +19,7 @@ const row = (over: Partial<ArtifactUsage> & { id: string }): ArtifactUsage => ({
   note: "Not used by your current settings. It downloads again if you need it.",
   can_delete: true,
   blocked: null,
+  linked: false,
   ...over,
 });
 
@@ -85,6 +86,17 @@ describe("row status and detail", () => {
     });
     expect(rowStatus(absent)).toBe("not_installed");
     expect(rowDetail(absent)).toBe("1.1 GB download");
+
+    const linked = row({
+      id: "d",
+      linked: true,
+      size_on_disk: 0,
+      note: "Linked folder, not managed by the app.",
+      can_delete: false,
+      blocked: "Linked folder, not managed by the app.",
+    });
+    expect(rowStatus(linked)).toBe("linked");
+    expect(rowDetail(linked)).toBe("Linked folder, not managed by the app.");
   });
 });
 
