@@ -1891,6 +1891,14 @@ fn accuracy_harness() {
         if let Some(r) = maybe_score_reference(&t) {
             results.insert("reference".into(), r);
         }
+        // optional: dropped-speech check against the audio the transcript
+        // came from (same rule as pipeline runs)
+        if let Ok(wav) = std::env::var("FLYONTHEWALL_HARNESS_HOLES_WAV") {
+            let (samples, rate) =
+                fly_audio::mix::read_wav_mono(Path::new(&wav)).expect("read holes wav");
+            let holes = run_stats::speech_holes(&t, &samples, rate);
+            results.insert("speech_holes".into(), run_stats::holes_json(&holes));
+        }
         write_results(results);
         return;
     }
@@ -2036,6 +2044,8 @@ struct RunOutput {
     loops: Vec<run_stats::LoopEvent>,
     /// Bench-engine stats (load/decode time, live latency, timing transfer).
     bench: Option<serde_json::Value>,
+    /// Speech the final transcript has no words for (mixed recordings).
+    speech_holes: Option<serde_json::Value>,
 }
 
 /// Run the REAL pipeline over a recording folder with `run`'s engine and
@@ -2305,6 +2315,30 @@ fn run_pipeline(rec_dir: &Path, run: &RunOpts) -> Option<RunOutput> {
         .expect("pipeline should succeed");
     let pipeline_secs = started.elapsed().as_secs_f64();
     let resources = sampler.finish();
+    // decoder robustness, reference-free: mixed recordings only (the
+    // two-channel path splits words across channels)
+    let speech_holes = (!per_channel)
+        .then(|| fly_audio::mix::read_wav_mono(&mixed_src).ok())
+        .flatten()
+        .map(|(samples, rate)| {
+            let skip = run.start_secs.unwrap_or(0) as usize * rate as usize;
+            let take = run
+                .max_secs
+                .map(|m| m as usize * rate as usize)
+                .unwrap_or(usize::MAX);
+            let window = &samples[skip.min(samples.len())..];
+            let window = &window[..take.min(window.len())];
+            let holes = run_stats::speech_holes(&transcript, window, rate);
+            eprintln!(
+                "speech holes (≥5 s of speech with no words): {} ({:.1} s)",
+                holes.len(),
+                holes
+                    .iter()
+                    .map(|(a, b)| (b - a) as f64 / 1000.0)
+                    .sum::<f64>()
+            );
+            run_stats::holes_json(&holes)
+        });
     let loops = run_stats::take_loops();
     eprintln!(
         "pipeline took {pipeline_secs:.1}s (engine recorded: {})",
@@ -2318,6 +2352,7 @@ fn run_pipeline(rec_dir: &Path, run: &RunOpts) -> Option<RunOutput> {
         resources,
         loops,
         bench: bench_engines::take_stats(),
+        speech_holes,
     })
 }
 
@@ -2423,6 +2458,9 @@ fn run_results(
     let loops = run_stats::loops_json(&out.loops);
     eprintln!("hallucination loops collapsed by the guard: {loops}");
     results.insert("loops".into(), loops);
+    if let Some(h) = &out.speech_holes {
+        results.insert("speech_holes".into(), h.clone());
+    }
     results.insert("transcript".into(), report(&out.transcript));
     results.insert(
         "structure".into(),
@@ -2860,6 +2898,8 @@ struct Row {
     first_partial_p90_s: Option<f64>,
     /// ASR CPU over the audio's duration, % of the whole machine.
     call_cpu_pct: Option<f64>,
+    /// ≥ 5 s speech stretches with no words (dropped speech).
+    holes: Option<u64>,
 }
 
 fn row_from(v: &serde_json::Value) -> Option<Row> {
@@ -2897,6 +2937,7 @@ fn row_from(v: &serde_json::Value) -> Option<Row> {
         kind: v.get("kind").and_then(|k| k.as_str()).map(str::to_string),
         first_partial_p90_s: f("/bench/live_latency/first_partial_p90_s"),
         call_cpu_pct: f("/call_cpu_pct"),
+        holes: v.pointer("/speech_holes/count").and_then(|x| x.as_u64()),
     })
 }
 
@@ -2930,7 +2971,7 @@ fn compare_results(dir: &Path) {
     let num = |x: Option<f64>, d: usize| x.map(|v| format!("{v:.d$}")).unwrap_or("-".into());
     eprintln!("\n== ASR comparison ({}) ==", dir.display());
     eprintln!(
-        "{:<26} {:<24} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7} {:>7} {:>8} {:>5} {:>5} {:>7} {:>7}",
+        "{:<26} {:<24} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7} {:>7} {:>8} {:>5} {:>5} {:>5} {:>7} {:>7}",
         "fixture",
         "variant",
         "WER%",
@@ -2943,13 +2984,14 @@ fn compare_results(dir: &Path) {
         "asr_s",
         "RSS_MB",
         "loops",
+        "holes",
         "cpu%",
         "agrWER%",
         "agrDER%"
     );
     for r in &rows {
         eprintln!(
-            "{:<26} {:<24} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7} {:>7} {:>8} {:>5} {:>5} {:>7} {:>7}",
+            "{:<26} {:<24} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7} {:>7} {:>8} {:>5} {:>5} {:>5} {:>7} {:>7}",
             r.fixture,
             r.variant,
             pct(r.wer),
@@ -2962,6 +3004,7 @@ fn compare_results(dir: &Path) {
             num(r.asr_secs, 0),
             num(r.peak_sidecar_rss_mb, 0),
             r.loops.map(|l| l.to_string()).unwrap_or("-".into()),
+            r.holes.map(|l| l.to_string()).unwrap_or("-".into()),
             num(r.machine_cpu_avg_pct, 0),
             pct(r.agree_wer),
             pct(r.agree_der_250),

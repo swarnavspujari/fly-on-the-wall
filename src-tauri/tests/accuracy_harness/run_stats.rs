@@ -411,3 +411,116 @@ mod tests {
         assert!(c.asr_secs().unwrap() >= 0.0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Speech holes (reference-free decoder-robustness check)
+// ---------------------------------------------------------------------------
+
+/// Word-free stretch that counts as a hole.
+const HOLE_MS: u64 = 5_000;
+const HOLE_FRAME_MS: usize = 100;
+/// Share of a stretch's frames that must carry speech-level energy.
+const HOLE_SPEECH_SHARE: f64 = 0.4;
+
+/// Stretches of ≥ 5 s with no transcribed word whose audio is mostly
+/// speech-level energy (≥ 40 % of 100 ms frames at ≥ ¼ of the median
+/// voiced RMS) — the same rule the shipped Parakeet engine uses to catch
+/// parakeet-cli's silent decoder, applied to the FINAL transcript of any
+/// engine over the whole recording. A nonzero count means speech was
+/// dropped (or a long unintelligible stretch); compare engines on the same
+/// audio. Returns (start_ms, end_ms) per hole.
+pub fn speech_holes(t: &Transcript, samples: &[f32], rate: u32) -> Vec<(u64, u64)> {
+    let per_frame = (rate as usize * HOLE_FRAME_MS / 1000).max(1);
+    let rms: Vec<f64> = samples
+        .chunks(per_frame)
+        .map(|c| (c.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / c.len() as f64).sqrt())
+        .collect();
+    let mut voiced: Vec<f64> = rms.iter().copied().filter(|r| *r > 1e-3).collect();
+    if voiced.is_empty() {
+        return Vec::new();
+    }
+    voiced.sort_by(|a, b| a.total_cmp(b));
+    let threshold = voiced[voiced.len() / 2] * 0.25;
+    let total_ms = (samples.len() as u64 * 1000) / rate.max(1) as u64;
+    let mut edges: Vec<(u64, u64)> = t
+        .segments
+        .iter()
+        .flat_map(|s| s.words.iter().map(|w| (w.start_ms, w.end_ms)))
+        .collect();
+    edges.sort_unstable();
+    edges.push((total_ms, total_ms));
+    let mut holes = Vec::new();
+    let mut covered_to = 0u64;
+    for (start, end) in edges {
+        if start >= covered_to + HOLE_MS {
+            let (a, b) = (
+                covered_to as usize / HOLE_FRAME_MS,
+                start as usize / HOLE_FRAME_MS,
+            );
+            let frames = &rms[a.min(rms.len())..b.min(rms.len())];
+            let speech = frames.iter().filter(|r| **r >= threshold).count();
+            if !frames.is_empty() && speech as f64 / frames.len() as f64 >= HOLE_SPEECH_SHARE {
+                holes.push((covered_to, start));
+            }
+        }
+        covered_to = covered_to.max(end);
+    }
+    holes
+}
+
+pub fn holes_json(holes: &[(u64, u64)]) -> serde_json::Value {
+    serde_json::json!({
+        "count": holes.len(),
+        "secs": holes.iter().map(|(a, b)| (b - a) as f64 / 1000.0).sum::<f64>(),
+        "spans_s": holes
+            .iter()
+            .take(20)
+            .map(|(a, b)| [*a as f64 / 1000.0, *b as f64 / 1000.0])
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[cfg(test)]
+mod hole_tests {
+    use super::*;
+
+    fn t_with_words(times: &[(u64, u64)]) -> Transcript {
+        Transcript {
+            meeting_id: "m".into(),
+            language: None,
+            engine: "e".into(),
+            segments: vec![fly_core::TranscriptSegment {
+                id: "s0".into(),
+                speaker_key: "spk_0".into(),
+                start_ms: times.first().map(|w| w.0).unwrap_or(0),
+                end_ms: times.last().map(|w| w.1).unwrap_or(0),
+                text: String::new(),
+                words: times
+                    .iter()
+                    .map(|&(s, e)| fly_core::Word {
+                        text: "w".into(),
+                        start_ms: s,
+                        end_ms: e,
+                    })
+                    .collect(),
+            }],
+            speakers: vec![],
+        }
+    }
+
+    #[test]
+    fn word_free_speech_is_a_hole_but_a_pause_is_not() {
+        let rate = 16_000u32;
+        // 0-20 s loud "speech"; 20-30 s silence
+        let mut s = vec![0.3f32; 30 * rate as usize];
+        for x in &mut s[20 * rate as usize..] {
+            *x = 0.0;
+        }
+        // words cover 0-8 s and resume at 15 s; nothing after 16 s
+        let t = t_with_words(&[(0, 8_000), (15_000, 16_000)]);
+        let holes = speech_holes(&t, &s, rate);
+        // 8-15 s is speech without words; 16-30 s is 4 s speech + 10 s
+        // silence (40 % threshold → 4/14 speech frames, not a hole)
+        assert_eq!(holes, vec![(8_000, 15_000)]);
+    }
+}
