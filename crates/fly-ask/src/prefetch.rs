@@ -3,9 +3,12 @@
 //! user's own notes, and presents them as `[seg:ID]`-marked lines sized to
 //! the tier's prompt budget.
 //!
-//! * **Search** goes through `fly_context::Context::search_passages` only
-//!   (hybrid keyword + semantic, Keep-local filtered in SQL), asking for
-//!   its deepest result (20 passages) and taking the best that fit.
+//! * **Search** goes through `fly_context::Context::search_passages_scored`
+//!   only (hybrid keyword + semantic, Keep-local filtered in SQL), asking
+//!   for 20 passages and taking the best that fit. A wide scope also asks
+//!   for up to 4 passages per meeting (the default 3 can miss a top
+//!   meeting's 4th window). The plain search's cosines feed the
+//!   "not found" floor.
 //! * **One meeting / one note**: the whole transcript when it fits the
 //!   budget (nothing to miss); otherwise the question's passages plus
 //!   single-term sub-searches, because search caps passages per meeting.
@@ -23,8 +26,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use fly_context::passages::{lexical_score, query_terms};
 use fly_context::{
-    Context, GetItemsArgs, GetNoteArgs, MemoryPrefetch, NoteKind, Passage, PassageSource,
-    QueryVector, SearchPassagesArgs, SegmentView,
+    Context, GetItemsArgs, GetNoteArgs, MemoryPrefetch, NoteKind, Passage, PassageScores,
+    PassageSource, QueryVector, SearchPassagesArgs, SegmentView,
 };
 use fly_core::{ItemKind, MeetingItem};
 use fly_storage::Storage;
@@ -35,8 +38,14 @@ use crate::router::Hints;
 use crate::scope::Resolved;
 use crate::tier::Budget;
 
-/// Deepest search fly-context offers.
+/// Passages per search (fly-context's tool-call maximum; in process it
+/// allows 40, more than any tier's budget can show).
 const SEARCH_LIMIT: u32 = 20;
+/// Passages per meeting in a wide scope's second search (#110 measured 4
+/// against the default 3: recall 0.941 / MRR 0.761 vs 0.912 / 0.743). A
+/// narrow scope keeps the default, which fills past 3 when few meetings
+/// are in scope; an explicit cap would be strict.
+const WIDE_PER_MEETING: u32 = 4;
 /// Router filters are dropped when they leave fewer passages than this.
 const SOFT_FILTER_MIN: usize = 3;
 /// Single-term sub-searches for a long single meeting.
@@ -238,6 +247,46 @@ pub struct Prefetch {
     /// Share of the question's topic terms present in the context.
     pub coverage: f64,
     pub terms: usize,
+    /// The search's semantic "not found" signal, when it applied a
+    /// similarity floor (an unscoped question of 4+ content words with a
+    /// measured embedder).
+    pub similarity: Option<Similarity>,
+}
+
+/// The best cosine against the floor the search applied.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Similarity {
+    /// Best cosine of any chunk in scope (`None`: nothing in scope).
+    pub top: Option<f32>,
+    pub floor: f32,
+}
+
+impl Similarity {
+    fn of(s: &PassageScores) -> Option<Self> {
+        s.similarity_floor.map(|floor| Self {
+            top: s.top_similarity,
+            floor,
+        })
+    }
+
+    /// Something in scope is semantically close to the question.
+    pub fn passes(&self) -> bool {
+        self.top.is_some_and(|t| t >= self.floor)
+    }
+
+    /// The closer of two searches' signals.
+    fn max(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(Self {
+                top: match (a.top, b.top) {
+                    (Some(x), Some(y)) => Some(x.max(y)),
+                    (x, y) => x.or(y),
+                },
+                floor: a.floor.min(b.floor),
+            }),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 /// A transcript excerpt about to be rendered.
@@ -307,6 +356,15 @@ fn search(
     input: &PrefetchInput<'_>,
     stats: &mut PrefetchStats,
 ) -> Result<Vec<Passage>, fly_context::ContextError> {
+    search_scored(ctx, args, input, stats).map(|(p, _)| p)
+}
+
+fn search_scored(
+    ctx: &Context<'_>,
+    args: &SearchPassagesArgs,
+    input: &PrefetchInput<'_>,
+    stats: &mut PrefetchStats,
+) -> Result<(Vec<Passage>, PassageScores), fly_context::ContextError> {
     let qv = input
         .embeddings
         .iter()
@@ -317,9 +375,9 @@ fn search(
             model,
         });
     stats.searches += 1;
-    let r = ctx.search_passages(args, qv)?;
+    let (r, scores) = ctx.search_passages_scored(args, qv)?;
     stats.semantic |= r.semantic;
-    Ok(r.passages)
+    Ok((r.passages, scores))
 }
 
 fn key(p: &Passage) -> (String, Option<u64>, String) {
@@ -419,6 +477,7 @@ pub fn prefetch(
         None => salient.clone(),
     };
     let mut stats = PrefetchStats::default();
+    let mut similarity: Option<Similarity> = None;
 
     // --- transcript excerpts -------------------------------------------
     let mut excerpts: Vec<Excerpt> = Vec::new();
@@ -461,15 +520,14 @@ pub fn prefetch(
         //    top transcript passages always go in whole.
         let mut plain: Vec<Passage> = Vec::new();
         for batch in &batches {
-            merge(
-                &mut plain,
-                search(
-                    &ctx,
-                    &base(batch.clone(), input.question),
-                    input,
-                    &mut stats,
-                )?,
-            );
+            let (found, scores) = search_scored(
+                &ctx,
+                &base(batch.clone(), input.question),
+                input,
+                &mut stats,
+            )?;
+            similarity = Similarity::max(similarity, Similarity::of(&scores));
+            merge(&mut plain, found);
         }
         // 2. Extras: the router's date filter, the follow-up, subfolders,
         //    and single-term searches for one long meeting.
@@ -496,6 +554,18 @@ pub fn prefetch(
             for batch in &batches {
                 let a = base(batch.clone(), fq);
                 let a = if has_dates { dated(a) } else { a };
+                let (found, scores) = search_scored(&ctx, &a, input, &mut stats)?;
+                // The follow-up's topic is the joined question's.
+                similarity = Similarity::max(similarity, Similarity::of(&scores));
+                merge(&mut extra, found);
+            }
+        }
+        if r.wide {
+            for batch in &batches {
+                let a = SearchPassagesArgs {
+                    per_meeting: Some(WIDE_PER_MEETING),
+                    ..base(batch.clone(), input.question)
+                };
                 merge(&mut extra, search(&ctx, &a, input, &mut stats)?);
             }
         }
@@ -827,6 +897,7 @@ pub fn prefetch(
     Ok(Prefetch {
         coverage: coverage(&floor_terms, &context.to_lowercase()),
         terms: floor_terms.len(),
+        similarity,
         context,
         evidence: ev,
         stats,
@@ -865,6 +936,22 @@ pub fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_closer_signal_wins_and_nothing_in_scope_fails() {
+        let s = |top: Option<f32>| Some(Similarity { top, floor: 0.35 });
+        assert!(s(Some(0.35)).unwrap().passes());
+        assert!(!s(Some(0.34)).unwrap().passes());
+        assert!(!s(None).unwrap().passes(), "no chunk in scope is not close");
+        let m = Similarity::max(s(Some(0.2)), s(Some(0.5))).unwrap();
+        assert_eq!(m.top, Some(0.5));
+        assert_eq!(
+            Similarity::max(s(None), s(Some(0.4))).unwrap().top,
+            Some(0.4)
+        );
+        assert_eq!(Similarity::max(None, s(Some(0.4))), s(Some(0.4)));
+        assert_eq!(Similarity::max(None, None), None);
+    }
 
     fn seg(i: usize, text: &str) -> SegmentView {
         SegmentView {

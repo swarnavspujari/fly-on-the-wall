@@ -476,6 +476,90 @@ async fn the_score_floor_answers_not_found_without_a_model_call() {
     assert!(!a.run_log.floor.passed);
 }
 
+/// A query embedder under the app's model name, so fly-context applies
+/// its measured similarity floor (the fixture's chunks are re-embedded
+/// under that name first).
+struct Gemma(fn(&str) -> Vec<f32>);
+
+impl QueryEmbedder for Gemma {
+    fn model(&self) -> &str {
+        fly_storage::embeddings::EMBEDDINGGEMMA
+    }
+    async fn embed(&self, text: &str) -> Option<Vec<f32>> {
+        Some((self.0)(text))
+    }
+}
+
+fn embed_as_gemma(s: &Storage) {
+    let model = fly_storage::embeddings::EMBEDDINGGEMMA;
+    let rows: Vec<(i64, Vec<f32>)> = s
+        .pending_embedding_chunks(model, 10_000)
+        .unwrap()
+        .iter()
+        .map(|c| (c.id, bow(&format!("{}\n{}", c.title, c.text))))
+        .collect();
+    s.store_chunk_embeddings(model, &rows).unwrap();
+}
+
+async fn run_gemma(f: &Fx, m: &Model, embed: fn(&str) -> Vec<f32>, q: &str) -> fly_ask::AskAnswer {
+    ask(
+        AskEnv {
+            store: &f.s,
+            provider: m,
+            on_device: true,
+            tier: Tier::S,
+            limits: None,
+            embedder: Some(&Gemma(embed)),
+            events: None,
+            cancel: None,
+        },
+        AskInput {
+            question: q,
+            history: &[],
+            scope: AskScope::All,
+            now: now(),
+        },
+    )
+    .await
+}
+
+/// Its words are all in the Harrowgate meeting (coverage passes).
+const SEATS: &str = "How much does Harrowgate pay each year for technician seats?";
+
+#[tokio::test]
+async fn an_unscoped_question_under_the_cosine_floor_is_not_found() {
+    let f = fx();
+    embed_as_gemma(&f.s);
+    let m = Model::new(true, vec![]);
+    // Pointing away from every chunk: nothing is semantically close.
+    let away = |_: &str| vec![-0.125f32; 64];
+    let a = run_gemma(&f, &m, away, SEATS).await;
+    assert_eq!(a.status, AnswerStatus::NotFound);
+    assert!(m.requests().is_empty(), "no model call");
+    let floor = &a.run_log.floor;
+    assert!(floor.applied && floor.semantic && !floor.passed);
+    assert!(floor.coverage_pct >= 34, "the words alone would pass");
+    assert_eq!(floor.similarity_floor_pct, Some(35));
+}
+
+#[tokio::test]
+async fn an_unscoped_question_over_the_cosine_floor_reaches_the_model() {
+    let f = fx();
+    embed_as_gemma(&f.s);
+    let m = Model::new(
+        true,
+        vec![ChatResponse::text_reply(
+            "Harrowgate pays $42,000 a year for sixty seats [seg:h01].",
+        )],
+    );
+    let a = run_gemma(&f, &m, bow, SEATS).await;
+    assert_eq!(a.status, AnswerStatus::Answered);
+    let floor = &a.run_log.floor;
+    assert!(floor.semantic && floor.passed);
+    assert!(floor.top_similarity_pct.unwrap() >= 35);
+    assert_eq!(m.requests().len(), 1);
+}
+
 #[tokio::test]
 async fn off_device_models_never_see_keep_local_meetings() {
     let f = fx();

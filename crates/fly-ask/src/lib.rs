@@ -607,13 +607,27 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     );
 
     // 5. Score floor (wide scopes): nothing about the topic → not found.
+    //    The share of the question's topic words in the context decides;
+    //    an unscoped question the search also measured semantically (a
+    //    floor for its embedder, 4+ content words) must clear its cosine
+    //    floor too. On the contract's wide questions with the app's
+    //    embedder the cosine alone caught 1 of 23 unanswerables (their
+    //    best cosines overlap the answerable ones'), coverage 4, either
+    //    one 4, with no answerable question refused by any rule.
     let floor_applies = resolved.wide;
+    let semantic = pf.similarity.filter(|_| resolved.kind == ScopeKind::All);
     let passed = !floor_applies
-        || (!pf.evidence.is_empty() && (pf.terms == 0 || pf.coverage >= FLOOR_COVERAGE));
+        || (!pf.evidence.is_empty()
+            && (pf.terms == 0 || pf.coverage >= FLOOR_COVERAGE)
+            && semantic.is_none_or(|sim| sim.passes()));
+    let pct = |c: f32| (c.max(0.0) * 100.0).round() as u32;
     run.log.floor = FloorLog {
         applied: floor_applies,
         terms: pf.terms as u32,
         coverage_pct: (pf.coverage * 100.0).round() as u32,
+        semantic: floor_applies && semantic.is_some(),
+        top_similarity_pct: semantic.and_then(|s| s.top).map(pct),
+        similarity_floor_pct: semantic.map(|s| pct(s.floor)),
         passed,
     };
     if !passed {

@@ -181,6 +181,15 @@ pub struct FloorLog {
     pub applied: bool,
     pub terms: u32,
     pub coverage_pct: u32,
+    /// The search's cosine floor was checked too (an unscoped question of
+    /// 4+ content words with a measured embedder), on top of the coverage.
+    #[serde(default)]
+    pub semantic: bool,
+    /// Best cosine in scope and the floor it was held to, as percents.
+    #[serde(default)]
+    pub top_similarity_pct: Option<u32>,
+    #[serde(default)]
+    pub similarity_floor_pct: Option<u32>,
     pub passed: bool,
 }
 

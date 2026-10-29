@@ -1,14 +1,14 @@
 # The Ask harness (`fly-ask`)
 
-> Layer: crate. Added by spec v2.5 PR 3.3 (on top of main `ccca11b`). The streaming Ask UI that renders its sentences, sources, frames and proposals is PR 3.4.
+> Layer: crate. Added by spec v2.5 PR 3.3 (up to date with main `ab7207c`, #110 search). The streaming Ask UI that renders its sentences, sources, frames and proposals is PR 3.4.
 
 ## Purpose
 Turns a question into an answer the user can trust because code, not the model, checks it (spec §4.2, §4.2a). One `ask()` call:
 
 1. **Scope**: this meeting, a note, a folder (with subfolders), a person, or everything. Visibility comes from the caller's `on_device` (`build_provider_with_reach`), never from `provider.is_local()`.
 2. **Route**: a deterministic self-query router pulls dates ("last week", "Friday's meeting"), people, a folder (`@Customers`) and list intents ("open action items") from the question, validated against known values. Dates are soft filters.
-3. **Prefetch** through `fly_context::Context::search_passages` only: the plain search's top 8 transcript passages always go in whole; ranks 9-20 and the router, follow-up, subfolder and (one long meeting) single-term searches fill the rest, clipped around their best line. Plus a memory briefing when the question names a known person or recurring meeting (fly-context `memory_prefetch`, facts with their verbatim source lines), else extracted items with their source lines, and the user's notes (demoted: they can't be cited). A short meeting is read whole.
-4. **Floor**: a wide-scope question whose topic words aren't in what was found is "not found" with no model call.
+3. **Prefetch** through `fly_context::Context::search_passages_scored` only: the plain search's top 8 transcript passages always go in whole; ranks 9-20 and the router, follow-up, subfolder, wide-scope 4-per-meeting and (one long meeting) single-term searches fill the rest, clipped around their best line. Plus a memory briefing when the question names a known person or recurring meeting (fly-context `memory_prefetch`, facts with their verbatim source lines), else extracted items with their source lines, and the user's notes (demoted: they can't be cited). A short meeting is read whole.
+4. **Floor**: a wide-scope question whose topic words aren't in what was found is "not found" with no model call. An unscoped question that fly-context also measured semantically (an embedder with a measured floor, 4+ content words: `PassageScores::similarity_floor`) must clear that cosine floor as well (`top_similarity`).
 5. **Synthesize**, streamed as sanitized frames (no markers, links or reasoning tags while streaming; the final frame, `turn` 0, is the validated answer). Tier S writes from the prefetch alone; tiers M and C may call fly-context's nine tools (six read tools and the three memory tools, all scope-clamped) and the two proposal tools, through fly-llm's tool loop.
 6. **Validate**: a citation counts only if the model was shown that line — its marker and its whole text in the same request (`Evidence::add_shown`). `[seg:a, b]` lists, a trailing "Sources: [seg:…]" line and a bare `[id]` of a shown line all cite; sentences are sourced, unsourced or flagged; numbers (spoken forms normalized), dates, names and quotes are checked against the cited lines; links and images are removed. No valid citation → one retry → otherwise shown fully flagged. An empty or cut-off reply is a model failure, not "not found".
 7. **Proposals** (`insert_into_note`, `add_action_item`) are validated and returned, never executed.
@@ -69,9 +69,9 @@ Only through the provider and embedder it is handed. It constructs no client.
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| unit | `crates/fly-ask/src/*.rs` | 40 | markers and sentence splitting, link stripping, refusals, defusing; spoken numbers, dates, names, quotes; clip/coverage; router dates/people/intents; tiers, sizes, budgets, smoke test; `Metered` caps, forcing, cancel, frames, truncation heuristic; proposal gate (injected and unsourced proposals refused); run-log free text |
-| integration (runs in CI) | `crates/fly-ask/tests/harness.rs` | 11 | tier S one-call answer; corrupted numbers/names flagged; out-of-set citations retried then flagged; refusal vs empty reply; the floor; Keep local for cloud and remote Ollama (and the count stays out of prompts); a Keep-local scope refused; tier C tools clamped to scope, proposals never executed; tool results join the retrieved set; history privacy; links never render (frames and sources too) |
-| system evals | `evals/` `ask_contract` (once registered) | 99 scenarios | every gate scored from what the harness sent; see [evals/README.md](../../evals/README.md) |
+| unit | `crates/fly-ask/src/*.rs` | 43 | markers and sentence splitting, link stripping, refusals, defusing; spoken numbers, dates, names, quotes; clip/coverage; the cosine signal; router dates/people/intents; tiers, sizes, budgets, smoke test; `Metered` caps, forcing, cancel, frames, truncation heuristic; proposal gate (injected and unsourced proposals refused); run-log free text |
+| integration (runs in CI) | `crates/fly-ask/tests/harness.rs` | 15 | tier S one-call answer; corrupted numbers/names flagged; out-of-set citations retried then flagged; refusal vs empty reply; the coverage floor and the cosine floor (under it: not found; over it: the model is asked); Keep local for cloud and remote Ollama (and the count stays out of prompts); a Keep-local scope refused; tier C tools clamped to scope, proposals never executed; tool results join the retrieved set; history privacy; links never render (frames and sources too) |
+| system evals | `evals/` `ask_contract` (registered in `evals/runner/src/harnesses.rs`) | 439 scenarios | every gate scored from what the harness sent; see [evals/README.md](../../evals/README.md) |
 | ignored live | `src-tauri/tests/ask_live.rs` | — | real local models through the app's provider; records replays outside the repo |
 
 ## Changing it safely
@@ -79,4 +79,5 @@ Only through the provider and embedder it is handed. It constructs no client.
 - The claim rules in `claims.rs` follow the eval scorer's on purpose (number tokenizing in particular): a looser reading of the source side would accept numbers the scorer rejects.
 - Keep the plain top-8 passages whole in the prefetch: the evals' `must_cite_request_shortfall` gate compares against plain retrieval.
 - New run-log fields: typed values only; enums through the `code::` serializers.
-- Trap: fly-context caps search at 3 passages per meeting and 20 per call; a single long meeting relies on the single-term sub-searches until it accepts a per-meeting cap.
+- Trap: fly-context's default is 3 passages per meeting, and slots it would leave empty go to further passages of the meetings already found, so a narrow scope already gets more than 3. An explicit `per_meeting` is a strict cap: the harness sets it (4) only on the wide scope's second search, never on a meeting scope.
+- The cosine floor only adds "not found" answers to the coverage floor. On the contract's wide questions with the app's embedder, the cosine alone caught 1 of 23 unanswerable questions (their best cosines, 0.24-0.56, overlap the answerable ones', from 0.35), coverage 4, either 4; none of the 86 answerable ones was refused by any rule. Re-measure before letting the cosine decide alone.

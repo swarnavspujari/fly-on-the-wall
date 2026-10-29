@@ -218,6 +218,9 @@ impl<S: StoreAccess, E: QueryEmbedder> ToolState<'_, S, E> {
         }
         if name == fly_context::tools::SEARCH_PASSAGES {
             let mut a: SearchPassagesArgs = args(&name, &input)?;
+            // A model's call gets a tool call's limit (in process fly-context
+            // allows more), as through `call()` and MCP.
+            a.limit = a.limit.map(|l| l.min(fly_context::tools::MAX_TOOL_LIMIT));
             a.meeting_ids = self.ctx_scope_ids(a.meeting_ids.take());
             if let Some(f) = &self.resolved.folder_id {
                 a.folder_id = Some(f.clone());
