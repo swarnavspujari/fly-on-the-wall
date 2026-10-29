@@ -2298,12 +2298,18 @@ fn run_pipeline(rec_dir: &Path, run: &RunOpts) -> Option<RunOutput> {
         .block_on(async {
             match bench_engine {
                 Some(engine) => {
+                    // shipped diarizer behind a per-audio cache (identical
+                    // turns for every engine on one recording)
+                    let diarizer = bench_diarize::cache_dir()
+                        .and_then(bench_diarize::CachedDiarizer::shipped)
+                        .map(|d| Box::new(d) as Box<dyn fly_diarize::DiarizationEngine>);
                     fly_app_lib::pipeline::run_with_asr_engine(
                         &state,
                         &on_stage,
                         &on_model,
                         &meeting_id,
                         engine,
+                        diarizer,
                     )
                     .await
                 }

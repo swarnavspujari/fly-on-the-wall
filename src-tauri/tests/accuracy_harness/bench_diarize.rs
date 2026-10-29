@@ -32,19 +32,94 @@ use crate::run_stats;
 
 const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
 
-/// One diarizer arm: turns for a 16 kHz mono wav.
-fn diarize(arm: &str, wav: &Path, gpu: bool) -> Result<Vec<SpeakerTurn>, String> {
-    match arm {
-        "sherpa" => {
-            let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
-            let paths = crate::diarizer_paths(&real_data).ok_or("diarizer artifacts missing")?;
-            let engine = fly_diarize::sherpa::SherpaDiarizeEngine {
+/// The shipped sherpa engine (segmentation + CAM++ + VBx, sidecar threads)
+/// behind a per-audio cache: diarization doesn't depend on the ASR engine,
+/// so every engine scored on one recording gets the SAME turns, and each
+/// recording is diarized once instead of once per engine run. Key = the
+/// 16-bit samples + options; the cache lives in the bench folder (outside
+/// the repo). The pipeline still applies its dust filter to the result.
+pub struct CachedDiarizer {
+    pub inner: fly_diarize::sherpa::SherpaDiarizeEngine,
+    pub cache_dir: PathBuf,
+}
+
+impl CachedDiarizer {
+    /// The shipped configuration, from the real data dir's artifacts.
+    pub fn shipped(cache_dir: PathBuf) -> Option<Self> {
+        let real_data = dirs::data_dir()?.join("FlyOnTheWall");
+        let paths = crate::diarizer_paths(&real_data)?;
+        Some(Self {
+            inner: fly_diarize::sherpa::SherpaDiarizeEngine {
                 exe: paths.exe,
                 segmentation_model: paths.seg,
                 embedding_model: paths.emb,
                 threads: fly_app_lib::pipeline::sidecar_threads(),
                 refine: Some(fly_diarize::vbx::VbxParams::default()),
-            };
+            },
+            cache_dir,
+        })
+    }
+
+    fn key(wav: &Path, opts: &fly_diarize::DiarizeOptions) -> Option<String> {
+        use std::hash::{Hash, Hasher};
+        let (samples, rate) = fly_audio::mix::read_wav_mono(wav).ok()?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        rate.hash(&mut h);
+        samples.len().hash(&mut h);
+        for x in &samples {
+            ((x * 32768.0).round() as i32).hash(&mut h);
+        }
+        format!("{opts:?}").hash(&mut h);
+        Some(format!("{:016x}", h.finish()))
+    }
+}
+
+#[async_trait::async_trait]
+impl fly_diarize::DiarizationEngine for CachedDiarizer {
+    fn id(&self) -> &'static str {
+        "sherpa-onnx (cached)"
+    }
+
+    async fn diarize(
+        &self,
+        wav_path: &Path,
+        opts: &fly_diarize::DiarizeOptions,
+    ) -> fly_diarize::Result<Vec<SpeakerTurn>> {
+        let key = Self::key(wav_path, opts);
+        let file = key
+            .as_ref()
+            .map(|k| self.cache_dir.join(format!("diar-{k}.json")));
+        if let Some(turns) = file
+            .as_ref()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|raw| serde_json::from_str::<Vec<SpeakerTurn>>(&raw).ok())
+        {
+            crate::bench_engines::stat("diarization_cache", serde_json::json!("hit"));
+            return Ok(turns);
+        }
+        let turns = self.inner.diarize(wav_path, opts).await?;
+        if let Some(f) = &file {
+            let _ = std::fs::create_dir_all(&self.cache_dir);
+            let _ = std::fs::write(f, serde_json::to_string(&turns).unwrap_or_default());
+        }
+        crate::bench_engines::stat("diarization_cache", serde_json::json!("miss"));
+        Ok(turns)
+    }
+}
+
+/// Where cached diarization lives: `<bench>/diar-cache`.
+pub fn cache_dir() -> Option<PathBuf> {
+    BenchDir::from_env().ok().map(|d| d.root.join("diar-cache"))
+}
+
+/// One diarizer arm: turns for a 16 kHz mono wav.
+fn diarize(arm: &str, wav: &Path, gpu: bool) -> Result<Vec<SpeakerTurn>, String> {
+    match arm {
+        "sherpa" => {
+            let engine = CachedDiarizer::shipped(
+                cache_dir().unwrap_or_else(|| std::env::temp_dir().join("fotw-diar-cache")),
+            )
+            .ok_or("diarizer artifacts missing")?;
             use fly_diarize::DiarizationEngine as _;
             let rt = tokio::runtime::Runtime::new().unwrap();
             let turns = rt
@@ -154,13 +229,13 @@ pub fn nemo_segments(v: &serde_json::Value) -> Vec<SpeakerTurn> {
     turns
 }
 
+/// The pipeline's own prep of a mixed track (read → 16 kHz → write), so a
+/// diarizer here hears byte-for-byte what it hears inside `run_with`, and
+/// the per-audio diarization cache is shared between the two.
 fn mixed_wav_16k(dir: &Path, tmp: &Path) -> Result<PathBuf, String> {
     let src = dir.join("recording.mixed.wav");
     let (samples, rate) = fly_audio::mix::read_wav_mono(&src).map_err(|e| e.to_string())?;
-    if rate == 16_000 {
-        return Ok(src);
-    }
-    let out = tmp.join("mixed.16k.wav");
+    let out = tmp.join("track.16k.wav");
     let s16 = fly_audio::mix::resample_linear(&samples, rate, 16_000);
     fly_audio::mix::write_wav_mono_16(&out, &s16, 16_000).map_err(|e| e.to_string())?;
     Ok(out)

@@ -155,14 +155,16 @@ pub async fn run_with(
     on_model: models::ProgressSink<'_>,
     meeting_id: &str,
 ) -> Result<Transcript, String> {
-    run_inner(state, on_stage, on_model, meeting_id, None).await
+    run_inner(state, on_stage, on_model, meeting_id, None, None).await
 }
 
 /// Accuracy-harness seam (not reachable from the app): the full pipeline
 /// with `asr` as the ONLY transcription engine — no whisper/cloud chain and
 /// no fallback, so a failure fails the run. Bench-only engines are then
 /// scored through exactly the prep, loop guard, diarization and alignment
-/// the app uses; only the ASR step differs.
+/// the app uses; only the ASR step differs. `diarizer` replaces the sherpa
+/// engine when given (the harness wraps the same engine in a per-audio
+/// cache, so engines compared on one recording share identical turns).
 #[doc(hidden)]
 pub async fn run_with_asr_engine(
     state: &AppState,
@@ -170,8 +172,9 @@ pub async fn run_with_asr_engine(
     on_model: models::ProgressSink<'_>,
     meeting_id: &str,
     asr: Box<dyn TranscriptionEngine>,
+    diarizer: Option<Box<dyn DiarizationEngine>>,
 ) -> Result<Transcript, String> {
-    run_inner(state, on_stage, on_model, meeting_id, Some(asr)).await
+    run_inner(state, on_stage, on_model, meeting_id, Some(asr), diarizer).await
 }
 
 async fn run_inner(
@@ -180,6 +183,7 @@ async fn run_inner(
     on_model: models::ProgressSink<'_>,
     meeting_id: &str,
     asr_override: Option<Box<dyn TranscriptionEngine>>,
+    diarizer_override: Option<Box<dyn DiarizationEngine>>,
 ) -> Result<Transcript, String> {
     // one pipeline per meeting at a time
     {
@@ -502,12 +506,15 @@ async fn run_inner(
         tiers.extend(whisper_tiers);
         GuardedAsr::chain(tiers)
     };
-    let diarizer = fly_diarize::sherpa::SherpaDiarizeEngine {
-        exe: sherpa_exe,
-        segmentation_model: seg_model,
-        embedding_model: emb_model,
-        threads,
-        refine: diarize_refine(),
+    let diarizer: Box<dyn DiarizationEngine> = match diarizer_override {
+        Some(d) => d,
+        None => Box::new(fly_diarize::sherpa::SherpaDiarizeEngine {
+            exe: sherpa_exe,
+            segmentation_model: seg_model,
+            embedding_model: emb_model,
+            threads,
+            refine: diarize_refine(),
+        }),
     };
 
     // ---- prepare 16 kHz mono inputs ----
