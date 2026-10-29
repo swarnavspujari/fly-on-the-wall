@@ -25,7 +25,8 @@ schema = 2
 #     meaning, so its recall says little about real quality: it gates only
 #     integrity, keep-local, and no regression past its baseline.
 #   * Release: the app's real embedder through Ollama (`--embedder`), which
-#     carries the absolute quality gates. `--strict` requires it.
+#     carries the absolute quality gates. `--strict` runs it; its `status`
+#     below says whether a miss fails the release check or is reported.
 [retrieval]
 status = "required"
 # Passages per question: the Ask prefetch size (spec §4.2).
@@ -52,6 +53,10 @@ must_cite_coverage = "higher"
 # The app's embedder (src-tauri embeddings.rs EMBED_MODEL), with the app's
 # document and query prompts (fly_core::embed_prompt).
 embedder = "ollama:embeddinggemma:300m"
+# Reported under --strict, not blocking, by the user's decision (2026-10-29:
+# "Yes, loosen it"): today's retrieval misses the MRR gate (a product finding
+# for search). Set "required" to make a release fail on these gates again.
+status = "report_only"
 
 [retrieval.real_embedder.gates]
 # Mean share of each answerable question's must-cite segments found in the

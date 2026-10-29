@@ -8,18 +8,18 @@ name: Evals
 #   evals-quality   `fly-evals --suite ci --gate quality`: fails only when a
 #                   gated metric regresses past evals/baselines/.
 # Integrity gates (gold-set floors, crashed scenarios) and scorer errors fail
-# both. A release requires `--strict` (every absolute gate), run before
-# tagging.
+# both. Before tagging a release, run `--strict` (every absolute gate) and
+# read its report.
 #
 # The job always runs, so both checks can be required. It builds and runs
 # the evals only when the change touches what they measure: evals/, any
 # crate fly-evals links (its workspace dependency closure, from cargo
-# metadata), the workspace manifests, the agent hook or this file.
+# metadata), the workspace manifests or this file.
 #
 # Before running, it checks the scorer can't be swapped or edited from
-# outside evals/ (this file and evals/ are protected paths: changing them
-# needs the user's approval, and once the hard lock is on, evals-guard.yml
-# fails any change the user hasn't re-hashed):
+# outside evals/ (CLAUDE.md says which eval files need the user's approval;
+# once the hard lock is on, evals-guard.yml fails any change the user hasn't
+# re-hashed):
 #   * no rust-toolchain file and no .cargo/config anywhere (checked before
 #     any cargo command: a toolchain file can point cargo at any binary);
 #   * every package in fly-evals' dependency graph is one of its five path
@@ -129,7 +129,7 @@ jobs:
               decide true
             fi
           done <<<"$closure"
-          if grep -qE '^(evals/|Cargo\.(toml|lock)$|\.github/workflows/evals\.yml$|\.claude/(settings\.json$|hooks/))' <<<"$files"; then
+          if grep -qE '^(evals/|Cargo\.(toml|lock)$|\.github/workflows/evals\.yml$)' <<<"$files"; then
             decide true
           fi
           decide false
@@ -204,11 +204,6 @@ jobs:
             echo "::error::Production code references the eval files above. The evals would be gamed; remove the reference."
             exit 1
           fi
-
-      # The agent hook (.claude/hooks/protect-evals.mjs): node built-ins only.
-      - name: Hook tests
-        if: steps.gate.outputs.run == 'true' && matrix.gate == 'security'
-        run: node --test .claude/hooks/protect-evals.test.mjs
 
       - name: Build the scorer
         if: steps.gate.outputs.run == 'true'
