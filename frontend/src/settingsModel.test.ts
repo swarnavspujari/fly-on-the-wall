@@ -74,7 +74,8 @@ describe("section search", () => {
 
   it("matches titles and keywords, case-insensitively", () => {
     expect(matchSections("mcp").map((s) => s.id)).toEqual(["apps", "connectors"]);
-    expect(matchSections("read-only").map((s) => s.id)).toEqual(["connectors"]);
+    expect(matchSections("always allow").map((s) => s.id)).toEqual(["connectors"]);
+    expect(matchSections("beta").map((s) => s.id)).toEqual(["connectors"]);
     expect(matchSections("GROQ").map((s) => s.id)).toEqual(["transcripts"]);
     expect(matchSections("dark").map((s) => s.id)).toEqual(["general"]);
     expect(matchSections("templates").map((s) => s.id)).toEqual(["ai"]);

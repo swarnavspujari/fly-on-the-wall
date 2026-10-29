@@ -1,32 +1,47 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { TriangleAlert } from "lucide-react";
+import { Trash2, TriangleAlert } from "lucide-react";
 import { api, CONNECTORS_PROPOSAL_EVENT, CONNECTORS_SETTLED_EVENT } from "../api";
-import { kindLabel, mergeProposals, parseArgs, prettyArgs, sameArgs } from "../connectorsModel";
-import type { ConnectorCallProposal, ConnectorSettled } from "../types";
-import { Badge, Button, EscapeLayerScope, useDialogFocus, useEscapeLayer } from "./ui";
+import {
+  argsFromFields,
+  decidedLabel,
+  fieldValuesFrom,
+  mergeProposals,
+  parseArgs,
+  prettyArgs,
+  sameArgs,
+  schemaFields,
+  splitDetails,
+} from "../connectorsModel";
+import type { ConnectorCallProposal, ConnectorCardAction, ConnectorSettled } from "../types";
+import { Button, Checkbox, Input, Select } from "./ui";
 
-/* The confirm card for connector calls. Every call Ask (or Settings' "Try a
-   tool") proposes waits here, with its exact arguments, until you choose
-   "Run" or "Don't run". Everything in a proposal comes from the model or the
-   server, so it is shown as plain text only. A write call is confirmed once
-   more by the backend in a native dialog after "Run". */
+/* The cards for connector calls. Every call Ask proposes for a tool on
+   Needs approval waits on one, with its exact details, until you decide.
+   Everything in a proposal comes from the model or the server, so it is
+   shown as plain text only. A call that can change data is confirmed once
+   more by the backend in a native dialog after "Review and send…". */
 
-/** Above Settings (depth 1) and sheets, below the in-app confirm (1000), so
- *  Esc answers the card before it closes whatever is under it. */
-const CARD_LAYER_DEPTH = 500;
+/** How long the buttons that allow a call stay off after a card appears (or
+ *  the visible card changes), so a double click on one card can't approve
+ *  the next one. */
+export const ARM_DELAY_MS = 700;
+/** How long a decided card stays as its one-line summary. */
+export const COLLAPSE_MS = 4000;
 
-const SMALL: CSSProperties = { margin: 0, fontSize: 12, lineHeight: 1.5 };
+const SMALL: CSSProperties = { margin: 0, fontSize: 12.5, lineHeight: 1.5 };
 const MONO: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 11.5 };
+const LINK =
+  "cursor-pointer text-primary-text underline disabled:cursor-not-allowed disabled:opacity-50";
 
 /** Pending proposals: what's pending when it mounts, then every
  *  `connectors:proposal` / `connectors:settled`. With `turnId`, only that
  *  Ask turn's. `markSettled` drops one at once (after you decided it). */
 export function useConnectorProposals(turnId?: string) {
   const [all, setAll] = useState<ConnectorCallProposal[]>([]);
-  // Settled ids, so a pending list that was read before a settle can't bring
-  // a decided card back.
+  // Settled ids, so a pending list read before a settle can't bring a
+  // decided card back.
   const settled = useRef(new Set<string>());
 
   const markSettled = useCallback((proposalId: string) => {
@@ -70,49 +85,94 @@ export function useConnectorProposals(turnId?: string) {
   return { proposals, markSettled };
 }
 
-/** One proposed call: who, what, where it goes, and the editable arguments. */
+/** False for `delay` ms after `key` first shows (and again whenever it
+ *  changes). */
+export function useArmed(key: string, delay = ARM_DELAY_MS): boolean {
+  const [armedKey, setArmedKey] = useState<string | null>(null);
+  useEffect(() => {
+    const t = window.setTimeout(() => setArmedKey(key), delay);
+    return () => window.clearTimeout(t);
+  }, [key, delay]);
+  return armedKey === key;
+}
+
+/** Someone is typing (an input, textarea or contenteditable has focus). */
+function isTyping(el: Element | null): boolean {
+  if (!el) return false;
+  if (el instanceof HTMLTextAreaElement) return true;
+  if (el instanceof HTMLInputElement)
+    return !["checkbox", "radio", "button", "submit", "reset", "range", "color", "file"].includes(
+      el.type,
+    );
+  return el instanceof HTMLElement && el.isContentEditable;
+}
+
+/** The card heading's words. */
+export function cardHeading(p: ConnectorCallProposal): string {
+  const verb =
+    p.kind === "write" ? "Ask wants to change something in" : "Ask wants to look something up in";
+  return `${verb} ${p.serverName} · ${p.toolTitle ?? p.tool}`;
+}
+
+/** One proposed call: who, what, where it goes, and its editable details. */
 export function ConnectorCallCard({
   proposal,
-  onSettled,
+  onDecided,
 }: {
   proposal: ConnectorCallProposal;
-  /** Called once the call is decided (it leaves the stack). */
-  onSettled: (proposalId: string) => void;
+  /** The call was decided (it leaves the stack as a summary line). */
+  onDecided: (proposalId: string, action: ConnectorCardAction, atMs: number) => void;
 }) {
-  const original = useMemo(() => prettyArgs(proposal.args), [proposal.args]);
-  const [text, setText] = useState(original);
-  const [busy, setBusy] = useState<"run" | "skip" | null>(null);
+  const write = proposal.kind === "write";
+  const armed = useArmed(proposal.proposalId);
+  const fields = useMemo(
+    () => schemaFields(proposal.inputSchema, proposal.args),
+    [proposal.inputSchema, proposal.args],
+  );
+  const [mode, setMode] = useState<"fields" | "code">(fields ? "fields" : "code");
+  const [values, setValues] = useState(() =>
+    fields ? fieldValuesFrom(fields, proposal.args) : new Map<string, string | boolean>(),
+  );
+  const [text, setText] = useState(() => prettyArgs(proposal.args));
+  const [busy, setBusy] = useState<ConnectorCardAction | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const parsed = parseArgs(text);
-  const edited = text !== original;
+
+  const current =
+    mode === "fields" && fields ? argsFromFields(fields, values, proposal.args) : parseArgs(text);
 
   const headingId = useId();
   const subId = useId();
-  const argsId = useId();
-  const parseErrorId = useId();
-  const ref = useRef<HTMLDivElement>(null);
-  // Focus starts on "Don't run"; it goes back where it was only if you were
-  // still in the card (you may have moved on to something else).
-  useDialogFocus(ref, true, { restoreFocus: "inside" });
+  const codeId = useId();
+  const cardRef = useRef<HTMLDivElement>(null);
 
-  const decide = async (run: boolean) => {
+  // Focus starts on Deny, unless you're typing somewhere (then the card is
+  // only announced).
+  useEffect(() => {
+    if (!isTyping(document.activeElement))
+      cardRef.current?.querySelector<HTMLButtonElement>("[data-deny]")?.focus();
+  }, []);
+
+  const decide = async (action: ConnectorCardAction) => {
     if (busy) return;
-    if (run && !parsed.ok) return;
-    setBusy(run ? "run" : "skip");
+    if (action !== "deny" && (!armed || !current.ok)) return;
+    setBusy(action);
     setError(null);
-    // null = run it exactly as proposed (the log records whether you edited)
-    const args = run && parsed.ok && !sameArgs(parsed.value, proposal.args) ? parsed.value : null;
+    const args =
+      action === "deny" || !current.ok || sameArgs(current.value, proposal.args)
+        ? null
+        : current.value;
     try {
-      const r = await api.decideConnectorCall(proposal.proposalId, run, args);
-      // Not running is always final: nothing runs without an explicit Run.
-      if (r.ok || !run) {
-        onSettled(proposal.proposalId);
+      const r = await api.decideConnectorCall(proposal.proposalId, action, args);
+      // Deny is always final: nothing runs without an explicit yes.
+      if (r.ok || action === "deny") {
+        onDecided(proposal.proposalId, action, Date.now());
         return;
       }
-      setError(r.error ?? "The call wasn't accepted. Check the arguments.");
+      // error null: you said no in the native dialog; the card stays.
+      setError(r.error);
     } catch (e) {
-      if (!run) {
-        onSettled(proposal.proposalId);
+      if (action === "deny") {
+        onDecided(proposal.proposalId, action, Date.now());
         return;
       }
       setError(String(e));
@@ -120,110 +180,162 @@ export function ConnectorCallCard({
     setBusy(null);
   };
 
-  const depth = useEscapeLayer(() => void decide(false), busy === null);
+  const toggleMode = () => {
+    setError(null);
+    if (mode === "fields") {
+      setText(prettyArgs(current.ok ? current.value : proposal.args));
+      setMode("code");
+      return;
+    }
+    const parsed = parseArgs(text);
+    const asFields = parsed.ok ? schemaFields(proposal.inputSchema, parsed.value) : null;
+    if (!parsed.ok || !asFields) {
+      setError("These details can't be shown as fields. Edit them as code.");
+      return;
+    }
+    setValues(fieldValuesFrom(asFields, parsed.value));
+    setMode("fields");
+  };
 
-  const title = proposal.toolTitle ?? proposal.tool;
-  const write = proposal.kind === "write";
-  const rows = Math.min(12, Math.max(3, text.split("\n").length));
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "Escape" || e.defaultPrevented || busy) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void decide("deny");
+  };
+
+  const setValue = (name: string, v: string | boolean) => setValues((m) => new Map(m).set(name, v));
+  const locked = busy !== null;
 
   return (
-    <EscapeLayerScope depth={depth}>
-      <div
-        ref={ref}
-        role="alertdialog"
-        aria-labelledby={headingId}
-        aria-describedby={subId}
-        data-proposal-id={proposal.proposalId}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-          maxHeight: "calc(100vh - 120px)",
-          overflowY: "auto",
-          padding: "14px 16px",
-          background: "var(--surface)",
-          color: "var(--text)",
-          border: `1px solid ${proposal.destructive ? "var(--error)" : "var(--line)"}`,
-          borderRadius: "var(--radius-2xl)",
-          boxShadow: "var(--shadow-lg)",
-        }}
-      >
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <h2
-            id={headingId}
-            style={{
-              margin: 0,
-              fontSize: 14,
-              fontWeight: 600,
-              lineHeight: 1.4,
-              overflowWrap: "anywhere",
-            }}
-          >
-            {proposal.serverName} wants to run {title}
-          </h2>
-          {proposal.toolTitle && proposal.toolTitle !== proposal.tool && (
-            <p className="text-text-3" style={{ ...SMALL, ...MONO, overflowWrap: "anywhere" }}>
-              tool: {proposal.tool}
-            </p>
+    <div
+      ref={cardRef}
+      role="group"
+      aria-labelledby={headingId}
+      aria-describedby={subId}
+      data-proposal-id={proposal.proposalId}
+      data-kind={proposal.kind}
+      onKeyDown={onKeyDown}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        maxHeight: "calc(100vh - 140px)",
+        overflowY: "auto",
+        padding: "14px 16px",
+        background: "var(--surface)",
+        color: "var(--text)",
+        border: "1px solid var(--line)",
+        // amber edge for a call that can change data (plus the marker text)
+        borderLeft: write ? "5px solid var(--warning)" : "1px solid var(--line)",
+        borderRadius: "var(--radius-2xl)",
+        boxShadow: "var(--shadow-lg)",
+      }}
+    >
+      {write && (
+        <p
+          className="text-warning-text"
+          style={{ ...SMALL, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}
+        >
+          <TriangleAlert size={14} strokeWidth={1.9} aria-hidden="true" />
+          <strong>Can change data</strong>
+          {proposal.destructive && (
+            <>
+              <span aria-hidden="true">·</span>
+              <Trash2 size={14} strokeWidth={1.9} aria-hidden="true" />
+              <strong className="text-error-text">Destructive</strong>
+            </>
           )}
-          <p id={subId} className="text-text-2" style={{ ...SMALL, overflowWrap: "anywhere" }}>
-            Sends to {proposal.destination}
+        </p>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        <h2
+          id={headingId}
+          style={{
+            margin: 0,
+            fontSize: 14,
+            fontWeight: 600,
+            lineHeight: 1.4,
+            overflowWrap: "anywhere",
+          }}
+        >
+          {cardHeading(proposal)}
+        </h2>
+        {proposal.toolTitle && proposal.toolTitle !== proposal.tool && (
+          <p className="text-text-3" style={{ ...SMALL, ...MONO, overflowWrap: "anywhere" }}>
+            tool: {proposal.tool}
           </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
-            <Badge tone={write ? "warning" : "neutral"}>{kindLabel(proposal.kind)}</Badge>
-          </div>
-        </div>
-
-        {proposal.destructive && (
-          <div
-            role="note"
-            className="text-error-text"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "8px 10px",
-              borderRadius: "var(--radius-md)",
-              background: "var(--error-soft)",
-              fontSize: 12.5,
-              lineHeight: 1.45,
-            }}
-          >
-            <TriangleAlert size={15} strokeWidth={1.75} aria-hidden="true" />
-            <Badge tone="danger">Destructive</Badge>
-            <span>It can delete or overwrite data.</span>
-          </div>
         )}
+        <p id={subId} className="text-text-2" style={{ ...SMALL, overflowWrap: "anywhere" }}>
+          Sends to {proposal.destination}
+        </p>
+      </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <label htmlFor={argsId} className="fly-field-label">
-              Arguments
-            </label>
-            {edited && (
-              <Button
-                variant="ghost"
-                size="xs"
-                disabled={busy !== null}
-                onClick={() => {
-                  setText(original);
-                  setError(null);
-                }}
-              >
-                Undo edits
-              </Button>
+      {mode === "fields" && fields ? (
+        fields.length === 0 ? (
+          <p className="text-text-3" style={SMALL}>
+            No details to send.
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {fields.map((f) =>
+              f.kind === "boolean" ? (
+                <Checkbox
+                  key={f.name}
+                  label={f.label}
+                  description={f.description ?? undefined}
+                  checked={values.get(f.name) === true}
+                  disabled={locked}
+                  onChange={(e) => setValue(f.name, e.target.checked)}
+                />
+              ) : f.options ? (
+                <label key={f.name} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span className="fly-field-label">
+                    {f.label}
+                    {!f.required && " (optional)"}
+                  </span>
+                  <Select
+                    aria-label={f.label}
+                    value={String(values.get(f.name) ?? "")}
+                    disabled={locked}
+                    onChange={(e) => setValue(f.name, e.target.value)}
+                  >
+                    {!f.required && <option value="">—</option>}
+                    {f.options.map((o) => (
+                      <option key={o} value={o}>
+                        {o}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+              ) : (
+                <Input
+                  key={f.name}
+                  label={`${f.label}${f.required ? "" : " (optional)"}`}
+                  hint={f.description ?? undefined}
+                  value={String(values.get(f.name) ?? "")}
+                  inputMode={f.kind === "string" ? undefined : "decimal"}
+                  spellCheck={false}
+                  autoComplete="off"
+                  disabled={locked}
+                  onChange={(e) => setValue(f.name, e.target.value)}
+                />
+              ),
             )}
           </div>
+        )
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label htmlFor={codeId} className="fly-field-label">
+            Details (JSON)
+          </label>
           <textarea
-            id={argsId}
+            id={codeId}
             value={text}
-            rows={rows}
+            rows={Math.min(12, Math.max(3, text.split("\n").length))}
             spellCheck={false}
-            autoCapitalize="off"
-            autoCorrect="off"
-            disabled={busy !== null}
-            aria-invalid={!parsed.ok || undefined}
-            aria-describedby={!parsed.ok ? parseErrorId : undefined}
+            disabled={locked}
+            aria-invalid={!current.ok || undefined}
             onChange={(e) => {
               setText(e.target.value);
               setError(null);
@@ -234,7 +346,7 @@ export function ConnectorCallCard({
               lineHeight: 1.5,
               color: "var(--text)",
               background: "var(--surface-2)",
-              border: `1px solid ${parsed.ok ? "var(--line)" : "var(--error)"}`,
+              border: `1px solid ${current.ok ? "var(--line)" : "var(--error)"}`,
               borderRadius: "var(--radius-md)",
               padding: "8px 10px",
               outline: "none",
@@ -242,96 +354,179 @@ export function ConnectorCallCard({
               whiteSpace: "pre",
             }}
           />
-          {!parsed.ok && (
-            <p id={parseErrorId} className="text-error-text" style={SMALL}>
-              {parsed.error}
-            </p>
-          )}
-          {error && (
-            <p
-              role="alert"
-              className="text-error-text"
-              style={{ ...SMALL, overflowWrap: "anywhere" }}
-            >
-              {error}
-            </p>
-          )}
         </div>
-
-        {write && (
-          <p className="text-text-2" style={SMALL}>
-            You&apos;ll confirm once more in a system dialog.
-          </p>
-        )}
-
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <Button
-            variant="outline"
-            size="sm"
-            data-autofocus
-            disabled={busy !== null}
-            onClick={() => void decide(false)}
+      )}
+      {fields && (
+        <div>
+          <button
+            type="button"
+            className={LINK}
+            style={{ ...SMALL, background: "none", border: 0, padding: 0 }}
+            disabled={locked}
+            onClick={toggleMode}
           >
-            Don&apos;t run
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={busy !== null || !parsed.ok}
-            onClick={() => void decide(true)}
-          >
-            {busy === "run" ? "Running…" : "Run"}
-          </Button>
+            {mode === "fields" ? "Show as code" : "Show as fields"}
+          </button>
         </div>
+      )}
+      {!current.ok && (
+        <p className="text-error-text" style={SMALL}>
+          {current.error}
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="text-error-text" style={{ ...SMALL, overflowWrap: "anywhere" }}>
+          {splitDetails(error).message}
+        </p>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <Button
+          data-deny
+          variant="outline"
+          size="sm"
+          disabled={locked}
+          onClick={() => void decide("deny")}
+        >
+          Deny
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={locked || !armed || !current.ok}
+          onClick={() => void decide("allow_once")}
+        >
+          {write
+            ? busy === "allow_once"
+              ? "Waiting…"
+              : "Review and send…"
+            : busy === "allow_once"
+              ? "Allowing…"
+              : "Allow once"}
+        </Button>
       </div>
-    </EscapeLayerScope>
+      {!write && (
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            className={LINK}
+            style={{ ...SMALL, background: "none", border: 0, padding: 0 }}
+            disabled={locked || !armed || !current.ok}
+            onClick={() => void decide("always_allow")}
+          >
+            Always allow this tool…
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
+interface Decided {
+  id: string;
+  title: string;
+  label: string;
+}
+
 /** Every pending proposal (or one Ask turn's), bottom-right above the rest
- *  of the app. One card at a time, oldest first, so a new proposal never
- *  takes focus from the one you're deciding. Mount once at the top level. */
+ *  of the app. One card at a time, oldest first; a decided card stays as a
+ *  one-line summary for a few seconds. Mount once at the top level. */
 export function ConnectorCallStack({ turnId }: { turnId?: string }) {
   const { proposals, markSettled } = useConnectorProposals(turnId);
-  if (proposals.length === 0) return null;
-  const [first] = proposals;
-  const waiting = proposals.length - 1;
+  const [decided, setDecided] = useState<Decided[]>([]);
+  const [announcement, setAnnouncement] = useState("");
+  const timers = useRef<number[]>([]);
+  useEffect(() => {
+    const list = timers.current;
+    return () => list.forEach((t) => window.clearTimeout(t));
+  }, []);
+
+  const first = proposals[0] ?? null;
+  const waiting = Math.max(0, proposals.length - 1);
+  const firstId = first?.proposalId ?? null;
+  const firstHeading = first ? cardHeading(first) : "";
+  // Announce each new card politely; it doesn't take focus while you type.
+  useEffect(() => {
+    if (firstId) setAnnouncement(firstHeading);
+  }, [firstId, firstHeading]);
+
+  const onDecided = (id: string, action: ConnectorCardAction, atMs: number) => {
+    const p = proposals.find((x) => x.proposalId === id);
+    markSettled(id);
+    const label = decidedLabel(action, atMs);
+    setAnnouncement(label);
+    setDecided((d) => [
+      ...d,
+      { id, title: p ? `${p.serverName} · ${p.toolTitle ?? p.tool}` : "", label },
+    ]);
+    timers.current.push(
+      window.setTimeout(() => setDecided((d) => d.filter((x) => x.id !== id)), COLLAPSE_MS),
+    );
+  };
+
   return (
-    <EscapeLayerScope depth={CARD_LAYER_DEPTH}>
-      <div
-        role="region"
-        aria-label="Connector calls waiting for you"
-        className="print:hidden"
-        style={{
-          position: "fixed",
-          right: 16,
-          bottom: 48,
-          // above Settings (55) and notices (50), below in-app dialogs (60)
-          zIndex: 58,
-          width: 400,
-          maxWidth: "calc(100vw - 32px)",
-          display: "flex",
-          flexDirection: "column",
-          gap: 8,
-        }}
-      >
-        <ConnectorCallCard key={first.proposalId} proposal={first} onSettled={markSettled} />
-        {waiting > 0 && (
-          <p
-            className="text-text-2"
-            style={{
-              ...SMALL,
-              alignSelf: "flex-end",
-              padding: "4px 10px",
-              borderRadius: "var(--radius-pill)",
-              background: "var(--surface)",
-              border: "1px solid var(--line)",
-            }}
-          >
-            {waiting} more call{waiting === 1 ? "" : "s"} waiting
-          </p>
-        )}
+    <>
+      <div role="status" aria-live="polite" className="sr-only">
+        {announcement}
       </div>
-    </EscapeLayerScope>
+      {(first || decided.length > 0) && (
+        <div
+          role="region"
+          aria-label="Connector calls"
+          className="print:hidden"
+          style={{
+            position: "fixed",
+            right: 16,
+            bottom: 48,
+            // above Settings (55) and notices (50), below in-app dialogs (60)
+            zIndex: 58,
+            width: 400,
+            maxWidth: "calc(100vw - 32px)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          {decided.map((d) => (
+            <div
+              key={d.id}
+              data-decided={d.id}
+              className="text-text-2"
+              style={{
+                ...SMALL,
+                padding: "8px 12px",
+                borderRadius: "var(--radius-xl)",
+                background: "var(--surface)",
+                border: "1px solid var(--line)",
+                boxShadow: "var(--shadow-sm)",
+              }}
+            >
+              <span className="text-text" style={{ fontWeight: 600 }}>
+                {d.label}
+              </span>
+              {d.title && <span style={{ overflowWrap: "anywhere" }}> — {d.title}</span>}
+            </div>
+          ))}
+          {first && (
+            <ConnectorCallCard key={first.proposalId} proposal={first} onDecided={onDecided} />
+          )}
+          {waiting > 0 && (
+            <p
+              className="text-text-2"
+              style={{
+                ...SMALL,
+                alignSelf: "flex-end",
+                padding: "4px 10px",
+                borderRadius: "var(--radius-pill)",
+                background: "var(--surface)",
+                border: "1px solid var(--line)",
+              }}
+            >
+              {waiting} more call{waiting === 1 ? "" : "s"} waiting
+            </p>
+          )}
+        </div>
+      )}
+    </>
   );
 }

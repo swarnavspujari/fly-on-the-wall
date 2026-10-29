@@ -165,7 +165,7 @@ describe("Settings overlay", () => {
       "Calendars",
       "Your files and privacy",
       "Other AI apps",
-      "Connectors (beta)",
+      "Connectors Beta",
       "General",
     ]);
     expect($('[role="dialog"]')!.getAttribute("aria-modal")).toBe("true");
@@ -186,10 +186,10 @@ describe("Settings overlay", () => {
     await open();
     const search = $<HTMLInputElement>("input[type=search]")!;
     await type(search, "mcp");
-    expect(headings()).toEqual(["Other AI apps", "Connectors (beta)"]);
+    expect(headings()).toEqual(["Other AI apps", "Connectors Beta"]);
     expect($$(".fly-settings-navitem").map((b) => b.textContent)).toEqual([
       "Other AI apps",
-      "Connectors (beta)",
+      "Connectors",
     ]);
     await type(search, "retention");
     expect(headings()).toEqual(["Your files and privacy"]);
@@ -409,7 +409,7 @@ describe("Settings overlay", () => {
     expect(host!.textContent).toContain("I understand this can't be undone");
     const search = $<HTMLInputElement>("input[type=search]")!;
     await type(search, "mcp");
-    expect(headings()).toEqual(["Other AI apps", "Connectors (beta)"]);
+    expect(headings()).toEqual(["Other AI apps", "Connectors Beta"]);
     await type(search, "");
     expect(host!.textContent).toContain("I understand this can't be undone");
   });

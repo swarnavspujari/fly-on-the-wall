@@ -53,9 +53,9 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   },
   {
     id: "connectors",
-    title: "Connectors (beta)",
+    title: "Connectors",
     keywords:
-      "connectors mcp servers tools hubspot notion github oauth sign in read-only call log beta",
+      "connectors beta mcp servers tools apps browse custom local claude desktop import hubspot notion linear github oauth sign in api key permissions always allow needs approval blocked activity",
   },
   {
     id: "general",

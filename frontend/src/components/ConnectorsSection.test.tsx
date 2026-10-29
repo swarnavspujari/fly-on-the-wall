@@ -1,94 +1,49 @@
 // @vitest-environment jsdom
-// Drives Settings › Connectors (beta) against the dev mock backend
-// (devMock.ts): the fake "Acme CRM" (web, OAuth) and "Local docs" (local
-// program). Where the backend asks in a native dialog, the mock asks with the
-// browser's confirm, so a test answers it by stubbing window.confirm.
+// Settings › Connectors (list and detail) against the dev mock backend
+// (devMock.ts): "Acme CRM" (web, OAuth, two tools to review), "Docs search"
+// (local) and "Team wiki" (web, API key, off). Where the backend shows a
+// native dialog, the mock asks with the browser's confirm, so a test answers
+// it by stubbing window.confirm.
 import { resetMockAppSettings, resetMockConnectors } from "../devMock";
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { api } from "../api";
-import type { Connector, ConnectorsOverview } from "../types";
-import { ConfirmProvider } from "./confirm";
+import type { Connector } from "../types";
 import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
-import { ConnectorCallStack } from "./ConnectorCallCard";
-import ConnectorsSection from "./ConnectorsSection";
+import { ARM_DELAY_MS } from "./ConnectorCallCard";
+import {
+  buttonIn,
+  click,
+  fieldIn,
+  flush,
+  liveText,
+  mountSection,
+  pickMenu,
+  type,
+  type Mounted,
+  unmount,
+} from "./connectorsTesting";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+// Whole screens against the mock; the 5 s default is tight when the suite
+// runs alongside other work.
+vi.setConfig({ testTimeout: 30_000 });
 
-let root: Root | null = null;
-let host: HTMLElement | null = null;
-/** The mock's stand-in for the backend's native dialogs. Unanswered, it declines. */
+let m: Mounted | null = null;
 let nativeDialog: MockInstance<(message?: string) => boolean>;
-
-const flush = async () => {
-  for (let i = 0; i < 6; i++) await act(async () => {});
-};
-
-async function mount() {
-  host = document.createElement("div");
-  document.body.appendChild(host);
-  root = createRoot(host);
-  act(() =>
-    root!.render(
-      <ConfirmProvider>
-        <ConnectorsSection />
-        <ConnectorCallStack />
-      </ConfirmProvider>,
-    ),
-  );
-  await flush();
-}
+const host = () => m!.host;
+const btn = (text: string) => buttonIn(host(), text);
+const row = (id: string) => host().querySelector<HTMLElement>(`[data-connector-row="${id}"]`);
+const toolRow = (name: string) => host().querySelector<HTMLElement>(`[data-tool="${name}"]`)!;
+const radio = (name: string, label: string) => buttonIn(toolRow(name), label) as HTMLButtonElement;
+const checkedIn = (name: string) =>
+  toolRow(name).querySelector('[role="radio"][aria-checked="true"]')?.textContent;
 
 async function betaOn() {
   await api.setAppSetting("ui.beta.connectors", "1");
 }
-
-const within = (el: Element | null) => {
-  if (!el) throw new Error("container not found");
-  return {
-    el: el as HTMLElement,
-    button: (text: string) =>
-      [...el.querySelectorAll<HTMLButtonElement>("button")].find(
-        (b) => b.textContent?.trim() === text,
-      ) ?? null,
-    text: () => el.textContent ?? "",
-  };
-};
-const connector = (id: string) => within(host!.querySelector(`[data-connector-id="${id}"]`));
-const tool = (name: string) => within(host!.querySelector(`[data-tool="${name}"]`));
-const onSwitch = (name: string) =>
-  host!.querySelector<HTMLButtonElement>(`[data-tool="${name}"] [role="switch"]`)!;
-const readOnlyBox = (name: string) =>
-  host!.querySelector<HTMLInputElement>(`[data-tool="${name}"] input[type="checkbox"]`)!;
-const card = () => host!.querySelector<HTMLElement>('[role="alertdialog"]');
-/** A tool's badges: kind, then Destructive (if so), then status. */
-const badges = (name: string) =>
-  [...host!.querySelectorAll(`[data-tool="${name}"] .fly-badge`)].map((b) => b.textContent);
-const byText = (text: string) => within(host!).button(text);
-const betaSwitch = () =>
-  host!.querySelector<HTMLButtonElement>('[aria-label="Let Ask use connectors (beta)"]')!;
-const inputByLabel = (label: string) => {
-  const l = [...host!.querySelectorAll("label")].find((x) => x.textContent === label);
-  if (!l) throw new Error(`no field ${label}`);
-  return document.getElementById(l.getAttribute("for")!) as HTMLInputElement;
-};
-
-async function click(el: Element | null) {
-  if (!el) throw new Error("element not found");
-  await act(async () => (el as HTMLElement).click());
-  await flush();
-}
-
-async function type(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
-  const proto =
-    el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
-  await act(async () => {
-    setter.call(el, value);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-  await flush();
+async function openDetail(id: string) {
+  await click(row(id)!.querySelector("[data-open-row]"));
 }
 
 beforeEach(() => {
@@ -99,448 +54,453 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (root) act(() => root!.unmount());
-  host?.remove();
-  root = null;
-  host = null;
+  unmount(m);
+  m = null;
 });
 
-describe("Settings › Connectors (beta)", () => {
+describe("Settings › Connectors: list", () => {
   it("is off at first; the switch writes only the beta flag", async () => {
-    await mount();
-    expect(host!.textContent).toContain("Every call is shown to you first");
-    expect(host!.textContent).toContain("Notes you keep local never use connectors.");
-    expect(betaSwitch().getAttribute("aria-checked")).toBe("false");
-    expect(host!.textContent).not.toContain("Acme CRM");
-    expect(host!.textContent).not.toContain("Add a connector");
+    m = await mountSection();
+    expect(host().textContent).toContain(
+      "Let Ask and Enhance check other apps and, if you allow it, make changes there.",
+    );
+    expect(host().textContent).toContain(
+      "Connectors use MCP, an open standard for linking AI to apps.",
+    );
+    expect(host().querySelector("a")!.textContent).toBe("Learn more");
+    const sw = host().querySelector<HTMLButtonElement>(
+      '[aria-label="Let Ask use connectors (beta)"]',
+    )!;
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    expect(host().textContent).not.toContain("Acme CRM");
 
     const set = vi.spyOn(api, "setAppSetting");
-    await click(betaSwitch());
+    await click(sw);
     expect(set).toHaveBeenLastCalledWith("ui.beta.connectors", "1");
-    expect(betaSwitch().getAttribute("aria-checked")).toBe("true");
-    expect(host!.textContent).toContain("Acme CRM");
-    expect(host!.textContent).toContain("Local docs");
-    expect(host!.textContent).toContain("Call log");
-
-    await click(betaSwitch());
+    expect(host().textContent).toContain("Acme CRM");
+    await click(sw);
     expect(set).toHaveBeenLastCalledWith("ui.beta.connectors", "0");
-    expect(host!.textContent).not.toContain("Acme CRM");
+    expect(host().textContent).not.toContain("Acme CRM");
     expect(set.mock.calls.every(([key]) => key === "ui.beta.connectors")).toBe(true);
-    expect(nativeDialog).not.toHaveBeenCalled();
-  });
-
-  it("the mock refuses connectors.* settings, like the backend", async () => {
     await expect(api.setAppSetting("connectors.servers", "[]")).rejects.toContain(
-      "can't be changed from the app UI",
+      "can't be changed",
     );
   });
 
-  it("shows each connector, its sign-in, variables and tools", async () => {
+  it("lists each connector with a badge, a status in words and a switch", async () => {
     await betaOn();
-    await mount();
-    const acme = connector("c-acme");
-    expect(acme.text()).toContain("mcp.acme-crm.example");
-    expect(acme.text()).toContain("Approved · config 3f9a1c0b7e21");
-    expect(acme.text()).toContain("Not signed in");
-    expect(acme.text()).toContain("Asks for: contacts.read deals.write");
-    expect(acme.button("Sign in")).not.toBeNull();
-
-    const search = tool("search_contacts");
-    expect(search.text()).toContain("Search contacts");
-    expect(badges("search_contacts")).toEqual(["Read", "OK"]);
-    expect(search.text()).toContain("pinned 4c1f9e02ab37");
-    expect(onSwitch("search_contacts").getAttribute("aria-checked")).toBe("true");
-    expect(readOnlyBox("search_contacts").checked).toBe(true);
-    expect(search.button("Try a tool")).not.toBeNull();
-
-    expect(badges("update_deal_stage")).toEqual(["May change data", "OK"]);
-    expect(readOnlyBox("update_deal_stage").disabled).toBe(true);
-    expect(tool("update_deal_stage").text()).toContain("The server says this tool can change data");
-    expect(badges("delete_contact")).toEqual(["May change data", "Destructive", "OK"]);
-    expect(tool("get_deal").button("Try a tool")).toBeNull(); // off
-
-    expect(tool("log_meeting_note").text()).toContain("Changed — review");
-    expect(onSwitch("log_meeting_note").disabled).toBe(true);
-    expect(tool("export_everything").text()).toContain(
-      "Can't be used: its input schema isn't valid JSON Schema",
-    );
-    expect(onSwitch("export_everything").disabled).toBe(true);
-    expect(tool("legacy_report").text()).toContain("No longer offered");
-
-    const docs = connector("c-docs");
-    expect(docs.text()).toContain("local program docs-mcp");
-    expect(docs.text()).not.toContain("Sign-in");
-    expect(docs.text()).toContain("DOCS_TOKEN");
-    expect(docs.text()).toContain("Not set");
-    expect(docs.text()).toContain("None listed yet");
-  });
-
-  it("turning a tool on is a draft; Save asks natively, and a decline is quiet", async () => {
-    await betaOn();
-    await mount();
-    const save = vi.spyOn(api, "saveConnectorTools");
-    await click(onSwitch("get_deal"));
-    const acme = connector("c-acme");
-    expect(acme.text()).toContain("1 unsaved tool change");
-    expect(acme.text()).toContain("You'll confirm in a system dialog.");
-    expect(save).not.toHaveBeenCalled();
-
-    // declined in the native dialog: nothing saved, the draft stays
-    await click(acme.button("Save"));
-    expect(save).toHaveBeenLastCalledWith("c-acme", [
-      { tool: "get_deal", enabled: true, readOnly: false },
+    m = await mountSection();
+    expect(row("c-acme")!.textContent).toContain("Acme CRM");
+    expect(row("c-acme")!.textContent).toContain("Custom");
+    expect(row("c-acme")!.textContent).toContain("2 tools changed — review");
+    expect(row("c-acme")!.querySelector("svg")).not.toBeNull(); // the problem icon
+    expect(row("c-docs")!.textContent).toContain("Local");
+    expect(row("c-docs")!.textContent).toContain("Connected");
+    expect(row("c-wiki")!.textContent).toContain("Off");
+    const wiki = row("c-wiki")!.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    expect(wiki.getAttribute("aria-label")).toBe("Use Team wiki");
+    expect(wiki.getAttribute("aria-checked")).toBe("false");
+    expect(btn("Browse connectors")).not.toBeNull();
+    const add = host().querySelector('[aria-haspopup="menu"]')!;
+    await click(add);
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((i) => i.textContent)).toEqual([
+      "Custom (web address)",
+      "Local (program on this computer)",
+      "Import from Claude Desktop",
     ]);
+  });
+
+  it("switching on asks natively (a no changes nothing); off applies at once", async () => {
+    await betaOn();
+    m = await mountSection();
+    const sw = () => row("c-wiki")!.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    await click(sw());
     expect(nativeDialog).toHaveBeenCalledTimes(1);
-    expect(String(nativeDialog.mock.lastCall?.[0])).toContain("get_deal");
-    expect(acme.text()).toContain("Not saved.");
-    expect(acme.el.querySelector('[role="alert"]')).toBeNull();
-    expect(onSwitch("get_deal").getAttribute("aria-checked")).toBe("true");
-    expect(acme.text()).toContain("1 unsaved tool change");
+    expect(String(nativeDialog.mock.lastCall?.[0])).toContain('Add "Team wiki" connector?');
+    expect(sw().getAttribute("aria-checked")).toBe("false");
+    expect(row("c-wiki")!.querySelector('[role="alert"]')).toBeNull();
+    nativeDialog.mockReturnValueOnce(true);
+    await click(sw());
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+    expect(liveText(host())).toBe("Team wiki turned on");
+
+    await click(row("c-docs")!.querySelector('[role="switch"]'));
+    expect(nativeDialog).toHaveBeenCalledTimes(2);
+    expect(row("c-docs")!.textContent).toContain("Off");
+  });
+
+  it("empty, loading-failed and retry states", async () => {
+    await betaOn();
+    const real = api.connectorsOverview;
+    const spy = vi
+      .spyOn(api, "connectorsOverview")
+      .mockResolvedValue({ beta: true, connectors: [] });
+    m = await mountSection();
+    expect(host().textContent).toContain("No connectors yet.");
+    expect(host().textContent).toContain("Connect an app you already use, like Notion or Linear.");
+    expect(btn("Browse connectors")).not.toBeNull();
+    unmount(m);
+
+    spy.mockRejectedValue("database is locked");
+    m = await mountSection();
+    expect(host().textContent).toContain("Couldn't load connectors.");
+    spy.mockImplementation(real);
+    await click(btn("Try again"));
+    expect(row("c-acme")).not.toBeNull();
+  });
+
+  it("shows server text as plain text: no markup, and no links but Learn more", async () => {
+    await betaOn();
+    const o = await api.connectorsOverview();
+    const acme: Connector = o.connectors[0];
+    acme.name = "<b>Acme</b>";
+    acme.tools = acme.tools.map((t) => ({
+      ...t,
+      title: "<img src=x onerror=alert(1)>",
+      description: "**Bold** [click](https://evil.example) <script>alert(1)</script>",
+      diff: t.diff.map((d) => ({ ...d, after: "<a href=x>a</a>" })),
+    }));
+    vi.spyOn(api, "connectorsOverview").mockResolvedValue({ beta: true, connectors: [acme] });
+    m = await mountSection();
+    await openDetail("c-acme");
+    await click(btn("Review"));
+    expect([...host().querySelectorAll("a")].map((a) => a.textContent)).toEqual(["Learn more"]);
+    expect(host().querySelector("img, script, b, strong")).toBeNull();
+    expect(host().textContent).toContain("<img src=x onerror=alert(1)>");
+    expect(host().textContent).toContain("**Bold** [click](https://evil.example)");
+  });
+});
+
+describe("Settings › Connectors: detail", () => {
+  it("opens with the status, the review banner and the Tools tab", async () => {
+    await betaOn();
+    m = await mountSection();
+    await openDetail("c-acme");
+    const heading = host().querySelector("h3")!;
+    expect(heading.textContent).toBe("Acme CRM");
+    expect(document.activeElement).toBe(heading);
+    expect(host().textContent).toContain(
+      "2 tools changed since you approved them. They're blocked until you review.",
+    );
+    const tabs = [...host().querySelectorAll('[role="tab"]')];
+    expect(tabs.map((t) => [t.textContent, t.getAttribute("aria-selected")])).toEqual([
+      ["About", "false"],
+      ["Tools", "true"],
+      ["Activity", "false"],
+    ]);
+    expect(host().textContent).toContain("Choose when the AI may use each tool.");
+    expect(host().textContent).toContain("Read-only tools (3)");
+    expect(host().textContent).toContain("Tools that can change or delete (5)");
+    expect(
+      host().querySelector('[aria-label="Read-only tools: Mixed"]')?.getAttribute("aria-haspopup"),
+    ).toBe("menu");
+    expect(toolRow("sync_notes").textContent).toContain("Not labelled — treated as a change tool");
+    expect(toolRow("delete_contact").textContent).toContain("Destructive");
+    expect(toolRow("list_owners").textContent).toContain("New — review");
+    // a changed or new tool can only be Blocked
+    expect(radio("list_owners", "Needs approval").disabled).toBe(true);
+    expect(radio("list_owners", "Blocked").disabled).toBe(false);
+    const group = toolRow("search_contacts").querySelector('[role="radiogroup"]')!;
+    expect(group.getAttribute("aria-label")).toBe("Permission for Search contacts");
+    expect(checkedIn("search_contacts")).toBe("Needs approval");
+
+    // arrow keys move along the tabs
+    await act(async () => {
+      tabs[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+    await flush();
+    expect(host().querySelector('[role="tab"][aria-selected="true"]')!.textContent).toBe(
+      "Activity",
+    );
+
+    await click(btn("Connectors"));
+    expect(document.activeElement).toBe(row("c-acme")!.querySelector("[data-open-row]"));
+  });
+
+  it("tightening applies at once; loosening asks natively and a no keeps the old value", async () => {
+    await betaOn();
+    m = await mountSection();
+    await openDetail("c-acme");
+    const set = vi.spyOn(api, "setConnectorToolPermissions");
+    await click(radio("search_contacts", "Blocked"));
+    expect(set).toHaveBeenLastCalledWith("c-acme", [
+      { tool: "search_contacts", permission: "blocked" },
+    ]);
+    expect(nativeDialog).not.toHaveBeenCalled();
+    expect(checkedIn("search_contacts")).toBe("Blocked");
+
+    await click(radio("search_contacts", "Always allow"));
+    expect(nativeDialog).toHaveBeenCalledTimes(1);
+    expect(String(nativeDialog.mock.lastCall?.[0])).toContain(
+      'Let the AI use "Search contacts" without asking?',
+    );
+    expect(checkedIn("search_contacts")).toBe("Blocked");
+    expect(host().querySelector('[role="alert"]')).toBeNull();
+    expect(liveText(host())).toBe("Kept as it was.");
 
     nativeDialog.mockReturnValueOnce(true);
-    await click(acme.button("Save"));
-    expect(acme.text()).toContain("Saved.");
-    expect(acme.text()).not.toContain("unsaved tool change");
-    const saved = (await api.connectorsOverview()).connectors[0].tools.find(
-      (t) => t.name === "get_deal",
+    await click(radio("search_contacts", "Always allow"));
+    expect(checkedIn("search_contacts")).toBe("Always allow");
+  });
+
+  it("Always allow on a change tool warns about meetings", async () => {
+    await betaOn();
+    m = await mountSection();
+    await openDetail("c-acme");
+    nativeDialog.mockReturnValueOnce(true);
+    await click(radio("update_deal_stage", "Always allow"));
+    expect(String(nativeDialog.mock.lastCall?.[0])).toContain(
+      "This can change data in Acme CRM. Something said in a meeting could steer the AI into using it.",
     );
-    expect(saved?.enabled).toBe(true);
-    expect(tool("get_deal").button("Try a tool")).not.toBeNull();
+    expect(toolRow("update_deal_stage").querySelector('[role="note"]')!.textContent).toBe(
+      "Someone speaking in a meeting could word things so the AI uses this without asking you.",
+    );
   });
 
-  it("turning a tool off asks nothing; Discard puts the draft back; read-only grants trust", async () => {
+  it("a group's menu sets every tool it can", async () => {
     await betaOn();
-    await mount();
-    const acme = connector("c-acme");
-    await click(onSwitch("search_contacts"));
-    expect(acme.text()).toContain("1 unsaved tool change");
-    expect(acme.text()).not.toContain("You'll confirm in a system dialog.");
-    await click(acme.button("Discard"));
-    expect(acme.text()).not.toContain("unsaved tool change");
-    expect(onSwitch("search_contacts").getAttribute("aria-checked")).toBe("true");
-
-    await act(async () => readOnlyBox("get_deal").click());
-    await flush();
-    expect(readOnlyBox("get_deal").checked).toBe(true);
-    expect(badges("get_deal")[0]).toBe("Read");
-    expect(acme.text()).toContain("You'll confirm in a system dialog.");
-    await click(acme.button("Discard"));
-
-    await click(onSwitch("search_contacts"));
-    await click(acme.button("Save"));
+    m = await mountSection();
+    await openDetail("c-acme");
+    await pickMenu(host().querySelector('[aria-label="Read-only tools: Mixed"]'), "Blocked");
     expect(nativeDialog).not.toHaveBeenCalled();
-    expect(acme.text()).toContain("Saved.");
-    expect(onSwitch("search_contacts").getAttribute("aria-checked")).toBe("false");
+    expect(checkedIn("search_contacts")).toBe("Blocked");
+    expect(checkedIn("get_deal")).toBe("Blocked");
+    expect(host().querySelector('[aria-label="Read-only tools: Blocked"]')).not.toBeNull();
   });
 
-  it("Review change shows the diff as text; Accept asks natively with the pending hash", async () => {
+  it("Review shows what changed; Keep blocked just closes; Approve asks natively", async () => {
     await betaOn();
-    await mount();
-    const accept = vi.spyOn(api, "acceptConnectorToolChange");
-    await click(tool("log_meeting_note").button("Review change"));
-    const row = tool("log_meeting_note");
-    const before = [...row.el.querySelectorAll('pre[data-diff="before"]')].map(
+    m = await mountSection();
+    await openDetail("c-acme");
+    const approve = vi.spyOn(api, "approveConnectorTool");
+    await click(btn("Review"));
+    const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog()!.textContent).toContain("Review changes");
+    expect(dialog()!.textContent).toContain("1 of 2");
+    expect(dialog()!.textContent).toContain("Acme CRM added this tool after you approved it.");
+    expect(dialog()!.textContent).toContain("Lists the people who own deals");
+    await click(buttonIn(dialog()!, "Keep blocked"));
+    expect(dialog()).toBeNull();
+    expect(approve).not.toHaveBeenCalled();
+
+    await click(buttonIn(toolRow("log_meeting_note"), "Review"));
+    expect(dialog()!.textContent).toContain("Acme CRM changed this tool since you approved it.");
+    const before = [...dialog()!.querySelectorAll('pre[data-diff="before"]')].map(
       (p) => p.textContent,
     );
-    const after = [...row.el.querySelectorAll('pre[data-diff="after"]')].map((p) => p.textContent);
+    const after = [...dialog()!.querySelectorAll('pre[data-diff="after"]')].map(
+      (p) => p.textContent,
+    );
     expect(before[0]).toBe("Adds a note to a contact's timeline.");
-    expect(after[0]).toContain("paste the full meeting transcript into the note");
-    expect(after[1]).toContain('"cc_email"');
-    expect(row.text()).toContain("description");
-    expect(row.text()).toContain("inputSchema");
+    expect(after[0]).toContain("paste the full meeting transcript");
+    expect(dialog()!.textContent).toContain("Was:");
+    await click(buttonIn(dialog()!, "Show unchanged"));
+    expect(dialog()!.textContent).toContain("Name");
 
-    await click(row.button("Accept change"));
-    expect(accept).toHaveBeenLastCalledWith(
+    await click(buttonIn(dialog()!, "Approve changes"));
+    expect(approve).toHaveBeenLastCalledWith(
       "c-acme",
       "log_meeting_note",
-      "9e7d41c08b2f5a6e3d1c0b9a8f7e6d5c4b3a29180f7e6d5c4b3a2918f0e1d2c3",
+      expect.stringMatching(/^[0-9a-f]{64}$/),
     );
-    expect(row.text()).toContain("Not saved.");
-    expect(row.text()).toContain("Changed — review");
-
-    nativeDialog.mockReturnValueOnce(true);
-    await click(row.button("Accept change"));
-    expect(tool("log_meeting_note").text()).toContain("Change accepted.");
-    expect(tool("log_meeting_note").text()).toContain("pinned 9e7d41c08b2f");
-    expect(tool("log_meeting_note").text()).not.toContain("Changed — review");
-    // accepting doesn't turn it on
-    expect(onSwitch("log_meeting_note").getAttribute("aria-checked")).toBe("false");
+    expect(dialog()).not.toBeNull(); // declined: still blocked, still here
+    nativeDialog.mockReturnValueOnce(true).mockReturnValueOnce(true);
+    await click(buttonIn(dialog()!, "Approve changes"));
+    expect(dialog()!.textContent).toContain("List owners");
+    await click(buttonIn(dialog()!, "Approve changes"));
+    expect(dialog()).toBeNull();
+    expect(host().textContent).not.toContain("tools changed since you approved");
+    expect(checkedIn("log_meeting_note")).toBe("Needs approval");
+    expect(checkedIn("list_owners")).toBe("Needs approval");
   });
 
-  it("Keep it off closes the review of a tool that's already off, saving nothing", async () => {
+  it("About shows sign-in, address and headers (never secret values)", async () => {
     await betaOn();
-    await mount();
-    const save = vi.spyOn(api, "saveConnectorTools");
-    await click(tool("log_meeting_note").button("Review change"));
-    await click(tool("log_meeting_note").button("Keep it off"));
-    expect(tool("log_meeting_note").el.querySelector("pre")).toBeNull();
-    expect(save).not.toHaveBeenCalled();
-    expect(nativeDialog).not.toHaveBeenCalled();
+    m = await mountSection();
+    await openDetail("c-wiki");
+    await click(btn("About"));
+    const text = host().textContent!;
+    expect(text).toContain("API key or token · Saved in your keychain");
+    expect(text).toContain("https://wiki.example.com/mcp");
+    expect(text).toContain("X-Team: design");
+    expect(text).toContain("X-Wiki-Token: Saved in your keychain");
+    expect(text).toContain("Approved · config 0c7f1b2d9e44");
   });
 
-  it("shows server text as plain text, never as markup or links", async () => {
-    const real = await api.connectorsOverview();
-    const acme: Connector = real.connectors[0];
-    const hostile: ConnectorsOverview = {
-      beta: true,
-      connectors: [
-        {
-          ...acme,
-          tools: [
-            {
-              ...acme.tools[4],
-              name: "<b>tool</b>",
-              title: "<img src=x onerror=alert(1)>",
-              description: "**Bold** [click](https://evil.example) <script>alert(1)</script>",
-              diff: [{ field: "<i>f</i>", before: "<a href=x>a</a>", after: "<strong>s</strong>" }],
-            },
-          ],
-        },
-      ],
-    };
-    vi.spyOn(api, "connectorsOverview").mockResolvedValue(hostile);
-    await mount();
-    await click(byText("Review change"));
-    expect(host!.querySelector("img, script, a, b, i, strong")).toBeNull();
-    expect(host!.textContent).toContain("<img src=x onerror=alert(1)>");
-    expect(host!.textContent).toContain("**Bold** [click](https://evil.example)");
-    expect(host!.querySelector('pre[data-diff="before"]')!.textContent).toBe("<a href=x>a</a>");
-  });
-
-  it("Remove asks in-app first and says the keychain entries go too", async () => {
+  it("sign-in waits for the browser; Cancel only hides the wait", async () => {
     await betaOn();
-    await mount();
+    m = await mountSection();
+    await openDetail("c-acme");
+    await click(btn("About"));
+    await click(btn("Sign out"));
+    expect(host().textContent).toContain("Sign in to use Acme CRM.");
+    let finish: (v: unknown) => void = () => {};
+    const signIn = vi.spyOn(api, "signInConnector").mockImplementation(
+      () =>
+        new Promise((r) => {
+          finish = r as (v: unknown) => void;
+        }),
+    );
+    await click(buttonIn(host().querySelector('[role="tabpanel"]')!, "Sign in"));
+    expect(signIn).toHaveBeenCalledWith("c-acme");
+    expect(host().textContent).toContain("Finish signing in in your browser…");
+    await click(btn("Cancel"));
+    expect(host().textContent).not.toContain("Finish signing in");
+
+    // A sign-in that finishes later still lands.
+    const o = await api.connectorsOverview();
+    await act(async () =>
+      finish({
+        saved: true,
+        connector: { ...o.connectors[0], signedIn: true, status: "review" },
+        error: null,
+      }),
+    );
+    await flush();
+    expect(host().textContent).not.toContain("Sign in to use Acme CRM.");
+  });
+
+  it("a sign-in error shows in words", async () => {
+    await betaOn();
+    m = await mountSection();
+    await openDetail("c-acme");
+    vi.spyOn(api, "signInConnector").mockRejectedValue("Sign-in was cancelled.");
+    await pickMenu(host().querySelector('[aria-label="More for Acme CRM"]'), "Reconnect");
+    expect(host().querySelector('[role="alert"]')!.textContent).toBe("Sign-in was cancelled.");
+  });
+
+  it("Activity: newest first, results in words, a Problems only filter", async () => {
+    await betaOn();
+    m = await mountSection();
+    await openDetail("c-acme");
+    await click(btn("Activity"));
+    const rows = () =>
+      [...host().querySelectorAll("tr[data-log-row]")].map((r) =>
+        [...r.querySelectorAll("td")].slice(1).map((td) => td.textContent),
+      );
+    expect(rows()).toEqual([
+      ["get_deal", "Allowed automatically"],
+      ["search_contacts", "Failedcouldn't reach the connector"],
+      ["delete_contact", "Blockedthe tool is blocked"],
+      ["update_deal_stage", "Denied"],
+      ["search_contacts", "Allowed by you"],
+    ]);
+    expect(host().textContent).toContain(
+      "Only tool names and outcomes are kept — never meeting text.",
+    );
+    await click(host().querySelector('input[type="checkbox"]'));
+    expect(rows().map((r) => r[0])).toEqual(["search_contacts", "delete_contact"]);
+
+    await click(btn("Clear activity…"));
+    expect(confirmTitle()).toBe("Clear connector activity?");
+    await act(async () => confirmChoice(true).click());
+    await flush();
+    expect(host().textContent).toContain("No calls yet.");
+  });
+
+  it("Disconnect asks in the app with the brief's words", async () => {
+    await betaOn();
+    m = await mountSection();
+    await openDetail("c-acme");
     const remove = vi.spyOn(api, "removeConnector");
-    await click(connector("c-docs").button("Remove"));
-    expect(confirmTitle()).toBe("Remove “Local docs”?");
-    expect(confirmDialog()!.textContent).toContain("system keychain");
+    await pickMenu(host().querySelector('[aria-label="More for Acme CRM"]'), "Disconnect");
+    expect(confirmTitle()).toBe("Disconnect Acme CRM?");
+    expect(confirmDialog()!.textContent).toContain("Your sign-in is removed from this computer.");
     await act(async () => confirmChoice(false).click());
     await flush();
     expect(remove).not.toHaveBeenCalled();
 
-    await click(connector("c-docs").button("Remove"));
+    await pickMenu(host().querySelector('[aria-label="More for Acme CRM"]'), "Disconnect");
     await act(async () => confirmChoice(true).click());
     await flush();
-    expect(remove).toHaveBeenCalledWith("c-docs");
-    expect(host!.querySelector('[data-connector-id="c-docs"]')).toBeNull();
+    expect(remove).toHaveBeenCalledWith("c-acme");
+    expect(row("c-acme")).toBeNull();
+    expect(liveText(host())).toBe("Acme CRM disconnected");
     expect(nativeDialog).not.toHaveBeenCalled();
   });
 
-  it("Add a connector checks the form, asks natively, then lists the new tools", async () => {
+  it("Edit opens the form filled in; saved secrets show as saved, never as values", async () => {
     await betaOn();
-    await mount();
-    const add = vi.spyOn(api, "addConnector");
-    const sync = vi.spyOn(api, "syncConnectorTools");
-    await click(byText("Add a connector"));
-    await type(inputByLabel("Name"), "Team wiki");
-    await type(inputByLabel("Web address"), "http://wiki.example.com/mcp");
-    await click(byText("Add connector"));
-    expect(host!.textContent).toContain("Use an https:// address.");
-    expect(add).not.toHaveBeenCalled();
-
-    await type(inputByLabel("Web address"), "https://wiki.example.com/mcp");
-    await click(byText("Add connector"));
-    expect(add).toHaveBeenLastCalledWith({
-      name: "Team wiki",
-      transport: { kind: "http", url: "https://wiki.example.com/mcp" },
-      auth: { kind: "none" },
-      clientSecret: null,
-    });
-    expect(String(nativeDialog.mock.lastCall?.[0])).toContain("Team wiki");
-    expect(host!.textContent).toContain("Not saved.");
-    expect(sync).not.toHaveBeenCalled();
-
-    nativeDialog.mockReturnValueOnce(true);
-    await click(byText("Add connector"));
-    expect(sync).toHaveBeenCalledTimes(1);
-    const id = sync.mock.calls[0][0];
-    expect(host!.textContent).toContain("Added Team wiki. Its tools start off");
-    const wiki = connector(id);
-    expect(wiki.text()).toContain("wiki.example.com");
-    expect(wiki.text()).toContain("Search");
+    m = await mountSection();
+    await openDetail("c-wiki");
+    await pickMenu(host().querySelector('[aria-label="More for Team wiki"]'), "Edit");
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("Edit Team wiki");
+    expect(fieldIn(dialog, "Name").value).toBe("Team wiki");
+    expect(fieldIn(dialog, "Web address").value).toBe("https://wiki.example.com/mcp");
     expect(
-      [...wiki.el.querySelectorAll('[role="switch"]')].map((s) => s.getAttribute("aria-checked")),
-    ).toEqual(["false", "false"]);
-  });
-
-  it("Add a local program: arguments and variable names are checked", async () => {
-    await betaOn();
-    await mount();
-    const add = vi.spyOn(api, "addConnector");
-    await click(byText("Add a connector"));
-    await click(within(host!.querySelector('[aria-label="Type"]')).button("Local program"));
-    await type(inputByLabel("Name"), "Notes folder");
-    await type(inputByLabel("Program"), "notes-mcp");
-    await type(inputByLabel("Arguments (optional)"), '--dir "My Notes"');
-    await type(inputByLabel("Environment variable names (optional)"), "NOTES_TOKEN, 9bad");
-    await click(byText("Add connector"));
-    expect(host!.textContent).toContain("Not a valid variable name: 9bad");
-    expect(add).not.toHaveBeenCalled();
-
-    await type(inputByLabel("Environment variable names (optional)"), "NOTES_TOKEN");
+      dialog.querySelector<HTMLInputElement>('input[type="radio"]:checked')!.parentElement!
+        .textContent,
+    ).toContain("API key or token");
+    expect(dialog.textContent).toContain("Saved in your keychain");
+    expect(buttonIn(dialog, "Replace")).not.toBeNull();
+    const update = vi.spyOn(api, "updateConnector");
     nativeDialog.mockReturnValueOnce(true);
-    await click(byText("Add connector"));
-    expect(add).toHaveBeenLastCalledWith({
-      name: "Notes folder",
-      transport: {
-        kind: "stdio",
-        command: "notes-mcp",
-        args: ["--dir", "My Notes"],
-        envNames: ["NOTES_TOKEN"],
+    await click(buttonIn(dialog, "Save changes"));
+    expect(update).toHaveBeenLastCalledWith("c-wiki", {
+      config: {
+        name: "Team wiki",
+        transport: {
+          kind: "http",
+          url: "https://wiki.example.com/mcp",
+          headers: [
+            { name: "X-Team", value: "design" },
+            { name: "X-Wiki-Token", value: null },
+          ],
+        },
+        auth: { kind: "api_key" },
       },
-      auth: { kind: "none" },
-      clientSecret: null,
+      secrets: { apiKey: null, clientSecret: null, values: {} },
     });
-    expect(host!.textContent).toContain("local program notes-mcp");
-    expect(host!.textContent).toContain("NOTES_TOKEN");
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(host().querySelector("h3")!.textContent).toBe("Team wiki");
   });
 
-  it("a local program's variable: a password field, set or not set, never shown", async () => {
+  it("Try… runs one real call through the approval card; the result is plain text", async () => {
     await betaOn();
-    await mount();
-    const setEnv = vi.spyOn(api, "setConnectorEnv");
-    const field = host!.querySelector<HTMLInputElement>('[aria-label="Value for DOCS_TOKEN"]')!;
-    expect(field.type).toBe("password");
-    const docs = connector("c-docs");
-    expect(docs.button("Save")!.disabled).toBe(true);
-    await type(field, "tok-123");
-    await click(docs.button("Save"));
-    expect(setEnv).toHaveBeenLastCalledWith("c-docs", "DOCS_TOKEN", "tok-123");
-    expect(docs.text()).toContain("Set");
-    expect(docs.text()).not.toContain("Not set");
-    expect(field.value).toBe("");
-    expect(host!.innerHTML).not.toContain("tok-123");
-
-    await click(docs.button("Clear"));
-    expect(setEnv).toHaveBeenLastCalledWith("c-docs", "DOCS_TOKEN", "");
-    expect(docs.text()).toContain("Not set");
-  });
-
-  it("sign-in waits for the browser, then shows signed in; sign out", async () => {
-    await betaOn();
-    const signedIn = { ...(await api.connectorsOverview()).connectors[0], signedIn: true };
-    let finish: (c: Connector) => void = () => {};
-    vi.spyOn(api, "signInConnector").mockImplementation(
-      () =>
-        new Promise<Connector>((r) => {
-          finish = r;
-        }),
-    );
-    await mount();
-    const acme = connector("c-acme");
-    await click(acme.button("Sign in"));
-    expect(acme.text()).toContain("Waiting for you to sign in in your browser…");
-    expect(acme.button("Refresh tools")!.disabled).toBe(true);
-    await act(async () => finish(signedIn));
-    await flush();
-    expect(acme.text()).toContain("Signed in");
-    expect(acme.text()).not.toContain("Waiting for you");
-
-    await click(acme.button("Sign out"));
-    expect(acme.text()).toContain("Not signed in");
-  });
-
-  it("Refresh tools and errors show next to the connector", async () => {
-    await betaOn();
-    await mount();
-    await click(connector("c-acme").button("Refresh tools"));
-    expect(connector("c-acme").text()).toContain("Tools are up to date.");
-    vi.spyOn(api, "syncConnectorTools").mockRejectedValueOnce("couldn't reach the server");
-    await click(connector("c-acme").button("Refresh tools"));
-    expect(connector("c-acme").el.querySelector('[role="alert"]')!.textContent).toBe(
-      "couldn't reach the server",
-    );
-  });
-
-  it("Try a tool: arguments from the schema, the confirm card, a plain-text result", async () => {
-    await betaOn();
-    await mount();
-    await click(tool("search_contacts").button("Try a tool"));
-    const area = tool("search_contacts").el.querySelector("textarea")!;
+    m = await mountSection();
+    await openDetail("c-acme");
+    // only usable tools that aren't Blocked
+    expect(buttonIn(toolRow("delete_contact"), "Try…")).toBeNull();
+    expect(buttonIn(toolRow("log_meeting_note"), "Try…")).toBeNull();
+    await click(buttonIn(toolRow("search_contacts"), "Try…"));
+    const panel = () => toolRow("search_contacts").querySelector<HTMLElement>("[data-try]")!;
+    expect(panel().textContent).toContain("It goes through the same approval card as Ask");
+    const area = panel().querySelector("textarea")!;
     expect(area.value).toBe('{\n  "query": ""\n}');
     await type(area, '{ "query": "Example" }');
-    await click(tool("search_contacts").button("Run"));
+    await click(buttonIn(panel(), "Run"));
 
-    // the call waits in the same card Ask uses
-    expect(card()).not.toBeNull();
-    expect(card()!.textContent).toContain("Acme CRM wants to run Search contacts");
-    expect(tool("search_contacts").text()).toContain("Check the call in the card that opened");
-    await click(within(card()).button("Run"));
-    expect(card()).toBeNull();
-    const result = tool("search_contacts").el.querySelector("pre[data-result]")!;
-    expect(result.getAttribute("data-result")).toBe("ok");
-    expect(result.textContent).toContain('Found 2 contacts for "Example"');
-    expect(result.textContent).toContain("dana@example.com");
+    const card = () => host().querySelector<HTMLElement>('[role="group"][data-proposal-id]');
+    expect(card()!.textContent).toContain(
+      "Ask wants to look something up in Acme CRM · Search contacts",
+    );
+    expect(panel().textContent).toContain("Waiting for your decision on the approval card…");
+    // the card's Allow once arms after a moment
+    await act(() => new Promise((r) => setTimeout(r, ARM_DELAY_MS + 50)));
+    await click(buttonIn(card()!, "Allow once"));
+    const result = () => panel().querySelector("pre[data-result]")!;
+    expect(result().getAttribute("data-result")).toBe("ok");
+    expect(result().textContent).toContain('Found 2 contacts for "Example"');
 
-    // Don't run: nothing runs, and the tester says so
-    await click(tool("search_contacts").button("Run"));
-    await click(within(card()).button("Don't run"));
-    expect(
-      tool("search_contacts").el.querySelector("pre[data-result]")!.getAttribute("data-result"),
-    ).toBe("error");
-    expect(tool("search_contacts").text()).toContain("You chose not to run it.");
+    await click(buttonIn(panel(), "Run"));
+    await click(buttonIn(card()!, "Deny"));
+    expect(result().getAttribute("data-result")).toBe("error");
+    expect(result().textContent).toBe("You chose not to run it.");
   });
 
-  it("Try a write tool: the card notes the second check, which the mock asks natively", async () => {
+  it("Try… on an Always allow tool runs without a card", async () => {
     await betaOn();
-    await mount();
-    await click(tool("update_deal_stage").button("Try a tool"));
-    await type(
-      tool("update_deal_stage").el.querySelector("textarea")!,
-      '{ "deal_id": "D-1042", "stage": "won" }',
-    );
-    await click(tool("update_deal_stage").button("Run"));
-    expect(card()!.textContent).toContain("May change data");
-    expect(card()!.textContent).toContain("You'll confirm once more in a system dialog.");
-    await click(within(card()).button("Run"));
-    expect(nativeDialog).toHaveBeenCalledTimes(1);
-    expect(card()).toBeNull();
-    // declined at the native check: it didn't run
-    expect(tool("update_deal_stage").text()).toContain("You chose not to run it.");
-  });
-
-  it("call log: newest first, plain labels, no arguments; Clear asks first", async () => {
-    await betaOn();
-    await mount();
-    const log = within(
-      [...host!.querySelectorAll(".fly-srow")].find((r) => r.textContent?.startsWith("Call log")) ??
-        null,
-    );
-    await click(log.button("Show"));
-    const rows = [...log.el.querySelectorAll("tr[data-log-row]")].map((r) =>
-      [...r.querySelectorAll("td")].map((td) => td.textContent),
-    );
-    expect(rows).toHaveLength(4);
-    expect(rows[0]).toEqual([
-      "10 min ago",
-      "Acme CRM",
-      "search_contacts edited",
-      "Read",
-      "Ran",
-      "1.2 s",
-      "12,000 chars, cut",
-    ]);
-    expect(rows[1][4]).toBe("Refused: the tool isn't turned on");
-    expect(rows[2]).toEqual([
-      "2 h ago",
-      "Acme CRM",
-      "update_deal_stage",
-      "May change data",
-      "You didn't run it",
-      "0 ms",
-      "—",
-    ]);
-    expect(rows[3][6]).toBe("1,532 chars");
-
-    await click(log.button("Clear log"));
-    expect(confirmTitle()).toBe("Clear the call log?");
-    await act(async () => confirmChoice(false).click());
-    await flush();
-    expect(log.el.querySelectorAll("tr[data-log-row]")).toHaveLength(4);
-    await click(log.button("Clear log"));
-    await act(async () => confirmChoice(true).click());
-    await flush();
-    expect(log.text()).toContain("No calls yet.");
-    expect(await api.connectorCallLog()).toEqual([]);
+    m = await mountSection();
+    await openDetail("c-acme");
+    const test = vi.spyOn(api, "testConnectorTool");
+    await click(buttonIn(toolRow("get_deal"), "Try…"));
+    const panel = toolRow("get_deal").querySelector<HTMLElement>("[data-try]")!;
+    expect(panel.textContent).toContain("The tool is on Always allow, so it runs without asking.");
+    await type(panel.querySelector("textarea")!, '{ "deal_id": "D-1042" }');
+    await click(buttonIn(panel, "Run"));
+    expect(test).toHaveBeenLastCalledWith("c-acme", "get_deal", { deal_id: "D-1042" });
+    expect(host().querySelector('[role="group"][data-proposal-id]')).toBeNull();
+    expect(panel.querySelector("pre[data-result]")!.textContent).toContain("Deal D-1042");
   });
 });

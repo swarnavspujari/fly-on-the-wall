@@ -1,314 +1,667 @@
 import { describe, expect, it } from "vitest";
 import {
+  KEEP_LOCAL_NOTICE,
+  activityDetail,
+  activityResult,
+  allowedPermissions,
+  argsFromFields,
   argsTemplate,
-  effectiveKind,
-  emptyAddDraft,
-  formatChars,
-  formatDuration,
-  grantsTrust,
-  kindLabel,
+  canTry,
+  candidateSummary,
+  connectorBadge,
+  connectorStatus,
+  customDraftFrom,
+  decidedLabel,
+  directoryInput,
+  emptyCustomDraft,
+  emptyLocalDraft,
+  fieldValuesFrom,
+  filterDirectory,
+  formatTime,
+  groupTools,
+  groupValue,
+  groupValueLabel,
+  isProblem,
+  localDraftFrom,
+  loosens,
   mergeProposals,
-  newestFirst,
-  outcomeLabel,
   parseArgs,
+  parseCommand,
+  planGroupChange,
   prettyArgs,
-  refusalLabel,
+  probeSummary,
+  quoteArg,
   relativeTime,
+  reviewBanner,
+  sameAddress,
   sameArgs,
+  schemaFields,
   splitArgs,
-  splitList,
-  toolPermissionChanges,
-  toolStatusLabel,
-  validateAddDraft,
-  type AddDraft,
-  type ToolDraft,
+  splitDetails,
+  toolStatusChip,
+  validateCustom,
+  validateLocal,
+  willRunPreview,
+  type CustomDraft,
+  type KVRow,
+  type LocalDraft,
 } from "./connectorsModel";
-import type { ConnectorCallProposal, ConnectorTool } from "./types";
+import type {
+  Connector,
+  ConnectorCallProposal,
+  ConnectorDirectoryEntry,
+  ConnectorTool,
+} from "./types";
 
 const tool = (t: Partial<ConnectorTool> & { name: string }): ConnectorTool => ({
   title: null,
   description: "",
-  enabled: false,
-  readOnly: false,
-  kind: "write",
-  canMarkReadOnly: true,
+  kind: "read",
+  labelled: true,
   destructive: false,
+  permission: "needs_approval",
   status: "ok",
   problem: null,
   pinnedHash: "a1b2c3d4e5f6",
-  pendingHash: null,
+  reviewHash: null,
   diff: [],
   inputSchema: {},
   ...t,
 });
 
-const draft = (d: Partial<AddDraft>): AddDraft => ({ ...emptyAddDraft(), ...d });
+const connector = (c: Partial<Connector> = {}): Connector => ({
+  id: "c1",
+  name: "Acme CRM",
+  kind: "web",
+  transport: { kind: "http", url: "https://mcp.acme-crm.example/mcp", headers: [] },
+  auth: { kind: "none" },
+  destination: "mcp.acme-crm.example",
+  willRun: null,
+  approved: true,
+  enabled: true,
+  configHash: "3f9a1c0b7e21",
+  status: "connected",
+  reviewCount: 0,
+  signedIn: null,
+  secrets: { apiKeySet: false, clientSecretSet: false, values: [] },
+  lastSync: null,
+  tools: [],
+  ...c,
+});
 
-describe("add form", () => {
-  it("builds a web connector, https only", () => {
-    const { config, errors } = validateAddDraft(
-      draft({ name: "  Acme CRM ", url: " https://mcp.acme-crm.example/mcp " }),
+const entry = (e: Partial<ConnectorDirectoryEntry> = {}): ConnectorDirectoryEntry => ({
+  id: "example-notes",
+  name: "Example Notes",
+  vendor: "Example Notes Inc.",
+  description: "Search and read pages.",
+  url: "https://mcp.example-notes.example/mcp",
+  auth: "oauth",
+  keyLabel: null,
+  ...e,
+});
+
+let seq = 0;
+const newId = () => `r${++seq}`;
+const row = (r: Partial<KVRow>): KVRow => ({
+  id: newId(),
+  name: "",
+  value: "",
+  secret: false,
+  stored: false,
+  ...r,
+});
+
+describe("copy and errors", () => {
+  it("exports the Keep-local notice for Ask", () => {
+    expect(KEEP_LOCAL_NOTICE).toBe(
+      "Connectors were off for this question because it includes a Keep-local meeting, which never leaves this computer.",
     );
-    expect(errors).toEqual({});
-    expect(config).toEqual({
-      name: "Acme CRM",
-      transport: { kind: "http", url: "https://mcp.acme-crm.example/mcp" },
-      auth: { kind: "none" },
-      clientSecret: null,
+  });
+
+  it("splits program output off an error", () => {
+    expect(splitDetails("Couldn't find npx. Install Node.js and try again.")).toEqual({
+      message: "Couldn't find npx. Install Node.js and try again.",
+      details: null,
     });
-    expect(validateAddDraft(draft({ name: "A", url: "http://mcp.example.com" })).errors.url).toBe(
-      "Use an https:// address. Connectors only talk to web servers over HTTPS.",
-    );
-    expect(validateAddDraft(draft({ name: "A", url: "mcp.example.com" })).errors.url).toContain(
-      "isn't a web address",
-    );
-    expect(validateAddDraft(draft({ name: "A", url: "" })).errors.url).toBe(
-      "Enter the server's web address.",
-    );
-    expect(
-      validateAddDraft(draft({ name: "A", url: "https://dana:pw@mcp.example.com" })).errors.url,
-    ).toBe("Leave sign-in details out of the address.");
-  });
-
-  it("checks the name is 1 to 40 characters", () => {
-    const url = "https://mcp.example.com";
-    expect(validateAddDraft(draft({ name: "   ", url })).errors.name).toBe("Give it a name.");
-    expect(validateAddDraft(draft({ name: "x".repeat(40), url })).config).not.toBeNull();
-    const long = validateAddDraft(draft({ name: "x".repeat(41), url }));
-    expect(long.config).toBeNull();
-    expect(long.errors.name).toBe("Keep the name to 40 characters or fewer.");
-  });
-
-  it("OAuth: scopes split on spaces and commas; a secret needs a client ID", () => {
-    const base = draft({ name: "Docs", url: "https://docs.example.com/mcp", auth: "oauth" });
-    expect(validateAddDraft({ ...base, scopes: "read, write  read" }).config?.auth).toEqual({
-      kind: "oauth",
-      scopes: ["read", "write"],
-      clientId: null,
+    expect(splitDetails("The program stopped right away.\n---\nError: boom\n  at x")).toEqual({
+      message: "The program stopped right away.",
+      details: "Error: boom\n  at x",
     });
-    const orphan = validateAddDraft({ ...base, clientSecret: "s3cret" });
-    expect(orphan.config).toBeNull();
-    expect(orphan.errors.clientSecret).toBe("A client secret needs a client ID.");
-    const full = validateAddDraft({ ...base, clientId: " app-123 ", clientSecret: "s3cret" });
-    expect(full.config?.auth).toEqual({ kind: "oauth", scopes: [], clientId: "app-123" });
-    expect(full.config?.clientSecret).toBe("s3cret");
-    // a secret typed while sign-in is None is never sent
-    expect(
-      validateAddDraft({ ...base, auth: "none", clientId: "x", clientSecret: "s3cret" }).config
-        ?.clientSecret,
-    ).toBeNull();
-  });
-
-  it("builds a local program with arguments and variable names", () => {
-    const { config, errors } = validateAddDraft(
-      draft({
-        name: "Local docs",
-        kind: "stdio",
-        command: " docs-mcp ",
-        args: '--root "My Notes" -v ""',
-        envNames: "DOCS_TOKEN, _HOME2 DOCS_TOKEN",
-      }),
-    );
-    expect(errors).toEqual({});
-    expect(config).toEqual({
-      name: "Local docs",
-      transport: {
-        kind: "stdio",
-        command: "docs-mcp",
-        args: ["--root", "My Notes", "-v", ""],
-        envNames: ["DOCS_TOKEN", "_HOME2"],
-      },
-      auth: { kind: "none" },
-      clientSecret: null,
-    });
-  });
-
-  it("explains a bad local program", () => {
-    const bad = validateAddDraft(
-      draft({ name: "X", kind: "stdio", command: "", args: '"open', envNames: "2BAD ok-not" }),
-    );
-    expect(bad.config).toBeNull();
-    expect(bad.errors.command).toBe("Enter the program to run.");
-    expect(bad.errors.args).toBe("A quote in the arguments isn't closed.");
-    expect(bad.errors.envNames).toContain("Not a valid variable name: 2BAD, ok-not");
+    expect(splitDetails(new Error("bad"))).toEqual({ message: "bad", details: null });
   });
 });
 
-describe("splitting", () => {
-  it("splits arguments on whitespace, keeping double-quoted spaces", () => {
-    expect(splitArgs("")).toEqual({ args: [] });
-    expect(splitArgs("  a   b\tc ")).toEqual({ args: ["a", "b", "c"] });
-    expect(splitArgs('--path "C:\\Program Files\\x" --flag')).toEqual({
-      args: ["--path", "C:\\Program Files\\x", "--flag"],
-    });
-    expect(splitArgs('pre"fix part"post')).toEqual({ args: ["prefix partpost"] });
-    expect(splitArgs('a ""')).toEqual({ args: ["a", ""] });
-    expect(splitArgs('"unclosed')).toEqual({ error: "A quote in the arguments isn't closed." });
+describe("permissions", () => {
+  it("loosening means more room for the AI", () => {
+    expect(loosens("blocked", "needs_approval")).toBe(true);
+    expect(loosens("needs_approval", "always_allow")).toBe(true);
+    expect(loosens("always_allow", "needs_approval")).toBe(false);
+    expect(loosens("needs_approval", "blocked")).toBe(false);
+    expect(loosens("blocked", "blocked")).toBe(false);
   });
 
-  it("splits lists on spaces and commas without repeats", () => {
-    expect(splitList(" a,b ,, c a ")).toEqual(["a", "b", "c"]);
-    expect(splitList("")).toEqual([]);
-  });
-});
-
-describe("tool permissions", () => {
-  const tools = [
-    tool({ name: "search", enabled: true, readOnly: true, kind: "read" }),
-    tool({ name: "update", enabled: false, canMarkReadOnly: false }),
-    tool({ name: "notes", enabled: true }),
-  ];
-
-  it("sends only tools whose permissions changed", () => {
-    const d: ToolDraft = new Map([
-      ["search", { enabled: true, readOnly: true }], // unchanged
-      ["update", { enabled: true, readOnly: true }], // read-only not allowed: dropped
-      ["notes", { enabled: false, readOnly: false }],
-      ["gone", { enabled: true, readOnly: true }], // no such tool
+  it("only usable tools can leave Blocked", () => {
+    expect(allowedPermissions(tool({ name: "a" }))).toEqual([
+      "always_allow",
+      "needs_approval",
+      "blocked",
     ]);
-    expect(toolPermissionChanges(tools, d)).toEqual([
-      { tool: "update", enabled: true, readOnly: false },
-      { tool: "notes", enabled: false, readOnly: false },
-    ]);
-    expect(toolPermissionChanges(tools, new Map())).toEqual([]);
-  });
-
-  it("tool names like __proto__ are just names", () => {
-    const odd = [tool({ name: "__proto__" }), tool({ name: "constructor" })];
-    expect(toolPermissionChanges(odd, new Map())).toEqual([]);
-    expect(
-      toolPermissionChanges(odd, new Map([["constructor", { enabled: true, readOnly: false }]])),
-    ).toEqual([{ tool: "constructor", enabled: true, readOnly: false }]);
-  });
-
-  it("enabling or marking read-only grants trust; turning off doesn't", () => {
-    expect(grantsTrust(tools, [{ tool: "update", enabled: true, readOnly: false }])).toBe(true);
-    expect(grantsTrust(tools, [{ tool: "notes", enabled: true, readOnly: true }])).toBe(true);
-    expect(grantsTrust(tools, [{ tool: "notes", enabled: false, readOnly: false }])).toBe(false);
-    expect(grantsTrust(tools, [{ tool: "search", enabled: true, readOnly: false }])).toBe(false);
-    expect(grantsTrust(tools, [])).toBe(false);
-  });
-
-  it("is read only when marked read-only and the server allows it", () => {
-    expect(effectiveKind(tools[0], true)).toBe("read");
-    expect(effectiveKind(tools[0], false)).toBe("write");
-    expect(effectiveKind(tools[1], true)).toBe("write");
-    expect(kindLabel("read")).toBe("Read");
-    expect(kindLabel("write")).toBe("May change data");
-  });
-
-  it("labels each status", () => {
-    expect(toolStatusLabel(tool({ name: "a" })).label).toBe("OK");
-    expect(toolStatusLabel(tool({ name: "a", status: "changed" })).label).toBe("Changed — review");
-    expect(toolStatusLabel(tool({ name: "a", status: "missing" })).label).toBe("No longer offered");
-    expect(toolStatusLabel(tool({ name: "a", status: "unusable", problem: "bad schema" }))).toEqual(
-      { label: "Can't be used: bad schema", tone: "danger" },
-    );
-  });
-});
-
-describe("args JSON", () => {
-  it("pretty prints and parses one JSON object", () => {
-    expect(prettyArgs({ a: 1 })).toBe('{\n  "a": 1\n}');
-    expect(prettyArgs(undefined)).toBe("{}");
-    expect(parseArgs(' { "q": "acme" } ')).toEqual({ ok: true, value: { q: "acme" } });
-    expect(parseArgs("{}")).toEqual({ ok: true, value: {} });
-  });
-
-  it("explains what's wrong", () => {
-    const bad = parseArgs("{ q: 1 }");
-    expect(bad.ok).toBe(false);
-    if (!bad.ok) expect(bad.error).toMatch(/^That isn't valid JSON: /);
-    for (const text of ["[1, 2]", "null", "3", '"x"']) {
-      expect(parseArgs(text)).toEqual({
-        ok: false,
-        error: "Arguments must be a JSON object ({ … }), not a list or a value.",
-      });
+    for (const status of ["changed", "new", "missing", "unusable"] as const) {
+      expect(allowedPermissions(tool({ name: "a", status }))).toEqual(["blocked"]);
     }
-    expect(parseArgs("  ")).toEqual({
-      ok: false,
-      error: "Arguments must be a JSON object, like {}.",
+  });
+
+  it("groups read-only and change tools; unlabelled ones are change tools", () => {
+    const tools = [
+      tool({ name: "r" }),
+      tool({ name: "w", kind: "write" }),
+      tool({ name: "u", kind: "write", labelled: false }),
+    ];
+    const g = groupTools(tools);
+    expect(g.read.map((t) => t.name)).toEqual(["r"]);
+    expect(g.write.map((t) => t.name)).toEqual(["w", "u"]);
+  });
+
+  it("a group shows one permission or Mixed", () => {
+    expect(groupValue([])).toBeNull();
+    expect(groupValue([tool({ name: "a" }), tool({ name: "b" })])).toBe("needs_approval");
+    expect(groupValue([tool({ name: "a" }), tool({ name: "b", permission: "blocked" })])).toBe(
+      "mixed",
+    );
+    expect(groupValueLabel("mixed")).toBe("Mixed");
+    expect(groupValueLabel("always_allow")).toBe("Always allow");
+    expect(groupValueLabel(null)).toBe("No tools");
+  });
+
+  it("a group change skips tools already there and tools that must stay blocked", () => {
+    const tools = [
+      tool({ name: "a" }),
+      tool({ name: "b", permission: "always_allow" }),
+      tool({ name: "c", status: "changed", permission: "blocked" }),
+    ];
+    expect(planGroupChange(tools, "always_allow")).toEqual([
+      { tool: "a", permission: "always_allow" },
+    ]);
+    expect(planGroupChange(tools, "blocked")).toEqual([
+      { tool: "a", permission: "blocked" },
+      { tool: "b", permission: "blocked" },
+    ]);
+  });
+
+  it("labels tool states", () => {
+    expect(toolStatusChip(tool({ name: "a" }))).toBeNull();
+    expect(toolStatusChip(tool({ name: "a", status: "changed" }))).toBe("Changed — review");
+    expect(toolStatusChip(tool({ name: "a", status: "new" }))).toBe("New — review");
+    expect(toolStatusChip(tool({ name: "a", status: "missing" }))).toBe("No longer offered");
+    expect(toolStatusChip(tool({ name: "a", status: "unusable", problem: "bad schema" }))).toBe(
+      "Can't be used: bad schema",
+    );
+  });
+});
+
+describe("connectors", () => {
+  it("says each status in words", () => {
+    expect(connectorStatus(connector()).text).toBe("Connected · mcp.acme-crm.example");
+    expect(connectorStatus(connector({ kind: "local" })).text).toBe("Connected");
+    expect(connectorStatus(connector({ status: "needs_sign_in" }))).toEqual({
+      text: "Needs sign-in",
+      problem: true,
+    });
+    expect(connectorStatus(connector({ status: "review", reviewCount: 2 })).text).toBe(
+      "2 tools changed — review",
+    );
+    expect(connectorStatus(connector({ status: "review", reviewCount: 1 })).text).toBe(
+      "1 tool changed — review",
+    );
+    expect(connectorStatus(connector({ status: "could_not_start" })).text).toBe("Couldn't start");
+    expect(connectorStatus(connector({ status: "off" }))).toEqual({ text: "Off", problem: false });
+    expect(reviewBanner(2)).toBe(
+      "2 tools changed since you approved them. They're blocked until you review.",
+    );
+    expect(reviewBanner(1)).toBe(
+      "1 tool changed since you approved it. It's blocked until you review.",
+    );
+  });
+
+  it("badges local and custom connectors, not directory ones", () => {
+    const dir = [entry()];
+    expect(connectorBadge(connector(), dir)).toBe("Custom");
+    expect(
+      connectorBadge(
+        connector({
+          transport: { kind: "http", url: "https://MCP.example-notes.example/mcp/", headers: [] },
+        }),
+        dir,
+      ),
+    ).toBeNull();
+    expect(
+      connectorBadge(
+        connector({
+          kind: "local",
+          transport: { kind: "stdio", command: "npx", args: [], env: [] },
+        }),
+        dir,
+      ),
+    ).toBe("Local");
+    expect(sameAddress("https://a.example/mcp/", "https://A.example/mcp")).toBe(true);
+  });
+
+  it("searches the directory by every word", () => {
+    const dir = [
+      entry(),
+      entry({ id: "t", name: "Sample Tracker", vendor: "Sample Labs", description: "Issues." }),
+    ];
+    expect(filterDirectory(dir, "").length).toBe(2);
+    expect(filterDirectory(dir, "sample issues").map((e) => e.id)).toEqual(["t"]);
+    expect(filterDirectory(dir, "nothing here")).toEqual([]);
+  });
+
+  it("summarises what a probe found", () => {
+    const t = (kind: "read" | "write") => ({
+      name: "x",
+      title: null,
+      description: "",
+      kind,
+      labelled: true,
+    });
+    expect(
+      probeSummary({
+        needsSignIn: false,
+        tools: [...Array(4)].map(() => t("read")).concat([...Array(8)].map(() => t("write"))),
+      }),
+    ).toBe("Found 12 tools: 4 read-only, 8 can make changes");
+    expect(probeSummary({ needsSignIn: false, tools: [t("read")] })).toBe(
+      "Found 1 tool: 1 read-only, 0 can make changes",
+    );
+    expect(probeSummary({ needsSignIn: true, tools: [] })).toContain("sign in with your browser");
+    expect(probeSummary({ needsSignIn: false, tools: [] })).toBe("Found no tools.");
+  });
+
+  it("turns a directory entry into an add request", () => {
+    expect(directoryInput(entry())).toEqual({
+      config: {
+        name: "Example Notes",
+        transport: { kind: "http", url: "https://mcp.example-notes.example/mcp", headers: [] },
+        auth: { kind: "oauth", scopes: [], clientId: null },
+      },
+      secrets: {},
+    });
+    expect(directoryInput(entry({ auth: "api_key" }), " key-1 ").secrets).toEqual({
+      apiKey: "key-1",
     });
   });
+});
 
-  it("compares arguments", () => {
-    expect(sameArgs({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] })).toBe(true);
-    expect(sameArgs({ a: 1 }, { a: 2 })).toBe(false);
+describe("Add custom", () => {
+  const draft = (d: Partial<CustomDraft>): CustomDraft => ({
+    ...emptyCustomDraft(),
+    name: "Team wiki",
+    url: "https://wiki.example.com/mcp",
+    signIn: "none",
+    ...d,
   });
 
-  it("templates the required properties with empty values", () => {
-    expect(
-      argsTemplate({
-        type: "object",
-        properties: {
-          query: { type: "string", default: "ignored" },
-          limit: { type: "integer" },
-          score: { type: "number" },
-          exact: { type: "boolean" },
-          tags: { type: "array" },
-          filter: { type: "object" },
-          maybe: { type: ["null", "string"] },
-          anything: {},
-          optional: { type: "string" },
-        },
-        required: [
-          "query",
-          "limit",
-          "score",
-          "exact",
-          "tags",
-          "filter",
-          "maybe",
-          "anything",
-          "notInProperties",
+  it("needs https, a name and a sign-in choice (nothing pre-selected)", () => {
+    expect(emptyCustomDraft().signIn).toBe("");
+    const bad = validateCustom(draft({ name: " ", url: "http://wiki.example.com", signIn: "" }));
+    expect(bad.input).toBeNull();
+    expect(bad.errors).toEqual({
+      name: "Give it a name.",
+      url: "Use an address that starts with https://",
+      signIn: "Choose how it signs in.",
+    });
+    expect(validateCustom(draft({ url: "wiki.example.com" })).errors.url).toBe(
+      "Use an address that starts with https://",
+    );
+    expect(validateCustom(draft({ url: "https://dana:pw@wiki.example.com" })).errors.url).toBe(
+      "Leave sign-in details out of the address.",
+    );
+    expect(validateCustom(draft({ name: "x".repeat(41) })).errors.name).toContain("40");
+  });
+
+  it("builds the input with headers; secret values go to the keychain", () => {
+    const { input, errors } = validateCustom(
+      draft({
+        headers: [
+          row({ name: "X-Team", value: "design" }),
+          row({ name: "X-Token", value: "s3cret", secret: true }),
+          row({}), // empty rows are ignored
         ],
       }),
-    ).toEqual({
-      query: "",
-      limit: 0,
-      score: 0,
-      exact: false,
-      tags: [],
-      filter: {},
-      maybe: "",
-      anything: null,
+    );
+    expect(errors).toEqual({});
+    expect(input).toEqual({
+      config: {
+        name: "Team wiki",
+        transport: {
+          kind: "http",
+          url: "https://wiki.example.com/mcp",
+          headers: [
+            { name: "X-Team", value: "design" },
+            { name: "X-Token", value: null },
+          ],
+        },
+        auth: { kind: "none" },
+      },
+      secrets: { apiKey: null, clientSecret: null, values: { "X-Token": "s3cret" } },
     });
   });
 
-  it("templates nothing from a missing or odd schema", () => {
-    expect(argsTemplate(null)).toEqual({});
-    expect(argsTemplate("x")).toEqual({});
-    expect(argsTemplate({ type: "object" })).toEqual({});
-    expect(argsTemplate({ properties: { a: { type: "string" } }, required: "a" })).toEqual({});
+  it("checks headers: names, repeats, and a value for every secret on add", () => {
+    const a = row({ name: "Bad Name", value: "x" });
+    const b = row({ name: "X-One", value: "1" });
+    const c = row({ name: "x-one", value: "2" });
+    const d = row({ name: "X-Secret", secret: true });
+    const { errors } = validateCustom(draft({ headers: [a, b, c, d] }));
+    expect(errors[`row:${a.id}`]).toContain("header name");
+    expect(errors[`row:${b.id}`]).toBeUndefined();
+    expect(errors[`row:${c.id}`]).toBe("This name is already listed.");
+    expect(errors[`row:${d.id}`]).toBe("Enter a value. It's saved in your keychain.");
+    // editing: a stored secret may stay empty
+    const kept = row({ name: "X-Secret", secret: true, stored: true });
+    expect(validateCustom(draft({ headers: [kept] })).errors).toEqual({});
+    const auth = row({ name: "Authorization", value: "x" });
+    expect(
+      validateCustom(draft({ signIn: "api_key", apiKey: "k", headers: [auth] })).errors,
+    ).toEqual({
+      [`row:${auth.id}`]: "Sign-in sets this header.",
+    });
+  });
+
+  it("API key: required on add, optional when one is saved", () => {
+    expect(validateCustom(draft({ signIn: "api_key" })).errors.apiKey).toBe(
+      "Enter the key or token.",
+    );
+    expect(
+      validateCustom(draft({ signIn: "api_key" }), { apiKeySet: true }).input?.secrets,
+    ).toEqual({ apiKey: null, clientSecret: null, values: {} });
+    expect(
+      validateCustom(draft({ signIn: "api_key", apiKey: " k-1 " })).input?.config.auth,
+    ).toEqual({ kind: "api_key" });
+    expect(
+      validateCustom(draft({ signIn: "api_key", apiKey: " k-1 " })).input?.secrets.apiKey,
+    ).toBe("k-1");
+  });
+
+  it("OAuth: client ID optional; a client secret needs one", () => {
+    expect(validateCustom(draft({ signIn: "oauth" })).input?.config.auth).toEqual({
+      kind: "oauth",
+      scopes: [],
+      clientId: null,
+    });
+    expect(validateCustom(draft({ signIn: "oauth", clientSecret: "s" })).errors.clientSecret).toBe(
+      "A client secret needs a client ID.",
+    );
+    const full = validateCustom(draft({ signIn: "oauth", clientId: " app ", clientSecret: "s" }));
+    expect(full.input?.config.auth).toEqual({ kind: "oauth", scopes: [], clientId: "app" });
+    expect(full.input?.secrets.clientSecret).toBe("s");
+  });
+
+  it("edit: prefills the form, secrets empty and marked stored", () => {
+    const c = connector({
+      auth: { kind: "api_key" },
+      transport: {
+        kind: "http",
+        url: "https://wiki.example.com/mcp",
+        headers: [
+          { name: "X-Team", value: "design" },
+          { name: "X-Token", value: null },
+        ],
+      },
+      secrets: {
+        apiKeySet: true,
+        clientSecretSet: false,
+        values: [{ name: "X-Token", set: true }],
+      },
+    });
+    const d = customDraftFrom(c, newId);
+    expect(d.signIn).toBe("api_key");
+    expect(d.apiKey).toBe("");
+    expect(
+      d.headers.map(({ name, value, secret, stored }) => ({ name, value, secret, stored })),
+    ).toEqual([
+      { name: "X-Team", value: "design", secret: false, stored: false },
+      { name: "X-Token", value: "", secret: true, stored: true },
+    ]);
+    expect(validateCustom(d, { apiKeySet: true }).input?.secrets).toEqual({
+      apiKey: null,
+      clientSecret: null,
+      values: {},
+    });
+  });
+});
+
+describe("Add local", () => {
+  const draft = (d: Partial<LocalDraft>): LocalDraft => ({
+    ...emptyLocalDraft(),
+    name: "Docs search",
+    program: "npx",
+    ...d,
+  });
+
+  it("builds a program with arguments and settings", () => {
+    const { input, errors } = validateLocal(
+      draft({
+        args: [
+          { id: "a", value: "-y" },
+          { id: "b", value: "" },
+          { id: "c", value: "@example/docs-server" },
+        ],
+        env: [
+          row({ name: "DOCS_TOKEN", value: "t0k", secret: true }),
+          row({ name: "MODE", value: "fast" }),
+        ],
+      }),
+    );
+    expect(errors).toEqual({});
+    expect(input).toEqual({
+      config: {
+        name: "Docs search",
+        transport: {
+          kind: "stdio",
+          command: "npx",
+          args: ["-y", "@example/docs-server"],
+          env: [
+            { name: "DOCS_TOKEN", value: null },
+            { name: "MODE", value: "fast" },
+          ],
+        },
+        auth: { kind: "none" },
+      },
+      secrets: { values: { DOCS_TOKEN: "t0k" } },
+    });
+  });
+
+  it("needs a program (and a file when choosing one) and good setting names", () => {
+    expect(validateLocal(draft({ program: "" })).errors.program).toBe("Choose the program.");
+    expect(validateLocal(draft({ program: "file", file: " " })).errors.program).toBe(
+      "Choose a file.",
+    );
+    expect(
+      validateLocal(draft({ program: "file", file: "/opt/x/server" })).input?.config.transport,
+    ).toMatchObject({
+      command: "/opt/x/server",
+    });
+    const bad = row({ name: "9BAD", value: "x" });
+    expect(validateLocal(draft({ env: [bad] })).errors[`row:${bad.id}`]).toContain("not starting");
+    const tooMany = [...Array(33)].map((_, i) => ({ id: `${i}`, value: `a${i}` }));
+    expect(validateLocal(draft({ args: tooMany })).errors.args).toBe("Use 32 arguments or fewer.");
+  });
+
+  it("previews what will run, with secrets as ••••", () => {
+    expect(
+      willRunPreview(
+        draft({
+          args: [
+            { id: "a", value: "-y" },
+            { id: "b", value: "@example/docs server" },
+          ],
+          env: [
+            row({ name: "TOKEN", value: "abc", secret: true }),
+            row({ name: "MODE", value: "fast" }),
+          ],
+        }),
+      ),
+    ).toEqual({
+      command: 'npx -y "@example/docs server"',
+      settings: ["TOKEN=••••", "MODE=fast"],
+    });
+    expect(willRunPreview(draft({ program: "" })).command).toBe("…");
+    expect(quoteArg("")).toBe('""');
+    expect(quoteArg('say "hi"')).toBe('"say \\"hi\\""');
+  });
+
+  it("Paste a command fills rows and never runs anything", () => {
+    const p = parseCommand('TOKEN=abc MODE=fast npx -y "@example/docs server"', newId);
+    expect("error" in p).toBe(false);
+    if ("error" in p) return;
+    expect(p.program).toBe("npx");
+    expect(p.args.map((a) => a.value)).toEqual(["-y", "@example/docs server"]);
+    expect(p.env.map(({ name, value, secret }) => ({ name, value, secret }))).toEqual([
+      { name: "TOKEN", value: "abc", secret: true },
+      { name: "MODE", value: "fast", secret: true },
+    ]);
+    expect(parseCommand("C:\\Tools\\uvx.exe server", newId)).toMatchObject({ program: "uvx" });
+    expect(parseCommand("/opt/x/server --port 3", newId)).toMatchObject({
+      program: "file",
+      file: "/opt/x/server",
+    });
+    expect(parseCommand("  ", newId)).toEqual({
+      error: "Paste a command, like npx -y @example/server.",
+    });
+    expect(parseCommand('npx "open', newId)).toEqual({
+      error: "A quote in the command isn't closed.",
+    });
+    expect(splitArgs('a "" b')).toEqual({ args: ["a", "", "b"] });
+  });
+
+  it("edit: prefills program, arguments and settings", () => {
+    const c = connector({
+      kind: "local",
+      transport: {
+        kind: "stdio",
+        command: "/opt/x/server",
+        args: ["--port", "3"],
+        env: [{ name: "TOKEN", value: null }],
+      },
+      secrets: { apiKeySet: false, clientSecretSet: false, values: [{ name: "TOKEN", set: true }] },
+    });
+    const d = localDraftFrom(c, newId);
+    expect(d.program).toBe("file");
+    expect(d.file).toBe("/opt/x/server");
+    expect(d.args.map((a) => a.value)).toEqual(["--port", "3"]);
+    expect(d.env[0]).toMatchObject({ name: "TOKEN", value: "", secret: true, stored: true });
+    expect(validateLocal(d).errors).toEqual({});
+  });
+
+  it("describes an import candidate", () => {
+    expect(
+      candidateSummary({
+        key: "k",
+        name: "Files",
+        kind: "local",
+        command: "npx",
+        args: ["-y", "@example/files server"],
+        envNames: [],
+        url: null,
+        headerNames: [],
+      }),
+    ).toBe('npx -y "@example/files server"');
+  });
+});
+
+describe("card fields", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      query: { type: "string", title: "Search for", description: "Name or email" },
+      limit: { type: "integer" },
+      score: { type: ["number", "null"] },
+      exact: { type: "boolean" },
+      stage: { type: "string", enum: ["won", "lost"] },
+    },
+    required: ["query", "limit"],
+  };
+
+  it("makes fields for simple properties", () => {
+    const f = schemaFields(schema, { query: "acme", limit: 5 });
+    expect(f?.map((x) => [x.name, x.label, x.kind, x.required])).toEqual([
+      ["query", "Search for", "string", true],
+      ["limit", "limit", "integer", true],
+      ["score", "score", "number", false],
+      ["exact", "exact", "boolean", false],
+      ["stage", "stage", "string", false],
+    ]);
+    expect(f?.[0].description).toBe("Name or email");
+    expect(f?.[4].options).toEqual(["won", "lost"]);
+  });
+
+  it("falls back to code for anything else", () => {
+    expect(schemaFields({ properties: { o: { type: "object" } } }, {})).toBeNull();
+    expect(schemaFields({ properties: { a: { type: "array" } } }, {})).toBeNull();
+    expect(schemaFields(schema, { extra: 1 })).toBeNull();
+    expect(schemaFields(schema, { limit: "5" })).toBeNull();
+    expect(schemaFields(schema, { limit: 1.5 })).toBeNull();
+    expect(schemaFields(null, {})).toEqual([]);
+    expect(schemaFields(null, { a: 1 })).toBeNull();
+  });
+
+  it("turns field values back into arguments", () => {
+    const f = schemaFields(schema, { query: "acme", limit: 5 })!;
+    const v = fieldValuesFrom(f, { query: "acme", limit: 5 });
+    expect(v.get("limit")).toBe("5");
+    expect(v.get("exact")).toBe(false);
+    expect(argsFromFields(f, v, { query: "acme", limit: 5 })).toEqual({
+      ok: true,
+      value: { query: "acme", limit: 5 },
+    });
+    const edited = new Map(v).set("limit", "7").set("exact", true).set("score", "0.5");
+    expect(argsFromFields(f, edited, {})).toEqual({
+      ok: true,
+      value: { query: "acme", limit: 7, score: 0.5, exact: true },
+    });
+    expect(argsFromFields(f, new Map(v).set("limit", ""), {})).toEqual({
+      ok: false,
+      error: "Enter a number for “limit”.",
+    });
+    expect(argsFromFields(f, new Map(v).set("limit", "2.5"), {})).toEqual({
+      ok: false,
+      error: "“limit” must be a whole number.",
+    });
+    expect(argsFromFields(f, new Map(v).set("score", "abc"), {})).toEqual({
+      ok: false,
+      error: "“score” must be a number.",
+    });
   });
 
   it("keeps a __proto__ property as a plain key", () => {
-    const t = argsTemplate({
+    const s = {
       properties: JSON.parse('{"__proto__": {"type": "string"}}'),
       required: ["__proto__"],
+    };
+    const f = schemaFields(s, {})!;
+    const out = argsFromFields(f, new Map([["__proto__", "x"]]), {});
+    expect(out.ok && JSON.stringify(out.value)).toBe('{"__proto__":"x"}');
+    expect(out.ok && Object.getPrototypeOf(out.value)).toBe(Object.prototype);
+  });
+
+  it("JSON editing and the decided summary", () => {
+    expect(prettyArgs({ a: 1 })).toBe('{\n  "a": 1\n}');
+    expect(parseArgs("[1]")).toEqual({
+      ok: false,
+      error: "Details must be a JSON object ({ … }), not a list or a value.",
     });
-    expect(Object.keys(t)).toEqual(["__proto__"]);
-    expect(Object.getPrototypeOf(t)).toBe(Object.prototype);
-    expect(JSON.stringify(t)).toBe('{"__proto__":""}');
-  });
-});
-
-describe("proposals", () => {
-  const p = (proposalId: string): ConnectorCallProposal => ({
-    proposalId,
-    turnId: "t1",
-    serverId: "c-acme",
-    serverName: "Acme CRM",
-    destination: "mcp.acme-crm.example",
-    tool: "search_contacts",
-    toolTitle: null,
-    kind: "read",
-    destructive: false,
-    args: {},
-    inputSchema: {},
+    expect(parseArgs("{").ok).toBe(false);
+    expect(parseArgs("").ok).toBe(false);
+    expect(sameArgs({ a: 1 }, { a: 1 })).toBe(true);
+    const at = new Date(2026, 9, 28, 14, 14).getTime();
+    expect(decidedLabel("allow_once", at)).toBe("Allowed once · 2:14 PM");
+    expect(decidedLabel("always_allow", at)).toBe("Always allowed · 2:14 PM");
+    expect(decidedLabel("deny", at)).toBe("Denied");
   });
 
-  it("adds new ones in order, skipping shown and settled ones", () => {
+  it("merges proposals without repeats or settled ones", () => {
+    const p = (id: string) => ({ proposalId: id }) as ConnectorCallProposal;
     const cur = [p("a")];
     expect(mergeProposals(cur, [p("a")], new Set())).toBe(cur);
     expect(
@@ -317,50 +670,77 @@ describe("proposals", () => {
   });
 });
 
-describe("call log labels", () => {
-  it("names outcomes and refusals", () => {
-    expect(outcomeLabel({ outcome: "ran", refusal: null })).toBe("Ran");
-    expect(outcomeLabel({ outcome: "declined", refusal: null })).toBe("You didn't run it");
-    expect(outcomeLabel({ outcome: "server_error", refusal: null })).toBe("Server error");
-    expect(outcomeLabel({ outcome: "failed", refusal: null })).toBe("Failed");
-    expect(outcomeLabel({ outcome: "refused", refusal: "keep_local" })).toBe(
-      "Refused: the note is kept local",
+describe("activity", () => {
+  it("names results and problems", () => {
+    expect(activityResult({ outcome: "ran", approval: "user" })).toBe("Allowed by you");
+    expect(activityResult({ outcome: "ran", approval: "automatic" })).toBe("Allowed automatically");
+    expect(activityResult({ outcome: "declined", approval: null })).toBe("Denied");
+    expect(activityResult({ outcome: "refused", approval: null })).toBe("Blocked");
+    expect(activityResult({ outcome: "failed", approval: null })).toBe("Failed");
+    expect(activityResult({ outcome: "server_error", approval: null })).toBe("Failed");
+    expect(activityDetail({ outcome: "refused", refusal: "keep_local" })).toBe(
+      "the note is kept local",
     );
-    expect(outcomeLabel({ outcome: "refused", refusal: null })).toBe("Refused");
-    for (const code of [
-      "not_offered",
-      "keep_local",
-      "after_result",
-      "budget",
-      "invalid_arguments",
-      "tool_changed",
-      "not_approved",
-      "timed_out",
-    ] as const) {
-      expect(refusalLabel(code)).not.toBe("refused");
+    expect(activityDetail({ outcome: "refused", refusal: "toString" as never })).toBeNull();
+    expect(activityDetail({ outcome: "ran", refusal: null })).toBeNull();
+    expect(isProblem({ outcome: "declined" })).toBe(false);
+    expect(isProblem({ outcome: "refused" })).toBe(true);
+    expect(isProblem({ outcome: "server_error" })).toBe(true);
+  });
+
+  it("formats times", () => {
+    const now = new Date(2026, 9, 28, 15, 0).getTime();
+    expect(formatTime(new Date(2026, 9, 28, 14, 14).getTime() / 1000, now)).toBe("2:14 PM");
+    expect(formatTime(new Date(2026, 9, 27, 9, 5).getTime() / 1000, now)).toBe("Oct 27, 9:05 AM");
+    expect(relativeTime(now / 1000 - 10, now)).toBe("just now");
+    expect(relativeTime(now / 1000 - 300, now)).toBe("5 min ago");
+    expect(relativeTime(now / 1000 - 3 * 3600, now)).toBe("3 h ago");
+    expect(relativeTime(now / 1000 - 26 * 3600, now)).toBe("yesterday");
+  });
+});
+
+describe("Try…", () => {
+  it("is offered for usable tools that aren't Blocked", () => {
+    expect(canTry(tool({ name: "a" }))).toBe(true);
+    expect(canTry(tool({ name: "a", permission: "always_allow" }))).toBe(true);
+    expect(canTry(tool({ name: "a", permission: "blocked" }))).toBe(false);
+    for (const status of ["changed", "new", "missing", "unusable"] as const) {
+      expect(canTry(tool({ name: "a", status }))).toBe(false);
     }
-    // an unknown code from a newer backend still reads sensibly
-    expect(refusalLabel("toString" as never)).toBe("refused");
   });
 
-  it("formats durations, sizes and order", () => {
-    expect(formatDuration(840)).toBe("840 ms");
-    expect(formatDuration(1210)).toBe("1.2 s");
-    expect(formatDuration(125_000)).toBe("2 min");
-    expect(formatChars(1, false)).toBe("1 char");
-    expect(formatChars(12000, true)).toBe("12,000 chars, cut");
-    expect(newestFirst([1, 2, 3])).toEqual([3, 2, 1]);
-  });
-
-  it("says how long ago", () => {
-    const now = Date.UTC(2026, 9, 28, 12, 0, 0);
-    const at = (secsAgo: number) => now / 1000 - secsAgo;
-    expect(relativeTime(at(10), now)).toBe("just now");
-    expect(relativeTime(at(-30), now)).toBe("just now");
-    expect(relativeTime(at(5 * 60), now)).toBe("5 min ago");
-    expect(relativeTime(at(3 * 3600), now)).toBe("3 h ago");
-    expect(relativeTime(at(26 * 3600), now)).toBe("yesterday");
-    expect(relativeTime(at(4 * 86400), now)).toBe("4 days ago");
-    expect(relativeTime(at(30 * 86400), now)).toBe("Sep 28, 2026");
+  it("starts from the required properties with empty values", () => {
+    expect(
+      argsTemplate({
+        type: "object",
+        properties: {
+          query: { type: "string", default: "ignored" },
+          limit: { type: "integer" },
+          exact: { type: "boolean" },
+          tags: { type: "array" },
+          filter: { type: "object" },
+          maybe: { type: ["null", "string"] },
+          anything: {},
+          optional: { type: "string" },
+        },
+        required: ["query", "limit", "exact", "tags", "filter", "maybe", "anything", "nope"],
+      }),
+    ).toEqual({
+      query: "",
+      limit: 0,
+      exact: false,
+      tags: [],
+      filter: {},
+      maybe: "",
+      anything: null,
+    });
+    expect(argsTemplate(null)).toEqual({});
+    expect(argsTemplate({ properties: { a: { type: "string" } }, required: "a" })).toEqual({});
+    const odd = argsTemplate({
+      properties: JSON.parse('{"__proto__": {"type": "string"}}'),
+      required: ["__proto__"],
+    });
+    expect(JSON.stringify(odd)).toBe('{"__proto__":""}');
+    expect(Object.getPrototypeOf(odd)).toBe(Object.prototype);
   });
 });

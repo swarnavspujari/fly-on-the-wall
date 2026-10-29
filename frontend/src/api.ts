@@ -23,12 +23,16 @@ import type {
   Connector,
   ConnectorCallLogEntry,
   ConnectorCallProposal,
-  ConnectorConfigInput,
+  ConnectorCardAction,
+  ConnectorClaudeImport,
   ConnectorDecideResult,
+  ConnectorDirectoryEntry,
+  ConnectorInput,
+  ConnectorPermissionChange,
+  ConnectorProbe,
   ConnectorSaveResult,
   ConnectorsOverview,
   ConnectorTestResult,
-  ConnectorToolPermission,
   DiskEncryption,
   ImportStaged,
   ScreenStatus,
@@ -276,37 +280,50 @@ export const api = {
   keepNoteBlock: (noteId: string, blockId: string) =>
     invoke<Note>("keep_note_block", { noteId, blockId }),
 
-  // connectors (beta): MCP servers Ask can call. Whatever grants trust
-  // (adding a server, enabling a tool, marking it read-only, accepting a
-  // changed tool) is confirmed by the backend in a native dialog; a decline
-  // there comes back as { saved: false }, not as an error.
+  // connectors (beta): MCP servers Ask and Enhance can call. Anything that
+  // grants trust (adding or turning on a connector, loosening a tool's
+  // permission, approving a changed tool, a write call) is confirmed by the
+  // backend in a native dialog; a decline comes back as `saved: false` (or
+  // `ok: false, error: null`), not as an error. Errors are strings; text
+  // after a "---" line is program output (see splitDetails).
   connectorsOverview: () => invoke<ConnectorsOverview>("connectors_overview"),
-  addConnector: (config: ConnectorConfigInput) =>
-    invoke<ConnectorSaveResult>("add_connector", { config }),
-  /** Also deletes the connector's keychain entries (sign-in, variables). */
+  connectorsDirectory: () => invoke<ConnectorDirectoryEntry[]>("connectors_directory"),
+  /** Web connectors only: its tools, or that it wants a browser sign-in. */
+  probeConnector: (input: ConnectorInput) => invoke<ConnectorProbe>("probe_connector", { input }),
+  addConnector: (input: ConnectorInput) => invoke<ConnectorSaveResult>("add_connector", { input }),
+  updateConnector: (id: string, input: ConnectorInput) =>
+    invoke<ConnectorSaveResult>("update_connector", { id, input }),
+  /** Off applies at once; on asks in a native dialog. */
+  setConnectorEnabled: (id: string, enabled: boolean) =>
+    invoke<ConnectorSaveResult>("set_connector_enabled", { id, enabled }),
+  /** Also deletes its sign-in and saved secrets from the keychain. */
   removeConnector: (id: string) => invoke<void>("remove_connector", { id }),
-  /** Connects and lists the server's tools; new tools arrive off. */
   syncConnectorTools: (id: string) => invoke<Connector>("sync_connector_tools", { id }),
-  /** Only the tools whose permissions changed. */
-  saveConnectorTools: (id: string, changes: ConnectorToolPermission[]) =>
-    invoke<ConnectorSaveResult>("save_connector_tools", { id, changes }),
-  acceptConnectorToolChange: (id: string, tool: string, pendingHash: string) =>
-    invoke<ConnectorSaveResult>("accept_connector_tool_change", { id, tool, pendingHash }),
-  /** Opens the system browser; resolves once sign-in completes (up to 5 min). */
-  signInConnector: (id: string) => invoke<Connector>("sign_in_connector", { id }),
+  /** Tightening applies at once; loosening asks in a native dialog. */
+  setConnectorToolPermissions: (id: string, changes: ConnectorPermissionChange[]) =>
+    invoke<ConnectorSaveResult>("set_connector_tool_permissions", { id, changes }),
+  approveConnectorTool: (id: string, tool: string, reviewHash: string) =>
+    invoke<ConnectorSaveResult>("approve_connector_tool", { id, tool, reviewHash }),
+  /** Opens the system browser; resolves when sign-in finishes (up to 5 min). */
+  signInConnector: (id: string) => invoke<ConnectorSaveResult>("sign_in_connector", { id }),
   signOutConnector: (id: string) => invoke<Connector>("sign_out_connector", { id }),
-  /** A local program's variable, kept in the OS keychain; "" clears it. The
-   *  value is never returned. */
-  setConnectorEnv: (id: string, name: string, value: string) =>
-    invoke<Connector>("set_connector_env", { id, name, value }),
+  /** Reads Claude Desktop's config (never writes it). */
+  claudeDesktopCandidates: () => invoke<ConnectorClaudeImport>("claude_desktop_candidates"),
+  importClaudeDesktopConnector: (key: string) =>
+    invoke<ConnectorSaveResult>("import_claude_desktop_connector", { key }),
+  /** Native file picker for a local connector's program; null if cancelled. */
+  pickConnectorProgram: () => invoke<string | null>("pick_connector_program"),
   /** Oldest first. Never holds arguments or results. */
   connectorCallLog: () => invoke<ConnectorCallLogEntry[]>("connector_call_log"),
   clearConnectorCallLog: () => invoke<void>("clear_connector_call_log"),
   pendingConnectorCalls: () => invoke<ConnectorCallProposal[]>("pending_connector_calls"),
-  /** `args` null = run with the proposed arguments unchanged. */
-  decideConnectorCall: (proposalId: string, run: boolean, args: Record<string, unknown> | null) =>
-    invoke<ConnectorDecideResult>("decide_connector_call", { proposalId, run, args }),
-  /** A call you start from Settings; it goes through the same confirm card. */
+  /** `args` null = send the proposed arguments unchanged. */
+  decideConnectorCall: (
+    proposalId: string,
+    action: ConnectorCardAction,
+    args: Record<string, unknown> | null,
+  ) => invoke<ConnectorDecideResult>("decide_connector_call", { proposalId, action, args }),
+  /** A call started from Settings; it follows the same rules and cards. */
   testConnectorTool: (id: string, tool: string, args: Record<string, unknown>) =>
     invoke<ConnectorTestResult>("test_connector_tool", { id, tool, args }),
 };

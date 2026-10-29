@@ -142,7 +142,7 @@ function Section({
   children,
 }: {
   id: SectionId;
-  title: string;
+  title: ReactNode;
   hidden: boolean;
   children: ReactNode;
 }) {
@@ -2214,7 +2214,18 @@ export default function SettingsModal({
                   </SettingsGroup>
                 </Section>
 
-                <Section id="connectors" hidden={!show("connectors")} title="Connectors (beta)">
+                <Section
+                  id="connectors"
+                  hidden={!show("connectors")}
+                  title={
+                    <>
+                      Connectors{" "}
+                      <Badge tone="primary" style={{ verticalAlign: "middle" }}>
+                        Beta
+                      </Badge>
+                    </>
+                  }
+                >
                   <ConnectorsSection />
                 </Section>
 

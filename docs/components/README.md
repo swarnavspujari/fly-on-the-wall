@@ -19,8 +19,8 @@ Three layers:
 | Layer | Where | Components |
 |---|---|---|
 | **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 11 `ui-*` docs |
-| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 105 Tauri commands) | 15 `app-*` docs |
-| **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 11 `fly-*` docs |
+| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 125 Tauri commands) | 16 `app-*` docs |
+| **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 12 `fly-*` docs |
 
 ## Index
 
@@ -39,6 +39,7 @@ Three layers:
 | [fly-storage](fly-storage.md) | SQLite index (FTS5, vectors, migrations) plus the user-owned files on disk: atomic mirrors, manifests, self-heal, path containment, scratch, erase. |
 | [fly-secrets](fly-secrets.md) | `SecretStore` over the OS keychain. Every API key and OAuth token lives here. |
 | [fly-mcp](fly-mcp.md) | The `flyonthewall-mcp` stdio MCP server: read-only tools over fly-storage, plus one label write. |
+| [fly-mcp-client](fly-mcp-client.md) | Connectors (beta): FOTW's Ask agent calling tools on MCP servers the user connects, on `rmcp` 3.8.0, with the spec §4.3 safety rules (approval bound to a config hash, pinned tool definitions, per-tool permissions, fenced results, https-only network guard, OAuth, keychain secrets). |
 
 ### Backend features (`src-tauri/src`)
 
@@ -59,6 +60,7 @@ Three layers:
 | [app-mcp-sidecar](app-mcp-sidecar.md) | `commands.rs` (`mcp_config`), `scripts/prepare-sidecars.mjs`, `externalBin` | Shipping and wiring the MCP binary. |
 | [app-screen-recording](app-screen-recording.md) | `screen_commands.rs` | Screen recording and video thumbnails. |
 | [app-updater](app-updater.md) | updater + process plugins, `frontend/src/updater.ts` | Signed auto-update, deferred while recording. |
+| [app-connectors](app-connectors.md) | `connectors.rs` | Connectors (beta): backend-only registry, native dialogs for every trust grant, the confirm-card approver, Claude Desktop import, `turn_for_ask` for the Ask harness. |
 
 ### Frontend features (`frontend/src`)
 
@@ -74,7 +76,7 @@ Three layers:
 | [ui-recording-bar](ui-recording-bar.md) | `RecordingBar.tsx`, `recordingBar.ts`, `LivePane.tsx` | Recording controls, capture warnings, live captions. |
 | [ui-attendees](ui-attendees.md) | `AttendeeEditor.tsx`, `calendarMatch.ts` | Attendee roster, confirmation, re-diarize with undo. |
 | [ui-confirm-consent](ui-confirm-consent.md) | `confirm.tsx`, `CloudConsent.tsx` | The in-app confirm dialog, and every cloud-consent request (the backend shows the dialog). |
-| [ui-connectors](ui-connectors.md) | `ConnectorsSection.tsx`, `ConnectorCallCard.tsx`, `connectorsModel.ts` | Settings › Connectors (beta) and the confirm card for every connector call (trust grants happen in the backend's native dialogs). |
+| [ui-connectors](ui-connectors.md) | `ConnectorsSection.tsx`, `ConnectorDetail.tsx`, `ConnectorAdd.tsx`, `ConnectorCallCard.tsx`, `connectorsModel.ts` | Settings › Connectors (list, Browse, Add, detail with per-tool permissions) and the call cards; trust grants happen in the backend's native dialogs. |
 
 ## Dependency diagrams
 
@@ -84,6 +86,7 @@ Three layers:
 flowchart LR
   app["fly-app<br/>(src-tauri)"]
   mcp["fly-mcp<br/>(sidecar binary)"]
+  mcpc["fly-mcp-client<br/>(connectors beta)"]
   ctx["fly-context<br/>(dormant)"]
   core["fly-core"]
   audio["fly-audio"]
@@ -95,7 +98,7 @@ flowchart LR
   sto["fly-storage"]
   sec["fly-secrets"]
 
-  app --> asr & audio & cal & cap & core & diar & llm & sec & sto
+  app --> asr & audio & cal & cap & core & diar & llm & mcpc & sec & sto
   asr --> audio & core
   audio --> core
   cal --> core & sec
@@ -105,11 +108,12 @@ flowchart LR
   sto --> core
   ctx --> core & sto
   mcp --> core & sto
+  mcpc --> llm & sec
 ```
 
 - `fly-core` and `fly-secrets` depend on no other workspace crate.
 - `fly-app` depends on neither `fly-mcp` (it ships as a separate binary, see [app-mcp-sidecar](app-mcp-sidecar.md)) nor `fly-context` (dormant until the Ask harness wires it).
-- Network-capable crates (`reqwest`): `fly-asr`, `fly-llm`, `fly-calendar`, and `fly-app`. **`fly-mcp`, `fly-storage`, `fly-core` and `fly-context` have no HTTP client.** This is what keeps spec §2 "the MCP binary never holds keys or calls a cloud LLM" true today. The [boundary rules](#how-to-enforce-boundaries-cheaply) propose checking it mechanically.
+- Network-capable crates (`reqwest`): `fly-asr`, `fly-llm`, `fly-calendar`, `fly-mcp-client` (connectors, behind its network guard), and `fly-app`. **`fly-mcp`, `fly-storage`, `fly-core` and `fly-context` have no HTTP client.** This is what keeps spec §2 "the MCP binary never holds keys or calls a cloud LLM" true today. The [boundary rules](#how-to-enforce-boundaries-cheaply) propose checking it mechanically.
 
 ### Component map (main edges)
 
@@ -196,7 +200,7 @@ Back-edges inside `fly-app` that the map doesn't show, measured with `grep crate
 
 ## Command ownership
 
-Each of the 105 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs:182-288`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
+Each of the 125 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
 
 | Doc | Commands |
 |---|---|
@@ -215,6 +219,7 @@ Each of the 105 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs:18
 | [app-privacy](app-privacy.md) | 12 |
 | [app-mcp-sidecar](app-mcp-sidecar.md) | 1 |
 | [app-updater](app-updater.md) | 0 (plugin-provided) |
+| [app-connectors](app-connectors.md) | 20 |
 
 ## Network egress at a glance
 
@@ -229,7 +234,8 @@ Every host the app or its child processes contact. Detail and gates are in each 
 | `github.com` releases (whisper.cpp, sherpa-onnx, FFmpeg builds, Ollama, this repo's tool builds), `huggingface.co`, and `hf-mirror.com` (on by default, tried after 2 failed huggingface.co attempts; `FLYONTHEWALL_NO_HF_MIRROR` turns it off) | No | First use of a model or tool | SHA-256 pinned | [app-models-gpu](app-models-gpu.md) |
 | `registry.ollama.ai` (from the Ollama child process) | No | Model pull, including the embedding model | — | [app-ollama](app-ollama.md), [app-search](app-search.md) |
 | `github.com/…/releases/latest/download/latest.json` and the release assets | No | Update check 5 s after launch; Update now | Minisign-verified | [app-updater](app-updater.md) |
-| `127.0.0.1:<ephemeral>` (inbound) | — | OAuth redirect | One-shot listener with a `state` check | [fly-calendar](fly-calendar.md) |
+| The https address of each connector the user added (beta), and its OAuth server | Only what the user lets through: the arguments of calls the user allowed on a card, or of tools the user set to Always allow | "Checking…" before adding; then only after approval: refresh tools, sign in, calls | Native-dialog approval bound to the config hash; per-tool permission; https only, private addresses blocked; Keep-local turns get no connectors | [fly-mcp-client](fly-mcp-client.md), [app-connectors](app-connectors.md) |
+| `127.0.0.1:<ephemeral>` (inbound) | — | OAuth redirect | One-shot listener with a `state` check | [fly-calendar](fly-calendar.md), [fly-mcp-client](fly-mcp-client.md) |
 
 `ARCHITECTURE.md`'s "exactly two things touch the network" predates calendars, the updater and model downloads. Only the first three rows can carry meeting content.
 
@@ -321,6 +327,7 @@ Each extraction moves its component doc with it, and the doc's **Tests** section
 | **#102** backend-only cloud consent: `request_cloud_consent` asks in a native dialog and is the only writer of `consent.cloud_llm.*`, which the webview can read but not set | **Merged**; the docs below describe it | [app-settings-consent](app-settings-consent.md), [app-llm](app-llm.md), [ui-confirm-consent](ui-confirm-consent.md), [ui-ask](ui-ask.md) |
 | **#103** immutable system-evals foundation (`evals/`, lock and run scripts) | Open, v2.5 | Test infrastructure; no component's surface changes |
 | **Ask harness (PR 3.3)** wires [fly-context](fly-context.md) and the fly-llm tool loop into Ask | Planned, v2.5 | [app-llm](app-llm.md), [ui-ask](ui-ask.md) |
+| **Connectors beta** (`fly-mcp-client`, Settings › Connectors, the confirm card); the harness offers connector tools through `connectors::turn_for_ask` | Open | [fly-mcp-client](fly-mcp-client.md), [app-connectors](app-connectors.md), [ui-connectors](ui-connectors.md), [app-privacy](app-privacy.md) (delete-all), [app-settings-consent](app-settings-consent.md) (`connectors.*` backend-only) |
 
 ## Keeping this catalog current
 
