@@ -445,9 +445,10 @@ pub fn prefetch(
                 .folder_id
                 .clone()
                 .or_else(|| input.hints.folder_id.clone()),
-            since: None,
-            until: None,
             limit: Some(SEARCH_LIMIT),
+            // Fields added later (search-indexing's per-meeting cap) keep
+            // fly-context's defaults until the harness asks for more.
+            ..Default::default()
         };
         let dated = |a: SearchPassagesArgs| SearchPassagesArgs {
             since: input.hints.since.map(|d| d.to_rfc3339()),
