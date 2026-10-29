@@ -778,27 +778,28 @@ fn contention_bench() {
         Some((samples, rate)) => {
             let rep = testtone::analyze(samples, *rate, &tone);
             let lost_ms: f64 = rep.gaps.iter().map(|g| g.ms).sum();
+            // silence: a gap filled with zeros (a recorder loss, or the
+            // engine stalling); removed: audio missing with no fill;
+            // inserted: extra non-silent audio — the render side repeating
+            // a period, which the speakers played too
+            let by_kind: serde_json::Map<String, Value> = ["silence", "removed", "inserted"]
+                .iter()
+                .map(|k| {
+                    let n = rep
+                        .gaps
+                        .iter()
+                        .filter(|g| g.kind == *k && g.ms > GAP_REPORT_MS)
+                        .count();
+                    (k.to_string(), json!(n))
+                })
+                .collect();
             let j = json!({
                 "rate": rate,
                 "frames": samples.len(),
                 "expected_frames": output.duration_ms * *rate as u64 / 1000,
                 "tone": &rep,
                 "gaps_over_10ms": rep.gaps_longer_than(GAP_REPORT_MS),
-                // silence: a gap filled with zeros (a recorder loss, or the
-                // engine stalling); removed: audio missing with no fill;
-                // inserted: extra non-silent audio — the render side
-                // repeating a period, which the speakers played too
-                "gaps_over_10ms_by_kind": ["silence", "removed", "inserted"]
-                    .iter()
-                    .map(|k| {
-                        let n = rep
-                            .gaps
-                            .iter()
-                            .filter(|g| g.kind == *k && g.ms > GAP_REPORT_MS)
-                            .count();
-                        (k.to_string(), json!(n))
-                    })
-                    .collect::<serde_json::Map<String, Value>>(),
+                "gaps_over_10ms_by_kind": by_kind,
                 "gap_ms_total": lost_ms,
             });
             (Some(rep), j)
