@@ -100,6 +100,14 @@ impl Storage {
     /// `filter`'s folder, `updated_at` window and `exclude_keep_local` (in
     /// SQL); `limit`/`offset` don't apply.
     pub fn note_term_stats(&self, terms: &[String], filter: &SearchFilter) -> Result<TermStats> {
+        self.read_snapshot(|| self.note_term_stats_in_snapshot(terms, filter))
+    }
+
+    fn note_term_stats_in_snapshot(
+        &self,
+        terms: &[String],
+        filter: &SearchFilter,
+    ) -> Result<TermStats> {
         let (cte, not_local) = if filter.exclude_keep_local {
             (
                 crate::privacy::KEEP_LOCAL_CTE,

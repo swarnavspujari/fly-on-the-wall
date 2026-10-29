@@ -313,6 +313,17 @@ impl Storage {
     /// failing closed like [`Storage::search_segments`]); `limit`/`offset`
     /// don't apply.
     pub fn segment_term_stats(&self, terms: &[String], filter: &SearchFilter) -> Result<TermStats> {
+        // One snapshot: the scope, the cached rowid ranges and the FTS rows
+        // must describe the same database (a commit in between could hand a
+        // reused rowid to another meeting).
+        self.read_snapshot(|| self.segment_term_stats_in_snapshot(terms, filter))
+    }
+
+    fn segment_term_stats_in_snapshot(
+        &self,
+        terms: &[String],
+        filter: &SearchFilter,
+    ) -> Result<TermStats> {
         // Scope is decided once per meeting, not per matching segment, and a
         // matching FTS row is mapped to its meeting through the cached rowid
         // ranges: a common term matches tens of thousands of segments in a

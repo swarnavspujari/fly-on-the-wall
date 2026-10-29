@@ -16,27 +16,60 @@
 //!   reading its text-heavy row. If ranges ever overlap, the caller falls
 //!   back to joining.
 //!
-//! **Validity.** A stamp of `PRAGMA data_version` (which changes when ANY
-//! other connection commits) and this connection's `total_changes()` (every
-//! row it inserts, updates or deletes, trigger programs included) says
-//! "nothing changed since the cache was built". Any write anywhere drops
-//! the caches, so they can never hold a vector or range a write replaced
-//! or removed. Visibility (folder, dates, keep-local) is never cached:
-//! every search asks the database which owners it may see.
+//! **Validity.** `PRAGMA data_version` changes when ANY other connection
+//! commits (another process: the MCP server, or the app while the server
+//! reads). This connection's own writes are counted too: every row it
+//! inserts, updates or deletes (`total_changes()`, trigger programs
+//! included) for the segment ranges, and every row of `embedding_chunks`
+//! it changes (an update hook) for the vectors, so saving a setting or a
+//! job's progress doesn't throw away a 35k-chunk matrix. A cache is dropped
+//! as soon as its stamp moves, so it never holds a vector or range a write
+//! replaced or removed. Searches read on one snapshot
+//! ([`Storage::read_snapshot`]), so the stamp they check describes the rows
+//! they read. Visibility (folder, dates, keep-local) is never cached: every
+//! search asks the database which owners it may see.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use rusqlite::Connection;
 
 use crate::{Result, Storage};
 
-#[derive(Default)]
 pub(crate) struct ReadCache {
     inner: Mutex<Inner>,
+    /// Rows of `embedding_chunks` this connection changed (update hook).
+    chunk_writes: Arc<AtomicU64>,
+}
+
+impl ReadCache {
+    /// A cache for `conn`, counting its writes to `embedding_chunks`. (No
+    /// `Default`: a cache without the hook would miss this connection's
+    /// own vector writes.)
+    pub(crate) fn watching(conn: &Connection) -> Result<Self> {
+        let chunk_writes = Arc::new(AtomicU64::new(0));
+        let counter = chunk_writes.clone();
+        conn.update_hook(Some(
+            move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+                if table == "embedding_chunks" {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+        ))?;
+        Ok(Self {
+            inner: Mutex::default(),
+            chunk_writes,
+        })
+    }
 }
 
 #[derive(Default)]
 struct Inner {
-    stamp: Option<(i64, u64)>,
+    /// (data_version, total_changes) when `ranges` was built.
+    ranges_stamp: Option<(i64, u64)>,
+    /// (data_version, embedding_chunks writes) when `vectors` was built.
+    vectors_stamp: Option<(i64, u64)>,
     vectors: Option<Arc<VectorMatrix>>,
     ranges: Option<Arc<Option<SegmentRanges>>>,
 }
@@ -109,34 +142,47 @@ impl SegmentRanges {
 }
 
 impl Storage {
-    fn read_stamp(&self) -> Result<(i64, u64)> {
-        let data_version: i64 = self
-            .conn
-            .pragma_query_value(None, "data_version", |r| r.get(0))?;
-        Ok((data_version, self.conn.total_changes()))
+    /// Run `read` on one snapshot of the database: every statement inside
+    /// sees it as of the first read, so a commit by another connection
+    /// can't land between a search's scope check, its cache stamp and its
+    /// reads (`PRAGMA data_version` stays put inside the snapshot too). A
+    /// savepoint, so it nests inside a caller's transaction. `read` must
+    /// not write.
+    pub(crate) fn read_snapshot<T>(&self, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("SAVEPOINT read_snapshot")?;
+        let out = read();
+        let end = self.conn.execute_batch("RELEASE read_snapshot");
+        let out = out?;
+        end?;
+        Ok(out)
     }
 
-    /// The cache, emptied first if anything changed since it was filled.
-    fn fresh_cache(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
-        let stamp = self.read_stamp()?;
-        let mut inner = self
-            .read_cache
+    fn data_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .pragma_query_value(None, "data_version", |r| r.get(0))?)
+    }
+
+    fn cache(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.read_cache
             .inner
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if inner.stamp != Some(stamp) {
-            *inner = Inner {
-                stamp: Some(stamp),
-                ..Default::default()
-            };
-        }
-        Ok(inner)
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// The embedded chunks of `model` whose vectors have `dims` components,
-    /// from the cache when nothing changed since it was built.
+    /// from the cache while no commit elsewhere and no write of this
+    /// connection to `embedding_chunks` happened since it was built.
     pub(crate) fn vector_matrix(&self, model: &str, dims: usize) -> Result<Arc<VectorMatrix>> {
-        let mut inner = self.fresh_cache()?;
+        let stamp = (
+            self.data_version()?,
+            self.read_cache.chunk_writes.load(Ordering::Relaxed),
+        );
+        let mut inner = self.cache();
+        if inner.vectors_stamp != Some(stamp) {
+            inner.vectors = None;
+            inner.vectors_stamp = Some(stamp);
+        }
         if let Some(m) = &inner.vectors {
             if m.model == model && m.dims == dims {
                 return Ok(m.clone());
@@ -193,7 +239,12 @@ impl Storage {
     /// Per-meeting rowid ranges of `transcript_segments`, or `None` when
     /// two meetings' ranges overlap (then rowids can't be mapped this way).
     pub(crate) fn segment_ranges(&self) -> Result<Arc<Option<SegmentRanges>>> {
-        let mut inner = self.fresh_cache()?;
+        let stamp = (self.data_version()?, self.conn.total_changes());
+        let mut inner = self.cache();
+        if inner.ranges_stamp != Some(stamp) {
+            inner.ranges = None;
+            inner.ranges_stamp = Some(stamp);
+        }
         if let Some(r) = &inner.ranges {
             return Ok(r.clone());
         }
@@ -258,6 +309,34 @@ mod tests {
         let exact: f32 = unit.iter().zip(&q).map(|(a, b)| a * b).sum();
         assert!((m.score(0, &q) - exact).abs() < 2e-3);
         assert!((m.score(0, &unit) - 1.0).abs() < 2e-3);
+    }
+
+    #[test]
+    fn only_vector_writes_drop_the_vector_cache() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("n", None).unwrap();
+        s.update_note_scratchpad(&note.id, "first body").unwrap();
+        let p = s.pending_embedding_chunks("m", 10).unwrap();
+        s.store_chunk_embeddings("m", &[(p[0].id, vec![1.0, 0.0])])
+            .unwrap();
+        let a = s.vector_matrix("m", 2).unwrap();
+        // Writes that touch no chunk keep the matrix.
+        s.set_setting("some.key", "1").unwrap();
+        s.create_folder("F", None).unwrap();
+        let b = s.vector_matrix("m", 2).unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "no chunk changed: same matrix");
+        // Storing a vector drops it.
+        s.store_chunk_embeddings("m", &[(p[0].id, vec![0.0, 1.0])])
+            .unwrap();
+        let c = s.vector_matrix("m", 2).unwrap();
+        assert!(!Arc::ptr_eq(&a, &c));
+        assert!(
+            (c.score(0, &[0.0, 1.0]) - 1.0).abs() < 1e-2,
+            "the new vector"
+        );
+        // Deleting the owner (its chunks go with it) drops it.
+        s.delete_note(&note.id).unwrap();
+        assert_eq!(s.vector_matrix("m", 2).unwrap().len(), 0);
     }
 
     #[test]

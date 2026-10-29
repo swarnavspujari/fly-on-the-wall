@@ -3,7 +3,7 @@
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0); the search half refreshed for the v2.5 search-quality PR (FTS fallback for questions, similarity floor, vector cache). Schema v3 (#92) has merged: `vector_search` filters Keep local in SQL, and chunk text is label-free (the corpus re-embeds once). The commands keep their signatures.
 
 ## Purpose
-Search-as-you-type over notes and transcripts. `search` is SQLite FTS5: a keyword search must match every word (the last as a prefix); when that finds nothing, as with a typed question, any content word matches and bm25 ranks the rows sharing the rarest words first (`fly_storage::query`). `search_semantic` fuses that with a vector search (reciprocal rank fusion, grouped by note); vector hits below the model's similarity floor don't count. Its vectors come from a background worker that chunks every note and transcript and embeds the chunks through Ollama's `/api/embed` with `embeddinggemma:300m`. Everything semantic is best-effort: no Ollama, no model or a dead server means FTS-only, never an error.
+Search-as-you-type over notes and transcripts. `search` is SQLite FTS5: a keyword search must match every word (the last as a prefix); when that finds nothing, as with a typed question, any content word matches and bm25 ranks the rows sharing the rarest words first (`fly_storage::query`). `search_semantic` fuses that with a vector search (reciprocal rank fusion, grouped by note). The vector list has no similarity floor: it is ranked, the user decides, and a short keyword search scores low cosines even against the note it is after ("cost cuts" 0.30 vs 0.49 for the same topic asked as a question). Its vectors come from a background worker that chunks every note and transcript and embeds the chunks through Ollama's `/api/embed` with `embeddinggemma:300m`. Everything semantic is best-effort: no Ollama, no model or a dead server means FTS-only, never an error.
 
 ## Files it owns
 - `src-tauri/src/commands.rs` (part) — `search` (651-660), `search_semantic` (662-715).
@@ -32,7 +32,7 @@ Search-as-you-type over notes and transcripts. `search` is SQLite FTS5: a keywor
 The storage lock is never held across HTTP. `embed_notify` is nudged by `update_note_scratchpad` (`commands.rs:256`), Enhance/block edits (`llm_commands.rs:738,756`) and each finished transcription (`scheduler.rs:171`).
 
 #### `search_semantic` (`commands.rs:662-715`)
-`SearchFilter { limit: 30, ..Default }`, so `exclude_keep_local = false`: Keep-local notes **are** returned, which is right for the user's own UI. Runs `search_split` (FTS notes, FTS transcripts, with the AND → OR fallback), then `embed_query`. With a vector it calls `vector_search_floor(…, EMBED_MODEL, &filter, 30, similarity_floor(EMBED_MODEL))`; a failure there is logged and treated as empty. Then `hybrid::fuse`.
+`SearchFilter { limit: 30, ..Default }`, so `exclude_keep_local = false`: Keep-local notes **are** returned, which is right for the user's own UI. Runs `search_split` (FTS notes, FTS transcripts, with the AND → OR fallback), then `embed_query`. With a vector it calls `vector_search(…, EMBED_MODEL, &filter, 30)` (no floor); a failure there is logged and treated as empty. Then `hybrid::fuse`.
 
 Measured on the eval gold set (63 questions; a hit = a note of the meeting holding the answer), before → after: **without Ollama** (FTS only) the right meeting is in the top 5 for 2 → 55 questions (MRR 0.03 → 0.77; FTS returned nothing for 53 of them before); **with** `embeddinggemma` 61 → 61 (MRR 0.86 → 0.82: a few answers moved from rank 1 to 2 now that the FTS lists contribute). Every unanswerable question now returns something in both modes (FTS shares a common word), as a search box should.
 
@@ -49,7 +49,7 @@ A synthetic library of 1,016 meetings (34,990 chunks, 768-d vectors), minimum of
 Where the time went on main: the vector scan read every 3 KB vector (and walked its overflow pages just to check `model`) per query, and keyword statistics read each matching segment's row. Now vectors come from an in-memory cache and visibility is decided per note and meeting.
 
 What's left:
-- **The cache rebuild.** Any database write drops the vector cache, so the first search after a write re-reads every vector (about 1-3 s at 35k chunks on this machine; ~0.1-0.3 s for a few hundred meetings). During a bulk re-embed, when the worker writes every few seconds, searches pay it about as often as main paid its scan.
+- **The cache rebuild.** A write to `embedding_chunks` (a stored vector, an edited note or transcript re-chunked) or any commit by another process drops the vector cache, so the next search re-reads every vector (about 1-3 s at 35k chunks on this machine; ~0.1-0.3 s for a few hundred meetings). Other writes (settings, job progress, items) keep it. During a bulk re-embed, when the worker stores a batch every few seconds, searches pay it about as often as main paid its scan.
 - **Transcript parsing.** The keyword pass parses up to 40 transcripts per query (most of the remaining keyword-only time); caching parsed windows is the next cut.
 - **Brute force.** Every in-scope vector is still scored (~35k dot products); an ANN index is the step past ~100k chunks.
 
@@ -95,7 +95,7 @@ None.
 
 ## Dependencies
 - **Inbound:** `lib.rs:177` (`embeddings::spawn`), `lib.rs:212-213` (registration), `commands.rs:256`, `llm_commands.rs:738,756`, `scheduler.rs:171` (`embed_notify`), `tests/search_eval.rs`.
-- **Outbound:** [fly-storage](fly-storage.md) (`search_split`, `vector_search_floor`, `embeddings::similarity_floor`, `hybrid::fuse`, chunk queue incl. `*_shareable`), [app-ollama](app-ollama.md) (`root_url`, `server_alive`, `ensure_running`, `pull_model`), [app-llm](app-llm.md) (`is_loopback_url`), `AppState::embed_notify`.
+- **Outbound:** [fly-storage](fly-storage.md) (`search_split`, `vector_search`, `hybrid::fuse`, chunk queue incl. `*_shareable`), [app-ollama](app-ollama.md) (`root_url`, `server_alive`, `ensure_running`, `pull_model`), [app-llm](app-llm.md) (`is_loopback_url`), `AppState::embed_notify`.
 
 ## Invariants
 - Semantic search degrades to FTS and never fails a search or blocks the UI (`embeddings.rs:10-13`; `commands.rs:683-694`).
@@ -126,7 +126,7 @@ None.
 
 ## Changing it safely
 - Run `cargo test -p fly-storage` (chunking, fusion, shareable queue) and, with Ollama + `embeddinggemma:300m` running locally, `cargo test -p fly-app --test search_eval -- --nocapture`. Read the printed table; a pass in CI means nothing.
-- Changing `doc_prompt` / `query_prompt` / chunking changes every vector's meaning. Bump or re-queue (the `model` column only re-queues on a model-name change), re-run `search_eval`, and re-measure `similarity_floor`: it is calibrated for these prompts.
+- Changing `doc_prompt` / `query_prompt` / chunking changes every vector's meaning. Bump or re-queue (the `model` column only re-queues on a model-name change), re-run `search_eval`, and re-measure `similarity_floor` (fly-context's Ask search uses it): it is calibrated for these prompts.
 - Any new caller that serves results to an external tool (MCP, agentic Ask) must set `exclude_keep_local`; keep a by-id re-check as defense in depth (fly-context does).
 - Keep `search` cheap: it is a synchronous command (`commands.rs:651-652`), so it runs on the main thread per keystroke (see `commands.rs:36-40`).
 - devMock: keep `search` / `search_semantic` returning the `SearchHit` shape (`kind`, `note_id`, `title`, `snippet` with `[[match]]`, `start_ms`).

@@ -48,8 +48,8 @@ pub use memory::{
 };
 pub use tools::{
     EventInfo, GetEventArgs, GetItemsArgs, GetNoteArgs, ItemList, ListMeetingsArgs, MeetingList,
-    MeetingSummary, NoteKind, NoteView, Passage, PassageResults, PassageSource, ReadSegmentsArgs,
-    SearchPassagesArgs, SegmentView, SegmentWindow, ToolDef, ToolOutput,
+    MeetingSummary, NoteKind, NoteView, Passage, PassageResults, PassageScores, PassageSource,
+    ReadSegmentsArgs, SearchPassagesArgs, SegmentView, SegmentWindow, ToolDef, ToolOutput,
 };
 
 /// Every tool a model may call, in a stable order: the six read tools

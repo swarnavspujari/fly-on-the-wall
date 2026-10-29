@@ -231,9 +231,9 @@ impl Storage {
         // lingering in free pages until reused (confidential-data disposal).
         conn.pragma_update(None, "secure_delete", "ON")?;
         let storage = Self {
+            read_cache: cache::ReadCache::watching(&conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
-            read_cache: Default::default(),
         };
         storage.migrate()?;
         storage.seed_builtin_templates()?;
@@ -282,9 +282,9 @@ impl Storage {
         conn.pragma_update(None, "secure_delete", "ON")?;
         Self::check_schema(&conn)?;
         Ok(Self {
+            read_cache: cache::ReadCache::watching(&conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
-            read_cache: Default::default(),
         })
     }
 

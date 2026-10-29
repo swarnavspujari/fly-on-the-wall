@@ -549,11 +549,26 @@ impl Storage {
     /// below `floor` (before `limit`) and reports the best score in scope
     /// whether or not it passed: a "nothing close" signal for callers.
     ///
-    /// Two phases: score every in-scope vector (ids and vectors only), then
-    /// read text and spans for the `limit` winners alone. The second read
-    /// re-applies every filter, so a row whose privacy or owner changed in
-    /// between is dropped, never returned.
+    /// Ranks on cached, quantized vectors, then re-scores the best
+    /// candidates exactly from the stored vectors (through the same scoped
+    /// SQL, so `best_score` only ever comes from a chunk in scope) and reads
+    /// text and spans for the `limit` winners alone, re-applying every
+    /// filter. All of it runs on one read snapshot. Scores are exact for
+    /// the first 256 candidates; a caller asking for more (a meeting-scoped
+    /// search takes every hit) gets approximate scores (|error| ≈ 1e-3)
+    /// past them.
     pub fn vector_search_floor(
+        &self,
+        query: &[f32],
+        model: &str,
+        filter: &SearchFilter,
+        limit: usize,
+        floor: Option<f32>,
+    ) -> Result<VectorResults> {
+        self.read_snapshot(|| self.vector_search_in_snapshot(query, model, filter, limit, floor))
+    }
+
+    fn vector_search_in_snapshot(
         &self,
         query: &[f32],
         model: &str,
@@ -589,7 +604,7 @@ impl Storage {
             .take(RESCORE_MAX)
             .map(|(_, id)| *id)
             .collect();
-        let mut scored = self.exact_scores(&qnorm, model, &head)?;
+        let mut scored = self.exact_scores(&qnorm, model, filter, &head)?;
         let best_score = scored.first().map(|(s, _)| *s);
         scored.extend(candidates.into_iter().skip(RESCORE_MAX));
         if let Some(f) = floor {
@@ -716,17 +731,20 @@ impl Storage {
 
 impl Storage {
     /// Exact cosines (from the stored f32 vectors) for `ids`, best first.
-    fn exact_scores(&self, qnorm: &[f32], model: &str, ids: &[i64]) -> Result<Vec<(f32, i64)>> {
+    /// Exact scores of `ids` that are still in scope under `filter`.
+    fn exact_scores(
+        &self,
+        qnorm: &[f32],
+        model: &str,
+        filter: &SearchFilter,
+        ids: &[i64],
+    ) -> Result<Vec<(f32, i64)>> {
         if ids.is_empty() {
             return Ok(vec![]);
         }
-        let list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, embedding FROM embedding_chunks
-              WHERE model = ?1 AND embedding IS NOT NULL AND id IN ({})",
-            list.join(",")
-        ))?;
-        let mut rows = stmt.query([model])?;
+        let (sql, params) = chunk_scope_sql("c.id, c.embedding", model, filter, ids);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(params.iter()))?;
         let mut out: Vec<(f32, i64)> = Vec::with_capacity(ids.len());
         while let Some(r) = rows.next()? {
             let rusqlite::types::ValueRef::Blob(blob) = r.get_ref(1)? else {

@@ -663,9 +663,9 @@ pub fn search(state: State<'_, AppState>, query: String) -> CmdResult<Vec<Search
 /// semantic: when the query can't be embedded (Ollama not running/installed,
 /// model missing) this degrades to grouped FTS — never an error, and never a
 /// server spawn on the search path. FTS matches every word of a keyword
-/// search and falls back to any content word for a question; vector hits
-/// below the model's similarity floor don't count, so a search nothing
-/// matches can come back empty.
+/// search and falls back to any content word for a question. Vector hits
+/// have no similarity floor here: the list is ranked and the user decides
+/// (short keyword searches score low cosines even against the right note).
 #[tauri::command]
 pub async fn search_semantic(
     state: State<'_, AppState>,
@@ -690,14 +690,7 @@ pub async fn search_semantic(
                 .storage
                 .lock()
                 .unwrap()
-                .vector_search_floor(
-                    &qvec,
-                    model,
-                    &filter,
-                    LIMIT,
-                    fly_storage::embeddings::similarity_floor(model),
-                )
-                .map(|r| r.hits)
+                .vector_search(&qvec, model, &filter, LIMIT)
                 .unwrap_or_else(|e| {
                     tracing::warn!(error = %e, "vector search failed, using FTS only");
                     vec![]

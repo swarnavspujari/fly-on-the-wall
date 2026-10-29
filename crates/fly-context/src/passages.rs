@@ -125,10 +125,54 @@ pub fn query_terms(q: &str) -> Vec<String> {
 /// Which query terms a text contains (a term also matches as a word
 /// prefix when ≥ 4 chars: "budget" finds "budgets").
 pub fn matched_terms(terms: &[String], text: &str) -> Vec<bool> {
-    let words: HashSet<String> = fly_storage::query::words(text).collect();
-    terms
+    let mut hit = vec![false; terms.len()];
+    mark_terms(terms, text, &mut hit);
+    hit
+}
+
+/// Set `hit[i]` for each term `text` holds: one pass over its words,
+/// stopping once every term is found.
+fn mark_terms(terms: &[String], text: &str, hit: &mut [bool]) {
+    let mut left = hit.iter().filter(|h| !**h).count();
+    let mut word = String::new();
+    for w in text.split(|c: char| !c.is_alphanumeric()) {
+        if left == 0 {
+            return;
+        }
+        if w.is_empty() {
+            continue;
+        }
+        fly_storage::query::fold_word_into(w, &mut word);
+        for (h, t) in hit.iter_mut().zip(terms) {
+            if !*h && fly_storage::query::term_matches(t, &word) {
+                *h = true;
+                left -= 1;
+            }
+        }
+    }
+}
+
+/// Which query terms each window holds, counting what [`window_text`]
+/// shows (its lines and its speakers' labels) without building the text:
+/// one pass over each line, each label matched once.
+pub fn window_matches(terms: &[String], t: &Transcript, windows: &[Window]) -> Vec<Vec<bool>> {
+    let mut labels: HashMap<&str, Vec<bool>> = HashMap::new();
+    windows
         .iter()
-        .map(|t| words.iter().any(|w| fly_storage::query::term_matches(t, w)))
+        .map(|w| {
+            let mut hit = vec![false; terms.len()];
+            for &i in &w.segments {
+                let seg = &t.segments[i];
+                let label = labels
+                    .entry(seg.speaker_key.as_str())
+                    .or_insert_with(|| matched_terms(terms, &t.label_for(&seg.speaker_key)));
+                for (h, l) in hit.iter_mut().zip(label.iter()) {
+                    *h |= *l;
+                }
+                mark_terms(terms, &seg.text, &mut hit);
+            }
+            hit
+        })
         .collect()
 }
 
@@ -207,13 +251,15 @@ pub enum Via {
 
 /// Reciprocal-rank fusion of ranked passage lists, then a per-owner cap so
 /// one long meeting can't crowd the others out. Ties keep first-seen order
-/// (lists are passed keyword-first). Slots the cap would leave empty go to
-/// the capped-out passages, best first: with nothing left to crowd out, a
-/// meeting's next-best window is worth more than an empty slot.
+/// (lists are passed keyword-first). With `fill`, slots the cap would leave
+/// empty go to the capped-out passages, best first: with nothing left to
+/// crowd out, a meeting's next-best window is worth more than an empty
+/// slot. Without it the cap is strict.
 pub fn fuse(
     lists: &[(Via, Vec<PassageKey>)],
     per_owner: usize,
     limit: usize,
+    fill: bool,
 ) -> Vec<(PassageKey, f32, Vec<Via>)> {
     let mut score: HashMap<PassageKey, (usize, f32, Vec<Via>)> = HashMap::new();
     let mut order = 0usize;
@@ -254,8 +300,10 @@ pub fn fuse(
         *n += 1;
         out.push((k, s, v));
     }
-    let room = limit.saturating_sub(out.len());
-    out.extend(capped.into_iter().take(room));
+    if fill {
+        let room = limit.saturating_sub(out.len());
+        out.extend(capped.into_iter().take(room));
+    }
     out
 }
 
@@ -390,7 +438,7 @@ mod tests {
             ),
             (Via::Semantic, vec![t("b", 0), t("a", 3)]),
         ];
-        let fused = fuse(&lists, 2, 4);
+        let fused = fuse(&lists, 2, 4, true);
         assert_eq!(fused[0].0, t("b", 0), "found by both lists");
         assert_eq!(fused[0].2, vec![Via::Keyword, Via::Semantic]);
         let from_a = fused.iter().filter(|(k, _, _)| k.owner() == "a").count();
@@ -408,8 +456,12 @@ mod tests {
             Via::Semantic,
             vec![t("c", 0), t("d", 0), t("e", 0), t("f", 0)],
         ));
-        let fused = fuse(&more, 2, 6);
+        let fused = fuse(&more, 2, 6, true);
         assert_eq!(fused.iter().filter(|(k, _, _)| k.owner() == "a").count(), 2);
-        assert_eq!(fuse(&lists, 3, 1).len(), 1, "limit");
+        assert_eq!(fuse(&lists, 3, 1, true).len(), 1, "limit");
+        // Strict: the free slot stays empty.
+        let fused = fuse(&lists, 2, 4, false);
+        assert_eq!(fused.len(), 3);
+        assert_eq!(fused.iter().filter(|(k, _, _)| k.owner() == "a").count(), 2);
     }
 }

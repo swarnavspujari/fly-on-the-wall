@@ -416,20 +416,28 @@ fn semantic_hits_map_onto_windows_and_fuse() {
         vector: &v,
         model: MODEL,
     };
-    let r = ctx.search_passages(&search("zzqx"), Some(qv)).unwrap();
+    let (r, scores) = ctx
+        .search_passages_scored(&search("zzqx"), Some(qv))
+        .unwrap();
     assert!(r.semantic);
-    let (i, p) = r
+    let p = r
         .passages
         .iter()
-        .enumerate()
-        .find(|(_, p)| p.segments.iter().any(|s| s.id == "b031"))
+        .find(|p| p.segments.iter().any(|s| s.id == "b031"))
         .expect("semantic passage with the hiring line");
     assert_eq!(p.matched_by, vec!["semantic"]);
-    // Its raw cosine rides along (no floor for this test model).
-    assert!(r.similarity[i].is_some_and(|c| c > 0.0));
-    assert_eq!(r.similarity.len(), r.passages.len());
-    assert_eq!(r.similarity_floor, None);
-    assert!(r.top_similarity >= r.similarity[i]);
+    // Its raw cosine rides along, keyed by passage id (no floor for this
+    // test model).
+    assert!(scores.of(p).is_some_and(|c| c > 0.0));
+    assert_eq!(scores.similarity.len(), r.passages.len());
+    assert_eq!(scores.similarity_floor, None);
+    assert!(scores.top_similarity >= scores.of(p));
+    // Ids are unique within a result and survive a caller reordering it.
+    let ids: std::collections::HashSet<String> = r.passages.iter().map(|p| p.id()).collect();
+    assert_eq!(ids.len(), r.passages.len());
+    assert!(p.id().starts_with(&format!("transcript:{}:", f.budget)));
+    // The plain call returns the same passages.
+    assert_eq!(ctx.search_passages(&search("zzqx"), Some(qv)).unwrap(), r);
     // Agreement between lists ranks first.
     let q = "hiring frozen";
     let v = embed(q);
@@ -1046,15 +1054,15 @@ fn questions_find_keyword_passages_without_vectors() {
     // used to AND every word ("what", "did", "say"…) and find nothing.
     let f = fixture();
     let ctx = Context::new(&f.storage, Visibility::ShareableOnly);
-    let r = ctx
-        .search_passages(&search("What did Dana say about the Q3 budget?"), None)
+    let (r, scores) = ctx
+        .search_passages_scored(&search("What did Dana say about the Q3 budget?"), None)
         .unwrap();
     let first = r.passages.first().expect("keyword passage");
     assert_eq!(first.meeting_id.as_deref(), Some(f.budget.as_str()));
     assert!(first.segments.iter().any(|s| s.id == "b030"));
     assert_eq!(first.matched_by, vec!["keyword"]);
-    assert_eq!(r.similarity, vec![None; r.passages.len()]);
-    assert_eq!(r.top_similarity, None);
+    assert!(scores.similarity.is_empty());
+    assert_eq!(scores.top_similarity, None);
     // Keep-local meetings share the words but never surface.
     assert!(r
         .passages
@@ -1083,6 +1091,24 @@ fn one_shared_common_word_is_not_a_keyword_match() {
 }
 
 #[test]
+fn a_typo_does_not_wipe_out_keyword_results() {
+    let f = fixture();
+    let ctx = Context::new(&f.storage, Visibility::ShareableOnly);
+    // "logistcs" occurs nowhere. It weighs like the rarest word that does
+    // occur, not more, so the two common words it came with still cover
+    // the query (it used to weigh several times their sum).
+    let r = ctx
+        .search_passages(&search("offsite venue logistcs"), None)
+        .unwrap();
+    let first = r
+        .passages
+        .first()
+        .expect("keyword passages despite the typo");
+    assert_eq!(first.meeting_id.as_deref(), Some(f.budget.as_str()));
+    assert!(first.text.contains("offsite venue"));
+}
+
+#[test]
 fn similarity_floor_drops_weak_semantic_hits() {
     let f = fixture();
     // Vectors under the app model's name, so its floor applies.
@@ -1098,27 +1124,186 @@ fn similarity_floor_drops_weak_semantic_hits() {
         .find(|p| p.text.contains("hiring stays frozen"))
         .expect("hiring chunk");
     let v = embed(&hiring.text);
-    let r = ctx
-        .search_passages(&search("zzqx"), Some(QueryVector { vector: &v, model }))
+    // A question-length query (four content words, none in the library).
+    let question = "zzqx zzqy zzqz zzqw";
+    let (r, scores) = ctx
+        .search_passages_scored(&search(question), Some(QueryVector { vector: &v, model }))
         .unwrap();
-    assert_eq!(r.similarity_floor, Some(floor));
+    assert_eq!(scores.similarity_floor, Some(floor));
     assert!(!r.passages.is_empty());
-    assert!(r.similarity.iter().all(|c| c.is_some_and(|c| c >= floor)));
+    assert!(r
+        .passages
+        .iter()
+        .all(|p| scores.of(p).is_some_and(|c| c >= floor)));
     // A vector pointing away from every chunk (the fake vectors are
     // non-negative counts): nothing passes, but the best score is still
     // reported, below the floor.
     let odd = vec![-1f32; DIMS];
-    let r = ctx
-        .search_passages(
-            &search("zzqx"),
-            Some(QueryVector {
-                vector: &odd,
-                model,
-            }),
-        )
+    let away = QueryVector {
+        vector: &odd,
+        model,
+    };
+    let (r, scores) = ctx
+        .search_passages_scored(&search(question), Some(away))
         .unwrap();
     assert!(r.passages.is_empty(), "{:?}", r.passages);
-    assert!(r.top_similarity.is_some_and(|c| c < floor));
+    assert!(scores.top_similarity.is_some_and(|c| c < floor));
+    // A short keyword query gets no floor: it scores low cosines even
+    // against the passage it is after, so the ranked semantic hits stay.
+    let (r, scores) = ctx
+        .search_passages_scored(&search("zzqx"), Some(away))
+        .unwrap();
+    assert_eq!(scores.similarity_floor, None);
+    assert!(!r.passages.is_empty());
+    assert!(scores.top_similarity.is_some_and(|c| c < floor));
+}
+
+/// Six shareable meetings and one Keep-local one, every window of each
+/// holding "zebra quota" (about a dozen windows per meeting).
+fn wide_fixture() -> (tempfile::TempDir, Storage, Vec<String>, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Storage::open(dir.path()).unwrap();
+    let lines: Vec<(&str, &str)> = (0..160)
+        .map(|i| {
+            (
+                if i % 2 == 0 { "mic" } else { "spk_0" },
+                "The zebra quota for the next region came up again in this review.",
+            )
+        })
+        .collect();
+    let mut shared = Vec::new();
+    for day in 1..=6 {
+        let (m, _) = meeting(&s, &format!("Region review {day}"), None, day, &[]);
+        s.save_transcript(&transcript(&m, &format!("w{day}"), &lines))
+            .unwrap();
+        shared.push(m);
+    }
+    let (hidden, hidden_note) = meeting(&s, "Private region review", None, 9, &[]);
+    s.save_transcript(&transcript(&hidden, "h", &lines))
+        .unwrap();
+    s.set_note_keep_local(&hidden_note, true).unwrap();
+    embed_all(&s);
+    (dir, s, shared, hidden)
+}
+
+fn per_meeting_counts(
+    meeting_ids: impl Iterator<Item = String>,
+) -> std::collections::HashMap<String, usize> {
+    let mut n = std::collections::HashMap::new();
+    for m in meeting_ids {
+        *n.entry(m).or_insert(0) += 1;
+    }
+    n
+}
+
+#[test]
+fn in_process_callers_may_raise_per_meeting_and_limit() {
+    let (_dir, s, shared, hidden) = wide_fixture();
+    let ctx = Context::new(&s, Visibility::ShareableOnly);
+    let v = embed("zebra quota region");
+    let qv = QueryVector {
+        vector: &v,
+        model: MODEL,
+    };
+    for vector in [None, Some(qv)] {
+        // Defaults: 8 passages, at most 3 per meeting.
+        let r = ctx.search_passages(&search("zebra quota"), vector).unwrap();
+        assert_eq!(r.passages.len(), 8);
+        let n = per_meeting_counts(r.passages.iter().filter_map(|p| p.meeting_id.clone()));
+        assert!(n.values().all(|&c| c <= 3), "{n:?}");
+
+        // Raised: 40 passages, up to 10 per meeting.
+        let args = SearchPassagesArgs {
+            limit: Some(40),
+            per_meeting: Some(10),
+            ..search("zebra quota")
+        };
+        let r = ctx.search_passages(&args, vector).unwrap();
+        assert_eq!(r.passages.len(), 40);
+        let n = per_meeting_counts(r.passages.iter().filter_map(|p| p.meeting_id.clone()));
+        assert!(n.values().all(|&c| c <= 10), "{n:?}");
+        assert!(n.values().any(|&c| c == 10), "{n:?}");
+        // The cap applies after the visibility filter: the Keep-local
+        // meeting (as strong a match as any) never takes a slot.
+        assert!(!n.contains_key(&hidden));
+        assert!(n.keys().all(|m| shared.contains(m)));
+
+        // Beyond the maximums: clamped to 40 passages, 12 per meeting.
+        let args = SearchPassagesArgs {
+            limit: Some(500),
+            per_meeting: Some(500),
+            ..search("zebra quota")
+        };
+        let r = ctx.search_passages(&args, vector).unwrap();
+        assert_eq!(r.passages.len(), 40);
+        let n = per_meeting_counts(r.passages.iter().filter_map(|p| p.meeting_id.clone()));
+        assert!(n.values().all(|&c| c <= 12), "{n:?}");
+        assert!(n.values().any(|&c| c == 12), "{n:?}");
+        assert!(!n.contains_key(&hidden));
+
+        // A cap of 1: one passage per meeting, so six.
+        let args = SearchPassagesArgs {
+            limit: Some(40),
+            per_meeting: Some(1),
+            ..search("zebra quota")
+        };
+        let r = ctx.search_passages(&args, vector).unwrap();
+        let n = per_meeting_counts(r.passages.iter().filter_map(|p| p.meeting_id.clone()));
+        assert_eq!(n.len(), 6, "{n:?}");
+        assert!(n.values().all(|&c| c == 1), "{n:?}");
+    }
+}
+
+#[test]
+fn a_tool_call_keeps_the_schema_limits() {
+    let (_dir, s, _shared, hidden) = wide_fixture();
+    let ctx = Context::new(&s, Visibility::ShareableOnly);
+    let v = embed("zebra quota region");
+    let qv = QueryVector {
+        vector: &v,
+        model: MODEL,
+    };
+    for vector in [None, Some(qv)] {
+        // The schema says 1-20: 40 is held to 20.
+        let out = call(
+            &ctx,
+            "search_passages",
+            &json!({"query": "zebra quota", "limit": 40}),
+            vector,
+        )
+        .unwrap();
+        let passages = out.json["passages"].as_array().unwrap();
+        // Keywords alone keep 3 windows per meeting (six meetings: 18);
+        // the semantic list has more to fill the free slots with.
+        let want = if vector.is_some() { 20 } else { 18 };
+        assert_eq!(passages.len(), want, "{}", out.text);
+        let ids: Vec<String> = passages
+            .iter()
+            .map(|p| p["meeting_id"].as_str().unwrap().to_string())
+            .collect();
+        // The default cap: 3 per meeting for the first six meetings' worth,
+        // then the free slots.
+        let n = per_meeting_counts(ids[..18].iter().cloned());
+        assert_eq!(n.len(), 6, "{n:?}");
+        assert!(n.values().all(|&c| c == 3), "{n:?}");
+        assert!(!ids.contains(&hidden));
+        // per_meeting is not part of the model-facing tool.
+        let err = call(
+            &ctx,
+            "search_passages",
+            &json!({"query": "zebra quota", "per_meeting": 10}),
+            vector,
+        );
+        assert!(matches!(err, Err(ContextError::InvalidArgs(_))), "{err:?}");
+    }
+    // The schema still advertises 1-20 and no per_meeting.
+    let def = tool_defs()
+        .into_iter()
+        .find(|d| d.name == "search_passages")
+        .unwrap();
+    let schema = serde_json::to_string(&def).unwrap();
+    assert!(schema.contains("1-20"), "{schema}");
+    assert!(!schema.contains("per_meeting"), "{schema}");
 }
 
 #[test]
