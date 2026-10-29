@@ -657,16 +657,26 @@ pub fn prefetch(
         }
     }
 
-    // Fit to the budget in rank order (the plain top passages always fit:
-    // they're what retrieval alone would have shown).
+    // Fit to the budget in rank order. The plain top passages go in whole
+    // while they fit (they're what retrieval alone would have shown); one
+    // that doesn't is clipped around its best line rather than sent over
+    // the tier's request cap, and the first always goes in.
     let mut used = 0usize;
     let mut kept: Vec<Excerpt> = Vec::new();
-    for e in excerpts {
+    for mut e in excerpts {
         let c = excerpt_chars(&e);
-        if !e.must && used + c > b.context_chars && !kept.is_empty() {
-            continue;
+        if used + c > b.context_chars && !kept.is_empty() {
+            if !e.must {
+                continue;
+            }
+            let room = b.context_chars.saturating_sub(used);
+            if room < b.passage_clip_chars.min(b.context_chars) {
+                continue;
+            }
+            e.lines = clip(&e.segments, &terms, room);
+            e.must = false;
         }
-        used += c;
+        used += excerpt_chars(&e);
         kept.push(e);
     }
     stats.transcript_passages = kept.len() as u32;
@@ -711,9 +721,20 @@ pub fn prefetch(
                 if last_end.is_some_and(|end| seg.start_ms > end + 30_000) {
                     transcript_text.push_str("…\n");
                 }
+                last_end = Some(seg.end_ms);
+                // One giant line (a transcript without pauses) is shown cut
+                // short. It isn't shown whole, so it can't be cited.
+                if seg.text.len() > b.context_chars {
+                    let cut = SegmentView {
+                        text: truncate(&seg.text, b.passage_clip_chars),
+                        ..seg.clone()
+                    };
+                    transcript_text.push_str(&evidence::segment_line(&cut));
+                    transcript_text.push('\n');
+                    continue;
+                }
                 transcript_text.push_str(&evidence::segment_line(seg));
                 transcript_text.push('\n');
-                last_end = Some(seg.end_ms);
                 shown.push(evidence::info(seg, &e.meeting_id, &e.title, e.started_at));
             }
         }

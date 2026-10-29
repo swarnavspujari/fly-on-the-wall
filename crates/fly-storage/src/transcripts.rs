@@ -297,13 +297,26 @@ impl Storage {
             .ok_or_else(|| StorageError::NotFound(format!("transcript for {meeting_id}")))?;
         let old_label = transcript.label_for(speaker_key);
         relabel(&mut transcript);
-        self.save_transcript(&transcript)?;
-        if let Some(mut cleaned) = self.get_cleaned_transcript(meeting_id)? {
-            relabel(&mut cleaned);
-            self.save_cleaned_transcript(&cleaned)?;
+        // One savepoint: the label and the item owners that named the old
+        // one change together or not at all (file mirrors follow the rows).
+        self.conn.execute_batch("SAVEPOINT relabel_speaker")?;
+        let res = (|| -> Result<()> {
+            self.save_transcript(&transcript)?;
+            if let Some(mut cleaned) = self.get_cleaned_transcript(meeting_id)? {
+                relabel(&mut cleaned);
+                self.save_cleaned_transcript(&cleaned)?;
+            }
+            // Items owned by the old label ("Speaker 2") now name the new one.
+            self.rename_item_owner(meeting_id, &old_label, label)?;
+            Ok(())
+        })()
+        .and_then(|()| Ok(self.conn.execute_batch("RELEASE relabel_speaker")?));
+        if res.is_err() {
+            let _ = self
+                .conn
+                .execute_batch("ROLLBACK TO relabel_speaker; RELEASE relabel_speaker");
         }
-        // Items owned by the old label ("Speaker 2") now name the new one.
-        self.rename_item_owner(meeting_id, &old_label, label)?;
+        res?;
         Ok(transcript)
     }
 
@@ -754,6 +767,46 @@ mod tests {
         )
         .unwrap();
         assert!(md.contains("**Dana:**"));
+    }
+
+    /// A failed owner rename leaves the label as it was (one savepoint).
+    #[test]
+    fn relabel_and_owner_rename_commit_together() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("m", None).unwrap();
+        let meeting = s.create_meeting("m", &note.id, &[]).unwrap();
+        s.save_transcript(&sample_transcript(&meeting.id)).unwrap();
+        let old = s
+            .get_transcript(&meeting.id)
+            .unwrap()
+            .unwrap()
+            .label_for("spk_0");
+        s.add_meeting_item(&fly_core::MeetingItem {
+            id: fly_core::new_id(),
+            meeting_id: meeting.id.clone(),
+            kind: fly_core::ItemKind::ActionItem,
+            text: "Post the rota".into(),
+            owner: Some(old.clone()),
+            status: Some("open".into()),
+            speaker_key: Some("spk_0".into()),
+            segment_ids: vec![],
+            created_at: chrono::Utc::now(),
+            extracted_by: "user:test".into(),
+        })
+        .unwrap();
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER boom BEFORE UPDATE ON meeting_items
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        assert!(s.relabel_speaker(&meeting.id, "spk_0", "Dana").is_err());
+        let t = s.get_transcript(&meeting.id).unwrap().unwrap();
+        assert_eq!(t.label_for("spk_0"), old, "rolled back with the owners");
+        s.conn.execute_batch("DROP TRIGGER boom").unwrap();
+        s.relabel_speaker(&meeting.id, "spk_0", "Dana").unwrap();
+        let items = s.get_meeting_items(&meeting.id).unwrap();
+        assert_eq!(items[0].owner.as_deref(), Some("Dana"));
     }
 
     /// A meeting with a recording keeps its transcript mirrors inside its

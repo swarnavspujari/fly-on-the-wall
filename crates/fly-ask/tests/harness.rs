@@ -418,6 +418,51 @@ async fn citations_outside_the_retrieved_set_retry_once_then_show_flagged() {
 }
 
 #[tokio::test]
+async fn a_giant_line_is_cut_short_instead_of_failing_the_budget() {
+    let f = fx();
+    let (mid, _) = meeting(&f.s, "Pottery marathon", None, 5, &["Priya Anand"]);
+    let giant = "we kept glazing and talking about the glaze colours ".repeat(800);
+    f.s.save_transcript(&transcript(
+        &mid,
+        "g",
+        &[
+            ("spk_0", giant.as_str()),
+            ("spk_1", "We fire the kiln on Sunday."),
+        ],
+    ))
+    .unwrap();
+    let m = Model::new(
+        true,
+        vec![ChatResponse::text_reply(
+            "They talked about glaze colours [seg:g01]. We fire the kiln on Sunday [seg:g02].",
+        )],
+    );
+    let a = run(
+        &f,
+        &m,
+        true,
+        Tier::S,
+        AskScope::Meeting(mid),
+        "When do we fire the kiln after the glazing?",
+        &[],
+    )
+    .await;
+    assert_eq!(a.status, AnswerStatus::Answered, "{:?}", a.failure);
+    let reqs = m.requests();
+    assert_eq!(reqs.len(), 1);
+    assert!(
+        a.run_log.input_tokens_est <= 6_000,
+        "within tier S's request cap: {}",
+        a.run_log.input_tokens_est
+    );
+    let sent = sent_text(&reqs);
+    assert!(sent.contains("[seg:g01]") && sent.contains("[seg:g02]"));
+    // The cut line isn't shown whole, so citing it doesn't count.
+    assert_ne!(a.sentences[0].status, SentenceStatus::Sourced);
+    assert_eq!(a.sentences[1].status, SentenceStatus::Sourced);
+}
+
+#[tokio::test]
 async fn an_answer_from_a_cut_context_is_a_model_failure() {
     let f = fx();
     // Ollama ran it with its default context (the sized one crashed).

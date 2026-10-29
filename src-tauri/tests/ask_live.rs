@@ -168,7 +168,7 @@ async fn ask_live() {
             .probe_capabilities()
             .await
             .unwrap_or_else(|_| built.provider.capabilities());
-        let tier = ask_tier(&state, built.provider.as_ref()).await;
+        let tier = ask_tier(&state, built.provider.as_ref(), built.endpoint.as_deref()).await;
         // The reference questions run at every tier; take the model's own.
         let scenarios: Vec<&&c::Scenario> = scenarios
             .iter()

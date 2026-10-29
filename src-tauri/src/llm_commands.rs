@@ -559,6 +559,11 @@ pub enum DataScope<'a> {
     Note(&'a str),
     /// One meeting's transcript (Polish, Extraction).
     Meeting(&'a str),
+    /// Many notes' content (Ask over a folder, a person or everything):
+    /// no single Keep-local switch decides, so the reader excludes Keep-local
+    /// meetings itself for an off-device model (the Ask harness, from
+    /// `BuiltProvider::on_device`). Cloud consent still applies.
+    Wide,
 }
 
 /// Error text when keep-local data meets a cloud provider: names the reason
@@ -633,6 +638,8 @@ pub struct BuiltProvider {
     /// (the Ask harness) may show it — an Ollama at a remote URL is local in
     /// kind but sends data off the device.
     pub on_device: bool,
+    /// The saved base URL (`None`: the provider's default).
+    pub endpoint: Option<String>,
 }
 
 /// [`build_provider`], also reporting `on_device`. The one constructor:
@@ -674,7 +681,7 @@ pub fn build_provider_with_reach(
     // Per-meeting / per-folder "Keep local" (fly-storage privacy.rs):
     // enforced here, the one place every LLM task gets its provider.
     let keep_local = match scope {
-        DataScope::NoMeetingData => false,
+        DataScope::NoMeetingData | DataScope::Wide => false,
         DataScope::Note(id) => storage.note_keep_local(id),
         DataScope::Meeting(id) => storage.meeting_keep_local(id),
     };
@@ -684,6 +691,7 @@ pub fn build_provider_with_reach(
     check_cloud_policy(&provider, is_local, on_device, consented, keep_local)?;
     drop(storage);
 
+    let endpoint = base_url.clone();
     let key = |name: &'static str| -> Result<String, String> {
         state
             .secrets
@@ -724,6 +732,7 @@ pub fn build_provider_with_reach(
     Ok(BuiltProvider {
         provider,
         on_device,
+        endpoint,
     })
 }
 
@@ -1049,15 +1058,81 @@ impl fly_ask::QueryEmbedder for AppEmbedder<'_> {
 }
 
 /// Settings key caching a model's tool smoke test (backend-only; not
-/// webview-writable).
-fn tool_smoke_key(provider: &dyn LLMProvider) -> String {
-    format!("ask.tool_smoke.{}.{}", provider.id(), provider.model())
+/// webview-writable): per server, model name and model digest, so a model
+/// re-pulled under the same name, or another server's copy, is tested
+/// again.
+fn tool_smoke_key(provider: &dyn LLMProvider, server: &str, digest: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    h.update(server.trim().trim_end_matches('/'));
+    h.update([0]);
+    h.update(provider.model());
+    h.update([0]);
+    h.update(digest);
+    let hex: String = h
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("ask.tool_smoke.{}.{hex}", provider.id())
+}
+
+/// The Ollama server root for a saved base URL (no `/v1`).
+fn ollama_root(endpoint: Option<&str>) -> String {
+    let u = endpoint.unwrap_or("http://localhost:11434").trim();
+    let u = u.trim_end_matches('/');
+    u.strip_suffix("/v1")
+        .unwrap_or(u)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// The digest Ollama lists for `model` (`/api/tags`), if it answers.
+async fn ollama_model_digest(root: &str, model: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Tags {
+        #[serde(default)]
+        models: Vec<Tag>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Tag {
+        name: String,
+        #[serde(default)]
+        digest: String,
+    }
+    let want = if model.contains(':') {
+        model.to_string()
+    } else {
+        format!("{model}:latest")
+    };
+    let tags: Tags = reqwest::Client::new()
+        .get(format!("{root}/api/tags"))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    tags.models
+        .into_iter()
+        .find(|t| t.name == want || t.name == model)
+        .map(|t| t.digest)
+        .filter(|d| !d.is_empty())
 }
 
 /// The Ask tier by measured capability (spec §4.2 step 3): probe the
 /// model's capabilities and, for a large local model that can call tools,
-/// run the tool smoke test once (cached per model).
-pub async fn ask_tier(state: &AppState, provider: &dyn LLMProvider) -> fly_ask::Tier {
+/// run the tool smoke test once (cached per server, model and digest;
+/// not cached when the digest can't be read).
+pub async fn ask_tier(
+    state: &AppState,
+    provider: &dyn LLMProvider,
+    endpoint: Option<&str>,
+) -> fly_ask::Tier {
     let caps = provider
         .probe_capabilities()
         .await
@@ -1069,14 +1144,13 @@ pub async fn ask_tier(state: &AppState, provider: &dyn LLMProvider) -> fly_ask::
         tool_smoke: None,
     };
     if fly_ask::tier::smoke_worth_running(inputs) {
-        let key = tool_smoke_key(provider);
-        let cached = state
-            .storage
-            .lock()
-            .unwrap()
-            .get_setting(&key)
-            .ok()
-            .flatten();
+        let root = ollama_root(endpoint);
+        let key = ollama_model_digest(&root, provider.model())
+            .await
+            .map(|d| tool_smoke_key(provider, &root, &d));
+        let cached = key
+            .as_deref()
+            .and_then(|k| state.storage.lock().unwrap().get_setting(k).ok().flatten());
         let passed = match cached {
             Some(v) => v == "passed",
             None => {
@@ -1086,8 +1160,8 @@ pub async fn ask_tier(state: &AppState, provider: &dyn LLMProvider) -> fly_ask::
                     .and_then(|v| v.as_str().map(str::to_string))
                     .unwrap_or_default();
                 // A transport error says nothing about the model: retry next time.
-                if r != fly_ask::tier::SmokeResult::Error {
-                    let _ = state.storage.lock().unwrap().set_setting(&key, &code);
+                if let (Some(k), true) = (&key, r != fly_ask::tier::SmokeResult::Error) {
+                    let _ = state.storage.lock().unwrap().set_setting(k, &code);
                 }
                 r == fly_ask::tier::SmokeResult::Passed
             }
@@ -1259,14 +1333,14 @@ pub async fn ask_meeting(
     let data_scope = match &scope {
         fly_ask::AskScope::Note(id) => DataScope::Note(id),
         fly_ask::AskScope::Meeting(id) => DataScope::Meeting(id),
-        // Wide scopes: the harness excludes Keep-local meetings in its
-        // queries for an off-device model.
-        _ => DataScope::NoMeetingData,
+        // The harness excludes Keep-local meetings in its queries for an
+        // off-device model.
+        _ => DataScope::Wide,
     };
     let built = build_provider_with_reach(&state, data_scope)?;
     let (turns, question) = split_ask_history(history)?;
     let provider = built.provider.as_ref();
-    let tier = ask_tier(&state, provider).await;
+    let tier = ask_tier(&state, provider, built.endpoint.as_deref()).await;
     let embedder = AppEmbedder(&state);
     let sink = {
         let app = app.clone();
@@ -1652,6 +1726,22 @@ pub async fn test_llm_connection(state: State<'_, AppState>) -> CmdResult<String
 #[cfg(test)]
 mod security_tests {
     use super::{check_cloud_policy, validate_base_url};
+
+    #[test]
+    fn the_tool_smoke_cache_is_per_server_model_and_digest() {
+        use super::{ollama_root, tool_smoke_key};
+        let p = fly_llm::mock::MockLLMProvider::new();
+        let a = tool_smoke_key(&p, "http://localhost:11434", "sha256:aa");
+        assert_ne!(a, tool_smoke_key(&p, "http://localhost:11434", "sha256:bb"));
+        assert_ne!(a, tool_smoke_key(&p, "http://10.0.0.5:11434", "sha256:aa"));
+        assert_eq!(
+            a,
+            tool_smoke_key(&p, "http://localhost:11434/", "sha256:aa")
+        );
+        assert!(a.starts_with("ask.tool_smoke.") && a.len() < 64, "{a}");
+        assert_eq!(ollama_root(None), "http://localhost:11434");
+        assert_eq!(ollama_root(Some("http://h.lan:1/v1/")), "http://h.lan:1");
+    }
 
     #[test]
     fn keep_local_refuses_cloud_providers_but_not_ollama() {
