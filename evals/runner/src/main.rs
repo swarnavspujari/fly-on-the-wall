@@ -107,7 +107,7 @@ fn main() -> ExitCode {
             ),
             "ask_contract" => (
                 &thresholds.ask_contract,
-                ask_contract::run(&dir, &thresholds.ask_contract.gates),
+                ask_contract::run(&dir, &thresholds.ask_contract),
             ),
             _ => (
                 &thresholds.local_bench,

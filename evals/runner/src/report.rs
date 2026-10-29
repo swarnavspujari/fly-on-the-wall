@@ -26,6 +26,10 @@ pub struct SuiteResult {
     /// self-check failure). Any error fails a required suite.
     #[serde(default)]
     pub errors: Vec<String>,
+    /// Gates the suite derived at run time from thresholds.toml (e.g. a
+    /// quality group's tier floors), judged like the configured ones.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_gates: BTreeMap<String, Gate>,
 }
 
 impl SuiteResult {
@@ -109,9 +113,10 @@ impl Gating {
 /// quality numbers say.
 pub const SECURITY_GATES: &[&str] = &[
     "keep_local_leaks",
-    "keep_local_in_cloud_requests",
+    "keep_local_off_device_requests",
     "executed_proposals",
     "rendered_links",
+    "out_of_scope_reads",
     "run_log_free_text",
 ];
 
@@ -121,6 +126,7 @@ pub const INTEGRITY_GATES: &[&str] = &[
     "answerable_questions",
     "unanswerable_questions",
     "red_team_scenarios",
+    "robustness_scenarios",
     "scenarios_errored",
 ];
 
@@ -208,7 +214,9 @@ pub fn judge_with(
     // Scorer errors make the run untrustworthy: they block in every mode.
     let mut blocks_list: Vec<String> = result.errors.clone();
     if result.ran {
-        for (metric, gate) in &cfg.gates {
+        let mut gates = cfg.gates.clone();
+        gates.extend(result.extra_gates.clone());
+        for (metric, gate) in &gates {
             let value = result.metrics.get(metric).copied();
             let base = baseline.and_then(|b| b.get(metric)).copied();
             let verdict = match value {
@@ -261,8 +269,46 @@ pub fn judge_with(
                 verdict,
             });
         }
+        // Tracked: no absolute gate, but no regression past the baseline.
+        for (metric, dir) in &cfg.tracked {
+            if gates.contains_key(metric) {
+                continue;
+            }
+            let value = result.metrics.get(metric).copied();
+            let base = baseline.and_then(|b| b.get(metric)).copied();
+            let verdict = match (value, base) {
+                (None, _) => Verdict::Missing,
+                (Some(v), Some(b)) if dir.regressed(v, b, tol) => Verdict::Regressed,
+                (Some(_), Some(_)) => Verdict::Pass,
+                (Some(_), None) => Verdict::Info,
+            };
+            let problem = match verdict {
+                Verdict::Regressed => Some(format!(
+                    "{metric} = {} regressed past baseline {} (tolerance {tol})",
+                    fmt(value),
+                    fmt(base)
+                )),
+                Verdict::Missing => Some(format!(
+                    "{metric} is tracked but the suite didn't measure it"
+                )),
+                _ => None,
+            };
+            if let Some(p) = problem {
+                if blocking(gating, metric, verdict) {
+                    blocks_list.push(p.clone());
+                }
+                problems.push(p);
+            }
+            rows.push(Row {
+                metric: metric.clone(),
+                value,
+                gate: None,
+                baseline: base,
+                verdict,
+            });
+        }
         for (metric, v) in &result.metrics {
-            if !cfg.gates.contains_key(metric) {
+            if !gates.contains_key(metric) && !cfg.tracked.contains_key(metric) {
                 rows.push(Row {
                     metric: metric.clone(),
                     value: Some(*v),
@@ -417,8 +463,12 @@ mod tests {
             status,
             baseline_tolerance: Some(0.02),
             gates,
+            tracked: BTreeMap::new(),
             k: None,
             embedder: None,
+            real_embedder: None,
+            tiers: BTreeMap::new(),
+            group_floor: None,
             der_tolerance: None,
         }
     }
@@ -517,5 +567,35 @@ mod tests {
         assert!(j.blocks, "a required suite that didn't run fails");
         let j = judge(SuiteResult::not_run("t", "why"), &p, None);
         assert!(!j.blocks);
+    }
+
+    #[test]
+    fn tracked_metrics_and_runtime_gates() {
+        let mut c = cfg(Status::Required);
+        c.tracked
+            .insert("mrr".into(), crate::config::Direction::Higher);
+        let mut base = BTreeMap::new();
+        base.insert("recall".to_string(), 0.9);
+        base.insert("mrr".to_string(), 0.5);
+        // A tracked metric below its baseline regresses (blocks in quality
+        // and strict, not in security); above it, it passes.
+        let mut r = result(0.9, 0.0);
+        r.metrics.insert("mrr".into(), 0.4);
+        let j = judge_with(r.clone(), &c, Some(&base), Gating::Quality);
+        assert!(j.blocks, "{:?}", j.problems);
+        assert!(!judge_with(r.clone(), &c, Some(&base), Gating::Security).blocks);
+        r.metrics.insert("mrr".into(), 0.6);
+        assert!(!judge_with(r.clone(), &c, Some(&base), Gating::Quality).blocks);
+        // A runtime gate is judged like a configured one.
+        r.metrics.insert("auto@S.grounded".into(), 0.5);
+        r.extra_gates.insert(
+            "auto@S.grounded".into(),
+            Gate {
+                min: Some(0.7),
+                max: None,
+            },
+        );
+        let j = judge_with(r, &c, Some(&base), Gating::Strict);
+        assert!(j.blocks && j.problems.iter().any(|p| p.contains("auto@S.grounded")));
     }
 }

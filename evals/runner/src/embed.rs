@@ -69,6 +69,20 @@ pub fn embed_pending(storage: &Storage) -> anyhow::Result<usize> {
     }
 }
 
+/// The CI query embedder handed to the Ask harness.
+pub struct HashedBow;
+
+#[async_trait::async_trait(?Send)]
+impl crate::ask_contract::QueryEmbedder for HashedBow {
+    fn model(&self) -> &str {
+        MODEL
+    }
+
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
+        Ok(embed(query))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

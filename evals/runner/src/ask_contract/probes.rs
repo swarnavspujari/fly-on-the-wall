@@ -16,7 +16,8 @@ use fly_llm::{ChatResponse, ContentBlock, ConverseRequest, Message, ToolChoice, 
 use serde_json::{json, Value};
 
 use super::{
-    AnswerSentence, AskAnswer, AskHarness, AskRequest, AskScope, ProposalView, SentenceStatus, Tier,
+    AnswerSentence, AskAnswer, AskHarness, AskOutcome, AskRequest, AskScope, ProposalView,
+    SentenceStatus, Tier,
 };
 use crate::{claims, embed};
 
@@ -193,8 +194,10 @@ async fn tool_loop(
                         }
                     }
                 }
+                let raw = input.to_string();
                 proposals.push(ProposalView {
                     tool: name.clone(),
+                    preview: if execute { raw } else { strip_links(&raw) },
                     executed: execute,
                 });
                 (
@@ -231,16 +234,16 @@ impl AskHarness for StrictProbe {
     }
 
     async fn ask(&self, req: AskRequest<'_>) -> Result<AskAnswer, String> {
-        let visibility = if req.provider.is_local() {
+        let visibility = if req.on_device {
             Visibility::All
         } else {
             Visibility::ShareableOnly
         };
         let ctx = Context::new(req.storage, visibility);
-        let v = embed::embed(req.question);
+        let v = req.embedder.embed_query(req.question).await?;
         let qv = QueryVector {
             vector: &v,
-            model: embed::MODEL,
+            model: req.embedder.model(),
         };
         let prefetch = call(&ctx, "search_passages", &search_args(&req), Some(qv))
             .map_err(|e| e.to_string())?;
@@ -258,7 +261,7 @@ impl AskHarness for StrictProbe {
         };
         let mut log = json!({
             "tier": format!("{:?}", req.tier),
-            "visibility": if req.provider.is_local() { "all" } else { "shareable" },
+            "visibility": if req.on_device { "all" } else { "shareable" },
             "passages": prefetch.json["passages"].as_array().map_or(0, Vec::len),
             "floor": if coverage >= 0.6 { "pass" } else { "below" },
         });
@@ -266,10 +269,9 @@ impl AskHarness for StrictProbe {
             log["not_found"] = json!(true);
             log["model_calls"] = json!(0);
             return Ok(AskAnswer {
-                not_found: true,
-                sentences: vec![],
-                proposals: vec![],
+                outcome: AskOutcome::NotFound,
                 run_log: log,
+                ..Default::default()
             });
         }
         let request = ConverseRequest {
@@ -330,10 +332,15 @@ impl AskHarness for StrictProbe {
         log["proposals"] = json!(proposals.len());
         log["not_found"] = json!(not_found);
         Ok(AskAnswer {
-            not_found,
+            outcome: if not_found {
+                AskOutcome::NotFound
+            } else {
+                AskOutcome::Answered
+            },
             sentences: out,
             proposals,
             run_log: log,
+            ..Default::default()
         })
     }
 }
@@ -376,10 +383,15 @@ impl AskHarness for NaiveProbe {
             })
             .collect();
         Ok(AskAnswer {
-            not_found: is_refusal(&text),
+            outcome: if is_refusal(&text) {
+                AskOutcome::NotFound
+            } else {
+                AskOutcome::Answered
+            },
             sentences,
             proposals,
             run_log: json!({ "question": req.question, "answer": text }),
+            ..Default::default()
         })
     }
 }

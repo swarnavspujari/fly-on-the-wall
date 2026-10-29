@@ -14,240 +14,30 @@
 
 pub mod probes;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, ensure, Context as _, Result};
 use chrono::{DateTime, TimeZone, Utc};
-use fly_llm::{
-    Capabilities, ChatRequest, ChatResponse, ContentBlock, ConverseRequest, LLMProvider, LlmError,
-    Role,
-};
-use fly_storage::Storage;
+use fly_llm::{ChatResponse, ContentBlock, ConverseRequest, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::claims;
+use crate::config::SuiteConfig;
 use crate::corpus::{Corpus, Db};
 use crate::report::SuiteResult;
 use crate::retrieval::{Answerable, GoldSet, LeakNeedles, Requirement, Scope};
 
-// ---------------------------------------------------------------------------
-// The adapter the harness implements
-// ---------------------------------------------------------------------------
+pub mod api;
+pub mod provider;
 
-/// Model-capability tier (spec §4.2): S makes no model-chosen tool calls,
-/// M ≤ 3 calls / 2 rounds, C ≤ 8 calls / 5 rounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Tier {
-    S,
-    M,
-    C,
-}
-
-/// What the question is about.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum AskScope {
-    All,
-    /// A meeting id (Ask from inside a note).
-    Meeting(String),
-    /// A folder id.
-    Folder(String),
-}
-
-/// One Ask, as the eval hands it to the harness.
-pub struct AskRequest<'a> {
-    /// The fixture database (fresh per scenario).
-    pub storage: &'a Storage,
-    /// A recording mock. Its `is_local()` decides Keep-local visibility:
-    /// the harness must derive that itself, as it will in the app.
-    pub provider: &'a dyn LLMProvider,
-    pub question: &'a str,
-    pub scope: AskScope,
-    /// Forced tier (the app measures it; the eval pins it per scenario).
-    pub tier: Tier,
-    /// The clock for relative dates ("last week").
-    pub now: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SentenceStatus {
-    /// Shown as sourced: every citation valid, claims checked.
-    Sourced,
-    /// Styled unsourced (no valid citation).
-    Unsourced,
-    /// Cited but flagged (e.g. failed the claim check).
-    Flagged,
-}
-
-/// One sentence as the user would see it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnswerSentence {
-    /// Displayed text (Markdown). `[seg:ID]` markers may stay in it.
-    pub text: String,
-    /// The segment ids this sentence is shown citing.
-    pub citations: Vec<String>,
-    pub status: SentenceStatus,
-}
-
-/// A proposal (spec §4.2 step 6): rendered as a button, never executed by
-/// the harness.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProposalView {
-    pub tool: String,
-    pub executed: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AskAnswer {
-    /// The answer is "not found in your meetings".
-    pub not_found: bool,
-    pub sentences: Vec<AnswerSentence>,
-    pub proposals: Vec<ProposalView>,
-    /// The durable run log for this answer (spec §4.2a #7): typed values
-    /// only, no free text.
-    pub run_log: Value,
-}
-
-/// The contract. The harness must present retrieved segments to the model
-/// as `[seg:ID]` markers (fly-context's rendering), never construct a
-/// provider, and never write to storage.
-#[async_trait::async_trait(?Send)]
-pub trait AskHarness {
-    fn name(&self) -> &str;
-    async fn ask(&self, req: AskRequest<'_>) -> std::result::Result<AskAnswer, String>;
-}
-
-// ---------------------------------------------------------------------------
-// Request-recording provider and replays
-// ---------------------------------------------------------------------------
-
-/// A provider that records every request. In replay mode it answers from a
-/// fixed script; in record mode it forwards to a real provider (built by
-/// the app's `build_provider`, never here) and keeps the responses.
-pub struct RecordingProvider {
-    local: bool,
-    script: Mutex<VecDeque<ChatResponse>>,
-    inner: Option<Arc<dyn LLMProvider>>,
-    seen: Mutex<Vec<ConverseRequest>>,
-    recorded: Mutex<Vec<ChatResponse>>,
-}
-
-impl RecordingProvider {
-    pub fn replay(responses: Vec<ChatResponse>, local: bool) -> Self {
-        Self {
-            local,
-            script: Mutex::new(responses.into()),
-            inner: None,
-            seen: Mutex::new(Vec::new()),
-            recorded: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub fn wrap(inner: Arc<dyn LLMProvider>) -> Self {
-        Self {
-            local: inner.is_local(),
-            script: Mutex::new(VecDeque::new()),
-            inner: Some(inner),
-            seen: Mutex::new(Vec::new()),
-            recorded: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub fn requests(&self) -> Vec<ConverseRequest> {
-        self.seen.lock().expect("lock").clone()
-    }
-
-    /// Responses a wrapped provider produced (record mode).
-    pub fn recorded(&self) -> Vec<ChatResponse> {
-        self.recorded.lock().expect("lock").clone()
-    }
-
-    /// A replay file for this run (record mode).
-    pub fn to_replay(&self, scenario: &str, model: &str) -> ReplayFile {
-        ReplayFile {
-            format: 1,
-            scenario: scenario.into(),
-            model: model.into(),
-            recorded_at: Utc::now(),
-            responses: self.recorded(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl LLMProvider for RecordingProvider {
-    fn id(&self) -> &'static str {
-        if self.local {
-            "eval-replay-local"
-        } else {
-            "eval-replay-cloud"
-        }
-    }
-
-    fn model(&self) -> &str {
-        self.inner.as_ref().map_or("eval-replay", |p| p.model())
-    }
-
-    fn is_local(&self) -> bool {
-        self.local
-    }
-
-    async fn chat(&self, req: ChatRequest) -> fly_llm::Result<String> {
-        Ok(self.converse(req.into()).await?.text())
-    }
-
-    async fn test_connection(&self) -> fly_llm::Result<()> {
-        Ok(())
-    }
-
-    fn capabilities(&self) -> Capabilities {
-        match &self.inner {
-            Some(p) => p.capabilities(),
-            None => Capabilities {
-                tools: true,
-                tool_choice_none: true,
-                tool_choice_required: true,
-                tool_choice_required_thinking_off: true,
-                strict_tools: true,
-                max_strict_tools: 0,
-                streaming: false,
-                thinking_control: false,
-                structured_output: false,
-                probed: false,
-            },
-        }
-    }
-
-    async fn converse(&self, req: ConverseRequest) -> fly_llm::Result<ChatResponse> {
-        self.seen.lock().expect("lock").push(req.clone());
-        if let Some(inner) = &self.inner {
-            let resp = inner.converse(req).await?;
-            self.recorded.lock().expect("lock").push(resp.clone());
-            return Ok(resp);
-        }
-        self.script
-            .lock()
-            .expect("lock")
-            .pop_front()
-            .ok_or_else(|| LlmError::Provider("replay script exhausted".into()))
-    }
-}
-
-/// A recorded real-model run, replayed in CI
-/// (`suites/ask_contract/replays/<model>/<scenario>.json`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReplayFile {
-    pub format: u32,
-    pub scenario: String,
-    pub model: String,
-    pub recorded_at: DateTime<Utc>,
-    pub responses: Vec<ChatResponse>,
-}
+pub use api::*;
+pub use provider::{
+    fingerprint, strip_thinking, ProviderKind, RecordingProvider, ReplayFile, ReplayProfile,
+    ScriptStep, REPLAY_FORMAT,
+};
 
 // ---------------------------------------------------------------------------
 // Scenarios
@@ -263,13 +53,6 @@ pub enum ScenarioKind {
     Guard,
     /// Injected speech the model obeys.
     RedTeam,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderKind {
-    Local,
-    Cloud,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -373,7 +156,7 @@ impl Contract {
         let expect_for =
             |gold_id: &str, provider: ProviderKind| -> Result<(String, Option<Scope>, Expect)> {
                 if let Some(q) = answerable.get(gold_id) {
-                    let expect = if q.keep_local && provider == ProviderKind::Cloud {
+                    let expect = if q.keep_local && !provider.on_device() {
                         Expect::NotFound
                     } else {
                         Expect::Answer(q.must_cite.clone())
@@ -382,7 +165,7 @@ impl Contract {
                 }
                 if let Some(u) = unanswerable.get(gold_id) {
                     ensure!(
-                        !(u.shareable_only() && provider == ProviderKind::Local),
+                        !(u.shareable_only() && provider.on_device()),
                         "{gold_id} is unanswerable only for a cloud provider"
                     );
                     return Ok((u.question.clone(), None, Expect::NotFound));
@@ -413,10 +196,7 @@ impl Contract {
         for (gold_id, provider) in auto_ids {
             let (question, scope, expect) = expect_for(&gold_id, provider)?;
             let responses = auto_responses(&expect, answerable.get(gold_id.as_str()).copied());
-            let p = match provider {
-                ProviderKind::Local => "local",
-                ProviderKind::Cloud => "cloud",
-            };
+            let p = provider.as_str();
             scenarios.push(Scenario {
                 id: format!("auto-{p}-{gold_id}"),
                 question,
@@ -499,7 +279,11 @@ impl Contract {
         for f in files {
             let r: ReplayFile = serde_json::from_str(&std::fs::read_to_string(&f)?)
                 .with_context(|| format!("parse {}", f.display()))?;
-            ensure!(r.format == 1, "{}: unsupported replay format", f.display());
+            ensure!(
+                r.format == REPLAY_FORMAT,
+                "{}: unsupported replay format",
+                f.display()
+            );
             let base = scenarios
                 .iter()
                 .find(|s| s.id == r.scenario)
@@ -581,7 +365,7 @@ pub struct Tally {
     pub grounded: usize,
     pub executed_proposals: usize,
     pub rendered_links: usize,
-    pub keep_local_in_cloud_requests: usize,
+    pub keep_local_off_device_requests: usize,
     pub run_log_free_text: usize,
     pub red_team: usize,
     pub rows: Vec<Value>,
@@ -629,8 +413,8 @@ impl Tally {
         m.insert("executed_proposals".into(), self.executed_proposals as f64);
         m.insert("rendered_links".into(), self.rendered_links as f64);
         m.insert(
-            "keep_local_in_cloud_requests".into(),
-            self.keep_local_in_cloud_requests as f64,
+            "keep_local_off_device_requests".into(),
+            self.keep_local_off_device_requests as f64,
         );
         m.insert("run_log_free_text".into(), self.run_log_free_text as f64);
         m.insert("red_team_scenarios".into(), self.red_team as f64);
@@ -732,7 +516,11 @@ pub fn eval_now() -> DateTime<Utc> {
 }
 
 /// Run every scenario through `harness`.
-pub fn run_harness(contract: &Contract, harness: &dyn AskHarness) -> Result<Tally> {
+pub fn run_harness(
+    contract: &Contract,
+    harness: &dyn AskHarness,
+    budgets: &BTreeMap<Tier, AskBudget>,
+) -> Result<Tally> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()?;
@@ -746,12 +534,12 @@ pub fn run_harness(contract: &Contract, harness: &dyn AskHarness) -> Result<Tall
         ..Default::default()
     };
     for s in &contract.scenarios {
-        let responses: Vec<ChatResponse> = s
+        let steps: Vec<ScriptStep> = s
             .responses
             .iter()
-            .map(|r| Ok(serde_json::from_value(db.substitute(r)?)?))
+            .map(|r| ScriptStep::from_json(&db.substitute(r)?))
             .collect::<Result<_>>()?;
-        let provider = RecordingProvider::replay(responses, s.provider == ProviderKind::Local);
+        let provider = RecordingProvider::scripted(steps, s.provider);
         let scope = match &s.scope {
             Some(Scope {
                 meeting: Some(m), ..
@@ -764,9 +552,13 @@ pub fn run_harness(contract: &Contract, harness: &dyn AskHarness) -> Result<Tall
         let req = AskRequest {
             storage: &db.storage,
             provider: &provider,
+            on_device: s.provider.on_device(),
+            embedder: &crate::embed::HashedBow,
             question: &s.question,
+            history: &[],
             scope,
             tier: s.tier,
+            budget: budgets[&s.tier],
             now: eval_now(),
         };
         let outcome = rt.block_on(async {
@@ -808,7 +600,7 @@ pub fn run_harness(contract: &Contract, harness: &dyn AskHarness) -> Result<Tall
                 .filter(|c| {
                     retrieved.contains(*c)
                         && corpus.segment(c).is_some()
-                        && !(s.provider == ProviderKind::Cloud && corpus.is_keep_local_segment(c))
+                        && !(!s.provider.on_device() && corpus.is_keep_local_segment(c))
                 })
                 .cloned()
                 .collect();
@@ -845,12 +637,12 @@ pub fn run_harness(contract: &Contract, harness: &dyn AskHarness) -> Result<Tall
         let executed =
             answer.proposals.iter().filter(|p| p.executed).count() + usize::from(db_changed);
         tally.executed_proposals += executed;
-        let leaks = if s.provider == ProviderKind::Cloud {
+        let leaks = if !s.provider.on_device() {
             leaking_requests(&requests, &s.question, &needles)
         } else {
             0
         };
-        tally.keep_local_in_cloud_requests += leaks;
+        tally.keep_local_off_device_requests += leaks;
         let free_text = free_text_leaves(
             &answer.run_log,
             &sensitive_words(corpus, &s.question),
@@ -870,7 +662,7 @@ pub fn run_harness(contract: &Contract, harness: &dyn AskHarness) -> Result<Tall
                     } else {
                         unsourced
                     };
-                    if answer.not_found {
+                    if answer.not_found() {
                         tally.false_refusals += 1;
                     }
                     let cited: BTreeSet<String> = sourced_with_valid
@@ -883,7 +675,7 @@ pub fn run_harness(contract: &Contract, harness: &dyn AskHarness) -> Result<Tall
                 }
                 Expect::NotFound => {
                     tally.quality_unanswerable += 1;
-                    if answer.not_found && !any_citation {
+                    if answer.not_found() && !any_citation {
                         tally.correct_refusals += 1;
                     }
                 }
@@ -893,7 +685,7 @@ pub fn run_harness(contract: &Contract, harness: &dyn AskHarness) -> Result<Tall
         tally.rows.push(json!({
             "id": s.id,
             "kind": s.kind,
-            "not_found": answer.not_found,
+            "outcome": answer.outcome,
             "sentences": answer.sentences.len(),
             "valid_citations": valid_cites_total,
             "claim_failures": claim_failures,
@@ -918,19 +710,18 @@ pub const GUARD_METRICS: &[&str] = &[
     "claim_check_pass_rate",
     "executed_proposals",
     "rendered_links",
-    "keep_local_in_cloud_requests",
+    "keep_local_off_device_requests",
     "run_log_free_text",
     "scenarios_errored",
 ];
 
 /// The scorer checks itself: the strict probe must pass every guard and
 /// the naive probe must fail every guard except errors. Returns problems.
-pub fn self_check(
-    contract: &Contract,
-    gates: &BTreeMap<String, crate::config::Gate>,
-) -> Result<(Value, Vec<String>)> {
-    let strict = run_harness(contract, &probes::StrictProbe)?.metrics();
-    let naive = run_harness(contract, &probes::NaiveProbe)?.metrics();
+pub fn self_check(contract: &Contract, cfg: &SuiteConfig) -> Result<(Value, Vec<String>)> {
+    let gates = &cfg.gates;
+    let budgets = budgets(cfg)?;
+    let strict = run_harness(contract, &probes::StrictProbe, &budgets)?.metrics();
+    let naive = run_harness(contract, &probes::NaiveProbe, &budgets)?.metrics();
     let mut problems = Vec::new();
     for m in GUARD_METRICS {
         let Some(gate) = gates.get(*m) else {
@@ -956,19 +747,29 @@ pub fn self_check(
     ))
 }
 
-pub fn run(evals_dir: &Path, gates: &BTreeMap<String, crate::config::Gate>) -> SuiteResult {
-    match run_inner(evals_dir, gates) {
+/// Each tier's budget, from thresholds.toml.
+pub fn budgets(cfg: &SuiteConfig) -> Result<BTreeMap<Tier, AskBudget>> {
+    Tier::ALL
+        .iter()
+        .map(|t| {
+            cfg.tiers
+                .get(t)
+                .map(|c| (*t, c.budget))
+                .with_context(|| format!("no budget for tier {}", t.as_str()))
+        })
+        .collect()
+}
+
+pub fn run(evals_dir: &Path, cfg: &SuiteConfig) -> SuiteResult {
+    match run_inner(evals_dir, cfg) {
         Ok(r) => r,
         Err(e) => SuiteResult::failed("ask_contract", e),
     }
 }
 
-fn run_inner(
-    evals_dir: &Path,
-    gates: &BTreeMap<String, crate::config::Gate>,
-) -> Result<SuiteResult> {
+fn run_inner(evals_dir: &Path, cfg: &SuiteConfig) -> Result<SuiteResult> {
     let contract = Contract::load(evals_dir)?;
-    let (check, problems) = self_check(&contract, gates)?;
+    let (check, problems) = self_check(&contract, cfg)?;
     let loaded = json!({
         "scenarios": contract.scenarios.len(),
         "scripts": contract.scripts,
@@ -988,7 +789,7 @@ fn run_inner(
             ),
         ),
         Some(h) => {
-            let tally = run_harness(&contract, h.as_ref())?;
+            let tally = run_harness(&contract, h.as_ref(), &budgets(cfg)?)?;
             let mut r = SuiteResult::new("ask_contract");
             r.metrics = tally.metrics();
             r.info.insert("harness".into(), json!(h.name()));
@@ -1025,7 +826,7 @@ mod tests {
         let c = Contract::load(&crate::evals_dir()).unwrap();
         let t =
             crate::config::Thresholds::load(&crate::evals_dir().join("thresholds.toml")).unwrap();
-        let (_, problems) = self_check(&c, &t.ask_contract.gates).unwrap();
+        let (_, problems) = self_check(&c, &t.ask_contract).unwrap();
         assert!(problems.is_empty(), "{problems:#?}");
     }
 
