@@ -287,8 +287,8 @@ pub fn resume(state: &AppState) {
 const IN_FLIGHT_CHECK: Duration = Duration::from_millis(500);
 
 /// Why the job is paused, as Settings names it: the shared background rule
-/// ([`AppState::background_yield_reason`]).
-fn paused_for(state: &AppState) -> Option<&'static str> {
+/// ([`AppState::background_yield_reason`]). The video job uses it too.
+pub(crate) fn paused_for(state: &AppState) -> Option<&'static str> {
     state.background_yield_reason().map(|why| match why {
         BackgroundYield::Recording => "recording",
         BackgroundYield::Transcription => "transcribing",
@@ -960,8 +960,8 @@ fn ctx_stopped(e: &fly_audio::AudioError) -> bool {
 
 /// Lower this thread's CPU (and, where the OS ties them, I/O) priority:
 /// Windows background mode, macOS's background QoS class, a high nice
-/// value on Linux (per thread there). Best effort.
-fn enter_background_priority() {
+/// value on Linux (per thread there). Best effort. The video job uses it too.
+pub(crate) fn enter_background_priority() {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::Threading::{
@@ -1379,6 +1379,31 @@ fn playback_plan(data_dir: &Path, rec: &RecordingRef) -> PlaybackPlan {
     }
 }
 
+/// The meeting exists and retention hasn't deleted its audio.
+fn audio_still_stored(storage: &fly_storage::Storage, meeting_id: &str) -> bool {
+    storage
+        .get_meeting_privacy(meeting_id)
+        .is_ok_and(|p| p.audio_deleted_at.is_none())
+}
+
+/// Put a freshly built playback mix in place, with the storage lock held:
+/// retention and purges delete a meeting's audio and scratch under that same
+/// lock, so either this lands first (and their sweep of scratch removes it)
+/// or they did, and the new copy is deleted instead. `false` = not placed.
+fn place_playback_cache(
+    storage: &fly_storage::Storage,
+    meeting_id: &str,
+    part: &Path,
+    cache: &Path,
+) -> Result<bool, String> {
+    if storage.get_meeting(meeting_id).is_err() || !audio_still_stored(storage, meeting_id) {
+        let _ = std::fs::remove_file(part);
+        return Ok(false);
+    }
+    std::fs::rename(part, cache).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 fn evict_playback_cache(data_dir: &Path, keep: &Path) {
     let root = fly_storage::scratch::scratch_root(data_dir);
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -1429,6 +1454,9 @@ pub async fn prepare_playback(
         let m = storage
             .get_meeting(&meeting_id)
             .map_err(|e| e.to_string())?;
+        if !audio_still_stored(&storage, &meeting_id) {
+            return Ok(None);
+        }
         match m.recording {
             Some(r) => r,
             None => return Ok(None),
@@ -1463,7 +1491,8 @@ pub async fn prepare_playback(
     let _one_at_a_time = store.playback_lock.lock().await;
     if !is_fresh() {
         let (cache_c, dir_c) = (cache.clone(), cache_dir.clone());
-        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let (app_c, id_c) = (app.clone(), meeting_id.clone());
+        let placed = tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
             std::fs::create_dir_all(&dir_c).map_err(|e| e.to_string())?;
             let part = dir_c.join("playback.part.wav");
             match &sys {
@@ -1482,11 +1511,17 @@ pub async fn prepare_playback(
                     .map(|_| ())
                     .map_err(|e| e.to_string())?,
             }
-            std::fs::rename(&part, &cache_c).map_err(|e| e.to_string())
+            let state = app_c.state::<AppState>();
+            let storage = state.storage.lock().unwrap();
+            place_playback_cache(&storage, &id_c, &part, &cache_c)
         })
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("couldn't prepare the recording for playback: {e}"))?;
+        if !placed {
+            // its audio (or the meeting) was deleted while the mix was built
+            return Ok(None);
+        }
     } else {
         // LRU: a hit counts as fresh use.
         if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&cache) {
@@ -1508,7 +1543,7 @@ pub async fn prepare_playback(
 // ---------------------------------------------------------------------------
 
 const AUDIO_EXTS: &[&str] = &[
-    "wav", "flac", "mp3", "m4a", "aac", "ogg", "oga", "opus", "wma",
+    "wav", "flac", "mp3", "m4a", "aac", "ogg", "oga", "opus", "wma", "mka",
 ];
 const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm", "avi"];
 
@@ -1528,6 +1563,8 @@ pub struct StorageReport {
     /// Other attachments (files, other videos).
     pub other_attachment_bytes: u64,
     pub compress: CompressStatus,
+    /// The opt-in video job (video_store.rs).
+    pub videos: crate::video_store::VideoJobStatus,
 }
 
 fn ext_of(p: &Path) -> String {
@@ -1603,6 +1640,7 @@ pub async fn storage_report(state: tauri::State<'_, AppState>) -> Result<Storage
         .await
         .map_err(|e| e.to_string())?;
     report.compress = state.audio_store.status();
+    report.videos = crate::video_store::status_for(&state);
     Ok(report)
 }
 
@@ -1641,6 +1679,50 @@ mod tests {
             *state.audio_store.wake.0.lock().unwrap(),
             "woken for a pass"
         );
+    }
+
+    /// A playback mix built while retention deleted the meeting's audio (or
+    /// the meeting went) never lands in scratch.
+    #[test]
+    fn a_playback_mix_is_dropped_if_the_audio_went_while_it_was_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = fly_storage::Storage::open(dir.path()).unwrap();
+        let note = s.create_note("Design review", None).unwrap();
+        let m = s.create_meeting("Design review", &note.id, &[]).unwrap();
+        s.end_meeting(
+            &m.id,
+            &RecordingRef {
+                mic_path: Some("recordings/r/recording.mic.flac".into()),
+                system_path: Some("recordings/r/recording.system.flac".into()),
+                mixed_path: None,
+                playback_path: None,
+                duration_ms: 1000,
+            },
+        )
+        .unwrap();
+        let scratch = dir.path().join("scratch-m");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let (part, cache) = (
+            scratch.join("playback.part.wav"),
+            scratch.join("playback.wav"),
+        );
+        std::fs::write(&part, b"RIFF").unwrap();
+        assert!(place_playback_cache(&s, &m.id, &part, &cache).unwrap());
+        assert!(cache.exists() && !part.exists());
+        std::fs::remove_file(&cache).unwrap();
+
+        s.delete_meeting_audio(&m.id).unwrap();
+        assert!(!audio_still_stored(&s, &m.id));
+        std::fs::write(&part, b"RIFF").unwrap();
+        assert!(!place_playback_cache(&s, &m.id, &part, &cache).unwrap());
+        assert!(
+            !cache.exists() && !part.exists(),
+            "no copy outlives the deletion"
+        );
+
+        std::fs::write(&part, b"RIFF").unwrap();
+        assert!(!place_playback_cache(&s, "gone", &part, &cache).unwrap());
+        assert!(!part.exists());
     }
 
     /// A lease taken just before halt() (its announcement still in the

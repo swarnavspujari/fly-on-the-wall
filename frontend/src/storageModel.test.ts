@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { compressLine, compressNoticeCopy, compressPercent, videoLine } from "./storageModel";
-import type { CompressStatus, StorageReport } from "./types";
+import {
+  audioOnlyConfirm,
+  compressLine,
+  compressNoticeCopy,
+  compressPercent,
+  importedVideosLine,
+  screenLine,
+  shrinkConfirm,
+  videoJobLine,
+} from "./storageModel";
+import type { CompressStatus, StorageReport, VideoJobStatus } from "./types";
 
 const GB = 1024 ** 3;
 const status = (p: Partial<CompressStatus> = {}): CompressStatus => ({
@@ -84,27 +93,88 @@ describe("compressLine", () => {
   });
 });
 
-describe("videoLine", () => {
-  const report = (p: Partial<StorageReport> = {}): StorageReport => ({
-    audio_bytes: 0,
-    wav_bytes: 0,
-    imported_video_bytes: 3 * GB,
-    imported_video_files: 2,
-    screen_recording_bytes: 1.5 * GB,
-    screen_recording_files: 1,
-    other_attachment_bytes: 0,
-    compress: status(),
-    ...p,
-  });
-  it("lists both kinds with sizes and says they're left alone", () => {
-    expect(videoLine(report())).toBe(
-      "2 imported meeting videos (3.0 GB), 1 screen recording (1.5 GB). Kept as they are: lossless compression doesn’t shrink video.",
+const videos = (p: Partial<VideoJobStatus> = {}): VideoJobStatus => ({
+  kind: null,
+  state: "idle",
+  paused_for: null,
+  files_total: 0,
+  files_done: 0,
+  files_skipped: 0,
+  bytes_saved: 0,
+  last_error: null,
+  import_policy: "keep",
+  ...p,
+});
+const report = (p: Partial<StorageReport> = {}): StorageReport => ({
+  audio_bytes: 0,
+  wav_bytes: 0,
+  imported_video_bytes: 3 * GB,
+  imported_video_files: 2,
+  screen_recording_bytes: 1.5 * GB,
+  screen_recording_files: 1,
+  other_attachment_bytes: 0,
+  compress: status(),
+  videos: videos(),
+  ...p,
+});
+
+describe("video rows", () => {
+  it("imported videos: sizes and what each choice does", () => {
+    expect(importedVideosLine(report())).toBe(
+      "2 videos, 3.0 GB. Audio only removes the picture and keeps the audio exactly as it is.",
     );
-  });
-  it("no videos", () => {
-    expect(videoLine(report({ imported_video_files: 0, screen_recording_files: 0 }))).toBe(
-      "No videos.",
+    expect(importedVideosLine(report({ videos: videos({ import_policy: "audio_only" }) }))).toMatch(
+      /keeps only its audio, exactly as it is/,
     );
+    expect(importedVideosLine(report({ imported_video_files: 0 }))).toBe("No imported videos.");
+    expect(
+      importedVideosLine(
+        report({ imported_video_files: 0, videos: videos({ import_policy: "audio_only" }) }),
+      ),
+    ).toMatch(/Videos you import keep only their audio/);
+  });
+
+  it("screen recordings", () => {
+    expect(screenLine(report())).toBe(
+      "1 recording, 1.5 GB. Shrinking re-encodes them to look the same.",
+    );
+    expect(screenLine(report({ screen_recording_files: 0 }))).toBe("No screen recordings.");
+  });
+
+  it("the job line per state", () => {
+    expect(videoJobLine(videos())).toBeNull();
+    const run = videos({ kind: "shrink_screen", files_total: 4, files_done: 1 });
+    expect(videoJobLine({ ...run, state: "working" })).toBe(
+      "Shrinking screen recordings: 2 of 4 recordings.",
+    );
+    expect(videoJobLine({ ...run, state: "working", bytes_saved: 2 * GB })).toMatch(
+      /2\.0 GB freed so far/,
+    );
+    expect(videoJobLine({ ...run, state: "paused", paused_for: "recording" })).toBe(
+      "Shrinking screen recordings is paused while you record.",
+    );
+    expect(videoJobLine({ ...run, state: "done", bytes_saved: 3 * GB, files_skipped: 1 })).toBe(
+      "Done: 3.0 GB freed. 1 recording left as it was.",
+    );
+    expect(videoJobLine({ ...run, state: "stopped", bytes_saved: GB })).toBe(
+      "Stopped. 1.0 GB freed.",
+    );
+    expect(
+      videoJobLine(videos({ kind: "audio_only", state: "working", files_total: 1, files_done: 0 })),
+    ).toBe("Keeping audio only: 1 of 1 video.");
+  });
+
+  it("the confirmations say what happens and what doesn't", () => {
+    const a = audioOnlyConfirm(report());
+    expect(a.message).toMatch(/picture of 2 imported videos \(3\.0 GB\) is removed/);
+    expect(a.message).toMatch(/subtitles/);
+    expect(a.message).toMatch(/exactly as it is, and checked before anything is deleted/);
+    expect(a.message).toMatch(/files you imported from aren't touched/);
+    const s = shrinkConfirm({ files: 4, bytes: 1.5 * GB, bytes_after: 0.5 * GB });
+    expect(s.title).toBe("Shrink 4 screen recordings?");
+    expect(s.message).toMatch(/About 1\.5 GB → 512 MB/);
+    expect(s.message).toMatch(/not bit for bit/);
+    expect(s.message).toMatch(/at least 98%/);
   });
 });
 

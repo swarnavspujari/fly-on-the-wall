@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use fly_core::{Meeting, RecordingRef};
+use fly_core::{Meeting, Note, RecordingRef};
 
 use crate::meetings::{contained_recordings_dir, recording_dir_rel};
 use crate::recovery::{RecordingManifest, MANIFEST_VERSION, RECORDING_MANIFEST};
@@ -214,6 +214,91 @@ impl Storage {
     }
 }
 
+impl Storage {
+    /// Point every note attachment at `old_rel` (a video copy being
+    /// replaced by its audio) to `new_rel`, renaming its display name and
+    /// MIME type to match. Returns the notes that changed (empty: nothing
+    /// pointed at `old_rel`).
+    pub fn repoint_attachments(&self, old_rel: &str, new_rel: &str) -> Result<Vec<String>> {
+        let new_name = new_rel.rsplit('/').next().unwrap_or(new_rel).to_string();
+        let ids: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM notes WHERE instr(attachments_json, ?1) > 0")?;
+            let rows = stmt.query_map([old_rel], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let mut changed = Vec::new();
+        for id in ids {
+            let note = self.get_note(&id)?;
+            let mut attachments = note.attachments.clone();
+            let mut hit = false;
+            for a in attachments.iter_mut().filter(|a| a.rel_path == old_rel) {
+                a.rel_path = new_rel.to_string();
+                a.file_name = new_name.clone();
+                a.mime = audio_mime(&new_name);
+                hit = true;
+            }
+            if hit {
+                self.set_note_attachments(&id, &attachments)?;
+                changed.push(id);
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Notes with at least one attachment (the video job lists its
+    /// candidates from these, never from directory listings).
+    pub fn notes_with_attachments(&self) -> Result<Vec<Note>> {
+        let ids: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM notes
+                  WHERE attachments_json IS NOT NULL AND attachments_json NOT IN ('', '[]')",
+            )?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        ids.iter().map(|id| self.get_note(id)).collect()
+    }
+
+    /// How many note attachments point at `rel_path`.
+    pub fn attachment_references(&self, rel_path: &str) -> Result<usize> {
+        let ids: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM notes WHERE instr(attachments_json, ?1) > 0")?;
+            let rows = stmt.query_map([rel_path], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let mut n = 0;
+        for id in ids {
+            n += self
+                .get_note(&id)?
+                .attachments
+                .iter()
+                .filter(|a| a.rel_path == rel_path)
+                .count();
+        }
+        Ok(n)
+    }
+}
+
+fn audio_mime(name: &str) -> Option<String> {
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(
+        match ext.as_str() {
+            "m4a" => "audio/mp4",
+            "mp3" => "audio/mpeg",
+            "ogg" => "audio/ogg",
+            "flac" => "audio/flac",
+            "wav" => "audio/wav",
+            "mka" => "audio/x-matroska",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::recovery::{RecordingManifest, RECORDING_MANIFEST};
@@ -335,6 +420,57 @@ mod tests {
             .mic_path
             .unwrap()
             .ends_with(".wav"));
+    }
+
+    #[test]
+    fn repoint_attachments_moves_a_video_attachment_to_its_audio() {
+        let (_d, s) = test_storage();
+        let note = s.create_note("Board call", None).unwrap();
+        let rel = "recordings/a/Board call.mp4";
+        s.set_note_attachments(
+            &note.id,
+            &[fly_core::Attachment {
+                id: "att1".into(),
+                file_name: "Board call.mp4".into(),
+                rel_path: rel.into(),
+                mime: Some("video/mp4".into()),
+                added_at: chrono::Utc::now(),
+            }],
+        )
+        .unwrap();
+        let other = s.create_note("Other", None).unwrap();
+        assert_eq!(s.attachment_references(rel).unwrap(), 1);
+        assert_eq!(
+            s.notes_with_attachments().unwrap().len(),
+            1,
+            "not the empty note"
+        );
+        assert_eq!(
+            s.repoint_attachments(rel, "recordings/a/Board call.m4a")
+                .unwrap(),
+            vec![note.id.clone()]
+        );
+        assert_eq!(s.attachment_references(rel).unwrap(), 0);
+        let a = &s.get_note(&note.id).unwrap().attachments[0];
+        assert_eq!(
+            (
+                a.id.as_str(),
+                a.rel_path.as_str(),
+                a.file_name.as_str(),
+                a.mime.as_deref()
+            ),
+            (
+                "att1",
+                "recordings/a/Board call.m4a",
+                "Board call.m4a",
+                Some("audio/mp4")
+            )
+        );
+        assert!(s.get_note(&other.id).unwrap().attachments.is_empty());
+        assert!(
+            s.repoint_attachments(rel, "x").unwrap().is_empty(),
+            "nothing left to move"
+        );
     }
 
     #[test]

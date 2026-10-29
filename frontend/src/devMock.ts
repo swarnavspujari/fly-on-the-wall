@@ -937,6 +937,25 @@ let mockRetentionDays: number | null = null;
 // fotwMockCompressFailed = "1" ends the pass with one failed and one
 // skipped meeting. Sizes are made up.
 let mockCompressNoticeDismissed = false;
+// Opt-in video job (video_store.rs). fotwMockVideoJob = working | paused |
+// done shows a run of that state. Sizes are made up.
+let mockImportPolicy: "keep" | "audio_only" = "keep";
+let mockVideoKind: "audio_only" | "shrink_screen" | null = null;
+function mockVideoStatus() {
+  const flag = mockFlag("fotwMockVideoJob");
+  const state = flag === "working" || flag === "paused" || flag === "done" ? flag : "idle";
+  return {
+    kind: state === "idle" ? mockVideoKind : (mockVideoKind ?? "shrink_screen"),
+    state,
+    paused_for: state === "paused" ? "recording" : null,
+    files_total: state === "idle" ? 0 : 4,
+    files_done: state === "done" ? 4 : state === "idle" ? 0 : 1,
+    files_skipped: state === "done" ? 1 : 0,
+    bytes_saved: state === "idle" ? 0 : state === "done" ? 0.9 * 1024 ** 3 : 0.3 * 1024 ** 3,
+    last_error: null,
+    import_policy: mockImportPolicy,
+  };
+}
 const GB = 1024 * 1024 * 1024;
 function mockStorageReport() {
   const state = mockFlag("fotwMockCompress") ?? "done";
@@ -967,6 +986,7 @@ function mockStorageReport() {
           ? "not enough free disk space to compress recordings (120 MB free, about 380 MB needed)"
           : null,
     },
+    videos: mockVideoStatus(),
   };
 }
 let mockBackfillPending = 3;
@@ -2208,6 +2228,17 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "dismiss_compress_notice":
       mockCompressNoticeDismissed = true;
       return null;
+    case "start_video_job":
+      mockVideoKind = args.kind as "audio_only" | "shrink_screen";
+      return { ...mockVideoStatus(), kind: mockVideoKind, state: "working", files_total: 6 };
+    case "cancel_video_job":
+      return null;
+    case "set_import_video_policy":
+      mockImportPolicy = args.policy === "audio_only" ? "audio_only" : "keep";
+      if (mockImportPolicy === "audio_only") mockVideoKind = "audio_only";
+      return mockVideoStatus();
+    case "estimate_screen_shrink":
+      return { files: 4, bytes: 1.5 * 1024 ** 3, bytes_after: 0.5 * 1024 ** 3 };
     case "get_transcript":
       // staged import: no transcript until the mock pipeline finishes
       if (args.meetingId === IMPORT_MEETING_ID && !mockImportDone) return null;

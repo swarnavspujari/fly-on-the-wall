@@ -287,21 +287,35 @@ pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String
         let rec = state.recording.lock().unwrap();
         delete_allowed_while_recording(&id, rec.as_ref().map(|r| r.note_id.as_str()))?;
     }
+    let on_stage = crate::scheduler::stage_emitter(&app);
+    delete_note_with(&state, &on_stage, &id)
+}
+
+/// [`delete_note`] past the recording check (tests call it without an app).
+pub(crate) fn delete_note_with(
+    state: &AppState,
+    on_stage: crate::pipeline::StageSink<'_>,
+    id: &str,
+) -> CmdResult<()> {
     let meetings = state
         .storage
         .lock()
         .unwrap()
-        .meetings_for_note(&id)
+        .meetings_for_note(id)
         .map_err(err_str)?;
-    let on_stage = crate::scheduler::stage_emitter(&app);
     for m in &meetings {
-        crate::scheduler::cancel(&state, &on_stage, &m.id).map_err(err_str)?;
+        crate::scheduler::cancel(state, on_stage, &m.id).map_err(err_str)?;
     }
+    // The opt-in video job may have one of this note's files open in
+    // ffmpeg: stop it BEFORE the files go (Windows refuses to delete an open
+    // file, which would strand the recording).
+    let meeting_ids: Vec<String> = meetings.iter().map(|m| m.id.clone()).collect();
+    crate::video_store::stop_for_note(state, id, &meeting_ids, std::time::Duration::from_secs(15));
     state
         .storage
         .lock()
         .unwrap()
-        .delete_note(&id)
+        .delete_note(id)
         .map_err(err_str)?;
     for m in &meetings {
         let running = {
@@ -310,11 +324,10 @@ pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String
         };
         if !running {
             // Background compression may be writing in the folder.
-            if !crate::audio_store::stop_meeting(&state, &m.id, std::time::Duration::from_secs(15))
-            {
+            if !crate::audio_store::stop_meeting(state, &m.id, std::time::Duration::from_secs(15)) {
                 tracing::warn!(meeting_id = %m.id, "recording compression didn't stop before the purge");
             }
-            crate::import_commands::purge_staged_import(&state, &m.id);
+            crate::import_commands::purge_staged_import(state, &m.id);
             if let Err(e) = state.storage.lock().unwrap().purge_meeting(&m.id) {
                 tracing::warn!(meeting_id = %m.id, error = %e, "purging deleted note's meeting failed");
             }
