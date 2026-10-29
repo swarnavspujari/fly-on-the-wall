@@ -330,12 +330,6 @@ impl Storage {
         Ok(dir)
     }
 
-    /// Title-edit policy for meeting folders: renaming a note renames the
-    /// folders of its meetings too — best-effort. A folder currently in use
-    /// (active capture or a pipeline holding files open) fails to rename on
-    /// Windows; we keep the old name and `recording_json` stays valid. A
-    /// pipeline that raced a successful rename re-resolves paths from
-    /// `recording_json` on its retry.
     /// Point the note's attachments that sit directly in `old_rel` (a renamed
     /// meeting folder) at `new_rel`. Attachments aren't in the note's
     /// mirrors, so only the row changes.
@@ -367,6 +361,12 @@ impl Storage {
         Ok(())
     }
 
+    /// Title-edit policy for meeting folders: renaming a note renames the
+    /// folders of its meetings too — best-effort. A folder currently in use
+    /// (active capture or a pipeline holding files open) fails to rename on
+    /// Windows; we keep the old name and `recording_json` stays valid. A
+    /// pipeline that raced a successful rename re-resolves paths from
+    /// `recording_json` on its retry.
     pub(crate) fn rename_meeting_dirs_for_note(&self, note_id: &str, title: &str) -> Result<()> {
         for meeting in self.meetings_for_note(note_id)? {
             let Some(rec) = &meeting.recording else {
