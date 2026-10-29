@@ -163,9 +163,9 @@ pub async fn run_with(
         }
     }
     emit_stage(state, on_stage, meeting_id, "starting", None);
-    // A cancel request left over from an earlier run of this meeting must
-    // not kill this fresh one; requests arriving from here on stick.
-    state.cancel_requests.lock().unwrap().remove(meeting_id);
+    // A pending cancel is NOT cleared here: this may be an automatic retry
+    // of a run the user just cancelled. Stale requests are dropped when the
+    // user queues the meeting again (`scheduler::enqueue`).
 
     let (recording, hint, data_dir, keep_local) = {
         let storage = state.storage.lock().unwrap();
@@ -529,8 +529,8 @@ pub async fn run_with(
     };
 
     // Cooperative cancellation: the delete/cancel commands drop this meeting
-    // id into `cancel_requests` (cleared at the start of this run); engines
-    // poll it between batches — checkpoints make the abort cheap.
+    // id into `cancel_requests` (cleared when the meeting is queued afresh);
+    // engines poll it between batches — checkpoints make the abort cheap.
     let cancelled = || state.cancel_requests.lock().unwrap().contains(meeting_id);
 
     if per_channel {

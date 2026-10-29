@@ -32,6 +32,8 @@ interface Props {
   onRetryFailure: (failure: PipelineFailure) => void;
   onDismissPipelineFailure: (meetingId: string) => void;
   onOpenEngineSettings: () => void;
+  /** Settings › Ask and Enhance, at the API key field. */
+  onOpenLlmKeySettings: () => void;
   updater: Updater;
 }
 
@@ -57,6 +59,7 @@ export default function AppNotices({
   onRetryFailure,
   onDismissPipelineFailure,
   onOpenEngineSettings,
+  onOpenLlmKeySettings,
   updater,
 }: Props) {
   const notices: StackedNotice[] = [];
@@ -169,7 +172,7 @@ export default function AppNotices({
   // Cleanup and action items the backend skipped for missing cloud consent:
   // ask for it here, then run them. Not urgent, so it waits out a recording.
   if (skips.count > 0 && !recordingActive) {
-    const copy = consentSkipsCopy(skips.count, skips.vendor);
+    const copy = consentSkipsCopy(skips.count, skips.vendor, skips.keyVendor);
     notices.push({
       id: "consent-skips",
       priority: NOTICE_PRIORITY.consentSkips,
@@ -184,7 +187,7 @@ export default function AppNotices({
                 variant="primary"
                 size="sm"
                 disabled={skips.busy}
-                onClick={() => void skips.run()}
+                onClick={() => (skips.keyVendor ? onOpenLlmKeySettings() : void skips.run())}
               >
                 {copy.action}
               </Button>

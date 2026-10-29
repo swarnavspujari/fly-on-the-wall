@@ -941,7 +941,7 @@ const MOCK_ASK_ERRORS: Record<string, string> = {
     'this note is set to "Keep local", so it isn\'t sent to anthropic. Switch the AI provider to Ollama (runs on this device) in Settings, or turn off Keep local for this note',
   consent:
     "OpenAI isn't allowed to receive your meeting content yet, so nothing was sent. To allow it, open Settings › Ask and Enhance and click Test. To keep everything on this computer, switch Runs on to This computer (Ollama).",
-  no_key: "no API key stored for openai — add one in Settings",
+  no_key: "No API key for OpenAI yet. Add one in Settings › Ask and Enhance.",
   auth: "authentication failed — check the API key",
   ollama_missing:
     "Ollama isn't installed — use the Install button in Settings → AI provider, or install it yourself from ollama.com",
@@ -974,7 +974,8 @@ function mockAsk(args: Record<string, unknown>): Promise<string> {
   if (!error && info && !info.is_local) {
     if (keptLocal) error = MOCK_ASK_ERRORS.keep_local.replace("anthropic", provider);
     else if (mockConsentRefusal()) error = mockConsentRefusal();
-    else if (!info.has_key) error = MOCK_ASK_ERRORS.no_key.replace("openai", provider);
+    else if (!info.has_key)
+      error = MOCK_ASK_ERRORS.no_key.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
   }
   return new Promise((resolve, reject) =>
     setTimeout(() => (error ? reject(error) : resolve(MOCK_ASK_ANSWER)), 700),
@@ -1034,10 +1035,19 @@ function mockRequestCloudConsent(provider: string, atLaunch: boolean): boolean {
   return true;
 }
 
+/** build_provider's missing-key refusal for the saved provider, or null. */
+function mockMissingKey(): string | null {
+  const info = llmSettings.providers.find((p) => p.id === llmSettings.provider);
+  if (!info || info.is_local || info.has_key) return null;
+  return MOCK_ASK_ERRORS.no_key.replace("OpenAI", MOCK_VENDORS[info.id] ?? info.id);
+}
+
 /* ---- consent skips ---- */
 // Meetings whose cleanup / action items the backend skipped for missing
-// consent. fotwMockConsentSkips = "1" starts with m1 skipped, so the notice
-// shows; retry_consent_skipped replays the "polishing" → done events.
+// consent or a missing API key. fotwMockConsentSkips = "1" starts with m1
+// skipped, so the notice shows; retry_consent_skipped replays the
+// "polishing" → done events, and a meeting stays skipped while the saved
+// cloud provider still has no key (as in the backend).
 let mockConsentSkips: string[] = mockFlag("fotwMockConsentSkips") === "1" ? ["m1"] : [];
 
 /* ---- recovered meetings kept local ---- */
@@ -1056,6 +1066,7 @@ function mockRetryConsentSkipped(): number {
       const base = { meeting_id: id, detail: null, error: null };
       mockEmit("pipeline:progress", { ...base, stage: "polishing", done: false });
       setTimeout(() => {
+        if (mockMissingKey() && !mockConsentSkips.includes(id)) mockConsentSkips.push(id);
         mockEmit("pipeline:progress", { ...base, stage: null, done: true });
         mockEmit("llm:consent-skips", mockConsentSkips);
       }, 900);
@@ -1140,7 +1151,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "edit_note_block":
       return note(String(args.id ?? args.noteId ?? "n1"));
     case "enhance_note": {
-      const refused = mockConsentRefusal();
+      const refused = mockConsentRefusal() ?? mockMissingKey();
       if (refused) throw refused;
       return note(String(args.id ?? args.noteId ?? "n1"));
     }

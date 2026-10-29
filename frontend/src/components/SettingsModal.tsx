@@ -58,6 +58,7 @@ import {
   type MadeOn,
   type Quality,
   type SectionId,
+  type SettingsFocus,
 } from "../settingsModel";
 
 interface Props {
@@ -68,7 +69,7 @@ interface Props {
   /** Deep-link from the transcribe error: "engine" opens Transcripts › More
    *  options scrolled to "Models on this computer"; "groq" scrolls to the
    *  "Made on" row, where Groq is one click away. */
-  initialFocus?: "engine" | "groq" | null;
+  initialFocus?: SettingsFocus | null;
   onClose: () => void;
 }
 
@@ -308,7 +309,7 @@ export default function SettingsModal({
   const [advOpen, setAdvOpen] = useState<Partial<Record<SectionId, boolean>>>(() => ({
     transcripts: initialFocus === "engine",
   }));
-  const [flash, setFlash] = useState<"engine" | "groq" | null>(null);
+  const [flash, setFlash] = useState<SettingsFocus | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const spyLock = useRef(0);
@@ -424,16 +425,22 @@ export default function SettingsModal({
   // Deep link: once settings have loaded (the target row is rendered),
   // bring it into view a single time — not on every later refresh.
   useEffect(() => {
-    if (!initialFocus || !settings || didFocusRef.current) return;
+    const keyRow = initialFocus === "llm-key";
+    if (!initialFocus || !(keyRow ? llm : settings) || didFocusRef.current) return;
     didFocusRef.current = true;
     const el = scrollRef.current?.querySelector<HTMLElement>(
-      initialFocus === "groq" ? "#settings-row-groq" : "#settings-row-engine",
+      keyRow
+        ? "#settings-row-llm"
+        : initialFocus === "groq"
+          ? "#settings-row-groq"
+          : "#settings-row-engine",
     );
     spyLock.current = Date.now();
-    setActive("transcripts");
+    setActive(keyRow ? "ai" : "transcripts");
     setFlash(initialFocus);
     el?.scrollIntoView({ block: "center" });
-  }, [initialFocus, settings]);
+    if (keyRow) el?.querySelector<HTMLInputElement>('input[type="password"]')?.focus();
+  }, [initialFocus, settings, llm]);
 
   const visible = matchSections(query);
   const visibleIds = new Set(visible.map((s) => s.id));
@@ -576,7 +583,7 @@ export default function SettingsModal({
         r.processed === 0
           ? "All meetings are already extracted."
           : allFailed
-            ? `Couldn't index ${r.processed === 1 ? "the meeting" : `any of the ${r.processed} meetings`}. ` +
+            ? `Couldn't extract from ${r.processed === 1 ? "the meeting" : `any of the ${r.processed} meetings`}. ` +
               "Check Ask and Enhance in Settings, then try again."
             : `${r.processed} meeting(s) processed, ${r.extracted} item(s) extracted` +
               (r.failed ? `, ${r.failed} failed` : "") +
@@ -1691,6 +1698,8 @@ export default function SettingsModal({
                       }
                     >
                       <SettingsRow
+                        id="settings-row-llm"
+                        className={flash === "llm-key" ? "fly-settings-flash" : undefined}
                         title="Runs on"
                         badge={
                           providerCloud && (
@@ -2148,10 +2157,10 @@ export default function SettingsModal({
                           {backfillBusy
                             ? "Extracting…"
                             : backfillPending === 0
-                              ? "All meetings indexed"
+                              ? "All meetings extracted"
                               : backfillPending === null
-                                ? "Index older meetings"
-                                : `Index ${backfillPending} meeting${backfillPending === 1 ? "" : "s"}`}
+                                ? "Extract from older meetings"
+                                : `Extract from ${backfillPending} meeting${backfillPending === 1 ? "" : "s"}`}
                         </Button>
                       }
                     >

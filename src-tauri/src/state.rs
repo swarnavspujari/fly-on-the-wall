@@ -44,8 +44,9 @@ pub struct AppState {
     /// optimistic "Listening…" forever.
     pub live_status: Mutex<Option<crate::live::LiveStatus>>,
     /// Meetings whose post-transcription cleanup / item extraction was refused
-    /// because the cloud provider has no recorded consent yet. In memory only:
-    /// the app's notice offers to run them once the user allows the provider
+    /// because the cloud provider has no recorded consent or no API key yet.
+    /// In memory only: the app's notice offers to run them once the user
+    /// allows the provider or adds the key
     /// (`llm_commands::retry_consent_skipped`).
     pub consent_skipped: Mutex<std::collections::BTreeSet<String>>,
     /// Meetings self-heal restored this launch and set to Keep local because

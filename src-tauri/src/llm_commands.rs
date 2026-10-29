@@ -469,11 +469,33 @@ pub fn is_consent_refusal(error: &str) -> bool {
     error.contains(CONSENT_REFUSAL_MARK)
 }
 
+/// How every missing-key error from [`build_provider`] starts. Ask's error
+/// view keys on "no api key" (askModel.ts describeAskError), and background
+/// cleanup on the whole mark ([`record_consent_skip`]).
+const MISSING_KEY_MARK: &str = "No API key for";
+
+/// The error when a cloud provider is picked but has no saved key: what's
+/// missing and where to add it, in words a person reads in Enhance or a
+/// notice.
+pub fn missing_key_error(provider: &str) -> String {
+    format!(
+        "{MISSING_KEY_MARK} {} yet. Add one in Settings › Ask and Enhance.",
+        provider_vendor(provider)
+    )
+}
+
+/// True when `error` is [`missing_key_error`]'s.
+pub fn is_missing_key(error: &str) -> bool {
+    error.contains(MISSING_KEY_MARK)
+}
+
 /// Background cleanup / extraction for `meeting_id` failed with `error`:
-/// remember the meeting when the reason was missing consent, so the app can
-/// offer to run it once the user allows the provider. Returns whether it was.
+/// remember the meeting when the reason was missing consent or a missing
+/// API key, so the app can offer to run it once the user allows the
+/// provider or adds the key (the notice reads which from the settings).
+/// Returns whether it was.
 pub fn record_consent_skip(state: &AppState, meeting_id: &str, error: &str) -> bool {
-    let skipped = is_consent_refusal(error);
+    let skipped = is_consent_refusal(error) || is_missing_key(error);
     if skipped {
         state
             .consent_skipped
@@ -648,7 +670,7 @@ pub fn build_provider(
             .secrets
             .get(name)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no API key stored for {provider} — add one in Settings"))
+            .ok_or_else(|| missing_key_error(&provider))
     };
 
     Ok(match provider.as_str() {
@@ -1384,14 +1406,52 @@ mod security_tests {
     /// was the reason (the app then offers to run it once allowed).
     #[test]
     fn only_the_consent_refusal_counts_as_a_consent_skip() {
-        use super::is_consent_refusal;
+        use super::{is_consent_refusal, missing_key_error};
         let consent = check_cloud_policy("anthropic", false, false, false, false).unwrap_err();
         assert!(is_consent_refusal(&consent), "{consent}");
         let keep_local = check_cloud_policy("anthropic", false, false, true, true).unwrap_err();
         assert!(!is_consent_refusal(&keep_local), "{keep_local}");
-        assert!(!is_consent_refusal(
-            "no API key stored for anthropic — add one in Settings"
+        assert!(!is_consent_refusal(&missing_key_error("anthropic")));
+    }
+
+    /// The missing-key error reads as a sentence and says where to fix it.
+    /// A background pass that hits it is remembered like a consent skip (the
+    /// notice then offers "Add a key"); keep-local and other failures aren't.
+    #[test]
+    fn a_missing_key_reads_plainly_and_is_remembered() {
+        use super::{is_missing_key, missing_key_error, record_consent_skip};
+        assert_eq!(
+            missing_key_error("openai"),
+            "No API key for OpenAI yet. Add one in Settings › Ask and Enhance."
+        );
+        assert!(is_missing_key(&missing_key_error("nim")));
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        assert!(record_consent_skip(
+            &state,
+            "m-key",
+            &missing_key_error("openai")
         ));
+        let keep_local = check_cloud_policy("openai", false, false, true, true).unwrap_err();
+        assert!(!record_consent_skip(&state, "m-local", &keep_local));
+        assert!(!record_consent_skip(
+            &state,
+            "m-net",
+            "can't reach api.openai.com"
+        ));
+        assert_eq!(
+            state
+                .consent_skipped
+                .lock()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec!["m-key"]
+        );
     }
 
     #[test]

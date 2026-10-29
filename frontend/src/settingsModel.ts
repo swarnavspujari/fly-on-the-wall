@@ -90,6 +90,9 @@ export function activeSectionAt<T extends string>(
 
 /* ------------------------------------------------------------- transcripts */
 
+/** Rows a deep link can open Settings at (and flash). */
+export type SettingsFocus = "engine" | "groq" | "llm-key";
+
 export type Quality = "light" | "balanced" | "best";
 /** "groq" = the Cloud tier; "hybrid" = Groq first, this computer fills in. */
 export type MadeOn = "local" | "groq" | "hybrid";

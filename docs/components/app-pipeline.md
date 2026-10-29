@@ -101,6 +101,8 @@ The pipeline reads per-meeting/folder Keep local through `storage.get_meeting_pr
 
 In-memory state (`src-tauri/src/state.rs`): `pipeline_stage: HashMap<meeting_id, stage>` (the per-meeting guard and the late-joiner stage), `cancel_requests: HashSet`, `consent_skipped`, `jobs_notify`.
 
+A cancel request stays until it's honoured: `run_with` doesn't clear it, so an automatic retry can't lose it, and `tick` ends a run that fails for any reason while a cancel is pending as `Cancelled` (job removed, no retry). Only `scheduler::enqueue` creating a new job drops a stale request.
+
 ### Files and directories written
 | Path | Written by | Lifetime |
 |---|---|---|
