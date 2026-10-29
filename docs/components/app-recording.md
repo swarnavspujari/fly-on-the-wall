@@ -83,6 +83,7 @@ devMock mirrors all 12 (`devMock.ts:1125-1131,1177-1181,1209-1240,1321-1325,1496
   - `recording.mixed.wav` (16 kHz),
   - `recording.playback.wav` (only when both channels exist),
   - at stop: `recording.manifest.json` and `note.json` (`recovery.rs:35,40,680-719`).
+- After the transcript is final, recording storage v2 ([app-audio-store](app-audio-store.md)) replaces the mic/system WAVs with lossless `recording.{mic,system}.flac` and drops `mixed`/`playback` when they regenerate bit-identically. Capture itself is unchanged and still writes WAV.
 - Stored paths are data-dir-relative with `/` separators (`recording.rs:241-245`). A path outside `<data_dir>` silently becomes `None` (inferred edge).
 - A date edit renames the folder (only once a recording is attached) and rewrites the manifest (`meetings.rs:173-182`).
 - Live captions write `<scratch_root>/<meeting id>/live-tmp/{you|them}-<start_sample>.wav` (16 kHz chunks). Each chunk is deleted after transcription, and the folder is removed when the loop ends (`live.rs:202-206,242,295,325`). After a crash, the startup scratch sweep removes leftovers (`scratch.rs:1-16`).

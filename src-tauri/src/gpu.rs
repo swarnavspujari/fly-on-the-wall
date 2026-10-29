@@ -298,7 +298,7 @@ mod windows {
     fn build_bench_sample(src: &Path) -> Result<Option<BenchSample>, String> {
         use fly_audio::vad::{detect_speech_spans, stitch_spans, VadConfig};
 
-        let (samples, rate) = fly_audio::mix::read_wav_mono(src).map_err(|e| e.to_string())?;
+        let (samples, rate) = fly_audio::mix::read_audio_mono(src).map_err(|e| e.to_string())?;
         let samples = fly_audio::mix::resample_linear(&samples, rate, 16_000);
         let spans = detect_speech_spans(&samples, 16_000, &VadConfig::default());
 
