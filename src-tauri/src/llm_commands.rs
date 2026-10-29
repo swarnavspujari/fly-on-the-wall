@@ -387,7 +387,10 @@ fn consent_buttons(prompt: &ConsentPrompt) -> rfd::MessageButtons {
 /// here (NSAlert gives Esc only to a "Cancel" button that isn't first), so
 /// one of the two buttons must be clicked.
 #[cfg(any(windows, target_os = "macos"))]
-async fn ask_consent_natively(app: &tauri::AppHandle, prompt: &ConsentPrompt) -> ConsentAnswer {
+pub(crate) async fn ask_consent_natively(
+    app: &tauri::AppHandle,
+    prompt: &ConsentPrompt,
+) -> ConsentAnswer {
     use tauri::Manager;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let shown = prompt.clone();
@@ -428,7 +431,10 @@ async fn ask_consent_natively(app: &tauri::AppHandle, prompt: &ConsentPrompt) ->
     target_os = "netbsd",
     target_os = "openbsd"
 ))]
-async fn ask_consent_natively(_app: &tauri::AppHandle, prompt: &ConsentPrompt) -> ConsentAnswer {
+pub(crate) async fn ask_consent_natively(
+    _app: &tauri::AppHandle,
+    prompt: &ConsentPrompt,
+) -> ConsentAnswer {
     let shown = prompt.clone();
     let asked = tauri::async_runtime::spawn_blocking(move || {
         let result = rfd::MessageDialog::new()
@@ -456,7 +462,10 @@ async fn ask_consent_natively(_app: &tauri::AppHandle, prompt: &ConsentPrompt) -
     target_os = "netbsd",
     target_os = "openbsd"
 )))]
-async fn ask_consent_natively(_app: &tauri::AppHandle, _prompt: &ConsentPrompt) -> ConsentAnswer {
+pub(crate) async fn ask_consent_natively(
+    _app: &tauri::AppHandle,
+    _prompt: &ConsentPrompt,
+) -> ConsentAnswer {
     ConsentAnswer::Decline
 }
 

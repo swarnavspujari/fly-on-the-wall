@@ -216,6 +216,8 @@ pub fn finish(app: &AppHandle, app_state: AppState) {
     }
     privacy::spawn_disk_encryption_check(app_state.data_dir.clone());
     app.manage(app_state);
+    // Connectors (beta): backend-only registry + confirm-card approver.
+    crate::connectors::init(app);
     // Warm the hardware cache off the startup path: detection shells out to
     // nvidia-smi and must never sit in front of first paint.
     {

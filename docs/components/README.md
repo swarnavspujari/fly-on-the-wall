@@ -18,9 +18,9 @@ Three layers:
 
 | Layer | Where | Components |
 |---|---|---|
-| **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 10 `ui-*` docs |
-| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 111 Tauri commands) | 16 `app-*` docs |
-| **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 11 `fly-*` docs |
+| **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 11 `ui-*` docs |
+| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 130 Tauri commands) | 17 `app-*` docs |
+| **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 12 `fly-*` docs |
 
 ## Index
 
@@ -39,6 +39,7 @@ Three layers:
 | [fly-storage](fly-storage.md) | SQLite index (FTS5, vectors, migrations) plus the user-owned files on disk: atomic mirrors, manifests, self-heal, path containment, scratch, erase. |
 | [fly-secrets](fly-secrets.md) | `SecretStore` over the OS keychain. Every API key and OAuth token lives here. |
 | [fly-mcp](fly-mcp.md) | The `flyonthewall-mcp` stdio MCP server: read-only tools over fly-storage, plus one label write. |
+| [fly-mcp-client](fly-mcp-client.md) | Connectors (beta): FOTW's Ask agent calling tools on MCP servers the user connects, on `rmcp` 3.8.0, with the spec §4.3 safety rules (approval bound to a config hash, pinned tool definitions, per-tool permissions, fenced results, https-only network guard, OAuth, keychain secrets). |
 
 ### Backend features (`src-tauri/src`)
 
@@ -60,6 +61,7 @@ Three layers:
 | [app-mcp-sidecar](app-mcp-sidecar.md) | `commands.rs` (`mcp_config`), `scripts/prepare-sidecars.mjs`, `externalBin` | Shipping and wiring the MCP binary. |
 | [app-screen-recording](app-screen-recording.md) | `screen_commands.rs` | Screen recording and video thumbnails. |
 | [app-updater](app-updater.md) | updater + process plugins, `frontend/src/updater.ts` | Signed auto-update, deferred while recording. |
+| [app-connectors](app-connectors.md) | `connectors.rs` | Connectors (beta): backend-only registry, native dialogs for every trust grant, the confirm-card approver, Claude Desktop import, `turn_for_ask` for the Ask harness. |
 
 ### Frontend features (`frontend/src`)
 
@@ -75,6 +77,7 @@ Three layers:
 | [ui-recording-bar](ui-recording-bar.md) | `RecordingBar.tsx`, `recordingBar.ts`, `LivePane.tsx` | Recording controls, capture warnings, live captions. |
 | [ui-attendees](ui-attendees.md) | `AttendeeEditor.tsx`, `calendarMatch.ts` | Attendee roster, confirmation, re-diarize with undo. |
 | [ui-confirm-consent](ui-confirm-consent.md) | `confirm.tsx`, `CloudConsent.tsx` | The in-app confirm dialog, and every cloud-consent request (the backend shows the dialog). |
+| [ui-connectors](ui-connectors.md) | `ConnectorsSection.tsx`, `ConnectorDetail.tsx`, `ConnectorAdd.tsx`, `ConnectorCallCard.tsx`, `connectorsModel.ts` | Settings › Connectors (list, Browse, Add, detail with per-tool permissions) and the call cards; trust grants happen in the backend's native dialogs. |
 
 ## Dependency diagrams
 
@@ -84,6 +87,7 @@ Three layers:
 flowchart LR
   app["fly-app<br/>(src-tauri)"]
   mcp["fly-mcp<br/>(sidecar binary)"]
+  mcpc["fly-mcp-client<br/>(connectors beta)"]
   ctx["fly-context"]
   core["fly-core"]
   audio["fly-audio"]
@@ -95,7 +99,7 @@ flowchart LR
   sto["fly-storage"]
   sec["fly-secrets"]
 
-  app --> asr & audio & cal & cap & core & diar & llm & sec & sto
+  app --> asr & audio & cal & cap & core & diar & llm & mcpc & sec & sto
   asr --> audio & core
   audio --> core
   cal --> core & sec
@@ -105,11 +109,12 @@ flowchart LR
   sto --> core
   ctx --> core & sto
   mcp --> core & ctx & sto
+  mcpc --> llm & sec
 ```
 
 - `fly-core` and `fly-secrets` depend on no other workspace crate.
 - `fly-app` depends on neither `fly-mcp` (it ships as a separate binary, see [app-mcp-sidecar](app-mcp-sidecar.md)) nor `fly-context`. `fly-mcp` uses fly-context for its context layer and passage search, and the Ask harness wires it into the app.
-- Network-capable crates (`reqwest`): `fly-asr`, `fly-llm`, `fly-calendar`, and `fly-app`. **`fly-mcp`, `fly-storage`, `fly-core` and `fly-context` have no HTTP client.** This is what keeps spec §2 "the MCP binary never holds keys or calls a cloud LLM" true today. The [boundary rules](#how-to-enforce-boundaries-cheaply) propose checking it mechanically.
+- Network-capable crates (`reqwest`): `fly-asr`, `fly-llm`, `fly-calendar`, `fly-mcp-client` (connectors, behind its network guard), and `fly-app`. **`fly-mcp`, `fly-storage`, `fly-core` and `fly-context` have no HTTP client.** This is what keeps spec §2 "the MCP binary never holds keys or calls a cloud LLM" true today. The [boundary rules](#how-to-enforce-boundaries-cheaply) propose checking it mechanically.
 
 ### Component map (main edges)
 
@@ -196,7 +201,7 @@ Back-edges inside `fly-app` that the map doesn't show, measured with `grep crate
 
 ## Command ownership
 
-Each of the 111 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs:94-206`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
+Each of the 130 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
 
 | Doc | Commands |
 |---|---|
@@ -215,6 +220,7 @@ Each of the 111 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs:94
 | [app-privacy](app-privacy.md) | 12 |
 | [app-mcp-sidecar](app-mcp-sidecar.md) | 1 |
 | [app-updater](app-updater.md) | 0 (plugin-provided) |
+| [app-connectors](app-connectors.md) | 20 |
 
 ## Network egress at a glance
 
@@ -229,7 +235,8 @@ Every host the app or its child processes contact. Detail and gates are in each 
 | `github.com` releases (whisper.cpp, sherpa-onnx, FFmpeg builds, Ollama, this repo's tool builds), `huggingface.co`, and `hf-mirror.com` (on by default, tried after 2 failed huggingface.co attempts; `FLYONTHEWALL_NO_HF_MIRROR` turns it off) | No | First use of a model or tool | SHA-256 pinned | [app-models-gpu](app-models-gpu.md) |
 | `registry.ollama.ai` (from the Ollama child process) | No | Model pull, including the embedding model | — | [app-ollama](app-ollama.md), [app-search](app-search.md) |
 | `github.com/…/releases/latest/download/latest.json` and the release assets | No | Update check 5 s after launch; Update now | Minisign-verified | [app-updater](app-updater.md) |
-| `127.0.0.1:<ephemeral>` (inbound) | — | OAuth redirect | One-shot listener with a `state` check | [fly-calendar](fly-calendar.md) |
+| The https address of each connector the user added (beta), and its OAuth server | Only what the user lets through: the arguments of calls the user allowed on a card, or of tools the user set to Always allow | Only after approval: list and refresh tools, sign in, calls | Native-dialog approval bound to the config hash; per-tool permission; https only, private addresses blocked; Keep-local turns get no connectors | [fly-mcp-client](fly-mcp-client.md), [app-connectors](app-connectors.md) |
+| `127.0.0.1:<ephemeral>` (inbound) | — | OAuth redirect | One-shot listener with a `state` check | [fly-calendar](fly-calendar.md), [fly-mcp-client](fly-mcp-client.md) |
 
 `ARCHITECTURE.md`'s "exactly two things touch the network" predates calendars, the updater and model downloads. Only the first three rows can carry meeting content.
 
@@ -266,7 +273,7 @@ The rules on this page are **proposals**. This PR changes no code.
 5. **The Rust↔TypeScript contract is copied by hand, and CI checks the two halves separately.**
    - `types.ts` (474 lines) mirrors the serde structs, and `api.ts` names commands as strings.
    - Refusal text, recording-warning sentences and pipeline stage names are matched by substring in TypeScript.
-   - `devMock.ts` (1,790 lines) handles 102 of the 111 commands and returns `null` for any command it doesn't know.
+   - `devMock.ts` (2,765 lines) handles 121 of the 130 commands and returns `null` for any command it doesn't know.
    - CI path gating runs the Rust tests and vitest on disjoint sets of changed files. A Rust-only change to a command, event or error string never runs the frontend tests, and vice versa.
 6. **`App.tsx` orchestrates everything:** 1,159 lines, 37 `useState`, 14 `useEffect`, 4 event subscriptions (2 Tauri `listen`, plus window `resize` and `keydown`). Fourteen files import `api` directly, and `safeContent.ts` calls `invoke` itself.
    - Large frontend files: `SettingsModal.tsx` 2,328 lines, `Editor.tsx` 1,614, `ui.tsx` 1,593.
@@ -286,7 +293,7 @@ Ordered by value for effort. Each check takes seconds in CI.
 
 | # | Check | What it enforces | Sketch |
 |---|---|---|---|
-| 1 | **Command ownership and devMock parity** | Every command is documented in exactly one component doc and mirrored in devMock (spec §2) | A script parses `generate_handler!` in `lib.rs`. Each name must appear as a backticked first-column row under `### Tauri commands` in exactly one `app-*.md`, and as a `case` in `devMock.ts`. devMock's `default:` throws under test. Gate it on `src-tauri/src/lib.rs`, `frontend/src/devMock.ts` and `docs/components/**`. This catalog passes the doc half today (111 of 111). The devMock half fails today (9 missing). |
+| 1 | **Command ownership and devMock parity** | Every command is documented in exactly one component doc and mirrored in devMock (spec §2) | A script parses `generate_handler!` in `lib.rs`. Each name must appear as a backticked first-column row under `### Tauri commands` in exactly one `app-*.md`, and as a `case` in `devMock.ts`. devMock's `default:` throws under test. Gate it on `src-tauri/src/lib.rs`, `frontend/src/devMock.ts` and `docs/components/**`. This catalog passes the doc half today (130 of 130). The devMock half fails today (9 missing). |
 | 2 | **Crate dependency rules** | The golden rule, and spec §2 "the MCP binary never holds keys or calls a cloud LLM" | `deny.toml` `[[bans.deny]]` entries with `wrappers`, so that only the listed crates may depend directly on `reqwest` (fly-asr, fly-llm, fly-calendar, fly-app), `keyring` (fly-secrets), `rusqlite` (fly-storage) and `tauri` (fly-app). Add a CI step requiring that `cargo tree -p fly-mcp -e normal -i reqwest` (and the same for `keyring`, `fly-llm` and `fly-secrets`) finds nothing. |
 | 3 | **Security config pin** | Spec §2: CSP and nav guard unchanged, asset scope `recordings/` + `attachments/` only | A Rust test parses `tauri.conf.json` and `capabilities/*.json` and asserts the exact CSP, permission list and empty static asset scope. Put the file under CODEOWNERS. |
 | 4 | **Settings-key registry** | Spec §2: webview-settable keys only under `consent.`/`capture.`/`ui.` (and never `consent.cloud_llm.*`, which only the backend writes) | One table of key or prefix, owner component and webview-settable flag. A test finds every string literal passed to `get_setting`/`set_setting` and fails on unregistered keys. devMock imports the same allowlist. |
@@ -321,6 +328,7 @@ Each extraction moves its component doc with it, and the doc's **Tests** section
 | **#102** backend-only cloud consent: `request_cloud_consent` asks in a native dialog and is the only writer of `consent.cloud_llm.*`, which the webview can read but not set | **Merged**; the docs below describe it | [app-settings-consent](app-settings-consent.md), [app-llm](app-llm.md), [ui-confirm-consent](ui-confirm-consent.md), [ui-ask](ui-ask.md) |
 | **#103** immutable system-evals foundation (`evals/`, lock and run scripts) | Open, v2.5 | Test infrastructure; no component's surface changes |
 | **Ask harness (PR 3.3)** wires [fly-context](fly-context.md) and the fly-llm tool loop into Ask | Planned, v2.5 | [app-llm](app-llm.md), [ui-ask](ui-ask.md) |
+| **Connectors beta** (`fly-mcp-client`, Settings › Connectors, the confirm card); the harness offers connector tools through `connectors::turn_for_ask` | Open | [fly-mcp-client](fly-mcp-client.md), [app-connectors](app-connectors.md), [ui-connectors](ui-connectors.md), [app-privacy](app-privacy.md) (delete-all), [app-settings-consent](app-settings-consent.md) (`connectors.*` backend-only) |
 
 ## Keeping this catalog current
 
