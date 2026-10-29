@@ -25,13 +25,67 @@ use rusqlite::Connection;
 
 use crate::folders::parse_ts;
 use crate::meetings::recording_dir_rel;
-use crate::{naming, Result};
+use crate::{naming, Result, Storage};
 
 pub(crate) fn to_v2(conn: &Connection, data_dir: &Path) -> Result<()> {
     rename_meeting_dirs(conn, data_dir)?;
     backfill_note_paths(conn, data_dir)?;
     park_orphan_recordings(conn, data_dir)?;
     park_orphan_notes(conn, data_dir)?;
+    Ok(())
+}
+
+/// v3 — retrieval index + citation locators (one transaction, so a crash
+/// leaves the file exactly as it was and the step simply runs again):
+///   * `transcript_segments` / `segments_fts` rebuilt for every transcript
+///     through the `transcripts` triggers (segments.rs), after dropping rows
+///     whose transcript is gone;
+///   * every transcript re-chunked: label-free text, exact spans, polished
+///     text where it exists. Chunk text changes once, so the corpus
+///     re-embeds once (the embedding worker picks the pending rows up);
+///   * citation locators recorded for every AI block and item from the
+///     current transcripts (their ids are valid now, so they start `ok`).
+///
+/// It is also what heals a file an OLDER build wrote to (that build stamps
+/// `user_version` back, so this runs again): labelled chunks it wrote are
+/// re-chunked, its deletes are reconciled, and locators it never wrote are
+/// recorded. Unreadable rows are logged and skipped — never fatal, since a
+/// failing step would stop the app from opening.
+pub(crate) fn to_v3(storage: &Storage) -> Result<()> {
+    let started = std::time::Instant::now();
+    let conn = &storage.conn;
+    let tx = conn.unchecked_transaction()?;
+    conn.execute_batch(
+        "DELETE FROM transcript_segments
+          WHERE meeting_id NOT IN (SELECT meeting_id FROM transcripts);
+         UPDATE transcripts SET json = json;
+         DELETE FROM embedding_chunks
+          WHERE owner_kind = 'transcript'
+            AND owner_id NOT IN (SELECT meeting_id FROM transcripts);",
+    )?;
+    let meeting_ids: Vec<String> = conn
+        .prepare("SELECT meeting_id FROM transcripts")?
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    for id in &meeting_ids {
+        let res = storage
+            .get_transcript(id)
+            .and_then(|t| t.map_or(Ok(()), |t| storage.sync_transcript_chunks(&t)));
+        if let Err(e) = res {
+            tracing::warn!(meeting_id = %id, error = %e, "v3: skipping transcript chunks");
+        }
+    }
+    storage.sync_all_citations()?;
+    // A keyword index left damaged by anything (an older build's crash, a
+    // half-copied file) would now fail transcript writes: rebuild it from
+    // its content table.
+    storage.rebuild_segment_index()?;
+    tx.commit()?;
+    tracing::info!(
+        meetings = meeting_ids.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "schema v3 step done"
+    );
     Ok(())
 }
 

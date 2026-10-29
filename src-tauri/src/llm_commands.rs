@@ -58,6 +58,17 @@ pub fn migrate_anthropic_model(storage: &fly_storage::Storage) -> Option<String>
     }
 }
 
+/// Settings-key prefix of cloud-AI consent: `consent.cloud_llm.<provider>` =
+/// "true" lets `build_provider` send meeting content to that provider. The
+/// webview can read these keys but not write them
+/// (`commands::is_webview_writable_setting_key`); the only writer is
+/// [`request_cloud_consent`], after a yes in a native dialog.
+pub const CLOUD_CONSENT_PREFIX: &str = "consent.cloud_llm.";
+
+fn cloud_consent_key(provider: &str) -> String {
+    format!("{CLOUD_CONSENT_PREFIX}{provider}")
+}
+
 /// Internal flag for [`reset_unseen_cloud_consent`]. Not under a webview
 /// prefix (see `commands::is_webview_setting_key`), so no script can clear
 /// it to re-run the reset, or set it to skip one.
@@ -71,8 +82,8 @@ pub const CLOUD_CONSENT_RESET_FLAG: &str = "migration.cloud_consent_reset_v2_4";
 /// every stored `consent.cloud_llm.*` was written without the disclosure
 /// being seen, including the ones the old `grandfather_cloud_consent`
 /// migration recorded. After this, `build_provider` refuses cloud providers
-/// until the user allows one in the in-app prompt (asked at launch when the
-/// saved provider is a cloud one).
+/// until the user allows one in the consent dialog (asked at launch when the
+/// saved provider is a cloud one; see [`request_cloud_consent`]).
 ///
 /// Runs once: the flag is written only after the delete succeeds. If that
 /// flag write itself fails, the reset runs again next launch and clears a
@@ -88,7 +99,7 @@ pub fn reset_unseen_cloud_consent(storage: &fly_storage::Storage) -> Option<usiz
     {
         return None;
     }
-    match storage.delete_settings_with_prefix("consent.cloud_llm.") {
+    match storage.delete_settings_with_prefix(CLOUD_CONSENT_PREFIX) {
         Ok(cleared) => {
             if let Err(e) = storage.set_setting(CLOUD_CONSENT_RESET_FLAG, "1") {
                 tracing::warn!(error = %e, "could not record the cloud-consent reset");
@@ -115,6 +126,308 @@ fn provider_vendor(provider: &str) -> &str {
         "nim" => "NVIDIA",
         other => other,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cloud consent
+// ---------------------------------------------------------------------------
+
+/// What the cloud-consent dialog says. Built here from the provider id, never
+/// taken from the webview, so no script can change what the user agrees to.
+/// The words are the disclosure the in-app prompt showed in v2.4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentPrompt {
+    pub title: String,
+    pub message: String,
+    /// The one button that records consent.
+    pub allow: String,
+    /// The default button (Enter, Space): records nothing.
+    pub decline: String,
+}
+
+/// The disclosure before `provider` first gets meeting content. `at_launch`
+/// adds why the app is asking unprompted (the saved provider is a cloud one
+/// without consent) and declines with "Not now" instead of "Cancel".
+pub fn cloud_consent_prompt(provider: &str, at_launch: bool) -> ConsentPrompt {
+    let vendor = provider_vendor(provider);
+    let disclosure = format!(
+        "Your notes and full meeting transcripts will be sent to {vendor} for processing \
+         whenever you run Enhance or Ask, and automatically for transcript cleanup and \
+         action items after each transcription. Their data-retention terms apply (see their \
+         privacy / data-usage policy).\n\n\
+         Recordings themselves stay on this computer, and so do notes you keep local. \
+         Choose This computer (Ollama) to keep everything local."
+    );
+    let message = if at_launch {
+        format!(
+            "Your AI provider is set to {vendor}, and nothing is sent there until you allow \
+             it. Until then, Enhance, Ask, transcript cleanup and action items won't run.\
+             \n\n{disclosure}"
+        )
+    } else {
+        disclosure
+    };
+    ConsentPrompt {
+        title: format!("Use {vendor} for Ask and Enhance?"),
+        message,
+        allow: format!("Use {vendor}"),
+        decline: if at_launch { "Not now" } else { "Cancel" }.to_string(),
+    }
+}
+
+/// How the consent dialog was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentAnswer {
+    /// The allow button, clicked.
+    Allow,
+    /// Anything else: the decline button, Enter, Esc, closing the dialog.
+    Decline,
+}
+
+/// True when `provider` already has recorded consent.
+fn has_cloud_consent(storage: &fly_storage::Storage, provider: &str) -> bool {
+    storage
+        .get_setting(&cloud_consent_key(provider))
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true")
+}
+
+/// What [`request_cloud_consent`] must do for `provider`: `None` when it may
+/// already receive content (a local provider, or allowed before), else the
+/// question to ask. An unknown provider is an error, with nothing shown.
+/// The launch wording ("Your AI provider is set to …") is used only when
+/// `provider` really is the saved one, whatever the caller says.
+pub fn cloud_consent_question(
+    storage: &fly_storage::Storage,
+    provider: &str,
+    at_launch: bool,
+) -> Result<Option<ConsentPrompt>, String> {
+    let Some(&(_, _, is_local)) = PROVIDERS.iter().find(|(id, _, _)| *id == provider) else {
+        return Err(format!("unknown provider '{provider}'"));
+    };
+    if is_local || has_cloud_consent(storage, provider) {
+        return Ok(None);
+    }
+    let saved = storage.get_setting("llm.provider").ok().flatten();
+    let at_launch = at_launch && saved.as_deref() == Some(provider);
+    Ok(Some(cloud_consent_prompt(provider, at_launch)))
+}
+
+/// Two declines for one provider this close together…
+const DECLINE_BURST: std::time::Duration = std::time::Duration::from_secs(60);
+/// …and requests for it return false without a dialog for this long.
+const QUIET_AFTER_BURST: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Paces the consent dialog per provider. A script that loops
+/// [`request_cloud_consent`] would otherwise put a new modal up after every
+/// decline, locking the app, and keep hoping a Tab-then-Enter lands on
+/// allow. After two declines within [`DECLINE_BURST`], that provider gets no
+/// dialog for [`QUIET_AFTER_BURST`]; an allow clears its record.
+#[derive(Debug, Default)]
+pub struct ConsentPacing {
+    by_provider: HashMap<String, Pacing>,
+}
+
+#[derive(Debug, Default)]
+struct Pacing {
+    last_decline: Option<std::time::Instant>,
+    quiet_until: Option<std::time::Instant>,
+}
+
+impl ConsentPacing {
+    /// True while `provider` is in its quiet period: don't ask now.
+    pub fn is_quiet(&self, provider: &str, now: std::time::Instant) -> bool {
+        self.by_provider
+            .get(provider)
+            .and_then(|p| p.quiet_until)
+            .is_some_and(|until| now < until)
+    }
+
+    /// Note how a dialog for `provider` was answered at `now`.
+    pub fn record(&mut self, provider: &str, answer: ConsentAnswer, now: std::time::Instant) {
+        if answer == ConsentAnswer::Allow {
+            self.by_provider.remove(provider);
+            return;
+        }
+        let p = self.by_provider.entry(provider.to_string()).or_default();
+        if p.last_decline
+            .is_some_and(|prev| now.saturating_duration_since(prev) <= DECLINE_BURST)
+        {
+            p.quiet_until = Some(now + QUIET_AFTER_BURST);
+        }
+        p.last_decline = Some(now);
+    }
+}
+
+/// The only code that writes cloud consent: records it for `provider` when
+/// the answer was [`ConsentAnswer::Allow`], and nothing otherwise. Returns
+/// whether consent was given.
+pub fn record_cloud_consent(
+    storage: &fly_storage::Storage,
+    provider: &str,
+    answer: ConsentAnswer,
+) -> Result<bool, String> {
+    if answer != ConsentAnswer::Allow {
+        return Ok(false);
+    }
+    storage
+        .set_setting(&cloud_consent_key(provider), "true")
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Ask whether `provider` may receive meeting content, in a native dialog
+/// that a script in the webview can't draw, fill in or click, and record a
+/// yes. Returns true when it may: a local provider, consent given before, or
+/// given now. Requests take turns, so only one dialog is ever open; one that
+/// waited sees the earlier answer before asking again. Right after two
+/// declines it returns false without asking ([`ConsentPacing`]).
+#[tauri::command]
+pub async fn request_cloud_consent(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    provider: String,
+    at_launch: bool,
+) -> CmdResult<bool> {
+    let mut pacing = state.consent_prompt.lock().await;
+    let question = cloud_consent_question(&state.storage.lock().unwrap(), &provider, at_launch)?;
+    let Some(prompt) = question else {
+        return Ok(true);
+    };
+    if pacing.is_quiet(&provider, std::time::Instant::now()) {
+        tracing::warn!(
+            provider,
+            "cloud-AI consent asked again right after two declines; not asking"
+        );
+        return Ok(false);
+    }
+    let answer = ask_consent_natively(&app, &prompt).await;
+    pacing.record(&provider, answer, std::time::Instant::now());
+    let allowed = record_cloud_consent(&state.storage.lock().unwrap(), &provider, answer)?;
+    tracing::info!(provider, allowed, "cloud-AI consent asked");
+    Ok(allowed)
+}
+
+/// Map the dialog's result: only a click on the allow button counts. On the
+/// paths used here (Windows TaskDialog, macOS NSAlert, GTK's blocking
+/// dialog) rfd reports a button as `Custom(<its label>)`, and Esc or closing
+/// the dialog as `Cancel`.
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn consent_answer(result: &rfd::MessageDialogResult, prompt: &ConsentPrompt) -> ConsentAnswer {
+    match result {
+        rfd::MessageDialogResult::Custom(label) if *label == prompt.allow => ConsentAnswer::Allow,
+        _ => ConsentAnswer::Decline,
+    }
+}
+
+/// The dialog's buttons: decline in the first slot, which every platform
+/// makes the default, so Enter (say, a keystroke meant for the editor when
+/// the dialog pops up) declines, like the in-app confirm's focused Cancel.
+///
+/// The dialog plugin's builder can't be used for this: it turns rfd's
+/// `Cancel` (Esc, closing) into the second button's label, which here is
+/// allow.
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn consent_buttons(prompt: &ConsentPrompt) -> rfd::MessageButtons {
+    rfd::MessageButtons::OkCancelCustom(prompt.decline.clone(), prompt.allow.clone())
+}
+
+/// Windows and macOS: show `prompt` as a native dialog over the main window
+/// (modal to it) and wait for it. Built on the main thread like
+/// tauri-plugin-dialog does (macOS requires it), then awaited off it. On
+/// Windows, Esc and closing come back as `Cancel`; on macOS Esc does nothing
+/// here (NSAlert gives Esc only to a "Cancel" button that isn't first), so
+/// one of the two buttons must be clicked.
+#[cfg(any(windows, target_os = "macos"))]
+async fn ask_consent_natively(app: &tauri::AppHandle, prompt: &ConsentPrompt) -> ConsentAnswer {
+    use tauri::Manager;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let shown = prompt.clone();
+    let handle = app.clone();
+    let scheduled = app.run_on_main_thread(move || {
+        let mut dialog = rfd::AsyncMessageDialog::new()
+            .set_level(rfd::MessageLevel::Info)
+            .set_title(&shown.title)
+            .set_description(&shown.message)
+            .set_buttons(consent_buttons(&shown));
+        if let Some(window) = handle.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
+        }
+        let answer = dialog.show();
+        std::thread::spawn(move || {
+            let result = tauri::async_runtime::block_on(answer);
+            let _ = tx.send(consent_answer(&result, &shown));
+        });
+    });
+    if let Err(e) = scheduled {
+        tracing::warn!(error = %e, "could not show the cloud-consent dialog");
+        return ConsentAnswer::Decline;
+    }
+    rx.await.unwrap_or(ConsentAnswer::Decline)
+}
+
+/// GTK (Linux, the BSDs): rfd's *blocking* dialog, run off the async
+/// runtime. Its async GTK path reports only Ok / Cancel, never which custom
+/// button: allow would come back as `Cancel`, the same as Esc, so nobody
+/// could ever allow. The blocking path (`gtk_dialog_run`) reports a button
+/// as its label and Esc / closing as `Cancel`. Both run on rfd's own GTK
+/// thread. rfd's GTK backend ignores the parent window, so here the dialog
+/// isn't modal to the app window.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+async fn ask_consent_natively(_app: &tauri::AppHandle, prompt: &ConsentPrompt) -> ConsentAnswer {
+    let shown = prompt.clone();
+    let asked = tauri::async_runtime::spawn_blocking(move || {
+        let result = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Info)
+            .set_title(&shown.title)
+            .set_description(&shown.message)
+            .set_buttons(consent_buttons(&shown))
+            .show();
+        consent_answer(&result, &shown)
+    })
+    .await;
+    asked.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not show the cloud-consent dialog");
+        ConsentAnswer::Decline
+    })
+}
+
+/// No native dialog elsewhere (mobile): nothing is allowed.
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
+async fn ask_consent_natively(_app: &tauri::AppHandle, _prompt: &ConsentPrompt) -> ConsentAnswer {
+    ConsentAnswer::Decline
 }
 
 /// The words every missing-consent refusal carries ([`check_cloud_policy`]);
@@ -279,15 +592,14 @@ pub fn build_provider(
     if let (Some(url), false) = (&base_url, provider == "anthropic") {
         validate_base_url(&provider, url)?;
     }
-    // Cloud processing needs the user's recorded consent (the in-app prompt,
-    // once per provider). Checked here, not only in the UI, so no LLM path
-    // can skip the check. Known gap: `consent.` keys are webview-writable
-    // (commands.rs is_webview_setting_key), so a script running in the
-    // webview could forge the record itself.
+    // Cloud processing needs the user's recorded consent (once per provider).
+    // Checked here, not only in the UI, so no LLM path can skip the check.
+    // Only request_cloud_consent writes it, after a yes in a native dialog;
+    // the webview can't (commands.rs is_webview_writable_setting_key).
     let is_local = PROVIDERS
         .iter()
         .any(|(id, _, local)| *id == provider && *local);
-    let consented = get(&format!("consent.cloud_llm.{provider}")).as_deref() == Some("true");
+    let consented = get(&cloud_consent_key(&provider)).as_deref() == Some("true");
     // Per-meeting / per-folder "Keep local" (fly-storage privacy.rs):
     // enforced here, the one place every LLM task gets its provider.
     let keep_local = match scope {
@@ -1002,8 +1314,287 @@ mod security_tests {
         assert!(!is_webview_setting_key(CLOUD_CONSENT_RESET_FLAG));
         // nor any other migration flag
         assert!(!is_webview_setting_key("migration.cloud_consent_recorded"));
-        // while the consents themselves stay where the in-app prompt writes them
-        assert!(is_webview_setting_key("consent.cloud_llm.anthropic"));
+    }
+
+    fn temp_storage() -> (tempfile::TempDir, fly_storage::Storage) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = fly_storage::Storage::open(dir.path()).unwrap();
+        (dir, s)
+    }
+
+    /// The native dialog shows the v2.4 in-app disclosure word for word.
+    #[test]
+    fn consent_dialog_says_what_the_in_app_prompt_said() {
+        use super::cloud_consent_prompt;
+        let p = cloud_consent_prompt("openai", false);
+        assert_eq!(p.title, "Use OpenAI for Ask and Enhance?");
+        assert_eq!(p.allow, "Use OpenAI");
+        assert_eq!(p.decline, "Cancel");
+        assert_eq!(
+            p.message,
+            "Your notes and full meeting transcripts will be sent to OpenAI for processing \
+             whenever you run Enhance or Ask, and automatically for transcript cleanup and \
+             action items after each transcription. Their data-retention terms apply (see \
+             their privacy / data-usage policy).\n\nRecordings themselves stay on this \
+             computer, and so do notes you keep local. Choose This computer (Ollama) to keep \
+             everything local."
+        );
+
+        // At launch it first says why it's asking, and declines with "Not now".
+        let launch = cloud_consent_prompt("anthropic", true);
+        assert_eq!(launch.title, "Use Anthropic for Ask and Enhance?");
+        assert_eq!(launch.allow, "Use Anthropic");
+        assert_eq!(launch.decline, "Not now");
+        assert!(
+            launch.message.starts_with(
+                "Your AI provider is set to Anthropic, and nothing is sent there until you \
+                 allow it. Until then, Enhance, Ask, transcript cleanup and action items \
+                 won't run.\n\nYour notes and full meeting transcripts will be sent to \
+                 Anthropic"
+            ),
+            "{}",
+            launch.message
+        );
+        assert_eq!(cloud_consent_prompt("nim", false).allow, "Use NVIDIA");
+    }
+
+    /// Asked only for a known cloud provider without consent; nothing is
+    /// shown for a local one, one already allowed, or an unknown id.
+    #[test]
+    fn consent_is_asked_only_when_it_is_missing() {
+        use super::{cloud_consent_prompt, cloud_consent_question};
+        let (_dir, s) = temp_storage();
+        assert_eq!(cloud_consent_question(&s, "ollama", false), Ok(None));
+        s.set_setting("llm.provider", "anthropic").unwrap();
+        assert_eq!(
+            cloud_consent_question(&s, "anthropic", true),
+            Ok(Some(cloud_consent_prompt("anthropic", true)))
+        );
+        assert!(cloud_consent_question(&s, "someday-cloud", false).is_err());
+        assert!(cloud_consent_question(&s, "", false).is_err());
+        s.set_setting("consent.cloud_llm.anthropic", "true")
+            .unwrap();
+        assert_eq!(cloud_consent_question(&s, "anthropic", false), Ok(None));
+        // anything but "true" is not consent
+        s.set_setting("consent.cloud_llm.openai", "yes").unwrap();
+        assert!(matches!(
+            cloud_consent_question(&s, "openai", false),
+            Ok(Some(_))
+        ));
+    }
+
+    /// Only an explicit allow writes consent; a decline writes nothing.
+    #[test]
+    fn only_an_allow_records_consent() {
+        use super::{record_cloud_consent, ConsentAnswer};
+        let (_dir, s) = temp_storage();
+        assert_eq!(
+            record_cloud_consent(&s, "anthropic", ConsentAnswer::Decline),
+            Ok(false)
+        );
+        assert_eq!(s.get_setting("consent.cloud_llm.anthropic").unwrap(), None);
+        assert_eq!(
+            record_cloud_consent(&s, "anthropic", ConsentAnswer::Allow),
+            Ok(true)
+        );
+        assert_eq!(
+            s.get_setting("consent.cloud_llm.anthropic")
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+        // per provider
+        assert_eq!(s.get_setting("consent.cloud_llm.openai").unwrap(), None);
+    }
+
+    /// The launch wording claims "Your AI provider is set to …": the caller
+    /// can't get it for a provider that isn't the saved one.
+    #[test]
+    fn launch_wording_only_for_the_saved_provider() {
+        use super::{cloud_consent_prompt, cloud_consent_question};
+        let (_dir, s) = temp_storage();
+        // nothing saved (Ollama by default), or another provider saved
+        assert_eq!(
+            cloud_consent_question(&s, "openai", true),
+            Ok(Some(cloud_consent_prompt("openai", false)))
+        );
+        s.set_setting("llm.provider", "anthropic").unwrap();
+        assert_eq!(
+            cloud_consent_question(&s, "openai", true),
+            Ok(Some(cloud_consent_prompt("openai", false)))
+        );
+        s.set_setting("llm.provider", "openai").unwrap();
+        assert_eq!(
+            cloud_consent_question(&s, "openai", true),
+            Ok(Some(cloud_consent_prompt("openai", true)))
+        );
+    }
+
+    /// What each dialog path reports for each answer (read from rfd 0.16's
+    /// backends), and what it means here: only a click on the allow button
+    /// is a yes. Pinned so an rfd upgrade or a change of dialog path gets
+    /// checked again.
+    #[test]
+    fn each_platforms_dialog_results_map_to_the_right_answer() {
+        use super::{cloud_consent_prompt, consent_answer, ConsentAnswer};
+        use rfd::MessageDialogResult as R;
+        use ConsentAnswer::{Allow, Decline};
+        let p = cloud_consent_prompt("anthropic", true);
+        let allow = R::Custom("Use Anthropic".into());
+        let decline = R::Custom("Not now".into());
+        let table = [
+            // Windows TaskDialog: Enter is the first (decline) button; Esc
+            // and closing are IDCANCEL.
+            ("windows: allow", allow.clone(), Allow),
+            ("windows: decline or Enter", decline.clone(), Decline),
+            ("windows: Esc or close", R::Cancel, Decline),
+            // macOS NSAlert: Return is the first (decline) button; Esc does
+            // nothing.
+            ("macos: allow", allow.clone(), Allow),
+            ("macos: decline or Return", decline.clone(), Decline),
+            // GTK's blocking gtk_dialog_run: Esc and closing are
+            // DELETE_EVENT, reported as Cancel.
+            ("gtk blocking: allow", allow.clone(), Allow),
+            ("gtk blocking: decline", decline.clone(), Decline),
+            ("gtk blocking: Esc or close", R::Cancel, Decline),
+            // GTK's async path (not used) reports allow as plain Cancel, so
+            // nobody could ever allow through it.
+            ("gtk async: allow", R::Cancel, Decline),
+            ("gtk async: decline", R::Ok, Decline),
+            // anything else is no
+            ("another label", R::Custom("Use OpenAI".into()), Decline),
+            ("empty label", R::Custom(String::new()), Decline),
+            ("yes", R::Yes, Decline),
+            ("no", R::No, Decline),
+        ];
+        for (case, result, want) in table {
+            assert_eq!(consent_answer(&result, &p), want, "{case}");
+        }
+    }
+
+    /// Two declines in a minute quiet that provider's dialog for a minute;
+    /// an allow, or time, clears it. Other providers are unaffected.
+    #[test]
+    fn repeated_declines_quiet_the_dialog_for_a_while() {
+        use super::{ConsentAnswer, ConsentPacing};
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |n: u64| t0 + Duration::from_secs(n);
+        let mut pacing = ConsentPacing::default();
+        assert!(!pacing.is_quiet("anthropic", t0));
+
+        pacing.record("anthropic", ConsentAnswer::Decline, at(0));
+        assert!(
+            !pacing.is_quiet("anthropic", at(1)),
+            "one decline isn't a burst"
+        );
+        pacing.record("anthropic", ConsentAnswer::Decline, at(30));
+        assert!(pacing.is_quiet("anthropic", at(31)));
+        assert!(pacing.is_quiet("anthropic", at(89)));
+        assert!(!pacing.is_quiet("openai", at(31)), "per provider");
+        assert!(!pacing.is_quiet("anthropic", at(90)), "quiet for a minute");
+
+        // declines more than a minute apart never quiet it
+        let mut slow = ConsentPacing::default();
+        slow.record("openai", ConsentAnswer::Decline, at(0));
+        slow.record("openai", ConsentAnswer::Decline, at(61));
+        assert!(!slow.is_quiet("openai", at(62)));
+
+        // an allow clears the record
+        let mut cleared = ConsentPacing::default();
+        cleared.record("nim", ConsentAnswer::Decline, at(0));
+        cleared.record("nim", ConsentAnswer::Allow, at(5));
+        cleared.record("nim", ConsentAnswer::Decline, at(10));
+        assert!(!cleared.is_quiet("nim", at(11)));
+    }
+
+    /// The dev mock (frontend/src/devMock.ts) asks with the backend's own
+    /// words; this catches the two drifting apart.
+    #[test]
+    fn dev_mock_shows_the_same_disclosure() {
+        use super::cloud_consent_prompt;
+        let mock = include_str!("../../frontend/src/devMock.ts").replace("\r\n", "\n");
+        let start = mock
+            .find("function mockConsentPrompt(")
+            .expect("devMock has mockConsentPrompt");
+        let end = start
+            + mock[start..]
+                .find("\n}\n")
+                .expect("end of mockConsentPrompt");
+        // Join its `…` + `…` template pieces, one line per whole string.
+        let mut joined = String::new();
+        let mut rest = &mock[start..end];
+        while let Some(open) = rest.find('`') {
+            let close = open + 1 + rest[open + 1..].find('`').expect("closing backtick");
+            joined.push_str(&rest[open + 1..close]);
+            rest = &rest[close + 1..];
+            if !rest.trim_start().starts_with('+') {
+                joined.push('\u{1}');
+            }
+        }
+        let joined = joined
+            .replace("\\n", "\n")
+            .replace("${vendor}", "OpenAI")
+            .replace("${disclosure}", "");
+        let rust = cloud_consent_prompt("openai", false);
+        assert!(
+            joined.contains(&rust.message),
+            "devMock disclosure differs from cloud_consent_prompt:\n{joined}"
+        );
+        assert!(joined.contains(&rust.title), "devMock title differs");
+        let launch = cloud_consent_prompt("openai", true);
+        let intro = launch
+            .message
+            .strip_suffix(rust.message.as_str())
+            .expect("launch message ends with the disclosure");
+        assert!(joined.contains(intro), "devMock launch intro differs");
+    }
+
+    /// The gate holds: no cloud provider is built without recorded consent,
+    /// and the consent writer is what opens it.
+    #[test]
+    fn build_provider_refuses_cloud_without_consent() {
+        use super::DataScope;
+        use super::{build_provider, is_consent_refusal, record_cloud_consent, ConsentAnswer};
+        use fly_secrets::SecretStore;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = std::sync::Arc::new(fly_secrets::MemorySecretStore::default());
+        secrets
+            .set(fly_secrets::keys::ANTHROPIC_API_KEY, "sk-test")
+            .unwrap();
+        let state = crate::state::AppState::init_with(dir.path().to_path_buf(), secrets).unwrap();
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .set_setting("llm.provider", "anthropic")
+            .unwrap();
+
+        let err = build_provider(&state, DataScope::NoMeetingData)
+            .err()
+            .expect("refused without consent");
+        assert!(is_consent_refusal(&err), "{err}");
+
+        // a declined dialog changes nothing
+        record_cloud_consent(
+            &state.storage.lock().unwrap(),
+            "anthropic",
+            ConsentAnswer::Decline,
+        )
+        .unwrap();
+        let err = build_provider(&state, DataScope::NoMeetingData)
+            .err()
+            .expect("still refused after a decline");
+        assert!(is_consent_refusal(&err), "{err}");
+
+        record_cloud_consent(
+            &state.storage.lock().unwrap(),
+            "anthropic",
+            ConsentAnswer::Allow,
+        )
+        .unwrap();
+        let provider = build_provider(&state, DataScope::NoMeetingData).expect("allowed");
+        assert_eq!(provider.id(), "anthropic");
     }
 
     /// M4: an Ollama on another machine is not "local" for keep-local data

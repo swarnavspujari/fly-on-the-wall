@@ -45,6 +45,7 @@ The second pass followed staff-engineer and SOC 2 (Security, Confidentiality and
 - **Cloud processing needs recorded consent per provider.** A one-time disclosure names the processor and what is sent, and it's enforced in the backend so no UI path can skip it.
   - *Correction (v2.4):* until v2.4 the disclosure used `window.confirm`, which tauri-plugin-dialog makes async and which had no dialog permission. So it never showed, and the Promise it returned counted as "yes". Every consent recorded before v2.4, including the one-time migration for users already on a cloud provider, was recorded without the disclosure being seen.
   - v2.4 asks with an in-app dialog, clears all earlier consents once (`reset_unseen_cloud_consent`), and asks again at launch when the saved provider is a cloud one. A lint rule bans `confirm`/`alert`.
+  - *Follow-up (after v2.4):* consent is now written only by the backend. `request_cloud_consent` shows the same disclosure in a native dialog the webview can't draw or click, and records only a click on its allow button. The decline button is the default, so a stray Enter declines. The webview can still read `consent.cloud_llm.*` but can't set it (`is_webview_writable_setting_key`), so a script can't skip the disclosure. Two declines for a provider within a minute stop its dialog for a minute, so a request loop can't keep a modal up. Consents recorded since v2.4 came from the then-working in-app prompt and are kept; there is no second reset.
 - **MCP settings copy corrected.** Results are sent to the MCP client's model provider; they don't "stay on this machine".
 
 **Supply chain and release (CC8)**
@@ -103,7 +104,6 @@ The second pass followed staff-engineer and SOC 2 (Security, Confidentiality and
 | Run the live Claude 5.5 test once with a real key | Needs the owner's API key | Repo owner |
 | tauri-plugin-updater's own zip 4 copy (RUSTSEC-2026-0367/8/9) and quick-xml (build-time only) | Waiting on upstream; the updater only unpacks signature-verified updates | Upstream |
 | Screen-recording videos aren't covered by audio retention; the WebView2 profile isn't wiped by delete-all; the FileVault check hasn't run on a real Mac | Small follow-ups | Code |
-| `consent.*` settings are webview-writable (`is_webview_setting_key`), so a script running in the webview could forge `consent.cloud_llm.*` without the prompt | `build_provider` checks the record but can't tell who wrote it; the fix is a backend-owned consent write (follow-up proposed) | Code |
 
 ## Verified good practices
 - API keys live in the OS keychain and are never returned to the webview (only `has_key`).

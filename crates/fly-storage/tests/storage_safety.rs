@@ -103,7 +103,11 @@ fn fresh_database_never_creates_unlinked() {
 
     let s = Storage::open(tmp.path()).unwrap();
 
-    assert_eq!(user_version(tmp.path()), 2, "fresh database is stamped");
+    assert_eq!(
+        user_version(tmp.path()),
+        Storage::SCHEMA_VERSION,
+        "fresh database is stamped"
+    );
     assert!(!tmp.path().join("recordings/_unlinked").exists());
     assert!(!tmp.path().join("notes/_unlinked").exists());
     assert!(meeting_dir.join("recording.mixed.wav").exists());
@@ -159,7 +163,7 @@ fn existing_pre_v2_database_still_parks_orphans() {
                 .exists(),
             "user_version {version}"
         );
-        assert_eq!(user_version(tmp.path()), 2);
+        assert_eq!(user_version(tmp.path()), Storage::SCHEMA_VERSION);
     }
 }
 
