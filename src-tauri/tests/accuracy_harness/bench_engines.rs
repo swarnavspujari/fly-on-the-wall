@@ -22,7 +22,9 @@
 //! - `nemocpp-parakeet`  parakeet-tdt-0.6b-v3 q8_0 via NVIDIA NeMo-Speech.cpp
 //!   (alternative runtime to the shipped parakeet-cli path).
 //! - `nemocpp-parakeet-whole` the same, the whole channel in one request
-//!   (NeMo-Speech.cpp's own long-form chunking, not the shipped VAD batches).
+//!   (NeMo-Speech.cpp's own long-form chunking, not the shipped VAD batches;
+//!   its 400 s chunks need a 5.1 GB graph, so CPU only on a 4 GB GPU).
+//! - `nemocpp-parakeet-win` contiguous ≤ 120 s windows of the raw channel.
 //! - `nemocpp-nemotron`  nemotron-speech-streaming-en q8_0 via NeMo-Speech.cpp
 //!   at 1.12 s right context (its offline/file path).
 //!
@@ -83,6 +85,7 @@ pub const BENCH_ENGINES: &[&str] = &[
     "granite",
     "nemocpp-parakeet",
     "nemocpp-parakeet-whole",
+    "nemocpp-parakeet-win",
     "nemocpp-nemotron",
 ];
 
@@ -233,7 +236,10 @@ pub fn build(
             }));
             Ok(Box::new(e))
         }
-        "nemocpp-parakeet" | "nemocpp-parakeet-whole" | "nemocpp-nemotron" => {
+        "nemocpp-parakeet"
+        | "nemocpp-parakeet-whole"
+        | "nemocpp-parakeet-win"
+        | "nemocpp-nemotron" => {
             let device = if gpu { "vulkan" } else { "cpu" };
             let exe = dir.need(&format!("bin/nemo-speech-{device}/bin/nemo-speech{EXE}"))?;
             let (gguf, extra): (&str, &[&str]) = if name.starts_with("nemocpp-parakeet") {
@@ -272,6 +278,7 @@ pub fn build(
             let label: &'static str = match name {
                 "nemocpp-parakeet" => "nemocpp-parakeet",
                 "nemocpp-parakeet-whole" => "nemocpp-parakeet-whole",
+                "nemocpp-parakeet-win" => "nemocpp-parakeet-win",
                 _ => "nemocpp-nemotron",
             };
             Ok(Box::new(crate::bench_servers::ServerEngine {
@@ -280,11 +287,13 @@ pub fn build(
                 exe,
                 args,
                 ready_path: "/ready",
-                // NeMo-Speech.cpp splits > 400 s itself; batches are ≤ 120 s
-                max_piece_ms: None,
-                // -whole: the channel in one request, NeMo-Speech's own
-                // long-form chunking instead of the shipped VAD batches
-                whole_file: name == "nemocpp-parakeet-whole",
+                // NeMo-Speech.cpp splits > 400 s itself; batches are ≤ 120 s.
+                // -win: contiguous ≤ 120 s windows of the raw channel (its
+                // 400 s chunks need a 5.1 GB graph: over a 4 GB GPU)
+                max_piece_ms: (name == "nemocpp-parakeet-win").then_some(120_000),
+                // -whole / -win: the raw channel instead of the shipped VAD
+                // batches (no silence removal, no stitching)
+                whole_file: name == "nemocpp-parakeet-whole" || name == "nemocpp-parakeet-win",
                 flavor: crate::bench_servers::ServerFlavor::NemoSpeech,
                 anchor: None,
             }))

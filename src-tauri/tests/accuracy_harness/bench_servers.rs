@@ -308,7 +308,20 @@ impl TranscriptionEngine for ServerEngine {
             let whole = async {
                 let (samples, rate) = fly_audio::mix::read_wav_mono(wav_path)
                     .map_err(|e| AsrError::BadAudio(format!("{}: {e}", wav_path.display())))?;
-                let words = self.post_piece(server_ref, None, &samples, rate).await?;
+                // contiguous windows (≤ max_piece_ms, cut at quiet points;
+                // None = the whole file): no silence removal, no stitching
+                let mut words = Vec::new();
+                for (from, to) in pieces(&samples, rate, self.max_piece_ms) {
+                    let off = from as u64 * 1000 / rate as u64;
+                    let got = self
+                        .post_piece(server_ref, None, &samples[from..to], rate)
+                        .await?;
+                    words.extend(got.into_iter().map(|mut x| {
+                        x.start_ms += off;
+                        x.end_ms += off;
+                        x
+                    }));
+                }
                 Ok::<_, AsrError>(RawTranscript {
                     language: Some("en".into()),
                     words: fly_asr::drop_non_speech_spans(words),
