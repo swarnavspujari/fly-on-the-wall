@@ -15,6 +15,8 @@ missing file is a SKIP.
 | Engine name | What runs | Timestamps |
 |---|---|---|
 | `nemocpp-parakeet` | Parakeet TDT 0.6B v3 q8_0 on NVIDIA NeMo-Speech.cpp (`nemo-speech serve`, one server per channel, shipped VAD batches) | native word times |
+| `nemocpp-parakeet-win` | the same, contiguous ≤ 120 s windows of the raw channel (no silence removal, no stitching) | native word times |
+| `nemocpp-parakeet-whole` | the same, the whole channel in one request (NeMo-Speech.cpp's own 400 s chunking; needs a 5.1 GB graph, so CPU only on a 4 GB GPU) | native word times |
 | `nemocpp-nemotron` | nemotron-speech-streaming-en-0.6b q8_0 on NeMo-Speech.cpp, 1.12 s right context | native word times |
 | `nemotron-live` | nemotron-speech-streaming-en-0.6b int8 (sherpa-onnx), the whole channel fed in 160 ms capture buffers like a live call; 2 threads (`FLYONTHEWALL_HARNESS_LIVE_THREADS`) | token times |
 | `nemotron-offline` | the same model over the shipped VAD batches | token times |
@@ -138,3 +140,70 @@ a call.
 Downloading from the official host at runtime makes the user, not us, the recipient. Mirroring
 (for example on our GitHub releases) makes us the distributor, and every condition above
 applies. The sherpa-onnx packages ship no license or NOTICE file, so we would add them.
+
+## Results (2026-10-29, provisional)
+
+Two 10-minute AMI excerpts (public, CC BY 4.0) cut with `cut_excerpt.py`:
+`ami-ES2004a-ihm-x10` (headset mix, 05:06–14:56) and `ami-TS3003a-sdm-x10` (single distant mic,
+05:32–14:59). Whisper and `parakeet-cli` rows are the 2026-10-27/28 full-meeting runs cropped to
+the same window ("cached"); everything else ran on the excerpt. The machine was shared with
+other builds throughout (machine CPU 50–100 %), so speeds are **contended** lower bounds. WER and
+DER don't depend on load. The user's Teams excerpt was scored too; it stays local, like all
+Teams results.
+
+### English engine and runtime
+
+| Engine (runtime, input) | ES2004a-ihm WER / SA-WER | TS3003a-sdm WER / SA-WER | speech holes (ihm/sdm) | ×realtime (Vulkan) |
+|---|---|---|---|---|
+| Whisper large-v3-turbo (shipped default, cached) | 23.0 / 29.8 | 49.6 / 52.5 | 0 / 5 | — |
+| Parakeet v3, `parakeet-cli`, VAD batches + hole guard (cached) | 20.9 / 27.3 | 53.4 / 55.2 | 2 / 18 | 8.4 (fresh) |
+| Parakeet v3, NeMo-Speech.cpp, VAD batches | 24.6 / 30.7 | 50.9 / 53.4 | 3 / 10 | 30–47 |
+| **Parakeet v3, NeMo-Speech.cpp, contiguous ≤ 120 s windows** | **20.5 / 27.2** | **39.7 / 43.4** | 2 / 16 | 24–41 |
+| Parakeet v3, NeMo-Speech.cpp, whole file in one call (CPU) | 22.2 / – | – | 2 / – | — |
+| Nemotron streaming 0.6B, NeMo-Speech.cpp q8, 1.12 s | 23.0 / 28.2 | 51.3 / 53.6 | 3 / 15 | 1.8–39 |
+| Nemotron streaming 0.6B, sherpa-onnx int8, live, 2 threads | 23.3 / 28.2 | – | 2 / – | CPU 0.5 (93 % busy) |
+
+- The shipped energy VAD's silence removal costs Parakeet a lot on distant-mic audio: the same
+  runtime and model go from 50.9 % (VAD batches) to 39.7 % (raw windows) on TS3003a-sdm.
+  Silero VAD (v2.5 2.3) and the batching design should be measured with this in mind.
+- `parakeet-cli` given the whole 590 s excerpt in one call ran 31 min, reached 8.9 GB of memory
+  and produced nothing; it was stopped. NeMo-Speech.cpp transcribed the same file in one call
+  with words right up to 589.9 s (WER 22.2 %).
+- CPU cost is the same for both runtimes: 1.44 (NeMo-Speech.cpp) vs 1.55 (`parakeet-cli`)
+  CPU-seconds per audio second at 4 and 8 threads. NeMo-Speech.cpp's Vulkan lead comes from
+  one loaded model per recording (no per-batch reload, no hole re-decodes).
+- Both Nemotron runtimes emit the same 21× one-word loop inside 0.5 s at 305 s of ES2004a
+  (a transducer repeating a token); the pipeline's loop guard collapses it.
+
+### Live captions (Nemotron streaming, sherpa-onnx int8, 1.12 s chunks, 2 threads)
+
+| | ES2004a-ihm (93 % busy) |
+|---|---|
+| first text after a speech onset, p50 / p90 | 2.65 / 5.54 s (starved: one chunk took 52 s) |
+| algorithmic only (chunk + lookahead), first token after a pause, p50 / p90 | 1.12 / 1.28 s |
+| CPU during a call (share of the machine) | 9.7 % |
+
+On a less-loaded run of the local Teams excerpt (73 % busy): first text p50/p90 2.10/2.44 s
+from the VAD onset (which includes the VAD's pre-roll), 1.66/1.77 s from the token's own time,
+CPU 7.9 %. The 560 ms export would cut about half a second at a small WER cost (NVIDIA:
+7.07 % vs 6.93 % average).
+
+### Diarizer (words fixed from the cached `parakeet-vulkan` transcript)
+
+| Diarizer | ES2004a-ihm turn DER250 / DER0 | clusters | words with wrong speaker | TS3003a-sdm turn DER250 | clusters | wall s (ihm / sdm) |
+|---|---|---|---|---|---|---|
+| shipped: sherpa-onnx + CAM++ + VBx | 25.5 / 34.1 | 4 / 4 | 7.7 % | 29.0 (conf 6.1) | 1 / 4 | 936 / 425 |
+| Nemotron-3-Diarization, default 1.12 s geometry | 18.6 / 24.6 | 4 / 4 | 4.7 % | 32.5 | 3 / 4 | 905 / 1373 |
+| **Nemotron-3-Diarization, card's 30.4 s config** | **18.8 / 25.1** | 4 / 4 | **4.2 %** | 30.5 (conf 0.0) | 3 / 4 | **65 / 56** |
+
+TS3003a's window is dominated by one speaker, so it's a weak diarization test: Nemotron finds
+3 of 4 speakers where the shipped pipeline collapses to one, but misses more quiet far-field
+speech (miss 30 % vs 22 %). The 30.4 s config is as accurate as the default and ~13× cheaper
+(195 vs 2,486 CPU-seconds on ES2004a).
+
+### Not run
+
+Cohere Transcribe and Granite Speech 5.0 2B: smoke clips only (28–60 s), on a busy machine.
+Granite gave the most complete transcript of the clip but ran at 0.4× realtime on CPU and
+~2.2× on Vulkan; Cohere ran at ~2.2× on 4 CPU threads with no timestamps. Neither is a default
+candidate on this hardware.
