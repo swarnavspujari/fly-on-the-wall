@@ -1,7 +1,9 @@
 name: Evals lock
 
 # The CI half of the eval lock (evals/README.md, "How it's enforced").
-# Evals are immutable to AI coding agents; only the user changes them.
+# Eval changes need the user's approval (CLAUDE.md). The hard lock is
+# optional: it's on once the user sets EVALS_LOCK_SHA256 (and requires this
+# check); until then this job passes and only reports the hash.
 #
 # `pull_request_target` runs THIS file as it is on the base branch (main),
 # so a pull request can't change the check that judges it. The job hashes
@@ -26,9 +28,11 @@ name: Evals lock
 # persisted, and the token is read-only. The only PR-derived values used are
 # commit SHAs, passed through env.
 #
-# Fails when the hash differs from the variable, or the variable is unset.
-# The computed hash is always printed to the job summary so the user can
-# copy it after reviewing an eval change. Job name: evals-lock.
+# Fails when the variable is set and the hash differs from it, and always
+# on an impostor. With the variable unset it passes with a "lock not
+# enabled" notice. The computed hash is always printed to the job summary
+# so the user can copy it after reviewing an eval change. Job name:
+# evals-lock.
 on:
   # zizmor: ignore[dangerous-triggers] -- read-only lock check: it hashes the PR head's protected paths with git ls-tree and never builds or runs PR code (see the header).
   pull_request_target:
@@ -217,7 +221,7 @@ jobs:
               echo '```'
             fi
             echo
-            echo "Only the user changes evals (evals/README.md, \"Changing an eval\"). To accept this version, set the repository variable \`EVALS_LOCK_SHA256\` to the hash above (Settings → Secrets and variables → Actions → Variables) and re-run this job."
+            echo "Eval changes need the user's approval (CLAUDE.md; evals/README.md, \"Changing an eval\"). With the hard lock on, the user accepts this version by setting the repository variable \`EVALS_LOCK_SHA256\` to the hash above (Settings → Secrets and variables → Actions → Variables) and re-running this job."
           } >>"$GITHUB_STEP_SUMMARY"
 
           if [ -n "$impostors" ]; then
@@ -225,11 +229,17 @@ jobs:
             exit 1
           fi
           if [ -z "$expected" ]; then
-            echo "::error title=Eval lock::EVALS_LOCK_SHA256 is not set. The user sets it to the hash in this job's summary."
-            exit 1
+            # The hard lock is off until the user sets the variable; the
+            # permission rule (CLAUDE.md) and the CI tripwires apply meanwhile.
+            echo "::notice title=Eval lock::Lock not enabled: EVALS_LOCK_SHA256 is unset, so this check only reports the hash ($hash). Setting the variable turns the hard lock on."
+            {
+              echo
+              echo "**Lock not enabled.** \`EVALS_LOCK_SHA256\` is unset, so this check passes and only reports the hash. To turn the hard lock on, set the variable to a reviewed hash and require this check (evals/README.md, \"Turning the hard lock on\")."
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           if [ "$hash" != "$expected" ]; then
-            echo "::error title=Eval lock::The protected eval files differ from the locked version (expected $expected, got $hash). Only the user changes evals; see this job's summary."
+            echo "::error title=Eval lock::The protected eval files differ from the locked version (expected $expected, got $hash). Eval changes need the user's approval; see this job's summary."
             exit 1
           fi
           echo "Eval lock matches."
