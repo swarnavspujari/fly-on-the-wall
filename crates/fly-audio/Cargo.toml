@@ -11,6 +11,8 @@ thiserror.workspace = true
 tracing.workspace = true
 cpal.workspace = true
 hound.workspace = true
+# lock-free SPSC ring between the capture callbacks and the WAV writer
+rtrb = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
@@ -18,6 +20,8 @@ windows = { version = "0.62", features = [
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
   "Win32_System_Com",
+  # AvSetMmThreadCharacteristicsW: real-time (MMCSS) capture threads
+  "Win32_System_Threading",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

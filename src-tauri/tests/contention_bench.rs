@@ -38,6 +38,12 @@
 //!   `<data>/results/contention-<UTC time>.json` (outside the repo)
 //! - `FOTW_BENCH_LABEL`  free text stored in the results (e.g. "before")
 //! - `FOTW_BENCH_ASK_EVERY_SECS` default 30
+//! - `FOTW_BENCH_DISK_MBPS`      disk-load write rate, default 50
+//! - `FOTW_BENCH_INDUCE_GAP_AT_SECS` (Windows) freeze the bench process
+//!   for `FOTW_BENCH_INDUCE_GAP_MS` (default 1000) at that point of the
+//!   recording — the tone keeps playing from a separate player process, so
+//!   the capture really loses audio and must report it
+//! - `FOTW_BENCH_KEEP_AUDIO` keep the recording under `<data>/rec/`
 //!
 //! The evals runner's `local_bench` can call this test and read the JSON.
 
@@ -157,6 +163,93 @@ fn queue_meeting(state: &AppState, wav: &Path, duration_ms: u64, link: bool) -> 
     meeting.id
 }
 
+/// The tone source: in this process, or — when the bench freezes itself
+/// to induce a gap — a child process (this test binary, `tone_player_child`).
+enum Player {
+    InProcess(TonePlayer),
+    Child {
+        child: std::process::Child,
+        stop_file: PathBuf,
+        stats_file: PathBuf,
+    },
+}
+
+impl Player {
+    fn start(tone: ToneSpec, separate: bool, dir: &Path) -> Self {
+        if !separate {
+            return Player::InProcess(TonePlayer::start(tone).expect("tone player"));
+        }
+        let stop_file = dir.join("player.stop");
+        let stats_file = dir.join("player.json");
+        let _ = std::fs::remove_file(&stop_file);
+        let _ = std::fs::remove_file(&stats_file);
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["tone_player_child", "--ignored", "--exact", "--nocapture"])
+            .env("FOTW_BENCH_PLAYER_STOP", &stop_file)
+            .env("FOTW_BENCH_PLAYER_STATS", &stats_file)
+            .spawn()
+            .expect("tone player process");
+        Player::Child {
+            child,
+            stop_file,
+            stats_file,
+        }
+    }
+
+    fn finish(self) -> Value {
+        match self {
+            Player::InProcess(p) => json!({
+                "process": "bench",
+                "rate": p.rate(),
+                "frames": p.frames_played(),
+                "max_callback_gap_ms": p.max_callback_gap_ms(),
+            }),
+            Player::Child {
+                mut child,
+                stop_file,
+                stats_file,
+            } => {
+                let _ = std::fs::write(&stop_file, b"stop");
+                let t0 = Instant::now();
+                while t0.elapsed() < Duration::from_secs(15) {
+                    if let Ok(Some(_)) = child.try_wait() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let _ = child.kill();
+                std::fs::read_to_string(&stats_file)
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or(Value::Null)
+            }
+        }
+    }
+}
+
+/// Freeze every thread of this process (capture callbacks and the writer
+/// included) for `ms`, from a helper process. Windows only.
+fn freeze_self(ms: u64) {
+    if !cfg!(target_os = "windows") {
+        eprintln!("FOTW_BENCH_INDUCE_GAP_AT_SECS is Windows-only; ignored");
+        return;
+    }
+    let script = format!(
+        "Add-Type -Namespace Fotw -Name Nt -MemberDefinition '\
+         [DllImport(\"ntdll.dll\")] public static extern int NtSuspendProcess(IntPtr h); \
+         [DllImport(\"ntdll.dll\")] public static extern int NtResumeProcess(IntPtr h);'; \
+         $p = Get-Process -Id {pid}; [Fotw.Nt]::NtSuspendProcess($p.Handle) | Out-Null; \
+         Start-Sleep -Milliseconds {ms}; [Fotw.Nt]::NtResumeProcess($p.Handle) | Out-Null",
+        pid = std::process::id()
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status();
+    if !matches!(status, Ok(s) if s.success()) {
+        eprintln!("freezing the bench process failed: {status:?}");
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
@@ -169,6 +262,8 @@ struct Shared {
     ask_overruns: AtomicU64,
     caption_lag_ms: Mutex<Vec<f64>>,
     caption_failures: AtomicU64,
+    caption_ticks: AtomicU64,
+    caption_tick_max_ms: AtomicU64,
     disk_mb: AtomicU64,
     cpu_samples: Mutex<Vec<f64>>,
 }
@@ -187,6 +282,11 @@ fn contention_bench() {
         .collect();
     let want = |l: &str| loads.iter().any(|x| x == l);
     let ask_every: u64 = env_or("FOTW_BENCH_ASK_EVERY_SECS", "30").parse().unwrap();
+    let disk_mbps: u64 = env_or("FOTW_BENCH_DISK_MBPS", "50").parse().unwrap();
+    let induce_at: Option<u64> = std::env::var("FOTW_BENCH_INDUCE_GAP_AT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let induce_ms: u64 = env_or("FOTW_BENCH_INDUCE_GAP_MS", "1000").parse().unwrap();
     let home = dirs::home_dir().expect("home dir");
     let bench_root = PathBuf::from(env_or(
         "FOTW_BENCH_DATA",
@@ -423,12 +523,13 @@ fn contention_bench() {
     let mut threads = Vec::new();
     if want("disk") {
         let shared = shared.clone();
+        let disk_mbps = disk_mbps as f64;
         let dir = bench_root.join("disk-load");
         threads.push(std::thread::spawn(move || {
             use std::io::Write;
             let _ = std::fs::create_dir_all(&dir);
             let buf = vec![0x5au8; 8 << 20];
-            let target_mb_s = 150.0;
+            let target_mb_s = disk_mbps;
             let t0 = Instant::now();
             let mut file_no = 0u64;
             while !shared.stop.load(Ordering::Relaxed) {
@@ -479,7 +580,8 @@ fn contention_bench() {
 
     // ---------------------------------------------------------- record
     let tone = ToneSpec::default();
-    let player = TonePlayer::start(tone).expect("tone player on the default output");
+    // an induced gap freezes this process: the tone must keep playing
+    let player = Player::start(tone, induce_at.is_some(), &bench_root);
     std::thread::sleep(Duration::from_secs(2));
     let capture = fly_audio::cpal_backend::CpalAudioCapture::new();
     let capture_warnings_at_start = capture.capture_warnings();
@@ -504,7 +606,13 @@ fn contention_bench() {
             let never = AtomicBool::new(false);
             while !shared.stop.load(Ordering::Relaxed) {
                 tokio::time::sleep(LIVE_TICK).await;
-                for outcome in captioner.tick(&engine, &never).await {
+                let t0 = Instant::now();
+                let outcomes = captioner.tick(&engine, &never).await;
+                shared.caption_ticks.fetch_add(1, Ordering::Relaxed);
+                shared
+                    .caption_tick_max_ms
+                    .fetch_max(t0.elapsed().as_millis() as u64, Ordering::Relaxed);
+                for outcome in outcomes {
                     match outcome {
                         ChunkOutcome::Text { end_ms, .. } => {
                             let now_ms = rec_started.elapsed().as_secs_f64() * 1000.0;
@@ -526,8 +634,16 @@ fn contention_bench() {
     let mut warnings_seen: Vec<String> = Vec::new();
     let deadline = rec_started + Duration::from_secs(secs);
     let mut last_report = Instant::now();
+    let mut induced = false;
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1000));
+        if let Some(at) = induce_at {
+            if !induced && rec_started.elapsed() >= Duration::from_secs(at) {
+                induced = true;
+                eprintln!("[{at:>5}s] freezing this process for {induce_ms} ms");
+                freeze_self(induce_ms);
+            }
+        }
         for w in session.warnings() {
             if !warnings_seen.contains(&w) {
                 eprintln!(
@@ -540,20 +656,19 @@ fn contention_bench() {
         if last_report.elapsed() > Duration::from_secs(60) {
             last_report = Instant::now();
             eprintln!(
-                "[{:>5.0}s] recording… embed batches {}, asr runs {}, asks {}, disk {} MB",
+                "[{:>5.0}s] recording… embed batches {}, asr runs {}, asks {}, disk {} MB, caption ticks {} chunks {}",
                 rec_started.elapsed().as_secs_f64(),
                 shared.embed_batches.load(Ordering::Relaxed),
                 shared.asr_runs.load(Ordering::Relaxed),
                 shared.ask_ms.lock().unwrap().len(),
                 shared.disk_mb.load(Ordering::Relaxed),
+                shared.caption_ticks.load(Ordering::Relaxed),
+                shared.caption_lag_ms.lock().unwrap().len(),
             );
         }
     }
     let output = session.stop().expect("capture stop");
-    let player_frames = player.frames_played();
-    let player_max_gap = player.max_callback_gap_ms();
-    let player_rate = player.rate();
-    drop(player);
+    let player = player.finish();
 
     // ---------------------------------------------------------- teardown
     shared.stop.store(true, Ordering::Relaxed);
@@ -631,6 +746,7 @@ fn contention_bench() {
             "secs": secs,
             "loads": loads,
             "ask_every_secs": ask_every,
+            "disk_mbps": disk_mbps,
             "tone": tone,
             "asr": {"tier": "light", "model": LIVE_MODEL, "gpu": false,
                     "threads": fly_app_lib::pipeline::sidecar_threads()},
@@ -639,15 +755,14 @@ fn contention_bench() {
         "capture": {
             "duration_ms": output.duration_ms,
             "warnings_at_start": capture_warnings_at_start,
+            // the capture's own accounting (absent before it existed)
+            "report": serde_json::to_value(&output).ok().and_then(|v| v.get("health").cloned()),
             "session_warnings": warnings_seen,
             "mic": mic_json,
             "system": system_json,
         },
-        "player": {
-            "rate": player_rate,
-            "frames": player_frames,
-            "max_callback_gap_ms": player_max_gap,
-        },
+        "player": player,
+        "induced_gap": induce_at.map(|at| json!({"at_secs": at, "ms": induce_ms})),
         "ask": {
             "latency": stats(shared.ask_ms.lock().unwrap().clone()),
             "errors": shared.ask_errors.lock().unwrap().clone(),
@@ -656,6 +771,8 @@ fn contention_bench() {
         "captions": {
             "lag": stats(shared.caption_lag_ms.lock().unwrap().clone()),
             "failures": shared.caption_failures.load(Ordering::Relaxed),
+            "ticks": shared.caption_ticks.load(Ordering::Relaxed),
+            "slowest_tick_ms": shared.caption_tick_max_ms.load(Ordering::Relaxed),
         },
         "load": {
             "embed_batches": shared.embed_batches.load(Ordering::Relaxed),
@@ -705,4 +822,28 @@ fn analyze_kept_recording() {
         .collect();
     let rep = testtone::analyze(&samples, rate, &ToneSpec::default());
     eprintln!("{}", serde_json::to_string_pretty(&rep).unwrap());
+}
+
+/// The tone source for an induced-gap run (spawned by the bench; a no-op
+/// when run by hand).
+#[test]
+#[ignore = "child process of contention_bench"]
+fn tone_player_child() {
+    let (Ok(stop), Ok(stats)) = (
+        std::env::var("FOTW_BENCH_PLAYER_STOP"),
+        std::env::var("FOTW_BENCH_PLAYER_STATS"),
+    ) else {
+        return;
+    };
+    let player = TonePlayer::start(ToneSpec::default()).expect("tone player");
+    while !Path::new(&stop).exists() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let out = json!({
+        "process": "child",
+        "rate": player.rate(),
+        "frames": player.frames_played(),
+        "max_callback_gap_ms": player.max_callback_gap_ms(),
+    });
+    let _ = std::fs::write(stats, out.to_string());
 }

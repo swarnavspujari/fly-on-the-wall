@@ -79,9 +79,10 @@ impl TonePlayer {
         let mut stream_config: cpal::StreamConfig = config.config();
         let rate = stream_config.sample_rate;
         let channels = stream_config.channels.max(1) as usize;
-        // A deep render buffer: under load the player itself must not glitch,
-        // or its gaps would be blamed on the recorder.
-        stream_config.buffer_size = cpal::BufferSize::Fixed(rate / 2);
+        // Under load the player itself must not glitch, or its gaps would be
+        // blamed on the recorder: a one-second render buffer, and the render
+        // thread runs as real-time audio (below).
+        stream_config.buffer_size = cpal::BufferSize::Fixed(rate);
         let frames = Arc::new(AtomicU64::new(0));
         let max_gap_us = Arc::new(AtomicU64::new(0));
 
@@ -95,6 +96,9 @@ impl TonePlayer {
                         stream_config.clone(),
                         move |data: &mut [$t], _| {
                             let now = Instant::now();
+                            if last.is_none() {
+                                boost_render_thread();
+                            }
                             if let Some(prev) = last {
                                 max_gap_us.fetch_max(
                                     now.duration_since(prev).as_micros() as u64,
@@ -150,6 +154,18 @@ impl TonePlayer {
     /// half-second render buffer means the player itself may have glitched.
     pub fn max_callback_gap_ms(&self) -> f64 {
         self.max_gap_us.load(Ordering::Relaxed) as f64 / 1000.0
+    }
+}
+
+/// MMCSS "Pro Audio" for the player's render thread (Windows), so a loaded
+/// machine starves the recorder under test, not the reference signal.
+fn boost_render_thread() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::core::w;
+        use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
+        let mut task_index = 0u32;
+        let _ = AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index);
     }
 }
 
