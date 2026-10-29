@@ -571,6 +571,38 @@ pub fn import_state(
     Ok(Some(staged))
 }
 
+/// After the join: point the meeting at its mixed track, and list the
+/// imported videos as the note's attachments, in place in the meeting folder,
+/// so they play in-app. A video that can't be listed is logged, not fatal.
+fn record_joined_import(
+    storage: &fly_storage::Storage,
+    staged: &ImportStaged,
+    files: &[ImportFile],
+    mixed_rel: String,
+    duration_ms: u64,
+) -> CmdResult<()> {
+    storage
+        .end_meeting(
+            &staged.meeting_id,
+            &RecordingRef {
+                mic_path: None,
+                system_path: None,
+                mixed_path: Some(mixed_rel),
+                playback_path: None,
+                duration_ms,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    for f in files.iter().filter(|f| f.kind == "video") {
+        if let Some(rel) = &f.rel_path {
+            if let Err(e) = storage.add_attachment_in_place(&staged.note_id, rel) {
+                tracing::warn!(error = %e, note_id = %staged.note_id, "attaching imported video failed");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Concatenate 16 kHz mono WAVs into `dst` with `gap_ms` of silence between
 /// files. Returns the total duration and the cumulative end (ms) of each
 /// source on the joined timeline. Tauri-free so tests can drive it.
@@ -708,29 +740,13 @@ pub async fn import_transcribe(
         .map_err(|e| e.to_string())?
         .to_string_lossy()
         .replace('\\', "/");
-    {
-        let storage = state.storage.lock().unwrap();
-        storage
-            .end_meeting(
-                &meeting_id,
-                &RecordingRef {
-                    mic_path: None,
-                    system_path: None,
-                    mixed_path: Some(mixed_rel),
-                    playback_path: None,
-                    duration_ms,
-                },
-            )
-            .map_err(|e| e.to_string())?;
-        // imported videos double as note attachments so they play in-app
-        for f in files.iter().filter(|f| f.kind == "video") {
-            if let Some(rel) = &f.rel_path {
-                if let Err(e) = storage.add_attachment_in_place(&staged.note_id, rel) {
-                    tracing::warn!(error = %e, note_id = %staged.note_id, "attaching imported video failed");
-                }
-            }
-        }
-    }
+    record_joined_import(
+        &state.storage.lock().unwrap(),
+        &staged,
+        &files,
+        mixed_rel,
+        duration_ms,
+    )?;
 
     let staged = ImportStaged {
         files,
@@ -1343,5 +1359,72 @@ mod tests {
 
         assert!(seen.lock().unwrap().is_empty());
         assert!(state.cancel_requests.lock().unwrap().contains(&meeting_id));
+    }
+
+    /// The join lists an imported video as the note's attachment, in place in
+    /// the meeting folder (it plays in-app); audio files aren't listed.
+    #[test]
+    fn an_imported_video_is_listed_as_the_notes_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let storage = state.storage.lock().unwrap();
+        // what import_stage leaves: note + meeting + copies in the meeting folder
+        let note = storage.create_note("Design review", None).unwrap();
+        let meeting = storage
+            .create_meeting("Design review", &note.id, &[])
+            .unwrap();
+        let rec_dir = storage
+            .allocate_meeting_dir("Design review", meeting.started_at)
+            .unwrap();
+        let folder = format!(
+            "recordings/{}",
+            rec_dir.file_name().unwrap().to_string_lossy()
+        );
+        std::fs::write(rec_dir.join("screen share.mp4"), b"ftyp").unwrap();
+        std::fs::write(rec_dir.join("room mic.m4a"), b"ftyp").unwrap();
+        std::fs::write(rec_dir.join("recording.mixed.wav"), b"RIFF").unwrap();
+        let file = |id: &str, name: &str, kind: &str| ImportFile {
+            id: id.into(),
+            file_name: name.into(),
+            size: 4,
+            kind: kind.into(),
+            rel_path: Some(format!("{folder}/{name}")),
+            error: None,
+            convert_error: None,
+        };
+        let files = vec![
+            file("f1", "screen share.mp4", "video"),
+            file("f2", "room mic.m4a", "audio"),
+        ];
+        let staged = ImportStaged {
+            note_id: note.id.clone(),
+            meeting_id: meeting.id.clone(),
+            files: files.clone(),
+            boundaries_ms: vec![],
+            started: false,
+        };
+
+        record_joined_import(
+            &storage,
+            &staged,
+            &files,
+            format!("{folder}/recording.mixed.wav"),
+            2_000,
+        )
+        .unwrap();
+
+        let attachments = storage.get_note(&note.id).unwrap().attachments;
+        assert_eq!(attachments.len(), 1, "{attachments:?}");
+        assert_eq!(
+            attachments[0].rel_path,
+            format!("{folder}/screen share.mp4")
+        );
+        assert_eq!(attachments[0].mime.as_deref(), Some("video/mp4"));
+        assert!(storage
+            .attachment_abs_path(&attachments[0].rel_path)
+            .unwrap()
+            .is_file());
+        let rec = storage.get_meeting(&meeting.id).unwrap().recording.unwrap();
+        assert_eq!(rec.duration_ms, 2_000);
     }
 }
