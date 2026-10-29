@@ -216,10 +216,70 @@ pub fn resume_recording(state: State<'_, AppState>) -> CmdResult<RecordingStatus
     ))
 }
 
+/// Next to the WAVs: what the capture lost, per channel (see
+/// `fly_audio::CaptureHealthReport`). Written for every recording, so a clean
+/// one is on record as clean.
+pub const CAPTURE_REPORT_FILE: &str = "recording.capture.json";
+
+/// Payload of the `recording:audio_lost` event: a recording that just
+/// stopped had gaps the person should know about.
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioLost {
+    pub meeting_id: String,
+    pub note_id: String,
+    pub mic_lost_ms: u64,
+    pub system_lost_ms: u64,
+}
+
+/// Store the capture report with the recording and, when audio was lost,
+/// tell the frontend (the live warning disappears with the recording bar).
+fn record_capture_health(
+    app: &tauri::AppHandle,
+    output: &fly_audio::CaptureOutput,
+    meeting_id: &str,
+    note_id: &str,
+) {
+    let health = &output.health;
+    let dir = output
+        .mic_path
+        .as_ref()
+        .or(output.system_path.as_ref())
+        .and_then(|p| p.parent());
+    if let Some(dir) = dir {
+        let report = serde_json::json!({
+            "schema": 1,
+            "duration_ms": output.duration_ms,
+            "mic": health.mic,
+            "system": health.system,
+        });
+        if let Ok(text) = serde_json::to_string_pretty(&report) {
+            if let Err(e) = std::fs::write(dir.join(CAPTURE_REPORT_FILE), text) {
+                tracing::warn!(meeting_id, error = %e, "could not write the capture report");
+            }
+        }
+    }
+    let lost = |c: &Option<fly_audio::ChannelReport>| c.as_ref().map_or(0, |c| c.audio_lost_ms());
+    if health.audio_lost_ms() >= fly_audio::LOST_AUDIO_WARN_MS {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "recording:audio_lost",
+            AudioLost {
+                meeting_id: meeting_id.to_string(),
+                note_id: note_id.to_string(),
+                mic_lost_ms: lost(&health.mic),
+                system_lost_ms: lost(&health.system),
+            },
+        );
+    }
+}
+
 /// Stop, finalize WAVs + mixdown (blocking work off the IPC thread), and
 /// attach the recording to its meeting.
 #[tauri::command]
-pub async fn stop_recording(state: State<'_, AppState>) -> CmdResult<Meeting> {
+pub async fn stop_recording(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<Meeting> {
     let rec = state
         .recording
         .lock()
@@ -237,6 +297,7 @@ pub async fn stop_recording(state: State<'_, AppState>) -> CmdResult<Meeting> {
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
+    record_capture_health(&app, &output, &meeting_id, &note_id);
 
     let to_rel = |p: &std::path::PathBuf| -> Option<String> {
         p.strip_prefix(&state.data_dir)

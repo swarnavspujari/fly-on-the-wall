@@ -1503,6 +1503,16 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       // the capture ends; the meeting comes back like the backend's
       mockRecPaused = false;
       if (typeof localStorage !== "undefined") localStorage.removeItem("fotwMockRecording");
+      // fotwMockAudioLost=1: the capture had gaps (recording.rs
+      // record_capture_health emits this right before returning)
+      if (mockFlag("fotwMockAudioLost") === "1") {
+        mockEmit("recording:audio_lost", {
+          meeting_id: "m1",
+          note_id: "n1",
+          mic_lost_ms: 1200,
+          system_lost_ms: 400,
+        });
+      }
       return meeting("n1");
     default:
       return null;
@@ -1580,6 +1590,11 @@ const MOCK_REC_WARNINGS: Record<string, string[]> = {
   ],
   macos: [
     "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall. If it already shows as allowed, the grant belongs to a previously installed build: remove Fly on the Wall from that list with the − button and re-add it (or run `tccutil reset ScreenCapture com.flyonthewall.app` in Terminal), then relaunch.",
+  ],
+  // lost_audio_warning (crates/fly-audio/src/cpal_backend.rs)
+  lost: [
+    "Your microphone has gaps: 1.2 s was lost because the computer was too busy (most recently at 2:31). The rest is still recording — closing heavy apps can help.",
+    "The other participants' audio has gaps: 0.4 s was lost because the computer was too busy (most recently at 2:31). The rest is still recording — closing heavy apps can help.",
   ],
 };
 function mockRecordingQa() {

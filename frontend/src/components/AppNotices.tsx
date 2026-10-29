@@ -1,5 +1,14 @@
-import { CircleAlert, Sparkles } from "lucide-react";
-import { NOTICE_PRIORITY, appErrorCopy, consentSkipsCopy, updateNoticeVisible } from "../notices";
+import { listen } from "@tauri-apps/api/event";
+import { AudioLines, CircleAlert, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  NOTICE_PRIORITY,
+  appErrorCopy,
+  audioLostCopy,
+  consentSkipsCopy,
+  updateNoticeVisible,
+  type AudioLost,
+} from "../notices";
 import type { PipelineFailure } from "../pipelineFailures";
 import { pipelineFailureCopy, selectPipelineNotice } from "../pipelineNotice";
 import type { Updater } from "../updater";
@@ -57,6 +66,32 @@ export default function AppNotices({
 }: Props) {
   const notices: StackedNotice[] = [];
   const skips = useConsentSkips();
+  const [audioLost, dismissAudioLost] = useAudioLost();
+
+  // A recording that just stopped had gaps (the live warning left with the
+  // recording bar). Shown whatever is recording now: it's about the last one.
+  if (audioLost) {
+    const copy = audioLostCopy(audioLost);
+    notices.push({
+      id: "audio-lost",
+      priority: NOTICE_PRIORITY.audioLost,
+      node: (
+        <Notice
+          tone="warning"
+          icon={<AudioLines size={18} strokeWidth={1.75} />}
+          title={copy.title}
+          steps={copy.steps}
+          actions={
+            <Button variant="ghost" size="sm" onClick={dismissAudioLost}>
+              Dismiss
+            </Button>
+          }
+        >
+          {copy.cause}
+        </Notice>
+      ),
+    });
+  }
 
   if (systemAudioBlocked && !recordingActive) {
     notices.push({
@@ -210,6 +245,26 @@ export default function AppNotices({
       <NoticeStack notices={notices} style={STACK_STYLE} />
     </div>
   );
+}
+
+/** The latest `recording:audio_lost` (recording.rs) until dismissed. */
+function useAudioLost(): [AudioLost | null, () => void] {
+  const [lost, setLost] = useState<AudioLost | null>(null);
+  useEffect(() => {
+    let live = true;
+    let unlisten: (() => void) | null = null;
+    listen<AudioLost>("recording:audio_lost", (e) => setLost(e.payload))
+      .then((un) => {
+        if (live) unlisten = un;
+        else un();
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+      unlisten?.();
+    };
+  }, []);
+  return [lost, () => setLost(null)];
 }
 
 /** Expanded on a short window the stack would run off the top: cap it and

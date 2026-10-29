@@ -11,8 +11,22 @@ const LOOPBACK =
   "System audio capture couldn't start (device busy) — only your microphone is being recorded, so the other participants won't be in this recording.";
 const MACOS =
   "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall.";
+// lost_audio_warning (cpal_backend.rs), pinned there by
+// lost_audio_warning_matches_the_recording_bar_classifier
+const MIC_LOST =
+  "Your microphone has gaps: 1.2 s was lost because the computer was too busy (most recently at 12:34). The rest is still recording — closing heavy apps can help.";
+const SYSTEM_LOST =
+  "The other participants' audio has gaps: 0.4 s was lost because the computer was too busy (most recently at 3:05). The rest is still recording — closing heavy apps can help.";
 
 describe("classifyWarning", () => {
+  it("puts lost microphone audio on the you chip", () => {
+    expect(classifyWarning(MIC_LOST)).toMatchObject({ side: "you", label: "Audio lost" });
+  });
+
+  it("puts lost system audio on the others chip", () => {
+    expect(classifyWarning(SYSTEM_LOST)).toMatchObject({ side: "others", label: "Audio lost" });
+  });
+
   it("labels a muted output on the others chip", () => {
     expect(classifyWarning(MUTED)).toMatchObject({
       side: "others",

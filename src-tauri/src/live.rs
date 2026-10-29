@@ -401,28 +401,34 @@ async fn run(app: tauri::AppHandle, meeting_id: String, out_dir: PathBuf, stop: 
 }
 
 /// Read the samples appended past `consumed` from a mono 16-bit WAV that is
-/// still being written (header sizes are stale until finalize — go by file
-/// length; our own writer emits the canonical 44-byte header). Returns
+/// still being written (go by file length, not the header's sizes, which
+/// lag the data; our own writer emits the canonical 44-byte header). Returns
 /// `(samples, rate, start_sample)` only when at least MIN_CHUNK_SECS of new
-/// audio exist; bounded by MAX_CHUNK_SECS.
+/// audio exist; bounded by MAX_CHUNK_SECS. Reads only the header and the new
+/// stretch — never the whole growing file (≈345 MB per channel per hour).
 fn take_chunk(path: &Path, consumed: u64) -> Option<(Vec<f32>, u32, u64)> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.len() < 44 {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len < 44 {
         return None;
     }
-    let rate = u32::from_le_bytes(bytes[24..28].try_into().ok()?);
+    let mut header = [0u8; 44];
+    file.read_exact(&mut header).ok()?;
+    let rate = u32::from_le_bytes(header[24..28].try_into().ok()?);
     if rate == 0 {
         return None;
     }
-    let total_samples = ((bytes.len() - 44) / 2) as u64;
+    let total_samples = (len - 44) / 2;
     let new = total_samples.saturating_sub(consumed);
     if new < MIN_CHUNK_SECS * rate as u64 {
         return None;
     }
     let take = new.min(MAX_CHUNK_SECS * rate as u64);
-    let from = 44 + (consumed as usize) * 2;
-    let to = from + (take as usize) * 2;
-    let (pairs, _tail) = bytes[from..to].as_chunks::<2>();
+    file.seek(SeekFrom::Start(44 + consumed * 2)).ok()?;
+    let mut bytes = vec![0u8; (take * 2) as usize];
+    file.read_exact(&mut bytes).ok()?;
+    let (pairs, _tail) = bytes.as_chunks::<2>();
     let samples: Vec<f32> = pairs
         .iter()
         .map(|p| i16::from_le_bytes(*p) as f32 / i16::MAX as f32)
