@@ -1,0 +1,67 @@
+[package]
+name = "fly-mcp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Connectors beta (spec §4.3): FOTW's own Ask agent calls tools on MCP servers
+# the user connects. Built on the official `rmcp` SDK, pinned exactly so an
+# SDK update is always a reviewed change. Only the client half of rmcp is
+# compiled: no server, no macros, no sampling or roots.
+#
+# The server crate (`fly-mcp`, the `flyonthewall-mcp` binary) is separate and
+# doesn't depend on this one.
+
+[features]
+# Test-only helpers: the malicious fixture server and a network policy that
+# allows plain http to 127.0.0.1. Never enabled by the app.
+test-support = ["tokio/io-std"]
+
+[dependencies]
+fly-llm.workspace = true
+fly-secrets.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["net"] }
+reqwest.workspace = true
+sha2.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+url = "2"
+http = "1"
+# General category (Cf, Zl, Zp) for the hidden-character check.
+unicode-properties = { version = "=0.1.4", default-features = false, features = ["general-category"] }
+rmcp = { version = "=3.8.0", default-features = false, features = [
+    "client",
+    "transport-async-rw",
+    "transport-streamable-http-client-reqwest",
+    "auth",
+    "reqwest",
+] }
+
+# Stop a local connector's whole process tree (npx.cmd → node → …), not just
+# the first process: a Job Object on Windows, a process group on Unix.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+fly-mcp-client = { path = ".", features = ["test-support"] }
+tokio = { workspace = true, features = ["net", "io-util"] }
+
+[[bin]]
+# The malicious fixture MCP server (stdio), for tests and the real-app check.
+# Built only with `--features test-support`; never bundled.
+name = "fly-mcp-fixture"
+path = "src/bin/fixture.rs"
+required-features = ["test-support"]

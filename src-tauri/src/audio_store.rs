@@ -233,11 +233,21 @@ impl StoreState {
     }
 }
 
+/// The job takes a folder lease and announces it in `current` in one hold
+/// of the storage lock (`compress_one_now`). Holding that lock once after
+/// raising a stop flag means: either the job has announced its meeting
+/// (wait for `current`), or its `blocked` check, under the same lock, will
+/// see the flag. Callers must not hold the storage lock.
+fn pass_lease_barrier(state: &AppState) {
+    drop(state.storage.lock().unwrap_or_else(|p| p.into_inner()));
+}
+
 /// Stop compressing `meeting_id` and wait (up to `timeout`) until the job
 /// has let go of its folder. Used before a note's meetings are purged.
 pub fn stop_meeting(state: &AppState, meeting_id: &str, timeout: Duration) -> bool {
     let store = &state.audio_store;
     store.cancel.lock().unwrap().insert(meeting_id.to_string());
+    pass_lease_barrier(state);
     let deadline = Instant::now() + timeout;
     while store.current().as_deref() == Some(meeting_id) {
         if Instant::now() > deadline {
@@ -255,6 +265,7 @@ pub fn halt(state: &AppState, timeout: Duration) -> bool {
     let store = &state.audio_store;
     store.halted.store(true, Ordering::SeqCst);
     store.nudge();
+    pass_lease_barrier(state);
     let deadline = Instant::now() + timeout;
     while store.current().is_some() {
         if Instant::now() > deadline {
@@ -663,6 +674,21 @@ pub fn compress_meeting(
     result
 }
 
+/// The meeting's recording, or `Gone` when the meeting or its recording was
+/// deleted since the pass was planned (never `Busy`: there's nothing to come
+/// back to).
+fn gone_check(storage: &fly_storage::Storage, id: &str) -> Result<RecordingRef, MeetingError> {
+    match storage.get_meeting(id) {
+        Ok(m) => m
+            .recording
+            .ok_or_else(|| MeetingError::Gone("the recording was removed".into())),
+        Err(fly_storage::StorageError::NotFound(_)) => {
+            Err(MeetingError::Gone("the meeting was deleted".into()))
+        }
+        Err(e) => Err(failed(e)),
+    }
+}
+
 fn compress_meeting_inner(
     ctx: &mut MeetingCtx<'_>,
     meeting_id: &str,
@@ -670,11 +696,7 @@ fn compress_meeting_inner(
 ) -> Result<MeetingOutcome, MeetingError> {
     let planned = {
         let storage = ctx.storage.lock().unwrap();
-        storage
-            .get_meeting(meeting_id)
-            .map_err(failed)?
-            .recording
-            .ok_or_else(|| MeetingError::Busy("no recording".into()))?
+        gone_check(&storage, meeting_id)?
     };
     let data_dir = ctx.data_dir;
     let (rel, dir) = meeting_folder(data_dir, &planned)
@@ -1198,23 +1220,28 @@ fn compress_one_now(
         }
         Ok(())
     };
+    // Lease and announce in one hold of the storage lock, so halt() and
+    // stop_meeting() can't miss a lease (see `pass_lease_barrier`).
     {
         let storage = state.storage.lock().unwrap();
+        gone_check(&storage, id)?;
         blocked(&storage).map_err(MeetingError::Busy)?;
         if !storage.lease_meeting_folder(id) {
             return Err(MeetingError::Busy("folder in use".into()));
         }
+        *store.current.lock().unwrap() = Some(id.to_string());
     }
-    *store.current.lock().unwrap() = Some(id.to_string());
     struct Release<'a>(&'a AppState, &'a str);
     impl Drop for Release<'_> {
         fn drop(&mut self) {
-            *self.0.audio_store.current.lock().unwrap() = None;
-            self.0
-                .storage
+            let storage = self.0.storage.lock().unwrap_or_else(|p| p.into_inner());
+            storage.release_meeting_folder(self.1);
+            *self
+                .0
+                .audio_store
+                .current
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .release_meeting_folder(self.1);
+                .unwrap_or_else(|p| p.into_inner()) = None;
         }
     }
     let _release = Release(state, id);
@@ -1617,6 +1644,41 @@ mod tests {
             *state.audio_store.wake.0.lock().unwrap(),
             "woken for a pass"
         );
+    }
+
+    /// A lease taken just before halt() (its announcement still in the
+    /// same storage-lock hold) is waited for, not missed.
+    #[test]
+    fn halt_waits_for_a_lease_taken_just_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        let job = &state;
+        std::thread::scope(|s| {
+            let (in_lease, entered) = std::sync::mpsc::channel();
+            s.spawn(move || {
+                // compress_one_now's lease block, then work on the meeting
+                let storage = job.storage.lock().unwrap();
+                in_lease.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(200));
+                *job.audio_store.current.lock().unwrap() = Some("m1".into());
+                drop(storage);
+                std::thread::sleep(Duration::from_millis(300));
+                *job.audio_store.current.lock().unwrap() = None;
+            });
+            entered.recv().unwrap();
+            let started = Instant::now();
+            assert!(halt(&state, Duration::from_secs(5)));
+            assert!(
+                started.elapsed() >= Duration::from_millis(400),
+                "returned while the job held its folder: {:?}",
+                started.elapsed()
+            );
+            assert!(state.audio_store.current().is_none());
+        });
     }
 
     /// The shared rule (#112) decides; it's asked at most every

@@ -102,9 +102,12 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 | `storage.compress.saved_bytes` | app-audio-store | `audio_store.rs` (`spawn`, `run_pass`) | `audio_store.rs` (`run_pass`) | no |
 | `storage.import_video` | app-audio-store | `video_store.rs` (`import_policy`) | `video_store.rs` (`set_import_video_policy`) | no |
 | `storage.compress.notice` | app-audio-store | `audio_store.rs` (`run_pass`) | `audio_store.rs` (`run_pass` → `pending`, `dismiss_compress_notice` → `shown`) | no |
+| `connectors.registry` | app-connectors | `connectors.rs` (`SettingsStore::load`) | `connectors.rs` (`SettingsStore::save`), only from connector commands; trust grants only after a native-dialog yes | **no: not readable either.** Outside the read allowlist and listed in `BACKEND_ONLY` (`commands.rs`; test `webview_cannot_touch_connector_state`) |
+| `connectors.call_log` | app-connectors | `connectors.rs` (`connector_call_log`) | `connectors.rs` (calls, `clear_connector_call_log`) | no |
+| `ui.beta.connectors` | ui-connectors | `connectors.rs` (`beta_enabled`: shows the feature, lets `turn_for_ask` offer tools; grants nothing); `ConnectorsSection.tsx` | `ConnectorsSection.tsx` | yes |
 | `privacy.last_wipe_report` | app-privacy | `privacy.rs:311` | `privacy.rs:775`; deleted 375 | no |
 
-Any other key under `consent.`, `capture.` or `ui.` (except `consent.cloud_llm.*`) can also be created by the webview. Today no backend code reads one.
+Any other key under `consent.`, `capture.` or `ui.` (except `consent.cloud_llm.*`) can also be created by the webview. Backend code reads one of them, `ui.beta.connectors`, as a show/hide switch only: what connectors may do is decided by native-dialog approvals stored in `connectors.*`.
 
 ### Database
 | Table | Columns | Read / write |
@@ -161,7 +164,7 @@ None. The consent dialog is an OS dialog shown in-process (Windows TaskDialog, m
 - devMock's settings commands skip the allowlist (apart from refusing `consent.cloud_llm.*` writes), so jsdom tests can't catch a UI that writes a disallowed key.
 
 ## Changing it safely
-- New setting the UI must write: prefer a dedicated validating command. Use the `ui.` prefix only for harmless view state, never for anything a backend path trusts. A record only the backend may write goes in `BACKEND_ONLY` in `is_webview_writable_setting_key`.
+- New setting the UI must write: prefer a dedicated validating command. Use the `ui.` prefix only for harmless view state, never for anything a backend path trusts. A record only the backend may write goes in `BACKEND_ONLY` in `is_webview_writable_setting_key` (today: `consent.cloud_llm.` and `connectors.`).
 - Changing the consent words: edit `cloud_consent_prompt` and devMock's `mockConsentPrompt` together. `consent_dialog_says_what_the_in_app_prompt_said` and `dev_mock_shows_the_same_disclosure` pin both.
 - Changing the dialog (an `rfd` upgrade, a new platform path, other buttons): check again what each backend reports for each button, Esc and closing, and update `each_platforms_dialog_results_map_to_the_right_answer`. Keep decline as the first (default) button, and count only a click on allow as yes.
 - Add the key to the registry table above, and to devMock if the UI reads it.

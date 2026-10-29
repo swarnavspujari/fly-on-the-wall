@@ -35,6 +35,7 @@ import RecordingBar from "./components/RecordingBar";
 import SettingsModal from "./components/SettingsModal";
 import FirstRunNotice from "./components/FirstRunNotice";
 import AppNotices from "./components/AppNotices";
+import { ConnectorCallStack } from "./components/ConnectorCallCard";
 import {
   failureFrom,
   failuresReducer,
@@ -1137,6 +1138,9 @@ export default function App() {
         }}
         updater={updater}
       />
+      {/* Every proposed connector call waits here for Run / Don't run,
+          wherever you are (including over Settings). */}
+      <ConnectorCallStack />
       {deletion.pending.length > 0 && (
         <UndoToast
           titles={deletion.pending.map((i) => i.title)}

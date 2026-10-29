@@ -156,7 +156,7 @@ function withoutConsent() {
 }
 
 describe("Settings overlay", () => {
-  it("shows the seven sections, the data tiles and the real data folder", async () => {
+  it("shows the eight sections, the data tiles and the real data folder", async () => {
     await open();
     expect(headings()).toEqual([
       "Recording",
@@ -165,6 +165,7 @@ describe("Settings overlay", () => {
       "Calendars",
       "Your files and privacy",
       "Other AI apps",
+      "Connectors Beta",
       "General",
     ]);
     expect($('[role="dialog"]')!.getAttribute("aria-modal")).toBe("true");
@@ -177,7 +178,7 @@ describe("Settings overlay", () => {
     expect(tiles[2]).toContain("except notes you keep local");
     expect(host!.textContent).toContain("C:\\Users\\you\\AppData\\Roaming\\FlyOnTheWall");
     // 220 px nav lists every section; search is focused on open
-    expect($$(".fly-settings-navitem")).toHaveLength(7);
+    expect($$(".fly-settings-navitem")).toHaveLength(8);
     expect(document.activeElement).toBe($("input[type=search]"));
   });
 
@@ -185,8 +186,11 @@ describe("Settings overlay", () => {
     await open();
     const search = $<HTMLInputElement>("input[type=search]")!;
     await type(search, "mcp");
-    expect(headings()).toEqual(["Other AI apps"]);
-    expect($$(".fly-settings-navitem").map((b) => b.textContent)).toEqual(["Other AI apps"]);
+    expect(headings()).toEqual(["Other AI apps", "Connectors Beta"]);
+    expect($$(".fly-settings-navitem").map((b) => b.textContent)).toEqual([
+      "Other AI apps",
+      "Connectors",
+    ]);
     await type(search, "retention");
     expect(headings()).toEqual(["Your files and privacy"]);
     await type(search, "zzzz");
@@ -449,7 +453,7 @@ describe("Settings overlay", () => {
     expect(host!.textContent).toContain("I understand this can't be undone");
     const search = $<HTMLInputElement>("input[type=search]")!;
     await type(search, "mcp");
-    expect(headings()).toEqual(["Other AI apps"]);
+    expect(headings()).toEqual(["Other AI apps", "Connectors Beta"]);
     await type(search, "");
     expect(host!.textContent).toContain("I understand this can't be undone");
   });
