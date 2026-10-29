@@ -39,7 +39,8 @@ pub trait Readers: Sync {
     fn read<R>(&self, f: impl FnOnce(&Storage) -> Result<R>) -> Result<R>;
 }
 
-/// The app's shared handle: workers take turns.
+/// The app's shared handle: workers take turns. Don't call [`fan_out`]
+/// while holding this lock yourself: every worker waits on it (deadlock).
 impl Readers for Mutex<Storage> {
     fn read<R>(&self, f: impl FnOnce(&Storage) -> Result<R>) -> Result<R> {
         // A poisoned lock means another command panicked mid-write; reads
@@ -49,8 +50,10 @@ impl Readers for Mutex<Storage> {
     }
 }
 
-/// A read connection per search (`Storage::open_existing` on the data
-/// dir), so searches run in parallel. Never migrates or creates anything.
+/// A connection per search (`Storage::open_existing` on the data dir), so
+/// searches run in parallel under WAL. It never migrates or creates
+/// anything, and fan-out only reads through it; fly-storage has no
+/// read-only open yet, so the connection itself is read-write.
 #[derive(Debug, Clone)]
 pub struct OpenPerWorker {
     data_dir: PathBuf,
@@ -342,6 +345,11 @@ fn owner_of(p: &Passage) -> String {
 
 /// Search every query (in parallel, within `budget`) and merge.
 ///
+/// * `budget`: never more than [`FanoutBudget::TIER_C`] — `max_searches`
+///   (at most 1 + [`MAX_SUB_QUERIES`]), `max_parallel`, `max_passages` and
+///   `max_chars` are clamped to it whatever the caller passes. With no
+///   searches left (`max_searches: 0`) nothing runs and
+///   [`Fanout::searches_run`] is 0.
 /// * `queries`: original first (see [`decompose`]); empty and duplicate
 ///   queries are dropped, and only the first `budget.max_searches` run.
 /// * `base`: scope filters applied to every search (`meeting_ids`,
@@ -372,15 +380,25 @@ pub fn fan_out<R: Readers>(
     if wanted.is_empty() {
         return Err(ContextError::InvalidArgs("no query to search".into()));
     }
+    // The caller's budget never exceeds tier C's.
+    let cap = FanoutBudget::TIER_C;
+    let budget = FanoutBudget {
+        max_searches: budget.max_searches.min(1 + MAX_SUB_QUERIES as u32),
+        per_search_limit: budget.per_search_limit.clamp(1, 20),
+        max_passages: budget.max_passages.min(cap.max_passages),
+        per_meeting: budget.per_meeting.max(1),
+        max_chars: budget.max_chars.min(cap.max_chars),
+        max_parallel: budget.max_parallel.clamp(1, cap.max_parallel),
+    };
     let run_n = wanted.len().min(budget.max_searches as usize);
     let skipped = (wanted.len() - run_n) as u32;
     wanted.truncate(run_n);
-    let per_search = budget.per_search_limit.clamp(1, 20);
+    let per_search = budget.per_search_limit;
     let semantic = wanted.iter().any(|(_, v)| v.is_some());
 
     // Search, `max_parallel` at a time.
     let mut lists: Vec<PassageResults> = Vec::with_capacity(wanted.len());
-    for wave in wanted.chunks(budget.max_parallel.max(1)) {
+    for wave in wanted.chunks(budget.max_parallel) {
         let results: Vec<Result<PassageResults>> = std::thread::scope(|scope| {
             let handles: Vec<_> = wave
                 .iter()
@@ -463,7 +481,7 @@ pub fn fan_out<R: Readers>(
         }
         let a = &acc[key];
         let owner = owner_of(&a.passage);
-        if per_owner.get(&owner).copied().unwrap_or(0) >= budget.per_meeting.max(1) {
+        if per_owner.get(&owner).copied().unwrap_or(0) >= budget.per_meeting {
             return false;
         }
         let len = a.passage.text.len();

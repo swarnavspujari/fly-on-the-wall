@@ -118,6 +118,10 @@ pub enum ContextError {
     KeepLocal(&'static str),
     #[error("there is no tool named {name:?}; available tools: {available}")]
     UnknownTool { name: String, available: String },
+    /// The Keep-local lookup itself failed, so nothing was returned (fail
+    /// closed; only under `ShareableOnly`).
+    #[error("couldn't check Keep local settings, so nothing was returned: {0}")]
+    KeepLocalCheck(StorageError),
     #[error("couldn't read your meetings: {0}")]
     Storage(#[from] StorageError),
 }
@@ -177,8 +181,14 @@ impl<'a> Context<'a> {
             return Ok(Hidden::default());
         }
         Ok(Hidden {
-            notes: self.storage.keep_local_note_ids()?,
-            meetings: self.storage.keep_local_meeting_ids()?,
+            notes: self
+                .storage
+                .keep_local_note_ids()
+                .map_err(ContextError::KeepLocalCheck)?,
+            meetings: self
+                .storage
+                .keep_local_meeting_ids()
+                .map_err(ContextError::KeepLocalCheck)?,
         })
     }
 

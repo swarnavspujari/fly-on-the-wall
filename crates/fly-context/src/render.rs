@@ -244,41 +244,71 @@ const KIND_SECTIONS: [(ItemKind, &str); 5] = [
     (ItemKind::Figure, "Key figures"),
 ];
 
-/// Longest source quote shown under a fact, in chars.
-const QUOTE_CHARS: usize = 220;
-/// Source quotes shown per fact.
+/// Longest source quote shown under a fact, in chars (a transcript segment
+/// is usually shorter; longer ones are cut at a word boundary).
+const QUOTE_CHARS: usize = 400;
+/// Source quotes (and so citations) per fact.
 const QUOTES_PER_FACT: usize = 2;
 
-/// `text` cut to about `max` chars at a word boundary, with "…".
-fn clip(text: &str, max: usize) -> String {
+/// Model-facing text plus exactly the cited segments it shows, each with
+/// the text it shows (a clipped quote's visible part only). Register
+/// `shown` as the evidence for `text`, not [`Briefing::evidence`]: a model
+/// can cite only what it saw, and claims are checked against what it saw.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct Rendered {
+    pub text: String,
+    pub shown: Vec<CitedSegment>,
+}
+
+impl Rendered {
+    fn show(&mut self, c: CitedSegment) {
+        if !self
+            .shown
+            .iter()
+            .any(|s| s.meeting_id == c.meeting_id && s.segment.id == c.segment.id)
+        {
+            self.shown.push(c);
+        }
+    }
+}
+
+/// `text` cut to about `max` chars at a word boundary: (the visible part,
+/// whether it was cut).
+fn clip(text: &str, max: usize) -> (String, bool) {
     let text = text.trim();
     if text.chars().count() <= max {
-        return text.to_string();
+        return (text.to_string(), false);
     }
     let cut: String = text.chars().take(max).collect();
     let cut = match cut.rfind(char::is_whitespace) {
         Some(i) if i > max / 2 => &cut[..i],
         _ => cut.as_str(),
     };
-    format!("{} …", cut.trim_end())
+    (cut.trim_end().to_string(), true)
 }
 
-/// A fact and the words it came from: the fact line, ending in the
-/// `[seg:ID]` markers of its cited segments, then those segments verbatim.
-/// Facts are extraction paraphrases, so an answer should take numbers,
-/// names and quotes from the source lines (the Ask claim check compares
-/// against the segments, not the fact). `None` when no cited segment still
-/// exists: the fact can't be cited, so it isn't shown.
+/// A fact and the words it came from: the fact line, then up to
+/// [`QUOTES_PER_FACT`] of its cited segments verbatim. Only the quoted
+/// segments get a `[seg:ID]` marker, and they're returned (with their
+/// visible text) as the evidence this block shows. Facts are extraction
+/// paraphrases, so an answer should take numbers, names and quotes from
+/// the quoted lines (the Ask claim check compares against the segments).
+/// `None` when no cited segment still exists: the fact can't be cited, so
+/// it isn't shown.
 fn fact_block<'b>(
     f: &MemoryFact,
     cited: impl Fn(&str, &str) -> Option<&'b CitedSegment>,
     with_kind: bool,
-) -> Option<String> {
-    let segs: Vec<&CitedSegment> = f
-        .segment_ids
-        .iter()
-        .filter_map(|id| cited(&f.meeting_id, id))
-        .collect();
+) -> Option<(String, Vec<CitedSegment>)> {
+    let mut segs: Vec<&CitedSegment> = Vec::new();
+    for id in &f.segment_ids {
+        if let Some(c) = cited(&f.meeting_id, id) {
+            if !segs.iter().any(|s| s.segment.id == c.segment.id) {
+                segs.push(c);
+            }
+        }
+    }
+    segs.truncate(QUOTES_PER_FACT);
     if segs.is_empty() {
         return None;
     }
@@ -287,15 +317,21 @@ fn fact_block<'b>(
         .map(|c| format!(" [seg:{}]", c.segment.id))
         .collect();
     let mut block = fact_line(f, &cites, with_kind);
-    for c in segs.iter().take(QUOTES_PER_FACT) {
+    let mut shown = Vec::with_capacity(segs.len());
+    for c in segs {
+        let (visible, cut) = clip(&c.segment.text, QUOTE_CHARS);
         let _ = write!(
             block,
-            "\n  > {}: \"{}\"",
+            "\n  > {}: \"{}{}\"",
             safe(&c.segment.speaker),
-            safe(&clip(&c.segment.text, QUOTE_CHARS))
+            safe(&visible),
+            if cut { " …" } else { "" }
         );
+        let mut seen = c.clone();
+        seen.segment.text = visible;
+        shown.push(seen);
     }
-    Some(block)
+    Some((block, shown))
 }
 
 fn fact_line(f: &MemoryFact, cites: &str, with_kind: bool) -> String {
@@ -308,8 +344,14 @@ fn fact_line(f: &MemoryFact, cites: &str, with_kind: bool) -> String {
     if let Some(o) = &f.owner {
         let _ = write!(line, " — owner: {}", safe(o));
     }
-    if let Some(s) = &f.status {
-        let _ = write!(line, " [{}]", safe(s));
+    // Only the statuses extraction writes: a healed or imported row can't
+    // put arbitrary text (or a marker) in brackets.
+    if let Some(s) = f
+        .status
+        .as_deref()
+        .filter(|s| matches!(*s, "open" | "done"))
+    {
+        let _ = write!(line, " [{s}]");
     }
     if let Some(by) = &f.said_by {
         if f.owner
@@ -331,15 +373,22 @@ fn fact_line(f: &MemoryFact, cites: &str, with_kind: bool) -> String {
 
 /// A briefing for a model, all of it.
 pub fn briefing(b: &Briefing) -> String {
-    briefing_within(b, usize::MAX)
+    briefing_rendered(b, usize::MAX).text
+}
+
+/// [`briefing_rendered`]'s text.
+pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
+    briefing_rendered(b, max_chars).text
 }
 
 /// A briefing for a model in about `max_chars`: the header, the newest
 /// meetings, then as many facts as fit, newest first (shown oldest first,
-/// grouped by kind). Facts whose cited segments no longer exist are left
-/// out: they can't be cited.
-pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
-    let mut out = String::new();
+/// grouped by kind), each with its quoted source lines. Facts whose cited
+/// segments no longer exist are left out: they can't be cited. `shown` is
+/// exactly the cited segments in the text.
+pub fn briefing_rendered(b: &Briefing, max_chars: usize) -> Rendered {
+    let mut r = Rendered::default();
+    let out = &mut r.text;
     if b.meetings.is_empty() {
         let since = b
             .since
@@ -360,7 +409,7 @@ pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
                 safe(&b.query)
             );
         }
-        return out;
+        return r;
     }
     let first = &b.meetings[0];
     let last = &b.meetings[b.meetings.len() - 1];
@@ -408,7 +457,7 @@ pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
     }
 
     // Facts that can be cited, newest first, while they fit.
-    let lines: Vec<Option<String>> = b
+    let lines: Vec<Option<(String, Vec<CitedSegment>)>> = b
         .facts
         .iter()
         .map(|f| fact_block(f, |m, id| b.cited(m, id), false))
@@ -422,7 +471,7 @@ pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
     let mut keep = vec![false; lines.len()];
     let mut kept = 0;
     for i in (0..lines.len()).rev() {
-        if let Some(l) = &lines[i] {
+        if let Some((l, _)) = &lines[i] {
             // The newest citable fact always shows: a briefing with facts
             // never reads like one without.
             if l.len() + 1 > budget && kept > 0 {
@@ -434,12 +483,14 @@ pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
         }
     }
     let mut any = false;
+    let mut shown: Vec<CitedSegment> = Vec::new();
     for (kind, heading) in KIND_SECTIONS {
         let mut section = String::new();
         for (i, f) in b.facts.iter().enumerate() {
-            if keep[i] && f.kind == kind {
-                section.push_str(lines[i].as_deref().unwrap_or_default());
+            if let (true, Some((l, segs))) = (keep[i] && f.kind == kind, &lines[i]) {
+                section.push_str(l);
                 section.push('\n');
+                shown.extend(segs.iter().cloned());
             }
         }
         if !section.is_empty() {
@@ -464,19 +515,30 @@ pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
         let _ = writeln!(out, "({not_shown} older item(s) not shown.)");
     }
     out.push_str(footer);
-    out
+    for c in shown {
+        r.show(c);
+    }
+    r
 }
 
-/// Open items for a model.
+/// Open items for a model, all of them.
 pub fn open_items(o: &OpenItems) -> String {
-    let mut out = String::new();
+    open_items_rendered(o, usize::MAX).text
+}
+
+/// Open items for a model in about `max_chars`, newest first (the newest
+/// citable one always shows), each with its quoted source lines. `shown`
+/// is exactly the cited segments in the text.
+pub fn open_items_rendered(o: &OpenItems, max_chars: usize) -> Rendered {
+    let mut r = Rendered::default();
+    let out = &mut r.text;
     if !o.scope_found {
         let _ = writeln!(
             out,
             "No recurring meeting matches \"{}\". Use \"all\" or a name from get_briefing.",
             safe(&o.scope)
         );
-        return out;
+        return r;
     }
     let who = o
         .owner
@@ -488,7 +550,7 @@ pub fn open_items(o: &OpenItems) -> String {
     } else {
         format!(" in \"{}\"", safe(&o.scope))
     };
-    let lines: Vec<String> = o
+    let lines: Vec<(String, Vec<CitedSegment>)> = o
         .facts
         .iter()
         .filter_map(|f| fact_block(f, |m, id| o.cited(m, id), true))
@@ -498,7 +560,7 @@ pub fn open_items(o: &OpenItems) -> String {
     let unsourced = o.facts.len() - lines.len();
     if o.facts.is_empty() {
         let _ = writeln!(out, "No open action items or commitments{who}{scope}.");
-        return out;
+        return r;
     }
     let _ = writeln!(
         out,
@@ -506,9 +568,21 @@ pub fn open_items(o: &OpenItems) -> String {
          a later meeting may have closed it):",
         o.facts.len()
     );
-    for l in lines {
-        out.push_str(&l);
+    let mut budget = max_chars.saturating_sub(out.len() + 120);
+    let mut shown: Vec<CitedSegment> = Vec::new();
+    let mut over = 0;
+    for (i, (l, segs)) in lines.iter().enumerate() {
+        if i > 0 && l.len() + 1 > budget {
+            over = lines.len() - i;
+            break;
+        }
+        budget = budget.saturating_sub(l.len() + 1);
+        out.push_str(l);
         out.push('\n');
+        shown.extend(segs.iter().cloned());
+    }
+    if over > 0 {
+        let _ = writeln!(out, "({over} older open item(s) not shown.)");
     }
     if unsourced > 0 {
         let _ = writeln!(
@@ -517,13 +591,23 @@ pub fn open_items(o: &OpenItems) -> String {
              cite.)"
         );
     }
-    out
+    for c in shown {
+        r.show(c);
+    }
+    r
 }
 
 /// Fan-out results for a model: the queries run, then the merged passages
 /// (transcript lines with `[seg:ID]`), each saying which queries found it.
 pub fn fanout(f: &Fanout) -> String {
     let mut out = String::new();
+    if f.searches_run == 0 {
+        out.push_str(
+            "Nothing was searched: the search budget for this answer is used up. Answer from \
+             what was already found.\n",
+        );
+        return out;
+    }
     let _ = writeln!(
         out,
         "Searched {} {}:",

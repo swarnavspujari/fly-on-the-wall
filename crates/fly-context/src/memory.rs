@@ -34,7 +34,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use fly_core::{ItemKind, Meeting, MeetingItem, Transcript};
+use fly_core::{ItemKind, Meeting, MeetingItem, Speaker, Transcript};
 use fly_storage::{ItemFilter, MeetingFilter, SearchFilter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,8 +49,11 @@ pub const GET_BRIEFING: &str = "get_briefing";
 pub const OPEN_ITEMS: &str = "open_items";
 pub const WHATS_CHANGED: &str = "whats_changed";
 
-/// Every meeting row (meeting rows are small; corpora are thousands).
-const ALL_MEETINGS: usize = 1_000_000;
+/// Newest meetings memory considers (as the old MCP context layer did).
+const MAX_MEETINGS: usize = 2_000;
+/// A scope this small is read meeting by meeting (so it reaches meetings
+/// older than the newest [`MAX_MEETINGS`]); larger scopes filter those.
+const SCOPE_BY_ID: usize = 500;
 /// Items one briefing reads.
 const BRIEFING_ITEMS: usize = 500;
 /// Items `open_items` scans before keeping the open ones (MCP parity).
@@ -249,8 +252,12 @@ pub struct Briefing {
     pub facts: Vec<MemoryFact>,
     /// Every segment a fact cites that still exists in its transcript.
     pub evidence: Vec<CitedSegment>,
-    /// Older facts dropped by the fact cap.
+    /// Older facts dropped by the fact cap (in-scope ones only when the
+    /// scope was passed in).
     pub facts_omitted: usize,
+    /// The meeting of each omitted fact, so `retain_meetings` can recount.
+    #[serde(skip)]
+    pub(crate) omitted_from: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -280,13 +287,18 @@ fn union_people(meetings: &[TimelineEntry]) -> Vec<String> {
 }
 
 impl Briefing {
-    /// Keep only meetings `keep` allows (e.g. an Ask scope). Timeline,
-    /// facts and evidence are filtered, and participants and series names
-    /// are rebuilt from what remains, so nothing out of scope is left.
+    /// Keep only meetings `keep` allows. Timeline, facts, evidence and the
+    /// omitted count are filtered, and participants and series names are
+    /// rebuilt from what remains, so nothing out of scope is left. Prefer
+    /// passing the scope in (`*_in`, [`MemoryPrefetch::meetings`]): caps
+    /// then apply to in-scope meetings only; filtering afterwards can leave
+    /// fewer facts than the caps allow.
     pub fn retain_meetings(&mut self, keep: impl Fn(&str) -> bool) {
         self.meetings.retain(|m| keep(&m.meeting_id));
         self.facts.retain(|f| keep(&f.meeting_id));
         self.evidence.retain(|e| keep(&e.meeting_id));
+        self.omitted_from.retain(|m| keep(m));
+        self.facts_omitted = self.omitted_from.len();
         self.participants = union_people(&self.meetings);
         let left: Vec<&str> = self
             .meetings
@@ -359,8 +371,12 @@ pub struct WhatsChangedArgs {
 /// Options for [`Context::memory_prefetch`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MemoryPrefetch {
-    /// People the caller already validated against the user's meetings
-    /// (e.g. the Ask router's). Empty: detect from the question.
+    /// The Ask scope: only these meetings, applied before series detection
+    /// and every cap. `None` = every meeting this view may see.
+    pub meetings: Option<Vec<String>>,
+    /// People the caller already validated (e.g. the Ask router's). The
+    /// first one who takes part in a meeting this view may see is used
+    /// (one person per briefing). Empty: detect from the question.
     pub people: Vec<String>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
@@ -702,12 +718,26 @@ fn display_name(name: &str, candidates: &[(String, Vec<String>)]) -> String {
 // Assembly
 // ---------------------------------------------------------------------------
 
-/// One memory read: the Keep-local sets (fetched once, fail closed) and a
-/// transcript cache.
+/// One memory read: the Keep-local sets (fetched once, fail closed), the
+/// caller's meeting scope, and caches of speaker legends and transcripts.
 struct Reader<'c, 'a> {
     ctx: &'c Context<'a>,
     hidden: Hidden,
+    scope: Option<HashSet<String>>,
+    /// Speaker legends (`$.speakers` only; `None` = no readable transcript).
+    speakers: HashMap<String, Option<Vec<Speaker>>>,
+    /// Full transcripts, read only to quote cited segments.
     transcripts: HashMap<String, Option<Transcript>>,
+}
+
+/// A speaker key's display label (the key itself when unlabelled), as
+/// [`Transcript::label_for`].
+fn label_in(speakers: &[Speaker], key: &str) -> String {
+    speakers
+        .iter()
+        .find(|s| s.key == key)
+        .map(|s| s.label.clone())
+        .unwrap_or_else(|| key.to_string())
 }
 
 /// What [`Reader::assemble`] produces facts for.
@@ -726,58 +756,114 @@ struct Plan {
 }
 
 impl<'c, 'a> Reader<'c, 'a> {
-    fn new(ctx: &'c Context<'a>) -> Result<Self> {
+    fn new(ctx: &'c Context<'a>, scope: Option<&[String]>) -> Result<Self> {
         Ok(Reader {
             ctx,
             hidden: ctx.hidden()?,
+            scope: scope.map(|ids| ids.iter().map(|id| id.trim().to_string()).collect()),
+            speakers: HashMap::new(),
             transcripts: HashMap::new(),
         })
     }
 
-    /// A meeting's transcript, loaded once per call. Word timings are
-    /// dropped on load: nothing here needs them, and a long series would
-    /// otherwise hold every meeting's words in memory at once.
-    fn transcript(&mut self, meeting_id: &str) -> Result<Option<&Transcript>> {
+    /// Load the speaker legends of `ids` not cached yet, in one query.
+    fn load_speakers(&mut self, ids: &[String]) -> Result<()> {
+        let missing: Vec<String> = ids
+            .iter()
+            .filter(|id| !self.speakers.contains_key(id.as_str()))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let mut found = self.ctx.storage().transcript_speakers(&missing)?;
+        for id in missing {
+            let legend = found.remove(&id);
+            self.speakers.insert(id, legend);
+        }
+        Ok(())
+    }
+
+    /// A meeting's speaker legend; `None` without a readable transcript.
+    fn speakers_of(&mut self, meeting_id: &str) -> Result<Option<&Vec<Speaker>>> {
+        self.load_speakers(&[meeting_id.to_string()])?;
+        Ok(self.speakers[meeting_id].as_ref())
+    }
+
+    /// A meeting's transcript, loaded once per call and only to quote cited
+    /// segments. An unreadable transcript of a visible meeting is skipped
+    /// (as the old MCP did), never shown. Word timings are dropped on load.
+    fn transcript(&mut self, meeting_id: &str) -> Option<&Transcript> {
         if !self.transcripts.contains_key(meeting_id) {
-            let t = self.ctx.storage().get_transcript(meeting_id)?.map(|mut t| {
-                for s in &mut t.segments {
-                    s.words = Vec::new();
-                }
-                t
-            });
+            let t = self
+                .ctx
+                .storage()
+                .get_transcript(meeting_id)
+                .ok()
+                .flatten()
+                .map(|mut t| {
+                    for s in &mut t.segments {
+                        s.words = Vec::new();
+                    }
+                    t
+                });
             self.transcripts.insert(meeting_id.to_string(), t);
         }
-        Ok(self.transcripts[meeting_id].as_ref())
+        self.transcripts[meeting_id].as_ref()
     }
 
     /// Named speaker labels in the newest [`PERSON_LABEL_SCAN`] meetings of
     /// `visible` (for finding a person known only as a relabeled speaker).
     fn recent_speaker_labels(&mut self, visible: &[Meeting]) -> Result<Vec<String>> {
+        let ids: Vec<String> = visible
+            .iter()
+            .take(PERSON_LABEL_SCAN)
+            .map(|m| m.id.clone())
+            .collect();
+        self.load_speakers(&ids)?;
         let mut out: Vec<String> = Vec::new();
-        for m in visible.iter().take(PERSON_LABEL_SCAN) {
-            if let Some(t) = self.transcript(&m.id)? {
-                for s in &t.speakers {
-                    if !out.iter().any(|o| o.eq_ignore_ascii_case(&s.label)) {
-                        out.push(s.label.clone());
-                    }
+        for id in &ids {
+            for s in self.speakers[id.as_str()].iter().flatten() {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(&s.label)) {
+                    out.push(s.label.clone());
                 }
             }
         }
         Ok(out)
     }
 
-    /// Every meeting this view may see, newest first. Keep local is
-    /// filtered in SQL and again by the in-memory sets.
+    /// The meetings this view may see, inside the caller's scope, newest
+    /// first: at most [`MAX_MEETINGS`]. Keep local is filtered in SQL and
+    /// again by the in-memory sets; a small scope is read by id.
     fn visible_meetings(&self) -> Result<Vec<Meeting>> {
-        let rows = self.ctx.storage().list_meetings_filtered(&MeetingFilter {
-            exclude_keep_local: self.ctx.shareable_only(),
-            limit: ALL_MEETINGS,
-            ..Default::default()
-        })?;
-        Ok(rows
-            .into_iter()
-            .filter(|m| !self.hidden.meeting(&m.id, &m.note_id))
-            .collect())
+        let mut rows = match &self.scope {
+            Some(ids) if ids.len() <= SCOPE_BY_ID => {
+                let mut rows = Vec::with_capacity(ids.len());
+                for id in ids {
+                    match self.ctx.storage().get_meeting(id) {
+                        Ok(m) => rows.push(m),
+                        Err(fly_storage::StorageError::NotFound(_)) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                rows.sort_by_key(|m| std::cmp::Reverse(m.started_at));
+                rows
+            }
+            scope => {
+                let rows = self.ctx.storage().list_meetings_filtered(&MeetingFilter {
+                    exclude_keep_local: self.ctx.shareable_only(),
+                    limit: MAX_MEETINGS,
+                    ..Default::default()
+                })?;
+                match scope {
+                    Some(ids) => rows.into_iter().filter(|m| ids.contains(&m.id)).collect(),
+                    None => rows,
+                }
+            }
+        };
+        rows.retain(|m| !self.hidden.meeting(&m.id, &m.note_id));
+        rows.truncate(MAX_MEETINGS);
+        Ok(rows)
     }
 
     /// Items, Keep local filtered in SQL, and kept only when their meeting
@@ -803,7 +889,9 @@ impl<'c, 'a> Reader<'c, 'a> {
 
     fn fact(&mut self, item: &MeetingItem, meeting: &Meeting) -> Result<MemoryFact> {
         let said_by = match &item.speaker_key {
-            Some(key) => self.transcript(&item.meeting_id)?.map(|t| t.label_for(key)),
+            Some(key) => self
+                .speakers_of(&item.meeting_id)?
+                .map(|sp| label_in(sp, key)),
             None => None,
         };
         Ok(MemoryFact {
@@ -828,7 +916,7 @@ impl<'c, 'a> Reader<'c, 'a> {
             if f.segment_ids.is_empty() {
                 continue;
             }
-            let Some(t) = self.transcript(&f.meeting_id)? else {
+            let Some(t) = self.transcript(&f.meeting_id) else {
                 continue;
             };
             for id in &f.segment_ids {
@@ -867,9 +955,18 @@ impl<'c, 'a> Reader<'c, 'a> {
         meetings.retain(|m| since.is_none_or(|s| m.started_at >= s));
         meetings.retain(|m| until.is_none_or(|u| m.started_at <= u));
         meetings.sort_by_key(|m| m.started_at);
+        let mut series = series;
         if let Some(n) = max_meetings {
             let drop = meetings.len().saturating_sub(n.max(1));
-            meetings.drain(..drop);
+            if drop > 0 {
+                meetings.drain(..drop);
+                // a series whose meetings were all cut isn't covered
+                let left: HashSet<&str> = meetings
+                    .iter()
+                    .filter_map(|m| series_of.get(&m.id).map(String::as_str))
+                    .collect();
+                series.retain(|k| left.contains(k.as_str()));
+            }
         }
         let mut b = Briefing {
             query,
@@ -887,10 +984,13 @@ impl<'c, 'a> Reader<'c, 'a> {
             facts: Vec::new(),
             evidence: Vec::new(),
             facts_omitted: 0,
+            omitted_from: Vec::new(),
         };
         if meetings.is_empty() {
             return Ok(b);
         }
+        let ids: Vec<String> = meetings.iter().map(|m| m.id.clone()).collect();
+        self.load_speakers(&ids)?;
 
         // Timeline, each meeting with its people: attendees, then named
         // speakers (participants = their union, first seen first).
@@ -904,9 +1004,9 @@ impl<'c, 'a> Reader<'c, 'a> {
             for a in &m.attendees {
                 add(a.display_name());
             }
-            let has_transcript = match self.transcript(&m.id)? {
-                Some(t) => {
-                    for s in &t.speakers {
+            let has_transcript = match self.speakers[m.id.as_str()].as_ref() {
+                Some(legend) => {
+                    for s in legend {
                         if !s.label.starts_with("Speaker ") {
                             add(&s.label);
                         }
@@ -915,7 +1015,13 @@ impl<'c, 'a> Reader<'c, 'a> {
                 }
                 None => false,
             };
-            let item_count = self.ctx.storage().get_meeting_items(&m.id)?.len();
+            // (an unreadable row counts as none, as the old MCP did)
+            let item_count = self
+                .ctx
+                .storage()
+                .get_meeting_items(&m.id)
+                .map(|i| i.len())
+                .unwrap_or(0);
             b.meetings.push(TimelineEntry {
                 meeting_id: m.id.clone(),
                 note_id: m.note_id.clone(),
@@ -932,10 +1038,16 @@ impl<'c, 'a> Reader<'c, 'a> {
         // Facts, chronological by meeting (stable: extraction order within).
         let by_id: HashMap<&str, &Meeting> = meetings.iter().map(|m| (m.id.as_str(), m)).collect();
         let visible: HashSet<&str> = by_id.keys().copied().collect();
+        // A person filter runs before the item cap: read deeper, filter,
+        // then keep the newest BRIEFING_ITEMS.
         let mut items = self.items(
             ItemFilter {
-                meeting_ids: Some(meetings.iter().map(|m| m.id.clone()).collect()),
-                limit: BRIEFING_ITEMS,
+                meeting_ids: Some(ids),
+                limit: if person.is_some() {
+                    BRIEFING_ITEMS * 10
+                } else {
+                    BRIEFING_ITEMS
+                },
                 ..Default::default()
             },
             &visible,
@@ -951,10 +1063,12 @@ impl<'c, 'a> Reader<'c, 'a> {
                 f.owner.as_deref().is_some_and(|o| p.matches(o))
                     || f.said_by.as_deref().is_some_and(|s| p.matches(s))
             });
+            let extra = facts.len().saturating_sub(BRIEFING_ITEMS);
+            facts.drain(..extra);
         }
         if let Some(n) = max_facts {
             let drop = facts.len().saturating_sub(n);
-            facts.drain(..drop);
+            b.omitted_from = facts.drain(..drop).map(|f| f.meeting_id).collect();
             b.facts_omitted = drop;
         }
         b.evidence = self.evidence(&facts)?;
@@ -1004,8 +1118,8 @@ impl<'c, 'a> Reader<'c, 'a> {
             if !hit && scanned < PERSON_LABEL_SCAN {
                 scanned += 1;
                 hit = self
-                    .transcript(&m.id)?
-                    .is_some_and(|t| t.speakers.iter().any(|s| person.matches(&s.label)));
+                    .speakers_of(&m.id)?
+                    .is_some_and(|sp| sp.iter().any(|s| person.matches(&s.label)));
             }
             if hit {
                 out.push(m.clone());
@@ -1086,7 +1200,11 @@ fn latest_start(ctx: &Context<'_>, meetings: &[Meeting]) -> Result<Option<DateTi
     let mut sorted: Vec<&Meeting> = meetings.iter().collect();
     sorted.sort_by_key(|m| std::cmp::Reverse(m.started_at));
     for m in &sorted {
-        if !ctx.storage().get_meeting_items(&m.id)?.is_empty() {
+        let has_items = ctx
+            .storage()
+            .get_meeting_items(&m.id)
+            .is_ok_and(|i| !i.is_empty());
+        if has_items {
             return Ok(Some(m.started_at));
         }
     }
@@ -1119,8 +1237,9 @@ impl Context<'_> {
         person: Option<&str>,
         since: Option<DateTime<Utc>>,
         opts: BriefingOptions,
+        scope: Option<&[String]>,
     ) -> Result<Briefing> {
-        let mut r = Reader::new(self)?;
+        let mut r = Reader::new(self, scope)?;
         let visible = r.visible_meetings()?;
         let series = detect_series(visible.clone());
         let person =
@@ -1152,6 +1271,7 @@ impl Context<'_> {
                     ..Default::default()
                 },
             )?;
+            // (series come from visible, in-scope meetings only)
             let ids: HashSet<String> = hits
                 .into_iter()
                 .filter(|h| !r.hidden.note(&h.note_id))
@@ -1185,8 +1305,9 @@ impl Context<'_> {
         series_name: &str,
         since: Option<DateTime<Utc>>,
         opts: BriefingOptions,
+        scope: Option<&[String]>,
     ) -> Result<Briefing> {
-        let mut r = Reader::new(self)?;
+        let mut r = Reader::new(self, scope)?;
         let visible = r.visible_meetings()?;
         let series = detect_series(visible);
         let matched = series_matching(&series, series_name);
@@ -1218,8 +1339,9 @@ impl Context<'_> {
         owner: Option<&str>,
         limit: Option<usize>,
         evidence: bool,
+        meetings: Option<&[String]>,
     ) -> Result<OpenItems> {
-        let mut r = Reader::new(self)?;
+        let mut r = Reader::new(self, meetings)?;
         let visible = r.visible_meetings()?;
         let by_id: HashMap<&str, &Meeting> = visible.iter().map(|m| (m.id.as_str(), m)).collect();
         let owner = match owner.and_then(non_empty_str) {
@@ -1305,6 +1427,16 @@ impl Context<'_> {
     /// newest [`DEFAULT_MAX_MEETINGS`] meetings and [`DEFAULT_MAX_FACTS`]
     /// facts.
     pub fn get_briefing(&self, args: &GetBriefingArgs) -> Result<Briefing> {
+        self.get_briefing_in(args, None)
+    }
+
+    /// [`get_briefing`](Self::get_briefing) inside a meeting scope (the
+    /// Ask's resolved meetings), applied before series detection and caps.
+    pub fn get_briefing_in(
+        &self,
+        args: &GetBriefingArgs,
+        scope: Option<&[String]>,
+    ) -> Result<Briefing> {
         check_query("query", &args.query)?;
         let since = parse_when("since", &args.since, false)?;
         self.briefing_with(
@@ -1316,11 +1448,22 @@ impl Context<'_> {
                 max_facts: Some(DEFAULT_MAX_FACTS),
                 max_meetings: Some(DEFAULT_MAX_MEETINGS),
             },
+            scope,
         )
     }
 
     /// `open_items`: open action items and commitments, newest first.
     pub fn open_items(&self, args: &OpenItemsArgs) -> Result<OpenItems> {
+        self.open_items_in(args, None)
+    }
+
+    /// [`open_items`](Self::open_items) inside a meeting scope, applied
+    /// before the series match and the limit.
+    pub fn open_items_in(
+        &self,
+        args: &OpenItemsArgs,
+        meetings: Option<&[String]>,
+    ) -> Result<OpenItems> {
         let scope = non_empty(&args.scope).unwrap_or("all");
         if scope.chars().count() > MAX_QUERY_CHARS {
             return Err(ContextError::InvalidArgs(format!(
@@ -1328,12 +1471,21 @@ impl Context<'_> {
             )));
         }
         let limit = clamp(args.limit, 30, 1, 100);
-        self.open_items_with(scope, args.owner.as_deref(), Some(limit), true)
+        self.open_items_with(scope, args.owner.as_deref(), Some(limit), true, meetings)
     }
 
     /// `whats_changed`: one series since a date (default: its newest
     /// meeting with extracted items).
     pub fn whats_changed(&self, args: &WhatsChangedArgs) -> Result<Briefing> {
+        self.whats_changed_in(args, None)
+    }
+
+    /// [`whats_changed`](Self::whats_changed) inside a meeting scope.
+    pub fn whats_changed_in(
+        &self,
+        args: &WhatsChangedArgs,
+        scope: Option<&[String]>,
+    ) -> Result<Briefing> {
         check_query("series", &args.series)?;
         let since = parse_when("since", &args.since, false)?;
         self.whats_changed_with(
@@ -1344,6 +1496,7 @@ impl Context<'_> {
                 max_facts: Some(DEFAULT_MAX_FACTS),
                 max_meetings: Some(DEFAULT_MAX_MEETINGS),
             },
+            scope,
         )
     }
 
@@ -1363,7 +1516,7 @@ impl Context<'_> {
         if question.trim().is_empty() || question.chars().count() > MAX_QUERY_CHARS {
             return Ok(None);
         }
-        let mut r = Reader::new(self)?;
+        let mut r = Reader::new(self, opts.meetings.as_deref())?;
         let visible = r.visible_meetings()?;
         if visible.is_empty() {
             return Ok(None);
@@ -1371,9 +1524,23 @@ impl Context<'_> {
         let words = Words::new(question);
         let owners = r.owners(&visible)?;
         let mut known = known_names(&visible, &owners);
-        let person = match opts.people.iter().find_map(|p| PersonKey::new(p)) {
-            Some(p) => Some(p),
-            None => {
+        let routed: Vec<PersonKey> = opts
+            .people
+            .iter()
+            .filter_map(|p| PersonKey::new(p))
+            .collect();
+        let person = if !routed.is_empty() {
+            // the first router name who takes part in a visible meeting
+            let mut chosen = None;
+            for p in routed {
+                if r.person_is_visible(&p, &visible)? {
+                    chosen = Some(p);
+                    break;
+                }
+            }
+            chosen
+        } else {
+            {
                 let mut found = find_person(question, &known);
                 // A person known only as a (relabeled) speaker: read recent
                 // speaker labels, but only when the question may name
@@ -1632,7 +1799,7 @@ pub mod mcp {
         query: &str,
         since: Option<DateTime<Utc>>,
     ) -> Result<Briefing> {
-        ctx.briefing_with(query, None, since, BriefingOptions::default())
+        ctx.briefing_with(query, None, since, BriefingOptions::default(), None)
     }
 
     /// `whats_changed(series, since)`.
@@ -1641,12 +1808,12 @@ pub mod mcp {
         series: &str,
         since: DateTime<Utc>,
     ) -> Result<Briefing> {
-        ctx.whats_changed_with(series, Some(since), BriefingOptions::default())
+        ctx.whats_changed_with(series, Some(since), BriefingOptions::default(), None)
     }
 
     /// `open_items(scope)` (no evidence: the MCP prints ids only).
     pub fn open_items(ctx: &Context<'_>, scope: &str) -> Result<OpenItems> {
-        ctx.open_items_with(scope, None, None, false)
+        ctx.open_items_with(scope, None, None, false, None)
     }
 }
 
