@@ -889,6 +889,7 @@ pub async fn delete_all_data(
             || !crate::video_store::halt(&state, Duration::from_secs(20))
         {
             crate::audio_store::resume(&state);
+            crate::video_store::resume(&state);
             return Err(
                 "background storage work didn't stop in time — nothing was deleted; try again"
                     .into(),
@@ -901,6 +902,7 @@ pub async fn delete_all_data(
         );
         if result.is_err() {
             crate::audio_store::resume(&state);
+            crate::video_store::resume(&state);
         }
         result
     })

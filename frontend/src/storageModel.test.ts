@@ -167,6 +167,7 @@ describe("video rows", () => {
   it("the confirmations say what happens and what doesn't", () => {
     const a = audioOnlyConfirm(report());
     expect(a.message).toMatch(/picture of 2 imported videos \(3\.0 GB\) is removed/);
+    expect(a.message).toMatch(/subtitles/);
     expect(a.message).toMatch(/exactly as it is, and checked before anything is deleted/);
     expect(a.message).toMatch(/files you imported from aren't touched/);
     const s = shrinkConfirm({ files: 4, bytes: 1.5 * GB, bytes_after: 0.5 * GB });

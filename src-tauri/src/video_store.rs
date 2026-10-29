@@ -16,9 +16,17 @@
 //!   [`SSIM_MIN`] against the original, and saves at least [`MIN_SAVING`].
 //!
 //! One job at a time, on its own background thread; ffmpeg runs at below-
-//! normal priority. While anything records, transcribes or imports the job
-//! kills the ffmpeg run in flight (its temp file is deleted, the original is
-//! untouched), waits, and starts that file again.
+//! normal priority. It follows the shared background rule
+//! (`AppState::background_yield_reason`): while anything records, runs a
+//! pipeline stage or a foreground AI request, the job kills the ffmpeg run in
+//! flight (its temp file is deleted, the original is untouched), waits, and
+//! starts that file again.
+//!
+//! Candidates come from the database, never from directory listings: an
+//! imported video is an attachment of its meeting's note that lives in that
+//! meeting's own folder, and a screen recording is an attachment named the
+//! way the app's recorder names them (`screen-YYYYMMDD-HHMMSS.mp4`). Links,
+//! junctions and other reparse points are never followed.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -45,6 +53,17 @@ pub const SSIM_MIN: f64 = 0.98;
 pub const MIN_SAVING: f64 = 0.10;
 const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm", "avi"];
 const POLL: Duration = Duration::from_millis(300);
+/// Recording compression holds the meeting's folder: wait this long, then
+/// try the file again (no hot loop on the storage lock).
+const LEASE_BACKOFF: Duration = Duration::from_secs(5);
+/// Event naming a note whose attachments the job changed (an imported video
+/// became its audio), so an open note refreshes them.
+pub const NOTE_ATTACHMENTS_EVENT: &str = "note:attachments";
+
+#[derive(Debug, Clone, Serialize)]
+struct NoteAttachments {
+    note_id: String,
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -83,7 +102,13 @@ pub struct VideoJobStatus {
 pub struct VideoState {
     status: Mutex<VideoJobStatus>,
     running: AtomicBool,
+    /// Stop the run in flight (Stop, a note delete). The next start resets it.
     cancel: AtomicBool,
+    /// Stopped until [`resume`] ("Delete all my data"): no job or estimate
+    /// starts, and one in flight stops.
+    halted: AtomicBool,
+    /// An estimate is sampling a screen recording with ffmpeg.
+    estimating: AtomicBool,
     /// The file in flight, and what deleted notes took out of this run.
     /// One lock, so a note delete and the job's pick of its next file can't
     /// miss each other ([`VideoState::claim`], [`VideoState::exclude`]).
@@ -146,6 +171,11 @@ impl VideoState {
         self.current.lock().unwrap().file = None;
     }
 
+    /// The run must stop: cancelled or halted.
+    fn stopping(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst) || self.halted.load(Ordering::SeqCst)
+    }
+
     /// Take a deleted note's files (its meetings' folders, its attachments
     /// folder) out of this run. `true` when one of them is in flight.
     fn exclude(&self, meeting_ids: &[String], attachments_dir: PathBuf) -> bool {
@@ -163,19 +193,44 @@ pub fn status_for(state: &AppState) -> VideoJobStatus {
     s
 }
 
-/// A note is being deleted: if the job is working on one of its files
-/// (an imported video in one of `meeting_ids`' folders, or a screen
-/// recording in its attachments), stop the job and wait for it to let go.
+/// Whether the video features need ffmpeg kept installed right now: a job
+/// or an estimate runs, or imported videos are set to keep only their audio
+/// (each new import is converted once it's transcribed). Model cleanup asks
+/// this before removing ffmpeg.
+pub fn needs_ffmpeg(state: &AppState) -> bool {
+    let vs = &state.video_store;
+    vs.is_running() || vs.estimating.load(Ordering::SeqCst) || import_policy(state) == "audio_only"
+}
+
+/// A note is about to be deleted: from here the job never picks one of its
+/// files up (an imported video in one of `meeting_ids`' folders, or a
+/// screen recording in its attachments); if one is in flight, stop the run
+/// and wait for ffmpeg to let go. Call it BEFORE the note's files are
+/// removed: Windows refuses to delete a file ffmpeg has open.
 pub fn stop_for_note(state: &AppState, note_id: &str, meeting_ids: &[String], timeout: Duration) {
-    // From here the job never picks one of the note's files up; if one is
-    // already in flight, stop the job and wait.
     let hit = state.video_store.exclude(
         meeting_ids,
         state.data_dir.join("attachments").join(note_id),
     );
-    if hit && !halt(state, timeout) {
-        tracing::warn!(note_id, "video job didn't stop before the note was deleted");
+    if hit {
+        state.video_store.cancel.store(true, Ordering::SeqCst);
+        if !wait_idle(state, timeout) {
+            tracing::warn!(note_id, "video job didn't stop before the note was deleted");
+        }
     }
+}
+
+/// Wait (up to `timeout`) until no job or estimate runs.
+fn wait_idle(state: &AppState, timeout: Duration) -> bool {
+    let vs = &state.video_store;
+    let deadline = Instant::now() + timeout;
+    while vs.is_running() || vs.estimating.load(Ordering::SeqCst) {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
 }
 
 fn emit<R: tauri::Runtime>(app: &tauri::AppHandle<R>, f: impl FnOnce(&mut VideoJobStatus)) {
@@ -237,6 +292,8 @@ impl Tools {
 pub enum VideoError {
     /// Something needed the machine, or the user stopped the job.
     Stopped,
+    /// Recording compression holds the meeting's folder; try again shortly.
+    FolderBusy,
     /// Left as it is, with the reason (never an error for the user).
     Skipped(String),
     Failed(String),
@@ -246,6 +303,7 @@ impl std::fmt::Display for VideoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VideoError::Stopped => write!(f, "stopped"),
+            VideoError::FolderBusy => write!(f, "its folder is in use"),
             VideoError::Skipped(w) => write!(f, "skipped: {w}"),
             VideoError::Failed(w) => write!(f, "{w}"),
         }
@@ -496,12 +554,14 @@ fn rel_of(data_dir: &Path, p: &Path) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Copy a video's audio out without re-encoding and prove it. Returns the
-/// audio file (in place next to the video; the video is NOT deleted here).
+/// audio file (in place next to the video; the video is NOT deleted here)
+/// and whether this run wrote it (`false`: an earlier run's proven file was
+/// reused, so it isn't this run's to delete).
 pub fn extract_audio(
     t: &Tools,
     video: &Path,
     keep_going: &dyn Fn() -> bool,
-) -> Result<PathBuf, VideoError> {
+) -> Result<(PathBuf, bool), VideoError> {
     let p = probe(t, video, keep_going)?;
     if !p.has_video {
         return Err(VideoError::Skipped("it has no picture to remove".into()));
@@ -525,7 +585,7 @@ pub fn extract_audio(
     let mut n = 2;
     while out.exists() {
         if audio_hashes(t, &out, keep_going)? == want {
-            return Ok(out);
+            return Ok((out, false));
         }
         out = dir.join(format!("{stem} ({n}).{ext}"));
         n += 1;
@@ -559,7 +619,7 @@ pub fn extract_audio(
         }
         keep_mtime(video, &temp);
         fly_storage::rename_with_retry(&temp, &out).map_err(failed)?;
-        Ok(out.clone())
+        Ok((out.clone(), true))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -691,14 +751,78 @@ fn is_video(p: &Path) -> bool {
         .is_some_and(|e| VIDEO_EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// Imported video copies in the folders of FINISHED imports (transcript
-/// saved, nothing queued or running for the meeting).
+/// `p` is what it looks like: not a link, junction or other reparse point.
+fn plain(p: &Path, want_dir: bool) -> bool {
+    let Ok(m) = std::fs::symlink_metadata(p) else {
+        return false;
+    };
+    if m.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    if want_dir {
+        m.is_dir()
+    } else {
+        m.is_file()
+    }
+}
+
+/// Every folder from the data dir down to `file`, and `file` itself, is
+/// plain: a folder made to point elsewhere is never followed.
+fn plain_chain(data_dir: &Path, file: &Path) -> bool {
+    let Ok(rel) = file.strip_prefix(data_dir) else {
+        return false;
+    };
+    let parts: Vec<_> = rel.components().collect();
+    let mut at = data_dir.to_path_buf();
+    for (i, c) in parts.iter().enumerate() {
+        at.push(c);
+        if !plain(&at, i + 1 < parts.len()) {
+            return false;
+        }
+    }
+    !parts.is_empty()
+}
+
+/// `screen-YYYYMMDD-HHMMSS.mp4`, the name the app's screen recorder gives
+/// (`screen_commands.rs`). A file the user attached themselves, even one
+/// called `screen-demo.mp4`, is never re-encoded.
+pub fn is_app_screen_recording(name: &str) -> bool {
+    let Some(stamp) = name
+        .strip_prefix("screen-")
+        .and_then(|s| s.strip_suffix(".mp4"))
+    else {
+        return false;
+    };
+    let b = stamp.as_bytes();
+    b.len() == 15
+        && b[8] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 8 || c.is_ascii_digit())
+}
+
+/// Imported videos of FINISHED imports (transcript saved, nothing queued or
+/// running for the meeting): attachments of the meeting's note that live in
+/// place in that meeting's own folder.
 pub fn imported_videos(state: &AppState) -> Vec<Candidate> {
+    imported_videos_and_dirs(state).0
+}
+
+/// [`imported_videos`], and the folders looked at (swept for leftovers).
+fn imported_videos_and_dirs(state: &AppState) -> (Vec<Candidate>, Vec<PathBuf>) {
     let storage = state.storage.lock().unwrap();
     let Ok(ids) = storage.meetings_with_stored_audio() else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    let mut out = Vec::new();
+    let (mut out, mut dirs): (Vec<Candidate>, Vec<PathBuf>) = (Vec::new(), Vec::new());
     for id in ids {
         let busy = storage
             .transcription_job(&id)
@@ -710,22 +834,33 @@ pub fn imported_videos(state: &AppState) -> Vec<Candidate> {
         if busy || !storage.get_transcript(&id).is_ok_and(|t| t.is_some()) {
             continue;
         }
-        let Some(dir) = storage
-            .get_meeting(&id)
-            .ok()
-            .and_then(|m| m.recording)
-            .and_then(|r| fly_storage::recording_dir_rel(&r))
-            .and_then(|rel| fly_storage::contained_recordings_dir(&state.data_dir, &rel))
+        let Ok(m) = storage.get_meeting(&id) else {
+            continue;
+        };
+        let Some(rel) = m
+            .recording
+            .as_ref()
+            .and_then(fly_storage::recording_dir_rel)
         else {
             continue;
         };
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Some(dir) = fly_storage::contained_recordings_dir(&state.data_dir, &rel) else {
             continue;
         };
-        for e in entries.flatten() {
-            let p = e.path();
-            let plain = std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_file());
-            if plain && is_video(&p) && !file_name(&p).starts_with('.') {
+        if !plain_dirs(&state.data_dir, &dir) {
+            continue;
+        }
+        dirs.push(dir.clone());
+        let Ok(note) = storage.get_note(&m.note_id) else {
+            continue;
+        };
+        for a in &note.attachments {
+            let Some(p) = fly_storage::recording_file_in_folder(&state.data_dir, &rel, &a.rel_path)
+            else {
+                continue;
+            };
+            if is_video(&p) && plain_chain(&state.data_dir, &p) && !out.iter().any(|c| c.path == p)
+            {
                 let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
                 out.push(Candidate {
                     path: p,
@@ -735,45 +870,132 @@ pub fn imported_videos(state: &AppState) -> Vec<Candidate> {
             }
         }
     }
-    out
+    (out, dirs)
 }
 
-/// Screen recordings (`attachments/<note>/screen-*.mp4`), except the one
-/// being recorded right now.
+/// Every folder from the data dir down to `dir` (itself included) is plain.
+fn plain_dirs(data_dir: &Path, dir: &Path) -> bool {
+    let Ok(rel) = dir.strip_prefix(data_dir) else {
+        return false;
+    };
+    let mut at = data_dir.to_path_buf();
+    for c in rel.components() {
+        at.push(c);
+        if !plain(&at, true) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The app's screen recordings (see [`is_app_screen_recording`]) attached
+/// to their notes, except the one being recorded right now.
 pub fn screen_recordings(state: &AppState) -> Vec<Candidate> {
+    screen_recordings_and_dirs(state).0
+}
+
+/// [`screen_recordings`], and the folders looked at (swept for leftovers).
+fn screen_recordings_and_dirs(state: &AppState) -> (Vec<Candidate>, Vec<PathBuf>) {
     let live = state
         .screen
         .lock()
         .unwrap()
         .as_ref()
         .map(|s| state.data_dir.join(&s.rel_path));
-    let mut out = Vec::new();
-    let Ok(notes) = std::fs::read_dir(state.data_dir.join("attachments")) else {
-        return out;
-    };
-    for d in notes.flatten() {
-        let Ok(files) = std::fs::read_dir(d.path()) else {
+    let notes = state
+        .storage
+        .lock()
+        .unwrap()
+        .notes_with_attachments()
+        .unwrap_or_default();
+    let (mut out, mut dirs): (Vec<Candidate>, Vec<PathBuf>) = (Vec::new(), Vec::new());
+    for note in notes {
+        let dir = state.data_dir.join("attachments").join(&note.id);
+        let prefix = format!("attachments/{}/", note.id);
+        let mut any = false;
+        for a in &note.attachments {
+            let Some(name) = a.rel_path.strip_prefix(&prefix) else {
+                continue;
+            };
+            if !is_app_screen_recording(name) {
+                continue;
+            }
+            let p = dir.join(name);
+            if Some(&p) == live.as_ref()
+                || !plain_chain(&state.data_dir, &p)
+                || out.iter().any(|c| c.path == p)
+            {
+                continue;
+            }
+            any = true;
+            let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            out.push(Candidate {
+                path: p,
+                meeting_id: None,
+                bytes,
+            });
+        }
+        if any {
+            dirs.push(dir);
+        }
+    }
+    (out, dirs)
+}
+
+/// `.<name>.deleting.<ext>`: a video set aside just before its note is
+/// pointed at the audio (a media extension, so retention still sees it).
+fn set_aside_name(name: &str) -> String {
+    let ext = Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!(".{name}.deleting.{ext}")
+}
+
+/// The original name of a set-aside video, if `name` is one.
+fn set_aside_original(name: &str) -> Option<&str> {
+    let inner = name.strip_prefix('.')?;
+    let at = inner.rfind(".deleting.")?;
+    (at > 0).then(|| &inner[..at])
+}
+
+/// A crash can leave the job's own temps (`.x.shrinking.mp4`,
+/// `.x.audio-only.part.<ext>`) and a set-aside video (see
+/// [`set_aside_name`]). Temps go. A set-aside video goes only once no note
+/// points at its original name (the repoint happened); otherwise it's put
+/// back, so a crash between the two never loses the picture.
+fn sweep_leftovers(state: &AppState, dirs: &[PathBuf]) {
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
-        for f in files.flatten() {
-            let p = f.path();
+        for e in entries.flatten() {
+            let p = e.path();
             let name = file_name(&p);
-            let plain = std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_file());
-            if plain
-                && name.starts_with("screen-")
-                && name.ends_with(".mp4")
-                && Some(&p) != live.as_ref()
-            {
-                let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                out.push(Candidate {
-                    path: p,
-                    meeting_id: None,
-                    bytes,
+            if !name.starts_with('.') || !plain(&p, false) {
+                continue;
+            }
+            if name.contains(".shrinking.") || name.contains(".audio-only.part.") {
+                let _ = std::fs::remove_file(&p);
+            } else if let Some(original) = set_aside_original(&name) {
+                let orig = dir.join(original);
+                // unsure (no path, a read error) counts as still linked: put it back
+                let linked = rel_of(&state.data_dir, &orig).is_none_or(|rel| {
+                    state
+                        .storage
+                        .lock()
+                        .unwrap()
+                        .attachment_references(&rel)
+                        .map_or(true, |n| n > 0)
                 });
+                if !linked {
+                    let _ = std::fs::remove_file(&p);
+                } else if !orig.exists() {
+                    let _ = fly_storage::rename_with_retry(&p, &orig);
+                }
             }
         }
     }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -823,9 +1045,16 @@ async fn start<R: tauri::Runtime>(
     kind: VideoJobKind,
 ) -> Result<VideoJobStatus, String> {
     let vs = &state.video_store;
+    if vs.halted.load(Ordering::SeqCst) {
+        return Err("video work is stopped while your data is being deleted".into());
+    }
     if vs.running.swap(true, Ordering::SeqCst) {
         return Err("a video job is already running".into());
     }
+    // Reset before anything awaits (ensure_tools may download ffmpeg for a
+    // while): a Stop, a note delete or a halt from here on sticks.
+    vs.cancel.store(false, Ordering::SeqCst);
+    *vs.current.lock().unwrap() = InFlight::default();
     let tools = match ensure_tools(app, &state.data_dir).await {
         Ok(t) => t,
         Err(e) => {
@@ -833,8 +1062,14 @@ async fn start<R: tauri::Runtime>(
             return Err(format!("ffmpeg isn't available: {e}"));
         }
     };
-    vs.cancel.store(false, Ordering::SeqCst);
-    *vs.current.lock().unwrap() = InFlight::default();
+    if vs.stopping() {
+        vs.running.store(false, Ordering::SeqCst);
+        emit(app, |s| {
+            s.kind = Some(kind);
+            s.state = "stopped".into();
+        });
+        return Ok(vs.status());
+    }
     let policy = import_policy(state);
     emit(app, |s| {
         *s = VideoJobStatus {
@@ -863,26 +1098,36 @@ async fn start<R: tauri::Runtime>(
     Ok(vs.status())
 }
 
+/// What one file's run did.
+#[derive(Debug, PartialEq)]
+pub struct FileDone {
+    /// Bytes freed.
+    pub saved: u64,
+    /// Notes whose attachments changed (an open one refreshes them).
+    pub notes: Vec<String>,
+}
+
 fn run_job<R: tauri::Runtime>(app: &tauri::AppHandle<R>, kind: VideoJobKind, tools: &Tools) {
     let state = app.state::<AppState>();
     let vs = &state.video_store;
-    let files = match kind {
-        VideoJobKind::AudioOnly => imported_videos(&state),
-        VideoJobKind::ShrinkScreen => screen_recordings(&state),
+    let (files, dirs) = match kind {
+        VideoJobKind::AudioOnly => imported_videos_and_dirs(&state),
+        VideoJobKind::ShrinkScreen => screen_recordings_and_dirs(&state),
     };
+    sweep_leftovers(&state, &dirs);
     emit(app, |s| s.files_total = files.len());
     let threads = std::thread::available_parallelism()
         .map(|n| (n.get() / 4).clamp(1, 4))
         .unwrap_or(2);
     for c in files {
-        if vs.cancel.load(Ordering::SeqCst) {
+        if vs.stopping() {
             break;
         }
         loop {
             // wait out whatever needs the machine
             let mut paused = false;
             while let Some(why) = busy(&state) {
-                if vs.cancel.load(Ordering::SeqCst) {
+                if vs.stopping() {
                     break;
                 }
                 if !paused {
@@ -900,10 +1145,10 @@ fn run_job<R: tauri::Runtime>(app: &tauri::AppHandle<R>, kind: VideoJobKind, too
                     s.paused_for = None;
                 });
             }
-            if vs.cancel.load(Ordering::SeqCst) {
+            if vs.stopping() {
                 break;
             }
-            let keep_going = || !vs.cancel.load(Ordering::SeqCst) && busy(&state).is_none();
+            let keep_going = || !vs.stopping() && busy(&state).is_none();
             if !vs.claim(&c) {
                 // its note was deleted during this run: nothing to do
                 emit(app, |s| s.files_done += 1);
@@ -911,18 +1156,36 @@ fn run_job<R: tauri::Runtime>(app: &tauri::AppHandle<R>, kind: VideoJobKind, too
             }
             let result = match kind {
                 VideoJobKind::AudioOnly => audio_only_one(&state, tools, &c, &keep_going),
-                VideoJobKind::ShrinkScreen => shrink_screen(tools, &c.path, threads, &keep_going),
+                VideoJobKind::ShrinkScreen => shrink_screen(tools, &c.path, threads, &keep_going)
+                    .map(|saved| FileDone {
+                        saved,
+                        notes: Vec::new(),
+                    }),
             };
             vs.release();
             match result {
-                Err(VideoError::Stopped) if !vs.cancel.load(Ordering::SeqCst) => continue,
+                Err(VideoError::Stopped) if !vs.stopping() => continue,
                 Err(VideoError::Stopped) => break,
-                Ok(saved) => {
-                    tracing::info!(saved, "videos: file done");
+                Err(VideoError::FolderBusy) => {
+                    // compression holds the folder: rest, then try again
+                    let until = Instant::now() + LEASE_BACKOFF;
+                    while Instant::now() < until && !vs.stopping() {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    if vs.stopping() {
+                        break;
+                    }
+                    continue;
+                }
+                Ok(done) => {
+                    tracing::info!(saved = done.saved, "videos: file done");
                     emit(app, |s| {
                         s.files_done += 1;
-                        s.bytes_saved += saved;
+                        s.bytes_saved += done.saved;
                     });
+                    for note_id in done.notes {
+                        let _ = app.emit(NOTE_ATTACHMENTS_EVENT, NoteAttachments { note_id });
+                    }
                 }
                 Err(VideoError::Skipped(why)) => {
                     tracing::info!(why, "videos: file left as it is");
@@ -943,7 +1206,7 @@ fn run_job<R: tauri::Runtime>(app: &tauri::AppHandle<R>, kind: VideoJobKind, too
             break;
         }
     }
-    let stopped = vs.cancel.load(Ordering::SeqCst);
+    let stopped = vs.stopping();
     emit(app, |s| {
         s.state = if stopped { "stopped" } else { "done" }.into();
         s.paused_for = None;
@@ -951,18 +1214,20 @@ fn run_job<R: tauri::Runtime>(app: &tauri::AppHandle<R>, kind: VideoJobKind, too
 }
 
 /// Audio-only for one imported video: lease its meeting folder, extract
-/// and prove the audio, repoint attachments, then delete the video copy
-/// (and its poster thumbnail).
+/// and prove the audio, then, under the storage lock, set the video aside,
+/// point the note at the audio, and delete the video copy (and its poster).
+/// Nothing changes for the user unless all of that succeeds: if the video
+/// can't be set aside (a player holds it on Windows) or no note lists it,
+/// it stays where it was and only an audio file this run wrote is removed.
 pub fn audio_only_one(
     state: &AppState,
     tools: &Tools,
     c: &Candidate,
     keep_going: &dyn Fn() -> bool,
-) -> Result<u64, VideoError> {
+) -> Result<FileDone, VideoError> {
     let id = c.meeting_id.clone().unwrap_or_default();
     if !state.storage.lock().unwrap().lease_meeting_folder(&id) {
-        // recording compression is in that folder; take it again later
-        return Err(VideoError::Stopped);
+        return Err(VideoError::FolderBusy);
     }
     struct Release<'a>(&'a AppState, &'a str);
     impl Drop for Release<'_> {
@@ -978,27 +1243,58 @@ pub fn audio_only_one(
     if !c.path.exists() {
         return Err(VideoError::Skipped("it's gone".into()));
     }
-    let audio = extract_audio(tools, &c.path, keep_going)?;
+    let (audio, created) = extract_audio(tools, &c.path, keep_going)?;
+    // Only what this run wrote is removed again; a proven audio file an
+    // earlier run left is never this run's to delete.
+    let forget = || {
+        if created {
+            let _ = std::fs::remove_file(&audio);
+        }
+    };
     let (Some(old_rel), Some(new_rel)) = (
         rel_of(&state.data_dir, &c.path),
         rel_of(&state.data_dir, &audio),
     ) else {
+        forget();
         return Err(failed("file outside the data folder"));
     };
     let audio_bytes = std::fs::metadata(&audio).map(|m| m.len()).unwrap_or(0);
-    {
+    let aside = c.path.with_file_name(set_aside_name(&file_name(&c.path)));
+    let notes = {
         let storage = state.storage.lock().unwrap();
-        storage
-            .repoint_attachments(&old_rel, &new_rel)
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&audio);
-                failed(e)
-            })?;
-        // the audio file now carries everything that file did but the picture
-        std::fs::remove_file(&c.path).map_err(failed)?;
-        let _ = std::fs::remove_file(c.path.with_file_name(format!("{}.jpg", file_name(&c.path))));
+        // 1. Set the video aside first: on Windows this fails cleanly while a
+        //    player has it open, before anything changed.
+        if let Err(e) = std::fs::rename(&c.path, &aside) {
+            forget();
+            return Err(VideoError::Skipped(format!(
+                "the video is open somewhere else ({e}); it's tried again next time"
+            )));
+        }
+        // 2. Point the note at the audio. If nothing lists the video, or that
+        //    fails, the video goes back where it was.
+        let undo = |why: VideoError| -> VideoError {
+            if let Err(e) = fly_storage::rename_with_retry(&aside, &c.path) {
+                tracing::error!(error = %e, "videos: couldn't put a video back yet; the next run does");
+            }
+            forget();
+            why
+        };
+        match storage.repoint_attachments(&old_rel, &new_rel) {
+            Ok(notes) if !notes.is_empty() => notes,
+            Ok(_) => return Err(undo(VideoError::Skipped("no note lists this video".into()))),
+            Err(e) => return Err(undo(failed(e))),
+        }
+    };
+    // 3. The video copy and its poster go. One a player still holds is
+    //    removed by the next run's sweep (no note links it any more).
+    if let Err(e) = std::fs::remove_file(&aside) {
+        tracing::warn!(error = %e, "videos: the replaced video stays until the next run");
     }
-    Ok(c.bytes.saturating_sub(audio_bytes))
+    let _ = std::fs::remove_file(c.path.with_file_name(format!("{}.jpg", file_name(&c.path))));
+    Ok(FileDone {
+        saved: c.bytes.saturating_sub(audio_bytes),
+        notes,
+    })
 }
 
 /// Stop the running job (it finishes the file in flight cleanly: the temp
@@ -1009,17 +1305,17 @@ pub fn cancel_video_job(state: tauri::State<'_, AppState>) -> Result<(), String>
     Ok(())
 }
 
-/// Stop for good and wait (Delete all my data).
+/// Stop until [`resume`] and wait ("Delete all my data"): the job and any
+/// estimate stop, and none starts meanwhile.
 pub fn halt(state: &AppState, timeout: Duration) -> bool {
+    state.video_store.halted.store(true, Ordering::SeqCst);
     state.video_store.cancel.store(true, Ordering::SeqCst);
-    let deadline = Instant::now() + timeout;
-    while state.video_store.is_running() {
-        if Instant::now() > deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    true
+    wait_idle(state, timeout)
+}
+
+/// Undo [`halt`] ("Delete all my data" was refused or failed).
+pub fn resume(state: &AppState) {
+    state.video_store.halted.store(false, Ordering::SeqCst);
 }
 
 /// `keep` or `audio_only`. Choosing audio only starts the job for the
@@ -1051,7 +1347,9 @@ pub async fn set_import_video_policy(
 /// import's video copy goes the same way (background, best-effort).
 pub fn after_transcription<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) {
     let state = handle.state::<AppState>();
-    if import_policy(&state) != "audio_only" || state.video_store.is_running() {
+    let vs = &state.video_store;
+    if import_policy(&state) != "audio_only" || vs.is_running() || vs.halted.load(Ordering::SeqCst)
+    {
         return;
     }
     if imported_videos(&state).is_empty() {
@@ -1081,18 +1379,44 @@ pub async fn estimate_screen_shrink(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<ShrinkEstimate>, String> {
+    const BUSY: &str = "the estimate stopped while the app is busy (recording, transcribing or answering); try again in a moment";
+    let vs = &state.video_store;
+    if vs.halted.load(Ordering::SeqCst) {
+        return Err("video work is stopped while your data is being deleted".into());
+    }
+    if state.background_should_yield() {
+        return Err(BUSY.into());
+    }
     let files = screen_recordings(&state);
     let Some(largest) = files.iter().max_by_key(|c| c.bytes).cloned() else {
         return Ok(None);
     };
     let tools = ensure_tools(&app, &state.data_dir).await?;
+    // ffmpeg in use (model cleanup asks needs_ffmpeg); halt waits for it.
+    struct Estimating<'a>(&'a AtomicBool);
+    impl Drop for Estimating<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    vs.estimating.store(true, Ordering::SeqCst);
+    let _estimating = Estimating(&vs.estimating);
+    let handle = app.clone();
     let scratch = fly_storage::scratch::scratch_root(&state.data_dir).join("_video-estimate");
     let total: u64 = files.iter().map(|c| c.bytes).sum();
     let count = files.len();
     let ratio = tauri::async_runtime::spawn_blocking(move || -> Result<f64, String> {
         std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
-        let go = || true;
-        let p = probe(&tools, &largest.path, &go).map_err(|e| e.to_string())?;
+        // the same rule as the job: step aside for real work, stop on a halt
+        let go = || {
+            let s = handle.state::<AppState>();
+            !s.video_store.halted.load(Ordering::SeqCst) && !s.background_should_yield()
+        };
+        let stopped = |e: VideoError| match e {
+            VideoError::Stopped => BUSY.to_string(),
+            e => e.to_string(),
+        };
+        let p = probe(&tools, &largest.path, &go).map_err(stopped)?;
         if p.comment.as_deref() == Some(SHRUNK_TAG) || p.duration_s <= 0.0 {
             return Ok(1.0);
         }
@@ -1113,7 +1437,7 @@ pub async fn estimate_screen_shrink(
         let r = run_tool(&tools.ffmpeg, &args, &go);
         let sample = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
         let _ = std::fs::remove_dir_all(&scratch);
-        r.map_err(|e| e.to_string())?;
+        r.map_err(stopped)?;
         let src_rate = largest.bytes as f64 / p.duration_s;
         let new_rate = sample as f64 / len;
         Ok((new_rate / src_rate).clamp(0.0, 1.0))
@@ -1130,6 +1454,168 @@ pub async fn estimate_screen_shrink(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app_state(dir: &Path) -> AppState {
+        AppState::init_with(
+            dir.to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn names_the_job_relies_on() {
+        assert!(is_app_screen_recording("screen-20260105-101500.mp4"));
+        for not in [
+            "screen-demo.mp4",
+            "screen-20260105-101500.mov",
+            "screen-2026010-101500.mp4",
+            "screen-20260105_101500.mp4",
+            "xscreen-20260105-101500.mp4",
+        ] {
+            assert!(!is_app_screen_recording(not), "{not}");
+        }
+        let aside = set_aside_name("Board call.mp4");
+        assert_eq!(aside, ".Board call.mp4.deleting.mp4");
+        assert_eq!(set_aside_original(&aside), Some("Board call.mp4"));
+        assert!(
+            fly_storage::privacy::is_media_file(Path::new(&aside)),
+            "retention sees it"
+        );
+        assert_eq!(set_aside_original(".x.shrinking.mp4"), None);
+    }
+
+    /// Compression holds the folder: a distinct outcome the job backs off
+    /// on, never `Stopped` (which it retries at once).
+    #[test]
+    fn a_leased_folder_is_folder_busy_not_a_hot_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        assert!(state.storage.lock().unwrap().lease_meeting_folder("m1"));
+        let c = Candidate {
+            path: dir.path().join("recordings/r/call.mp4"),
+            meeting_id: Some("m1".into()),
+            bytes: 1,
+        };
+        let t = Tools::beside(PathBuf::from("ffmpeg"));
+        assert_eq!(
+            audio_only_one(&state, &t, &c, &|| true),
+            Err(VideoError::FolderBusy)
+        );
+        assert!(LEASE_BACKOFF >= Duration::from_secs(2));
+    }
+
+    /// Temps from a crash go; a set-aside video comes back if a note still
+    /// lists it (the repoint never happened), and goes once none does.
+    #[test]
+    fn crash_leftovers_are_swept_and_a_still_linked_video_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let note = state
+            .storage
+            .lock()
+            .unwrap()
+            .create_note("Demo", None)
+            .unwrap();
+        let att = dir.path().join("attachments").join(&note.id);
+        std::fs::create_dir_all(&att).unwrap();
+        let linked = "screen-20260105-101500.mp4";
+        std::fs::write(att.join(linked), b"the picture").unwrap();
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .add_attachment_in_place(&note.id, &format!("attachments/{}/{linked}", note.id))
+            .unwrap();
+        // the crash: set aside, never repointed
+        std::fs::rename(att.join(linked), att.join(set_aside_name(linked))).unwrap();
+        std::fs::write(att.join(set_aside_name("old.mp4")), b"replaced").unwrap();
+        std::fs::write(att.join(".screen-20260105-111500.shrinking.mp4"), b"t").unwrap();
+        std::fs::write(att.join(".call.audio-only.part.m4a"), b"t").unwrap();
+        sweep_leftovers(&state, std::slice::from_ref(&att));
+        assert_eq!(std::fs::read(att.join(linked)).unwrap(), b"the picture");
+        let left: Vec<String> = std::fs::read_dir(&att)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, vec![linked.to_string()], "{left:?}");
+    }
+
+    /// The job holds a note's screen recording open (as ffmpeg does, which
+    /// Windows won't let anyone delete): deleting the note stops the job
+    /// FIRST, so the recording and its folder really go.
+    #[test]
+    fn deleting_a_note_stops_the_job_before_its_files_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let note = state
+            .storage
+            .lock()
+            .unwrap()
+            .create_note("Demo", None)
+            .unwrap();
+        let att = dir.path().join("attachments").join(&note.id);
+        std::fs::create_dir_all(&att).unwrap();
+        let file = att.join("screen-20260105-101500.mp4");
+        std::fs::write(&file, b"v").unwrap();
+        let c = Candidate {
+            path: file.clone(),
+            meeting_id: None,
+            bytes: 1,
+        };
+        let vs = &state.video_store;
+        vs.running.store(true, Ordering::SeqCst);
+        assert!(vs.claim(&c));
+        let job = &state;
+        std::thread::scope(|s| {
+            let (opened, ready) = std::sync::mpsc::channel();
+            s.spawn(move || {
+                let mut o = std::fs::OpenOptions::new();
+                o.read(true);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    o.share_mode(1); // FILE_SHARE_READ, like ffmpeg
+                }
+                let held = o.open(&c.path).unwrap();
+                opened.send(()).unwrap();
+                while !job.video_store.stopping() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                drop(held);
+                job.video_store.release();
+                job.video_store.running.store(false, Ordering::SeqCst);
+            });
+            ready.recv().unwrap();
+            crate::commands::delete_note_with(&state, &|_| {}, &note.id).unwrap();
+        });
+        assert!(!file.exists(), "the recording went with its note");
+        assert!(!att.exists());
+    }
+
+    #[test]
+    fn halt_holds_until_resume_and_needs_ffmpeg_follows_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        assert!(!needs_ffmpeg(&state));
+        assert!(halt(&state, Duration::from_secs(1)));
+        assert!(state.video_store.stopping());
+        // a Stop is cleared by the next start; a halt only by resume
+        state.video_store.cancel.store(false, Ordering::SeqCst);
+        assert!(state.video_store.stopping(), "still halted");
+        resume(&state);
+        assert!(!state.video_store.stopping());
+        state.video_store.running.store(true, Ordering::SeqCst);
+        assert!(needs_ffmpeg(&state));
+        state.video_store.running.store(false, Ordering::SeqCst);
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .set_setting(IMPORT_VIDEO_POLICY_KEY, "audio_only")
+            .unwrap();
+        assert!(needs_ffmpeg(&state), "later imports will be converted");
+    }
 
     /// A note deleted mid-run: a file of it in flight is reported (the
     /// delete then stops the job), and none of its files is picked up after.

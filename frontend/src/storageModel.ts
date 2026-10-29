@@ -114,8 +114,8 @@ export function audioOnlyConfirm(r: StorageReport): { title: string; message: st
     title: "Keep only the audio of imported videos?",
     message:
       (n > 0
-        ? `The picture of ${plural(n, "imported video")} (${formatBytes(r.imported_video_bytes)}) is removed from Fly on the Wall. `
-        : "") +
+        ? `The picture of ${plural(n, "imported video")} (${formatBytes(r.imported_video_bytes)}) is removed from Fly on the Wall, and any subtitles in them. `
+        : "The picture (and any subtitles) is removed. ") +
       "The audio is copied out first, exactly as it is, and checked before anything is deleted; transcripts and notes don't change. " +
       "Videos you import later get the same treatment once they're transcribed.\n\n" +
       "The files you imported from aren't touched. If you've deleted them, this removes the last copy of the picture.",
