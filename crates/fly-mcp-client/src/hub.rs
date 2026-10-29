@@ -694,6 +694,10 @@ impl ExternalTools for ConnectorTurn {
         self.state.lock().unwrap().keep_local = true;
     }
 
+    fn sealed(&self) -> bool {
+        self.state.lock().unwrap().sealed
+    }
+
     async fn call(&self, name: &str, args: Value) -> Result<String, String> {
         let Some(route) = self.routes.get(name).cloned() else {
             return Err("That connector tool isn't available in this answer.".into());
