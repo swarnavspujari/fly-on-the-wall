@@ -16,13 +16,20 @@ use fly_core::Transcript;
 // Peak RSS + machine CPU sampler
 // ---------------------------------------------------------------------------
 
-/// Sidecar families whose peak resident memory is reported. Only direct
-/// children of this test process count, so another session's whisper-cli
-/// on the same machine never pollutes the number.
+/// Sidecar families whose peak resident memory is reported. Only
+/// descendants of this test process count, so another session's
+/// whisper-cli on the same machine never pollutes the number.
+/// First matching prefix wins, so the diarizer's sidecar is listed before
+/// the bench build's sherpa-onnx ASR binaries.
 const FAMILIES: &[(&str, &str)] = &[
     ("whisper-cli", "whisper"),
     ("parakeet-cli", "parakeet"),
-    ("sherpa-onnx", "sherpa"),
+    ("sherpa-onnx-offline-speaker-diarization", "sherpa"),
+    // bench-only engines (bench_engines.rs)
+    ("sherpa-onnx", "sherpa-asr"),
+    ("python", "sherpa-asr"),
+    ("llama-", "llama"),
+    ("nemo", "nemo-cpp"),
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -31,6 +38,11 @@ pub struct ResourceStats {
     pub peak_rss_mb: std::collections::BTreeMap<String, f64>,
     /// Peak RSS of the harness process itself (in-process VBx/ort), MB.
     pub peak_rss_self_mb: f64,
+    /// CPU time per sidecar family, seconds (summed over every process of
+    /// the family; sampled, so a process's last < 250 ms can be missed).
+    pub cpu_secs: std::collections::BTreeMap<String, f64>,
+    /// Logical CPUs on this machine (to turn CPU-seconds into a share).
+    pub logical_cpus: usize,
     /// Mean whole-machine CPU % over the run — high values mean other work
     /// competed for the cores and timings are pessimistic.
     pub machine_cpu_avg_pct: f64,
@@ -52,7 +64,11 @@ impl Sampler {
             let mut sys = System::new();
             let mut stats = ResourceStats::default();
             let mut cpu_sum = 0.0f64;
+            // pid → (family, accumulated CPU ms at its latest sample)
+            let mut cpu_ms: std::collections::HashMap<sysinfo::Pid, (&str, u64)> =
+                std::collections::HashMap::new();
             sys.refresh_cpu_usage();
+            stats.logical_cpus = sys.cpus().len();
             while !flag.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(250));
                 sys.refresh_cpu_usage();
@@ -65,17 +81,33 @@ impl Sampler {
                         stats.peak_rss_self_mb = stats.peak_rss_self_mb.max(mb);
                         continue;
                     }
-                    if me.is_none() || p.parent() != me {
+                    // children and grandchildren (a venv's python.exe on
+                    // Windows is a launcher that spawns the real interpreter)
+                    let ours = me.is_some() && {
+                        let mut at = p.parent();
+                        let mut hops = 0;
+                        while at.is_some() && at != me && hops < 3 {
+                            at = at.and_then(|q| sys.process(q)).and_then(|q| q.parent());
+                            hops += 1;
+                        }
+                        at.is_some() && at == me
+                    };
+                    if !ours {
                         continue;
                     }
                     let name = p.name().to_string_lossy().to_ascii_lowercase();
                     if let Some((_, fam)) = FAMILIES.iter().find(|(pre, _)| name.starts_with(pre)) {
                         let e = stats.peak_rss_mb.entry(fam.to_string()).or_default();
                         *e = e.max(mb);
+                        let c = cpu_ms.entry(*pid).or_insert((fam, 0));
+                        c.1 = c.1.max(p.accumulated_cpu_time());
                     }
                 }
             }
             stats.machine_cpu_avg_pct = cpu_sum / stats.samples.max(1) as f64;
+            for (fam, ms) in cpu_ms.into_values() {
+                *stats.cpu_secs.entry(fam.to_string()).or_default() += ms as f64 / 1000.0;
+            }
             stats
         });
         Self { stop, handle }

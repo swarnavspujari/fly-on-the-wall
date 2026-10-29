@@ -8,7 +8,7 @@
 //!   so). Returns no speaker labels; diarization always runs locally
 //!   regardless (spec §6.3).
 
-mod batch;
+pub mod batch;
 pub mod checkpoint;
 pub mod groq;
 pub mod parakeet;

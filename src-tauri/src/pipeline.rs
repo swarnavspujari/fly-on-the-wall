@@ -155,6 +155,32 @@ pub async fn run_with(
     on_model: models::ProgressSink<'_>,
     meeting_id: &str,
 ) -> Result<Transcript, String> {
+    run_inner(state, on_stage, on_model, meeting_id, None).await
+}
+
+/// Accuracy-harness seam (not reachable from the app): the full pipeline
+/// with `asr` as the ONLY transcription engine — no whisper/cloud chain and
+/// no fallback, so a failure fails the run. Bench-only engines are then
+/// scored through exactly the prep, loop guard, diarization and alignment
+/// the app uses; only the ASR step differs.
+#[doc(hidden)]
+pub async fn run_with_asr_engine(
+    state: &AppState,
+    on_stage: StageSink<'_>,
+    on_model: models::ProgressSink<'_>,
+    meeting_id: &str,
+    asr: Box<dyn TranscriptionEngine>,
+) -> Result<Transcript, String> {
+    run_inner(state, on_stage, on_model, meeting_id, Some(asr)).await
+}
+
+async fn run_inner(
+    state: &AppState,
+    on_stage: StageSink<'_>,
+    on_model: models::ProgressSink<'_>,
+    meeting_id: &str,
+    asr_override: Option<Box<dyn TranscriptionEngine>>,
+) -> Result<Transcript, String> {
     // one pipeline per meeting at a time
     {
         let stages = state.pipeline_stage.lock().unwrap();
@@ -327,7 +353,13 @@ pub async fn run_with(
         .or_else(|| mixed_wav.clone())
         .expect("checked above: at least one recording file exists");
 
-    let asr: GuardedAsr = if let Some(key) = groq_key {
+    let asr: GuardedAsr = if let Some(engine) = asr_override {
+        GuardedAsr::chain(vec![AsrTier {
+            engine,
+            label: None,
+            gpu_model_id: None,
+        }])
+    } else if let Some(key) = groq_key {
         // A Groq failure that survives the engine's own per-chunk retries
         // (outage, exhausted quota budget, rejected payload) must not sink
         // the meeting — the SAME local chain the no-cloud path uses (GPU

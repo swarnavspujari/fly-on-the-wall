@@ -99,6 +99,14 @@ use std::path::{Path, PathBuf};
 use fly_core::repeat::loop_token;
 use fly_core::{RecordingRef, SpeakerTurn, Transcript};
 
+#[path = "accuracy_harness/bench_align.rs"]
+mod bench_align;
+#[path = "accuracy_harness/bench_diarize.rs"]
+mod bench_diarize;
+#[path = "accuracy_harness/bench_engines.rs"]
+mod bench_engines;
+#[path = "accuracy_harness/bench_servers.rs"]
+mod bench_servers;
 #[path = "accuracy_harness/corpus_extra.rs"]
 mod corpus_extra;
 #[path = "accuracy_harness/normalize.rs"]
@@ -1861,6 +1869,12 @@ fn accuracy_harness() {
         return;
     }
 
+    // ---- diarizer comparison over the corpus (words held fixed) ----
+    if let Ok(manifest) = std::env::var("FLYONTHEWALL_HARNESS_DIARIZE_CORPUS") {
+        bench_diarize::run_diarize_corpus(&manifest);
+        return;
+    }
+
     // ---- corpus mode: every manifest item × every engine ----
     if let Ok(manifest) = std::env::var("FLYONTHEWALL_HARNESS_CORPUS") {
         run_corpus(&manifest);
@@ -2020,6 +2034,8 @@ struct RunOutput {
     audio_secs: f64,
     resources: run_stats::ResourceStats,
     loops: Vec<run_stats::LoopEvent>,
+    /// Bench-engine stats (load/decode time, live latency, timing transfer).
+    bench: Option<serde_json::Value>,
 }
 
 /// Run the REAL pipeline over a recording folder with `run`'s engine and
@@ -2050,11 +2066,14 @@ fn run_pipeline(rec_dir: &Path, run: &RunOpts) -> Option<RunOutput> {
     // real data dir like the golden E2E; missing → skip, not panic ----
     let real_data = dirs::data_dir().unwrap().join("FlyOnTheWall");
     diarizer_paths(&real_data)?;
-    if !fly_app_lib::models::tool_installed(
-        &real_data,
-        fly_app_lib::models::WHISPER_ENGINE_ID,
-        fly_app_lib::models::WHISPER_CLI_NAMES,
-    ) {
+    let bench = bench_engines::is_bench_engine(&run.engine);
+    if !bench
+        && !fly_app_lib::models::tool_installed(
+            &real_data,
+            fly_app_lib::models::WHISPER_ENGINE_ID,
+            fly_app_lib::models::WHISPER_CLI_NAMES,
+        )
+    {
         eprintln!("SKIP: whisper engine not installed (no managed artifact, nothing on PATH)");
         return None;
     }
@@ -2064,7 +2083,11 @@ fn run_pipeline(rec_dir: &Path, run: &RunOpts) -> Option<RunOutput> {
             .map(|a| a.probe_rel.to_string())
             .unwrap_or_else(|| format!("models/asr/{id}.bin"))
     };
-    let mut weights = vec![model_rel(model)];
+    let mut weights = if bench {
+        Vec::new() // bench engines bring their own runtime + weights
+    } else {
+        vec![model_rel(model)]
+    };
     if run.engine == "parakeet" {
         weights.push(model_rel(fly_app_lib::models::PARAKEET_MODEL_ID));
     }
@@ -2228,7 +2251,25 @@ fn run_pipeline(rec_dir: &Path, run: &RunOpts) -> Option<RunOutput> {
         (meeting.id, audio_ms)
     };
 
+    // bench engines: built from FLYONTHEWALL_HARNESS_BENCH_DIR, run through
+    // the pipeline seam with no fallback
+    let bench_engine = if bench {
+        match bench_engines::build(
+            &run.engine,
+            run.gpu_on(),
+            fly_app_lib::pipeline::sidecar_threads(),
+        ) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                eprintln!("SKIP {}: {e}", run.variant());
+                return None;
+            }
+        }
+    } else {
+        None
+    };
     run_stats::take_loops(); // nothing from an earlier run may leak in
+    bench_engines::take_stats();
     let clock = run_stats::StageClock::default();
     let started = std::time::Instant::now();
     let on_stage = |p: fly_app_lib::pipeline::PipelineProgress| {
@@ -2244,12 +2285,23 @@ fn run_pipeline(rec_dir: &Path, run: &RunOpts) -> Option<RunOutput> {
     let sampler = run_stats::Sampler::start();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let transcript = runtime
-        .block_on(fly_app_lib::pipeline::run_with(
-            &state,
-            &on_stage,
-            &on_model,
-            &meeting_id,
-        ))
+        .block_on(async {
+            match bench_engine {
+                Some(engine) => {
+                    fly_app_lib::pipeline::run_with_asr_engine(
+                        &state,
+                        &on_stage,
+                        &on_model,
+                        &meeting_id,
+                        engine,
+                    )
+                    .await
+                }
+                None => {
+                    fly_app_lib::pipeline::run_with(&state, &on_stage, &on_model, &meeting_id).await
+                }
+            }
+        })
         .expect("pipeline should succeed");
     let pipeline_secs = started.elapsed().as_secs_f64();
     let resources = sampler.finish();
@@ -2265,6 +2317,7 @@ fn run_pipeline(rec_dir: &Path, run: &RunOpts) -> Option<RunOutput> {
         audio_secs: audio_ms as f64 / 1000.0,
         resources,
         loops,
+        bench: bench_engines::take_stats(),
     })
 }
 
@@ -2282,6 +2335,13 @@ fn run_results(
     if run.engine == "parakeet" {
         config["asr_model"] = serde_json::json!(fly_app_lib::models::PARAKEET_MODEL_ID);
         config["fallback_model"] = serde_json::json!(run.model);
+    } else if bench_engines::is_bench_engine(&run.engine) {
+        // "label:model-folder", as the pipeline recorded it
+        config["asr_model"] = serde_json::json!(out.transcript.engine);
+        config["threads"] = serde_json::json!(std::env::var("FLYONTHEWALL_HARNESS_BENCH_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(fly_app_lib::pipeline::sidecar_threads));
     } else {
         config["asr_model"] = serde_json::json!(run.model);
     }
@@ -2324,6 +2384,24 @@ fn run_results(
         "resources".into(),
         serde_json::to_value(&out.resources).unwrap(),
     );
+    // ASR CPU spread over the audio's duration as a share of the whole
+    // machine: what a live engine would cost during a call of this length
+    let asr_cpu_secs: f64 = out
+        .resources
+        .cpu_secs
+        .iter()
+        .filter(|(fam, _)| fam.as_str() != "sherpa")
+        .map(|(_, s)| s)
+        .sum();
+    let call_cpu_pct = (asr_cpu_secs > 0.0 && out.resources.logical_cpus > 0).then(|| {
+        100.0 * asr_cpu_secs
+            / (out.audio_secs.max(f64::EPSILON) * out.resources.logical_cpus as f64)
+    });
+    results.insert("asr_cpu_secs".into(), serde_json::json!(asr_cpu_secs));
+    results.insert("call_cpu_pct".into(), serde_json::json!(call_cpu_pct));
+    if let Some(b) = &out.bench {
+        results.insert("bench".into(), b.clone());
+    }
     let loops = run_stats::loops_json(&out.loops);
     eprintln!("hallucination loops collapsed by the guard: {loops}");
     results.insert("loops".into(), loops);
@@ -2413,7 +2491,9 @@ struct CorpusItem {
     kind: Option<String>,
 }
 
-fn run_corpus(manifest: &str) {
+/// A manifest's out_dir and runnable items (Teams meetings discovered from
+/// `teams_dir` and their audio extracted once into the cache).
+fn load_corpus(manifest: &str) -> (PathBuf, Vec<CorpusItem>) {
     let manifest_path = Path::new(manifest);
     let corpus: Corpus = serde_json::from_str(
         &std::fs::read_to_string(manifest_path).expect("read corpus manifest"),
@@ -2431,18 +2511,6 @@ fn run_corpus(manifest: &str) {
         });
     refuse_inside_repo(&out_dir, "corpus out_dir (results + optional transcripts)");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let engines: Vec<String> = std::env::var("FLYONTHEWALL_HARNESS_ENGINES")
-        .unwrap_or_else(|_| "whisper".into())
-        .split(',')
-        .map(|e| e.trim().to_string())
-        .filter(|e| !e.is_empty())
-        .collect();
-    let only: Option<Vec<String>> = std::env::var("FLYONTHEWALL_HARNESS_ONLY")
-        .ok()
-        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
-    let keep_transcripts = std::env::var("FLYONTHEWALL_HARNESS_KEEP_TRANSCRIPTS")
-        .is_ok_and(|v| !v.is_empty() && v != "0");
-
     let mut items: Vec<CorpusItem> = corpus.items;
     if let Some(teams_dir) = &corpus.teams_dir {
         let cache: PathBuf = corpus
@@ -2474,6 +2542,22 @@ fn run_corpus(manifest: &str) {
             }
         }
     }
+    (out_dir, items)
+}
+
+fn run_corpus(manifest: &str) {
+    let (out_dir, items) = load_corpus(manifest);
+    let engines: Vec<String> = std::env::var("FLYONTHEWALL_HARNESS_ENGINES")
+        .unwrap_or_else(|_| "whisper".into())
+        .split(',')
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty())
+        .collect();
+    let only: Option<Vec<String>> = std::env::var("FLYONTHEWALL_HARNESS_ONLY")
+        .ok()
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+    let keep_transcripts = std::env::var("FLYONTHEWALL_HARNESS_KEEP_TRANSCRIPTS")
+        .is_ok_and(|v| !v.is_empty() && v != "0");
 
     for item in &items {
         if item.skip || only.as_ref().is_some_and(|o| !o.contains(&item.name)) {
@@ -2754,6 +2838,10 @@ struct Row {
     agree_wer: Option<f64>,
     agree_der_250: Option<f64>,
     kind: Option<String>,
+    /// Live (streaming) variants: onset → first text, 90th percentile.
+    first_partial_p90_s: Option<f64>,
+    /// ASR CPU over the audio's duration, % of the whole machine.
+    call_cpu_pct: Option<f64>,
 }
 
 fn row_from(v: &serde_json::Value) -> Option<Row> {
@@ -2789,13 +2877,18 @@ fn row_from(v: &serde_json::Value) -> Option<Row> {
         agree_wer: f("/agreement/wer_merged"),
         agree_der_250: f("/agreement/diarization/der_collar_250/der"),
         kind: v.get("kind").and_then(|k| k.as_str()).map(str::to_string),
+        first_partial_p90_s: f("/bench/live_latency/first_partial_p90_s"),
+        call_cpu_pct: f("/call_cpu_pct"),
     })
 }
 
-/// Ship gates from spec §4.1 that this harness can measure. "Live first
-/// partial ≤ 2 s" and "CPU ≤ 25 % during a call" belong to the live path
-/// (not in this PR) and are reported as not measured.
+/// Ship gates from spec §4.1. "Live first partial ≤ 2 s" and "CPU ≤ 25 %
+/// during a call" apply to streaming (live) variants only: the 90th
+/// percentile of onset → first text, and the engine's CPU spread over the
+/// call's duration as a share of the machine.
 const MIN_CPU_SPEED_X: f64 = 5.0;
+const MAX_FIRST_PARTIAL_S: f64 = 2.0;
+const MAX_CALL_CPU_PCT: f64 = 25.0;
 
 fn compare_results(dir: &Path) {
     let mut rows: Vec<Row> = Vec::new();
@@ -2906,6 +2999,18 @@ fn compare_results(dir: &Path) {
                 base.loops.map(|l| l.to_string()).unwrap_or("-".into())
             ),
         ));
+        if cand.first_partial_p90_s.is_some() {
+            checks.push((
+                format!("live first partial ≤ {MAX_FIRST_PARTIAL_S} s (p90)"),
+                cand.first_partial_p90_s.map(|s| s <= MAX_FIRST_PARTIAL_S),
+                format!("{} s", num(cand.first_partial_p90_s, 2)),
+            ));
+            checks.push((
+                format!("CPU ≤ {MAX_CALL_CPU_PCT}% during a call"),
+                cand.call_cpu_pct.map(|c| c <= MAX_CALL_CPU_PCT),
+                format!("{}%", num(cand.call_cpu_pct, 1)),
+            ));
+        }
         if !cand.gpu {
             checks.push((
                 format!("≥ {MIN_CPU_SPEED_X}× realtime on CPU"),
@@ -2938,9 +3043,7 @@ fn compare_results(dir: &Path) {
             }));
         }
     }
-    eprintln!(
-        "\nnot measured here (live path, later PR): live first partial ≤ 2 s; CPU ≤ 25 % during a call"
-    );
+    eprintln!("\nlive gates (first partial, CPU during a call) apply to streaming variants only");
     let summary = serde_json::json!({ "rows": rows, "gates": gates });
     std::fs::write(
         dir.join("summary.json"),
