@@ -1,7 +1,7 @@
 # Connectors (`ui-connectors`)
 
 > Layer: frontend feature. New with connectors (beta); not on main yet. References are by symbol name.
-> In flight: the backend side ([app-connectors](app-connectors.md), [fly-mcp-client](fly-mcp-client.md)) lands with it. Ask (spec v2.5 PR 3.4, [ui-ask](ui-ask.md)) shows a turn's cards in the turn (`AskConnectorCards`) and `KEEP_LOCAL_NOTICE`.
+> In flight: the backend side ([app-connectors](app-connectors.md), [fly-mcp-client](fly-mcp-client.md)) lands with it. Ask (spec v2.5 PR 3.4, [ui-ask](ui-ask.md)) shows a turn's cards in the turn (`AskConnectorCards`) and `KEEP_LOCAL_NOTICE`; the app-level stack skips those turns while the answer sheet shows them (`hideTurnIds`).
 
 ## Purpose
 Connectors let Ask and Enhance call tools on MCP servers you add: hosted ones from a built-in directory, custom web addresses (browser sign-in, an API key, or none) and local programs. This component is the UI for that feature:
@@ -37,7 +37,7 @@ The safety rules live in the backend. The UI asks the backend for every change a
   - `frontend/src/api.ts`: the command wrappers and the three event-name constants;
   - `frontend/src/types.ts`: the types;
   - `frontend/src/devMock.ts`: the devMock connector fixtures.
-- Placement: the `"connectors"` entry in `settingsModel.ts` belongs to [ui-settings](ui-settings.md). `SettingsModal.tsx` renders the section after "Other AI apps", and `App.tsx` mounts one `<ConnectorCallStack />` after `AppNotices`.
+- Placement: the `"connectors"` entry in `settingsModel.ts` belongs to [ui-settings](ui-settings.md). `SettingsModal.tsx` renders the section after "Other AI apps", and `App.tsx` mounts one `<ConnectorCallStack hideTurnIds={…} />` after `AppNotices` (the Ask turns whose cards the open answer sheet shows; see [ui-ask](ui-ask.md)).
 
 ## Surface area
 ### Screens and states
@@ -187,4 +187,4 @@ None read. API keys, client secrets and secret header or setting values are type
 - Don't add a path that grants trust without the backend's native dialog, and don't write `connectors.*` settings.
 - Keep the arm delay on every button that allows a call, and key it by the proposal id.
 - When the backend contract changes, update `types.ts`, `api.ts` and devMock together.
-- If Ask gets its own `ConnectorCallStack turnId={…}`, show each proposal in one place only.
+- Each proposal shows in one place only: Ask's `AskConnectorCards` registers its turn (`useInlineAskTurns`) and the corner stack's `hideTurnIds` skips it. Keep both sides when changing either.

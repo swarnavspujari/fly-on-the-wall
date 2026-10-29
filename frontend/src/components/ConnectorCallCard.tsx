@@ -431,8 +431,17 @@ interface Decided {
 /** Every pending proposal (or one Ask turn's), bottom-right above the rest
  *  of the app. One card at a time, oldest first; a decided card stays as a
  *  one-line summary for a few seconds. Mount once at the top level. */
-export function ConnectorCallStack({ turnId }: { turnId?: string }) {
-  const { proposals, markSettled } = useConnectorProposals(turnId);
+export function ConnectorCallStack({
+  turnId,
+  hideTurnIds,
+}: {
+  turnId?: string;
+  /** Ask turns whose cards an open answer sheet shows in place
+   *  (AskConnectors.tsx), so a call never has two cards. */
+  hideTurnIds?: ReadonlySet<string>;
+}) {
+  const { proposals: pending, markSettled } = useConnectorProposals(turnId);
+  const proposals = hideTurnIds?.size ? pending.filter((p) => !hideTurnIds.has(p.turnId)) : pending;
   const [decided, setDecided] = useState<Decided[]>([]);
   const [announcement, setAnnouncement] = useState("");
   const timers = useRef<number[]>([]);
