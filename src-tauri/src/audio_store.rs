@@ -219,12 +219,22 @@ pub fn halt(state: &AppState, timeout: Duration) -> bool {
     true
 }
 
-/// Why background work should wait, if it should.
+/// Why the job should pause, if it should. The one place the yield rule
+/// lives: an interim copy of `AppState::background_should_yield()` (coming
+/// with the search-indexing work: a recording, live captions, or any
+/// pipeline stage but "waiting"; a merely queued job doesn't count), plus a
+/// media import, which copies and converts files.
 fn busy_reason(state: &AppState) -> Option<&'static str> {
     if crate::scheduler::recording_active(state) {
         return Some("recording");
     }
-    if !state.pipeline_stage.lock().unwrap().is_empty() {
+    if state
+        .pipeline_stage
+        .lock()
+        .unwrap()
+        .values()
+        .any(|stage| stage != crate::scheduler::WAITING_STAGE)
+    {
         return Some("transcribing");
     }
     if crate::privacy::imports_in_flight() {
