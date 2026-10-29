@@ -122,3 +122,19 @@ a call.
   no timestamps.
 - **Granite Speech 5.0 2B** (Q8_0): 0.4× realtime on CPU, so Vulkan only; the first request
   pays ~2 min of Vulkan shader warmup, then ~2.2× realtime on a loaded machine.
+
+## Licenses, if any of these ships (read 2026-10-28; an engineering summary, not legal advice)
+
+| Model / runtime | License | What shipping needs |
+|---|---|---|
+| NeMo-Speech.cpp | Apache-2.0 (+ third-party notices: ggml, llama.cpp, SentencePiece, miniaudio, …) | Ship `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` with the DLLs |
+| Parakeet TDT 0.6B v3 | CC-BY-4.0 | Credit NVIDIA, link the model and the license, say if converted (int8/GGUF). No patent grant |
+| nemotron-speech-streaming-en-0.6b | NVIDIA Open Model License (revocable; NVIDIA may change it) | Runtime download: show the license name + link before download. If we mirror it: ship the full license and a NOTICE reading "Licensed by NVIDIA Corporation under the NVIDIA Open Model License". It terminates on bypassing "technical limitations" or on IP litigation; Trustworthy-AI terms (lawful use, which ties to recording consent); licensee indemnifies NVIDIA. Needs the user's OK (spec §4.1) |
+| nemotron-3.5-asr-streaming-0.6b | OpenMDW-1.1 | Keep the license and origin notices; no field-of-use limits. Avoids the Open Model License's red flags |
+| Nemotron-3-Diarization | OpenMDW-1.1 | Same as above (litigation-termination clause, no cure period) |
+| Cohere Transcribe | Apache-2.0 (HF repo is gated; the sherpa int8 package isn't) | License text, keep notices, mark modified files |
+| Granite Speech 5.0 2B | Apache-2.0 | Same. Avoid `granite-speech-5.0-470m-turboctc-nc` (CC-BY-NC-SA) |
+
+Downloading from the official host at runtime makes the user, not us, the recipient. Mirroring
+(for example on our GitHub releases) makes us the distributor, and every condition above
+applies. The sherpa-onnx packages ship no license or NOTICE file, so we would add them.

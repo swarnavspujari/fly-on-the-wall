@@ -182,6 +182,16 @@ def online_decode(rec, wav, feed_ms, latency, left_pad_s=LEFT_PAD_S):
     }
     if latency:
         out["emits"] = emits
+        # raw emission log for offline analysis (algorithmic vs compute delay)
+        dump = os.environ.get("FOTW_BENCH_EMITS_DIR") or os.path.join(
+            os.environ.get("TEMP", "."), "fotw-bench-emits")
+        try:
+            os.makedirs(dump, exist_ok=True)
+            name = f"emits-{int(time.time())}-{os.getpid()}.json"
+            with open(os.path.join(dump, name), "w", encoding="utf-8") as f:
+                json.dump({"audio_secs": out["audio_secs"], "emits": emits}, f)
+        except OSError:
+            pass
     return out
 
 
