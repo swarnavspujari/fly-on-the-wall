@@ -418,7 +418,11 @@ impl WriterThread {
                 let mut first_err = None;
                 for s in sinks.iter_mut() {
                     if let Err(e) = s.finalize() {
-                        tracing::error!(file = %s.path.display(), "finalizing WAV failed: {e}");
+                        // the file name only: the folder is named after the meeting
+                        tracing::error!(
+                            file = %s.path.file_name().unwrap_or_default().to_string_lossy(),
+                            "finalizing WAV failed: {e}"
+                        );
                         first_err.get_or_insert(e);
                     }
                 }
