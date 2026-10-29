@@ -152,12 +152,10 @@ describe("Editor › audio player on a compressed recording", () => {
   });
 
   it("a stored file plays without any rebuild", async () => {
-    const prepare = vi
-      .spyOn(api, "preparePlayback")
-      .mockResolvedValue({
-        path: "C:/data/recordings/x/recording.playback.wav",
-        needs_build: false,
-      });
+    const prepare = vi.spyOn(api, "preparePlayback").mockResolvedValue({
+      path: "C:/data/recordings/x/recording.playback.wav",
+      needs_build: false,
+    });
     host = document.createElement("div");
     document.body.appendChild(host);
     root = createRoot(host);
