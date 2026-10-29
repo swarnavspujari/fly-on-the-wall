@@ -111,8 +111,25 @@ async fn ask_live() {
     let contract = Contract::load(&fly_evals::evals_dir()).expect("contract");
     let db = fly_evals::corpus::Db::build(&contract.corpus, true).expect("fixture db");
     // Database ids back to fixture ids (the evals' own mapping), so a
-    // replay's request fingerprint matches what CI computes.
-    let normalize = |s: &str| db.normalize_ids(s);
+    // replay's request fingerprint matches what CI computes. Applied to
+    // ASCII runs only: ids are ASCII, and `Db::normalize_ids` slices a
+    // 36-byte window that can end inside a multibyte character (an em
+    // dash) and panic. Same output as a char-safe `normalize_ids`.
+    let normalize = |text: &str| {
+        let mut out = String::with_capacity(text.len());
+        let mut run = String::new();
+        for ch in text.chars() {
+            if ch.is_ascii() {
+                run.push(ch);
+            } else {
+                out.push_str(&db.normalize_ids(&run));
+                run.clear();
+                out.push(ch);
+            }
+        }
+        out.push_str(&db.normalize_ids(&run));
+        out
+    };
     let now = fly_evals::ask_contract::eval_now();
     // Quality scenarios on a local provider: the reference questions.
     let scenarios: Vec<&c::Scenario> = contract
@@ -121,7 +138,6 @@ async fn ask_live() {
         .filter(|s| s.kind == ScenarioKind::Quality && s.provider == c::ProviderKind::Local)
         .filter(|s| !s.id.starts_with("replay:"))
         .filter(|s| only.as_deref().is_none_or(|o| s.id.contains(o)))
-        .take(limit)
         .collect();
 
     let mut summary = BTreeMap::new();
@@ -153,6 +169,12 @@ async fn ask_live() {
             .await
             .unwrap_or_else(|_| built.provider.capabilities());
         let tier = ask_tier(&state, built.provider.as_ref()).await;
+        // The reference questions run at every tier; take the model's own.
+        let scenarios: Vec<&&c::Scenario> = scenarios
+            .iter()
+            .filter(|s| s.tier == tier_of(tier))
+            .take(limit)
+            .collect();
         let inner: Arc<dyn fly_llm::LLMProvider> = Arc::from(built.provider);
         let model_dir = out.join(model.replace([':', '/', '\\'], "_"));
         std::fs::create_dir_all(&model_dir).expect("out dir");
