@@ -6,7 +6,11 @@
 //! about -30 dBFS, level stepping once a second) plays through the default
 //! output, and — all at once —
 //! - `embed`: a full re-embed: batches of 16 chunks through the app's
-//!   `embeddings::embed_raw` against the local Ollama, back to back;
+//!   `embeddings::embed_raw` against the local Ollama, following the app's
+//!   background rule: it steps aside while the recording runs (an in-flight
+//!   batch is abandoned within 500 ms), as the embedding worker does
+//!   (`AppState::background_yield_reason`). `embed_unpaced` instead runs
+//!   batches back to back throughout, as builds before that rule did;
 //! - `asr`: a queued transcription: the real `pipeline::run_with`
 //!   (whisper.cpp + VAD + sherpa diarization, CPU) over a ~4 min meeting,
 //!   restarted whenever it finishes (so diarization runs during the
@@ -32,7 +36,8 @@
 //! ```
 //! Environment:
 //! - `FOTW_BENCH_SECS`   recording length, default 600
-//! - `FOTW_BENCH_LOAD`   comma list of embed,asr,ask,disk (default all; `none`)
+//! - `FOTW_BENCH_LOAD`   comma list of embed,asr,ask,disk (default all; `none`),
+//!   or `embed_unpaced` in place of `embed`
 //! - `FOTW_BENCH_DATA`   scratch data dir, default `~/fotw-bench` (keep it
 //!   short: sherpa breaks on long Windows paths)
 //! - `FOTW_BENCH_OUT`    results JSON path, default
@@ -334,7 +339,12 @@ impl Drop for ScratchGuard {
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
+    /// The capture is running: the background rule's "recording" (the bench
+    /// records through fly-audio directly, not `AppState::recording`).
+    recording: AtomicBool,
     embed_batches: AtomicU64,
+    embed_batches_recording: AtomicU64,
+    embed_abandoned: AtomicU64,
     embed_errors: AtomicU64,
     asr_runs: AtomicU64,
     asr_errors: Mutex<Vec<String>>,
@@ -467,7 +477,8 @@ fn contention_bench() {
             setup_errors.push(format!("asr warm-up: {e}"));
         }
     }
-    if want("embed") || want("ask") {
+    let embed_unpaced = want("embed_unpaced");
+    if want("embed") || embed_unpaced || want("ask") {
         let ok = rt.block_on(fly_app_lib::embeddings::embed_raw(
             OLLAMA,
             &["warm-up".to_string()],
@@ -484,15 +495,23 @@ fn contention_bench() {
 
     // ---------------------------------------------------------- loads
     let mut tasks = Vec::new();
-    if want("embed") {
+    if want("embed") || embed_unpaced {
         let shared = shared.clone();
         let state = state.clone();
         tasks.push(rt.spawn(async move {
+            // the app's embedding worker steps aside while a recording runs,
+            // checks back every 5 s, and abandons a batch in flight within
+            // 500 ms (embeddings.rs YIELD_POLL / IN_FLIGHT_CHECK)
+            let yields = || !embed_unpaced && shared.recording.load(Ordering::Relaxed);
             let filler = "We walked through the quarterly plan, the hiring pipeline, the \
                           vendor renewal and the open risks on the migration; each owner \
                           gave a date and the group agreed to revisit the budget next week. ";
             let mut n: u64 = 0;
             while !shared.stop.load(Ordering::Relaxed) {
+                if yields() {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
                 let inputs: Vec<String> = (0..16)
                     .map(|i| {
                         n += 1;
@@ -502,9 +521,29 @@ fn contention_bench() {
                         )
                     })
                     .collect();
-                match fly_app_lib::embeddings::embed_raw(OLLAMA, &inputs).await {
-                    Ok(v) => {
+                let batch = fly_app_lib::embeddings::embed_raw(OLLAMA, &inputs);
+                tokio::pin!(batch);
+                let outcome = loop {
+                    tokio::select! {
+                        done = &mut batch => break Some(done),
+                        _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                            if yields() {
+                                break None;
+                            }
+                        }
+                    }
+                };
+                match outcome {
+                    None => {
+                        shared.embed_abandoned.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Some(Ok(v)) => {
                         shared.embed_batches.fetch_add(1, Ordering::Relaxed);
+                        if shared.recording.load(Ordering::Relaxed) {
+                            shared
+                                .embed_batches_recording
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
                         // the worker commits each batch to SQLite
                         let bytes: usize = v.iter().map(|e| e.len() * 4).sum();
                         let _ = state
@@ -513,7 +552,7 @@ fn contention_bench() {
                             .unwrap()
                             .set_setting("bench.embed_progress", &format!("{n}:{bytes}"));
                     }
-                    Err(_) => {
+                    Some(Err(_)) => {
                         shared.embed_errors.fetch_add(1, Ordering::Relaxed);
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
@@ -680,6 +719,7 @@ fn contention_bench() {
     let rec_dir = bench_root
         .join("rec")
         .join(started_utc.format("%Y%m%dT%H%M%SZ").to_string());
+    shared.recording.store(true, Ordering::Relaxed);
     let rec_started = Instant::now();
     let session = capture
         .start(CaptureConfig {
@@ -748,9 +788,10 @@ fn contention_bench() {
         if last_report.elapsed() > Duration::from_secs(60) {
             last_report = Instant::now();
             eprintln!(
-                "[{:>5.0}s] recording… embed batches {}, asr runs {}, asks {}, disk {} MB, caption ticks {} chunks {}",
+                "[{:>5.0}s] recording… embed batches {} (while recording {}), asr runs {}, asks {}, disk {} MB, caption ticks {} chunks {}",
                 rec_started.elapsed().as_secs_f64(),
                 shared.embed_batches.load(Ordering::Relaxed),
+                shared.embed_batches_recording.load(Ordering::Relaxed),
                 shared.asr_runs.load(Ordering::Relaxed),
                 shared.ask_ms.lock().unwrap().len(),
                 shared.disk_mb.load(Ordering::Relaxed),
@@ -760,6 +801,7 @@ fn contention_bench() {
         }
     }
     let output = session.stop().expect("capture stop");
+    shared.recording.store(false, Ordering::Relaxed);
     let player = player.finish();
 
     // ---------------------------------------------------------- teardown
@@ -893,7 +935,10 @@ fn contention_bench() {
             "slowest_tick_ms": shared.caption_tick_max_ms.load(Ordering::Relaxed),
         },
         "load": {
+            "embed_mode": if embed_unpaced { "unpaced" } else { "yields_while_recording" },
             "embed_batches": shared.embed_batches.load(Ordering::Relaxed),
+            "embed_batches_while_recording": shared.embed_batches_recording.load(Ordering::Relaxed),
+            "embed_batches_abandoned": shared.embed_abandoned.load(Ordering::Relaxed),
             "embed_errors": shared.embed_errors.load(Ordering::Relaxed),
             "asr_runs_completed": shared.asr_runs.load(Ordering::Relaxed),
             "asr_errors": shared.asr_errors.lock().unwrap().clone(),
