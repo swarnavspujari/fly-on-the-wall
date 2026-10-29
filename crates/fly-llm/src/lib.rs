@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
 pub mod conversation;
+pub mod external_tools;
 pub mod mock;
 pub mod openai_compat;
 pub mod repair;
