@@ -21,17 +21,17 @@ Search-as-you-type over notes and transcripts. `search` is plain SQLite FTS5. `s
 | `doc_prompt(title, text)` → `"title: {title} \| text: {text}"`; `query_prompt(q)` → `"task: search result \| query: {q}"` | 37-46 | worker, `embed_query`, `search_eval` |
 | `embed_raw(root, &[String]) -> Result<Vec<Vec<f32>>, String>`: `POST {root}/api/embed`, 300 s timeout, count-checked | 49-77 | worker, `embed_query`, `search_eval` |
 | `embed_query(&AppState, q) -> Option<Vec<f32>>`: only if `GET {root}/api/version` answers; never spawns a server or pulls | 83-96 | `search_semantic` |
-| `spawn(AppHandle)`: the background indexer (called once, from `startup::finish`, `startup.rs:252`) | 293-371 | app setup |
-| `yield_reason(&AppState) -> Option<YieldTo>`, `rest_after(Duration)`, `embed_next_batch(&Mutex<Storage>, &impl Embedder, shareable_only, size)`, `Embedder` trait (crate-private; tested with a fake embedder) | 168-262 | the worker, tests |
+| `spawn(AppHandle)`: the background indexer (called once, from `startup::finish`, `startup.rs:252`) | 322-414 | app setup |
+| `yield_reason(&AppState) -> Option<YieldTo>`, `rest_after(Duration)`, `embed_next_batch(&Mutex<Storage>, &impl Embedder, shareable_only, size)`, `embed_batch_unless(…, should_yield)`, `Embedder` trait (crate-private; tested with fake embedders) | 171-292 | the worker, tests |
 
-#### Indexer loop (`embeddings.rs:145-371`)
+#### Indexer loop (`embeddings.rs:145-414`)
 1. Once at start, on a blocking thread: the chunk backfill (`Storage::chunk_owners`, newest first, then `sync_owner_chunks` for 8 owners per storage-lock hold). Idempotent; a library already chunked costs one JSON parse per owner and never holds the lock for long.
 2. Loop. **Yield** first (`yield_reason`): while a recording or screen recording runs (live captions), while a transcription job is running (any `pipeline_stage` other than `"waiting"`, which includes the polish), or while a foreground AI request holds `AppState::foreground_ai()` (Ask, Enhance), the worker logs `embedding index paused` once and checks back every 5 s or on a nudge. Priority: live captions > transcription > Ask / Enhance > backlog.
 3. `root = ollama::root_url` (`llm.ollama.base_url`, else `http://localhost:11434`). If the root is **not** loopback, count only the *shareable* backlog (keep-local owners excluded); otherwise the full backlog.
 4. Backlog 0 → wait for `embed_notify` or 30 s.
 5. `ensure_ready`: `ollama::ensure_running` (may spawn the managed `ollama serve`), then `GET /api/tags`; if the model is missing, **pull it** (`POST /api/pull`, progress on `model:progress`). Failure → wait 60 s or a nudge.
-6. `embed_next_batch`: re-derive remote/local from the URL actually used, take the 16 **most recently written** pending chunks (shareable queue when remote) under the lock, embed `doc_prompt(title, text)` with no lock held, then `store_pending_embeddings`, which stores a vector only where the row still holds the text that was embedded (a chunk re-chunked meanwhile, possibly under the same id, stays pending). Failure → sleep 60 s.
-7. **Rest** after each batch for as long as it took (at least 250 ms): a large backlog (the one-time re-embed after the v3 upgrade, a model change) uses at most about half of what the embedding runtime can do.
+6. Check the yield again (readiness can take a while), then `embed_batch_unless` → `embed_next_batch`: re-derive remote/local from the URL actually used, take the 16 **most recently written** pending chunks (shareable queue when remote) under the lock, embed `doc_prompt(title, text)` with no lock held, then `store_pending_embeddings`, which stores a vector only where the row still holds the text that was embedded (a chunk re-chunked meanwhile, possibly under the same id, stays pending). While the batch is in flight the worker re-checks the yield every 500 ms and **abandons** the batch when a recording (or transcription, or Ask) starts: no lock is held, nothing is stored, the chunks stay pending. Failure → sleep 60 s.
+7. **Rest** after each batch for as long as it took (at least 250 ms): a large backlog (the one-time re-embed after the v3 upgrade, a model change) uses at most about half of what the embedding runtime can do. A content write (`embed_notify`) ends the rest early, so fresh content waits for at most the batch in flight.
 
 New content first: chunk ids grow with every (re)chunk, so the queue is "newest write first" and a meeting that was just transcribed is embedded ahead of any backlog, as soon as its transcription and polish are done.
 
@@ -99,7 +99,7 @@ None.
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| unit | `src-tauri/src/embeddings.rs` | 5 | newest-first batches with the lock free during embedding (fake embedder), a chunk rewritten mid-embed stays pending, the startup pass, yielding to transcription and foreground AI, pacing |
+| unit | `src-tauri/src/embeddings.rs` | 6 | newest-first batches with the lock free during embedding (fake embedder), a chunk rewritten mid-embed stays pending, an in-flight batch abandoned when a recording starts (nothing stored), the startup pass, yielding to transcription and foreground AI, pacing |
 | unit (crate) | `crates/fly-storage/src/embeddings.rs:495-716` | 9 | chunking, pending/store/search round trip, re-sync, filters, backfill |
 | unit (crate) | `crates/fly-storage/src/hybrid.rs:129-185` | 5 | RRF fusion, grouping, FTS-only degrade, limit |
 | unit (crate) | `crates/fly-storage/src/privacy.rs:834` | 1 | shareable queue skips keep-local owners |

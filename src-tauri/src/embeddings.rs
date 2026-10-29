@@ -152,6 +152,9 @@ const RETRY_DELAY: Duration = Duration::from_secs(60);
 /// While the worker yields (recording, transcription, a foreground AI
 /// request), it checks back this often.
 const YIELD_POLL: Duration = Duration::from_secs(5);
+/// While a batch is in flight, how often the worker checks whether it
+/// should step aside (and abandon the batch).
+const IN_FLIGHT_CHECK: Duration = Duration::from_millis(500);
 /// Pacing: after a batch that took `t`, rest `t × REST_RATIO` (at least
 /// `MIN_REST`), so a large backlog — the one-time re-embed after the v3
 /// upgrade, or a model change — takes at most about half of what the
@@ -260,6 +263,32 @@ pub(crate) async fn embed_next_batch<E: Embedder>(
         .map_err(|e| e.to_string())
 }
 
+/// [`embed_next_batch`], abandoned as soon as `should_yield` says so (polled
+/// every [`IN_FLIGHT_CHECK`]): a recording that starts while a slow batch is
+/// in flight gets the machine back at once instead of after the batch. The
+/// storage lock is never held while the batch awaits, so dropping it leaves
+/// nothing behind: its chunks simply stay pending. `None` = abandoned.
+pub(crate) async fn embed_batch_unless<E: Embedder>(
+    storage: &Mutex<Storage>,
+    embedder: &E,
+    shareable_only: bool,
+    size: usize,
+    should_yield: impl Fn() -> bool,
+) -> Option<Result<usize, String>> {
+    let batch = embed_next_batch(storage, embedder, shareable_only, size);
+    tokio::pin!(batch);
+    loop {
+        tokio::select! {
+            done = &mut batch => return Some(done),
+            _ = tokio::time::sleep(IN_FLIGHT_CHECK) => {
+                if should_yield() {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 /// The startup chunk pass, a few owners per storage-lock hold, so commands
 /// and the recording path never wait behind a whole library's re-chunk.
 fn backfill_chunks(storage: &Mutex<Storage>) -> Result<usize, String> {
@@ -347,18 +376,35 @@ pub fn spawn(app: tauri::AppHandle) {
                 }
             };
 
+            // Readiness can take a while (a server spawn, a model pull):
+            // check again right before sending.
+            if yield_reason(&state).is_some() {
+                continue;
+            }
             // Decide the filter from the SAME url the batch is sent to: the
             // setting may have changed since the backlog check above.
             let send_remote = !crate::llm_commands::is_loopback_url(&root);
             let started = std::time::Instant::now();
-            match embed_next_batch(&state.storage, &Ollama { root }, send_remote, BATCH_SIZE).await
-            {
-                Ok(0) => {}
-                Ok(n) => {
+            let outcome = embed_batch_unless(
+                &state.storage,
+                &Ollama { root },
+                send_remote,
+                BATCH_SIZE,
+                || yield_reason(&state).is_some(),
+            )
+            .await;
+            match outcome {
+                None => tracing::info!("embedding batch abandoned to step aside"),
+                Some(Ok(0)) => {}
+                Some(Ok(n)) => {
                     tracing::debug!(embedded = n, backlog, "embedded chunk batch");
-                    tokio::time::sleep(rest_after(started.elapsed())).await;
+                    // A content write (a note edit, a finished transcription)
+                    // ends the rest early: the next batch takes the newest
+                    // chunks, so fresh content waits at most for one batch.
+                    let rest = rest_after(started.elapsed());
+                    let _ = tokio::time::timeout(rest, state.embed_notify.notified()).await;
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     tracing::warn!(error = %e, "embedding batch failed, backing off");
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
@@ -554,6 +600,58 @@ mod tests {
             assert_eq!(yield_reason(&state), Some(YieldTo::Foreground));
         }
         assert_eq!(yield_reason(&state), None, "guards release on drop");
+    }
+
+    /// Takes its time, like Ollama on a busy CPU.
+    struct Slow;
+
+    impl Embedder for Slow {
+        async fn embed(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok(inputs.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    #[test]
+    fn an_in_flight_batch_is_abandoned_when_a_recording_starts() {
+        let (_dir, storage) = storage();
+        meeting(&storage.lock().unwrap(), "Backlog", "older words");
+        let started = std::time::Instant::now();
+        let recording = std::sync::atomic::AtomicBool::new(false);
+        let outcome = run(async {
+            let flip = async {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                recording.store(true, std::sync::atomic::Ordering::SeqCst);
+            };
+            let batch = embed_batch_unless(&storage, &Slow, false, 8, || {
+                recording.load(std::sync::atomic::Ordering::SeqCst)
+            });
+            tokio::join!(flip, batch).1
+        });
+        assert_eq!(outcome, None, "abandoned");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        // Nothing was stored; the chunk is still pending.
+        assert_eq!(
+            storage
+                .lock()
+                .unwrap()
+                .embedding_backlog(EMBED_MODEL)
+                .unwrap(),
+            1
+        );
+        // Without a reason to yield, the batch completes.
+        let done = run(embed_batch_unless(
+            &storage,
+            &Fake::new(&storage),
+            false,
+            8,
+            || false,
+        ));
+        assert_eq!(done, Some(Ok(1)));
     }
 
     #[test]
