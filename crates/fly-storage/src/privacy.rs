@@ -319,7 +319,7 @@ impl Storage {
         let mut stmt = self.conn.prepare(&format!(
             "{KEEP_LOCAL_CTE}SELECT c.id, c.title, c.text FROM embedding_chunks c
               WHERE (c.embedding IS NULL OR c.model IS NOT ?1) AND {SHAREABLE_CHUNK}
-              ORDER BY c.id LIMIT ?2"
+              ORDER BY c.id DESC LIMIT ?2"
         ))?;
         let rows = stmt.query_map((model, limit as i64), |r| {
             Ok(crate::PendingChunk {

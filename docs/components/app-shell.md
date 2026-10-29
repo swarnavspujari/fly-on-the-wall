@@ -45,6 +45,7 @@ The process entry point and the only place platform implementations are chosen. 
 | `consent_skipped` | `Mutex<BTreeSet<meeting_id>>` | Inserted/retried by scheduler.rs; read/drained by llm_commands.rs:449-463 |
 | `consent_prompt` | `tokio::sync::Mutex<ConsentPacing>` | llm_commands.rs only: `request_cloud_consent` holds it while the cloud-consent dialog is open (one dialog at a time) and keeps each provider's recent declines in it |
 | `embed_notify` | `tokio::sync::Notify` | Notified by commands.rs, llm_commands.rs, scheduler.rs; awaited by embeddings.rs |
+| `foreground_ai` (private) | `AtomicUsize`, via `foreground_ai()` → RAII `ForegroundAi` guard and `foreground_ai_active()` | Guards held by llm_commands.rs (`ask_meeting`, `enhance_note`); read by embeddings.rs (`yield_reason`) |
 
 Observed lock nesting: `recording` → `storage` (`recording.rs:134-140`), `recording` → `screen` (`scheduler.rs:469`), `consent_prompt` → `storage` (`llm_commands.rs:294-308`). No reverse order was found.
 

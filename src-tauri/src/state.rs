@@ -55,6 +55,20 @@ pub struct AppState {
     /// Nudges the embedding worker after a content write (embeddings.rs).
     /// The worker also polls, so a missed nudge only delays indexing.
     pub embed_notify: tokio::sync::Notify,
+    /// Foreground AI requests in flight (Ask, Enhance): the embedding
+    /// backlog steps aside while any runs. Take it with
+    /// [`AppState::foreground_ai`].
+    foreground_ai: std::sync::atomic::AtomicUsize,
+}
+
+/// Held for the length of a user-facing AI request (see
+/// [`AppState::foreground_ai`]); dropping it releases the slot.
+pub struct ForegroundAi<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for ForegroundAi<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl AppState {
@@ -115,7 +129,22 @@ impl AppState {
             consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
             consent_prompt: tokio::sync::Mutex::new(Default::default()),
             embed_notify: tokio::sync::Notify::new(),
+            foreground_ai: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Mark a user-facing AI request (Ask, Enhance) as running until the
+    /// guard drops: background work that competes for the same model
+    /// runtime (the embedding backlog) waits meanwhile.
+    pub fn foreground_ai(&self) -> ForegroundAi<'_> {
+        self.foreground_ai
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ForegroundAi(&self.foreground_ai)
+    }
+
+    /// Whether any [`foreground_ai`](Self::foreground_ai) guard is alive.
+    pub fn foreground_ai_active(&self) -> bool {
+        self.foreground_ai.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 
     /// Shared handle for components that hold the secret store themselves

@@ -664,6 +664,8 @@ pub async fn enhance_note(
     note_id: String,
     template_id: String,
 ) -> CmdResult<Note> {
+    // The embedding backlog steps aside while this runs.
+    let _foreground = state.foreground_ai();
     ensure_provider_ready(&state).await?;
     let provider = build_provider(&state, DataScope::Note(&note_id))?;
     let profile = profile_for(provider.model());
@@ -969,6 +971,8 @@ pub async fn ask_meeting(
     note_id: String,
     history: Vec<AskMessage>,
 ) -> CmdResult<String> {
+    // The embedding backlog steps aside while this runs.
+    let _foreground = state.foreground_ai();
     ensure_provider_ready(&state).await?;
     let provider = build_provider(&state, DataScope::Note(&note_id))?;
     let profile = profile_for(provider.model());

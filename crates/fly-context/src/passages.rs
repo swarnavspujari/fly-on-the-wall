@@ -298,6 +298,29 @@ mod tests {
     }
 
     #[test]
+    fn polished_chunks_span_the_raw_windows() {
+        // A polish drops words (and can empty a line); chunk spans still
+        // follow the raw windows, so a vector hit maps onto exactly one.
+        let t = long_transcript();
+        let mut cleaned = t.clone();
+        for s in &mut cleaned.segments {
+            s.text = "budget and hiring".into();
+        }
+        cleaned.segments[0].text = String::new();
+        let chunks = fly_storage::embeddings::chunk_transcript_variant(&t, Some(&cleaned));
+        let windows = transcript_windows(&t);
+        assert_eq!(chunks.len(), windows.len());
+        for (c, w) in chunks.iter().zip(&windows) {
+            let ids: Vec<&str> = w
+                .segments
+                .iter()
+                .map(|&i| t.segments[i].id.as_str())
+                .collect();
+            assert_eq!(c.segment_ids, ids);
+        }
+    }
+
+    #[test]
     fn windows_skip_empty_segments_and_cover_the_rest_once() {
         let t = long_transcript();
         let windows = transcript_windows(&t);
