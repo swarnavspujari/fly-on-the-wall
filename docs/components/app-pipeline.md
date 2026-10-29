@@ -23,13 +23,13 @@ Turns a meeting's recorded WAVs into a saved, diarized transcript, then runs the
 | `pipeline::{PipelineProgress, StageSink, ReDiarizeOutcome, TierKind, MIC_SPEAKER_KEY = "mic", ERR_NO_RECORDING_FILES, sidecar_threads}` | `pipeline.rs:26`, `pipeline.rs:100-111`, `pipeline.rs:139-144`, `pipeline.rs:718-722`, `pipeline.rs:906-910` | scheduler, import, tests |
 | `scheduler::enqueue(state, on_stage, meeting_id)` (idempotent) | `scheduler.rs:56-68` | `transcribe_meeting`, `import_transcribe` (`import_commands.rs:745`) |
 | `scheduler::tick` / `Tick::{Idle, RecordingActive, Completed, Cancelled, Retrying, GaveUp}` | `scheduler.rs:34-151` | `spawn` loop; tests |
-| `scheduler::spawn(app)` | `scheduler.rs:156-201` | `lib.rs:173` (app setup) |
+| `scheduler::spawn(app)` | `scheduler.rs:156-201` | `startup.rs:248` (app setup) |
 | `scheduler::cancel(state, on_stage, meeting_id) -> Result<bool>` | `scheduler.rs:306-344` | `delete_note` (`commands.rs:296`), `cancel_staged_transcription` (`import_commands.rs:369`) |
 | `scheduler::{finish_cancelled, emit_cancelled (crate), recover, stage_emitter, last_failure, retry_consent_skipped, recording_active (crate)}` | `scheduler.rs:237-470` | import, `llm_commands.rs:476` (`retry_consent_skipped`), `privacy.rs:259`, `privacy.rs:405` (`recording_active`) |
 | `scheduler::{MAX_ATTEMPTS = 3, WAITING_STAGE = "waiting"}` | `scheduler.rs:24-26` | tests, UI stage handling |
 
 ### Tauri commands
-All are registered in `src-tauri/src/lib.rs` (`cancel_transcription` at `lib.rs:198`; the rest at `lib.rs:226-238`).
+All are registered in `src-tauri/src/lib.rs` (`cancel_transcription` at `lib.rs:110`; the rest at `lib.rs:138-150`).
 
 | Command | Arguments | Returns | Called from (UI) |
 |---|---|---|---|

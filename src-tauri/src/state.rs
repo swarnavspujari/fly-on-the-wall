@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use fly_audio::cpal_backend::CpalAudioCapture;
 use fly_audio::AudioCapture;
 use fly_secrets::{KeychainSecretStore, SecretStore};
-use fly_storage::{OpenRetry, Storage};
+use fly_storage::{OpenRetry, Storage, UpgradeProgress};
 
 use crate::recording::ActiveRecording;
 use crate::screen_commands::ActiveScreenRecording;
@@ -61,10 +61,54 @@ pub struct AppState {
     /// Nudges the embedding worker after a content write (embeddings.rs).
     /// The worker also polls, so a missed nudge only delays indexing.
     pub embed_notify: tokio::sync::Notify,
+    /// Foreground AI requests in flight (Ask, Enhance): the embedding
+    /// backlog steps aside while any runs. Take it with
+    /// [`AppState::foreground_ai`].
+    foreground_ai: std::sync::atomic::AtomicUsize,
+}
+
+/// What background work (the embedding backlog, audio compression) is
+/// stepping aside for, in priority order: live captions (a recording) >
+/// transcription and its polish > a user-facing AI request > background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundYield {
+    /// An audio or screen recording is running (live captions with it).
+    Recording,
+    /// A transcription pipeline stage is running (ASR, diarization,
+    /// polish). A merely queued job ("waiting") doesn't count.
+    Transcription,
+    /// A [`ForegroundAi`] guard is alive: a model request is running (Ask,
+    /// Enhance, transcript polish, item extraction).
+    ForegroundAi,
+}
+
+/// Held for the length of a user-facing AI request (see
+/// [`AppState::foreground_ai`]); dropping it releases the slot.
+pub struct ForegroundAi<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for ForegroundAi<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl AppState {
     pub fn init() -> anyhow::Result<Self> {
+        let (data_dir, secrets) = Self::prepare()?;
+        Self::init_with(data_dir, secrets)
+    }
+
+    /// [`init`](Self::init) for the background startup open (startup.rs):
+    /// the same open, reporting the one-time schema step's progress.
+    pub fn init_with_progress(progress: &mut dyn FnMut(UpgradeProgress)) -> anyhow::Result<Self> {
+        let (data_dir, secrets) = Self::prepare()?;
+        let storage =
+            Storage::open_with_retry_and_progress(&data_dir, OpenRetry::STARTUP, progress)?;
+        tracing::info!(dir = %data_dir.display(), "storage ready");
+        Ok(Self::with_storage(storage, data_dir, secrets))
+    }
+
+    fn prepare() -> anyhow::Result<(PathBuf, Arc<dyn SecretStore>)> {
         let data_dir = prepared_data_dir()?;
         let secrets = Arc::new(KeychainSecretStore::new());
         // Best-effort: copy secrets out of the pre-rebrand keychain service. A
@@ -75,7 +119,7 @@ impl AppState {
             secrets.as_ref(),
             &migrated_secret_keys(),
         );
-        Self::init_with(data_dir, secrets)
+        Ok((data_dir, secrets))
     }
 
     /// Composition with explicit data dir + secret store — used by tests.
@@ -87,7 +131,11 @@ impl AppState {
         // does the caller reach the startup error dialog.
         let storage = Storage::open_with_retry(&data_dir, OpenRetry::STARTUP)?;
         tracing::info!(dir = %data_dir.display(), "storage ready");
-        Ok(Self {
+        Ok(Self::with_storage(storage, data_dir, secrets))
+    }
+
+    fn with_storage(storage: Storage, data_dir: PathBuf, secrets: Arc<dyn SecretStore>) -> Self {
+        Self {
             storage: Mutex::new(storage),
             data_dir,
             audio: Box::new(CpalAudioCapture::new()),
@@ -103,7 +151,51 @@ impl AppState {
             recovered_kept_local: Mutex::new(Vec::new()),
             consent_prompt: tokio::sync::Mutex::new(Default::default()),
             embed_notify: tokio::sync::Notify::new(),
-        })
+            foreground_ai: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Mark a model request (Ask, Enhance, polish, extraction) as running until the
+    /// guard drops: background work that competes for the same model
+    /// runtime (the embedding backlog) waits meanwhile.
+    pub fn foreground_ai(&self) -> ForegroundAi<'_> {
+        self.foreground_ai
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ForegroundAi(&self.foreground_ai)
+    }
+
+    /// Whether any [`foreground_ai`](Self::foreground_ai) guard is alive.
+    pub fn foreground_ai_active(&self) -> bool {
+        self.foreground_ai.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    /// Why background work should step aside right now, if it should (see
+    /// [`BackgroundYield`]). The one rule every background job follows: the
+    /// embedding backlog and audio compression both call it, between units
+    /// of work and while a unit is in flight.
+    pub fn background_yield_reason(&self) -> Option<BackgroundYield> {
+        if crate::scheduler::recording_active(self) {
+            return Some(BackgroundYield::Recording);
+        }
+        let transcribing = self
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .values()
+            .any(|stage| stage != crate::scheduler::WAITING_STAGE);
+        if transcribing {
+            return Some(BackgroundYield::Transcription);
+        }
+        if self.foreground_ai_active() {
+            return Some(BackgroundYield::ForegroundAi);
+        }
+        None
+    }
+
+    /// Whether background work should step aside right now:
+    /// [`background_yield_reason`](Self::background_yield_reason)`.is_some()`.
+    pub fn background_should_yield(&self) -> bool {
+        self.background_yield_reason().is_some()
     }
 
     /// Shared handle for components that hold the secret store themselves

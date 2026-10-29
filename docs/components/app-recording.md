@@ -105,7 +105,7 @@ No meeting audio or text leaves the machine from this component.
 None.
 
 ## Dependencies
-- **Inbound:** `src-tauri/src/lib.rs:214-225` (command registration); `calendar_commands.rs:470-471` (`start_meeting_from_event`). These read `AppState.recording`: `scheduler.rs:468-470`, `privacy.rs:259,405`, `commands.rs:285`, and `live.rs:223-232` itself. `src-tauri/tests/scheduling.rs` injects a fake `ActiveRecording`.
+- **Inbound:** `src-tauri/src/lib.rs:126-137` (command registration); `calendar_commands.rs:470-471` (`start_meeting_from_event`). These read `AppState.recording`: `scheduler.rs:468-470`, `privacy.rs:259,405`, `commands.rs:285`, and `live.rs:223-232` itself. `src-tauri/tests/scheduling.rs` injects a fake `ActiveRecording`.
 - **Outbound:**
   - [fly-audio](fly-audio.md): the capture trait, `preflight_system_audio`, `mix::{resample_linear, write_wav_mono_16}`.
   - [fly-storage](fly-storage.md): `create_note`, `create_meeting`, `allocate_meeting_dir`, `stash_recording_manifest`, `end_meeting`, `get_meeting_for_note`, `meetings_for_note`, `set_meeting_started_at`, `get_setting`, `scratch::meeting_scratch_dir`.
@@ -140,14 +140,14 @@ None.
 | manual | `docs/TESTING.md` (M2, M9, M11, M14, auto-update) | — | real capture; mute warning within ~1 s; live partials within ~20 s; no update banner while recording |
 
 **Known gaps:**
-- **No test drives start, pause, resume or stop through this module.** The commands need an `AppHandle`, and `AppState::init_with` hard-codes `CpalAudioCapture` (`state.rs:85`). So the manifest-before-database ordering, path relativizing, the stop error path and status warnings ordering are untested here.
+- **No test drives start, pause, resume or stop through this module.** The commands need an `AppHandle`, and `AppState::init_with` hard-codes `CpalAudioCapture` (`state.rs:106`). So the manifest-before-database ordering, path relativizing, the stop error path and status warnings ordering are untested here.
 - **Spec §2 item 7 has no CI test at any seam.** The seed test doesn't touch the flag. The storage test checks "unconfirmed" only with an empty list (`meetings.rs:476-478`). `speaker_hint` has no test, and the only confirmed→`num_speakers` check is `#[ignore]`d.
 - **Stop failure orphans the audio (inferred).** If `session.stop()` fails (mixdown or finalize error, dead audio thread), the command returns before the manifest is written (`recording.rs:236-239`). A crash mid-recording is the same. Self-heal only scans folders that have a manifest (`recovery.rs:172-176`), so the WAVs stay in the folder with nothing pointing at them.
 - **Live caption lag and I/O are untested.** `take_chunk` reads the whole growing WAV every 5 s for each channel (`live.rs:334`). That's about 0.35 GB per hour per channel at 48 kHz (inferred). There is no catch-up when transcription runs slower than real time. Partials skip `guard_loops` while feeding the previous text back as the prompt, a known Whisper loop amplifier. The only latency check is the manual "~20 s".
 - **Spec §2 item 6 ordering** (no probe before consent) and `calendarMatch.ts` (`pickInProgressEvent`, `seedFromEvent`) have no vitest.
 
 ## Changing it safely
-- **New or renamed command:** register it in `src-tauri/src/lib.rs:214-225`, wrap it in `api.ts`, add a `types.ts` type, and mirror it in `devMock.ts` (spec §2 item 4). Then document it here.
+- **New or renamed command:** register it in `src-tauri/src/lib.rs:126-137`, wrap it in `api.ts`, add a `types.ts` type, and mirror it in `devMock.ts` (spec §2 item 4). Then document it here.
 - **Payload shapes** (`RecordingStatus`, `LiveStatus`, `LiveSegment`) are copied in `types.ts` and in local interfaces in `LivePane.tsx:7-18`. Change them together.
 - **Warning strings** come from fly-audio; `recordingBar.ts` and devMock match them by substring.
 - **Keep the stash-before-database order** in `stop_recording`. Never put a fallible step between `session.stop()` and the manifest without also writing a manifest on failure.

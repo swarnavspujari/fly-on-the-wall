@@ -35,6 +35,101 @@ pub(crate) fn to_v2(conn: &Connection, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Which part of the v3 step is running (see [`UpgradeProgress`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UpgradeStage {
+    /// Rebuilding `transcript_segments` through the triggers.
+    Segments,
+    /// Re-chunking transcripts for semantic search.
+    Chunks,
+    /// Recording citation locators.
+    Citations,
+    /// Rebuilding `segments_fts` and committing.
+    Index,
+}
+
+/// Progress of the one-time v3 step, reported by
+/// [`Storage::open_with_progress`]. `done` / `total` are work units weighted
+/// by each stage's measured cost, not meetings: use them as a fraction.
+/// `total` is fixed for the run, `done` never decreases, and the last report
+/// has `done == total` (sent once the step has committed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpgradeProgress {
+    pub stage: UpgradeStage,
+    pub done: u64,
+    pub total: u64,
+}
+
+/// Units per transcript for each stage, in proportion to the stages' times
+/// in the 1,000-meeting benchmark (`tests/migration_v3.rs::v3_step_timing`):
+/// the trigger rebuild takes about 60 %, the re-chunk and the locators about
+/// 15 % each, the index rebuild and commit the rest.
+const UNITS_SEGMENTS: u64 = 8;
+const UNITS_CHUNKS: u64 = 2;
+const UNITS_CITATIONS: u64 = 2;
+const UNITS_INDEX: u64 = 1;
+
+/// Minimum gap between two reports within a stage.
+const REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Throttles progress reports (a stage's first report and the final one
+/// always go out) and times each stage for the log line.
+struct Reporter<'a> {
+    sink: &'a mut dyn FnMut(UpgradeProgress),
+    total: u64,
+    sent_at: Option<std::time::Instant>,
+    stage: Option<(UpgradeStage, std::time::Instant)>,
+    stage_ms: Vec<(UpgradeStage, u64)>,
+}
+
+impl<'a> Reporter<'a> {
+    fn new(sink: &'a mut dyn FnMut(UpgradeProgress), total: u64) -> Self {
+        Self {
+            sink,
+            total,
+            sent_at: None,
+            stage: None,
+            stage_ms: Vec::new(),
+        }
+    }
+
+    fn at(&mut self, stage: UpgradeStage, done: u64) {
+        let now = std::time::Instant::now();
+        let new_stage = self.stage.is_none_or(|(s, _)| s != stage);
+        if new_stage {
+            self.close_stage(now);
+            self.stage = Some((stage, now));
+        }
+        let due = new_stage
+            || done >= self.total
+            || self
+                .sent_at
+                .is_none_or(|t| now.duration_since(t) >= REPORT_EVERY);
+        if due {
+            (self.sink)(UpgradeProgress {
+                stage,
+                done: done.min(self.total),
+                total: self.total,
+            });
+            self.sent_at = Some(now);
+        }
+    }
+
+    fn close_stage(&mut self, now: std::time::Instant) {
+        if let Some((stage, since)) = self.stage.take() {
+            let ms = now.duration_since(since).as_millis() as u64;
+            self.stage_ms.push((stage, ms));
+        }
+    }
+
+    fn ms(&self, stage: UpgradeStage) -> u64 {
+        self.stage_ms
+            .iter()
+            .find(|(s, _)| *s == stage)
+            .map_or(0, |(_, ms)| *ms)
+    }
+}
+
 /// v3 — retrieval index + citation locators (one transaction, so a crash
 /// leaves the file exactly as it was and the step simply runs again):
 ///   * `transcript_segments` / `segments_fts` rebuilt for every transcript
@@ -51,39 +146,83 @@ pub(crate) fn to_v2(conn: &Connection, data_dir: &Path) -> Result<()> {
 /// re-chunked, its deletes are reconciled, and locators it never wrote are
 /// recorded. Unreadable rows are logged and skipped — never fatal, since a
 /// failing step would stop the app from opening.
-pub(crate) fn to_v3(storage: &Storage) -> Result<()> {
+///
+/// The trigger rebuild runs one transcript at a time — the same trigger,
+/// fired for the same rows, as a table-wide `UPDATE` — so `progress` can
+/// follow it.
+pub(crate) fn to_v3(storage: &Storage, progress: &mut dyn FnMut(UpgradeProgress)) -> Result<()> {
     let started = std::time::Instant::now();
     let conn = &storage.conn;
     let tx = conn.unchecked_transaction()?;
     conn.execute_batch(
         "DELETE FROM transcript_segments
           WHERE meeting_id NOT IN (SELECT meeting_id FROM transcripts);
-         UPDATE transcripts SET json = json;
          DELETE FROM embedding_chunks
           WHERE owner_kind = 'transcript'
             AND owner_id NOT IN (SELECT meeting_id FROM transcripts);",
     )?;
+    // Oldest meeting first: the re-chunk below hands each meeting's new
+    // chunk rows the next ids, and the embedding queue takes the highest
+    // ids first, so the newest meeting is re-embedded first. (Primary-key
+    // order would be the random order of the UUIDs.)
     let meeting_ids: Vec<String> = conn
-        .prepare("SELECT meeting_id FROM transcripts")?
+        .prepare(
+            "SELECT t.meeting_id FROM transcripts t
+               LEFT JOIN meetings m ON m.id = t.meeting_id
+              ORDER BY COALESCE(m.started_at, ''), t.meeting_id",
+        )?
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
-    for id in &meeting_ids {
+    // Units per transcript; an empty library still goes 0 → total.
+    let unit = (meeting_ids.len() as u64).max(1);
+    let chunks_at = UNITS_SEGMENTS * unit;
+    let citations_at = chunks_at + UNITS_CHUNKS * unit;
+    let index_at = citations_at + UNITS_CITATIONS * unit;
+    let total = index_at + UNITS_INDEX * unit;
+    let mut report = Reporter::new(progress, total);
+
+    report.at(UpgradeStage::Segments, 0);
+    {
+        let mut rebuild =
+            conn.prepare("UPDATE transcripts SET json = json WHERE meeting_id = ?1")?;
+        for (i, id) in meeting_ids.iter().enumerate() {
+            rebuild.execute([id])?;
+            report.at(UpgradeStage::Segments, UNITS_SEGMENTS * (i as u64 + 1));
+        }
+    }
+    report.at(UpgradeStage::Chunks, chunks_at);
+    for (i, id) in meeting_ids.iter().enumerate() {
         let res = storage
             .get_transcript(id)
             .and_then(|t| t.map_or(Ok(()), |t| storage.sync_transcript_chunks(&t)));
         if let Err(e) = res {
             tracing::warn!(meeting_id = %id, error = %e, "v3: skipping transcript chunks");
         }
+        report.at(
+            UpgradeStage::Chunks,
+            chunks_at + UNITS_CHUNKS * (i as u64 + 1),
+        );
     }
-    storage.sync_all_citations()?;
+    report.at(UpgradeStage::Citations, citations_at);
+    storage.sync_all_citations(&mut |done, of| {
+        let share = UNITS_CITATIONS * unit * done as u64 / (of as u64).max(1);
+        report.at(UpgradeStage::Citations, citations_at + share);
+    })?;
+    report.at(UpgradeStage::Index, index_at);
     // A keyword index left damaged by anything (an older build's crash, a
     // half-copied file) would now fail transcript writes: rebuild it from
     // its content table.
     storage.rebuild_segment_index()?;
     tx.commit()?;
+    report.at(UpgradeStage::Index, total);
+    report.close_stage(std::time::Instant::now());
     tracing::info!(
         meetings = meeting_ids.len(),
         elapsed_ms = started.elapsed().as_millis() as u64,
+        segments_ms = report.ms(UpgradeStage::Segments),
+        chunks_ms = report.ms(UpgradeStage::Chunks),
+        citations_ms = report.ms(UpgradeStage::Citations),
+        index_commit_ms = report.ms(UpgradeStage::Index),
         "schema v3 step done"
     );
     Ok(())
@@ -103,6 +242,16 @@ pub(crate) fn rename_legacy_db(data_dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The database file [`Storage::open`] will open in `data_dir`, after
+/// [`rename_legacy_db`]: `flyonthewall.db`, else a pre-rebrand `looma.db`
+/// (which the open renames first), else none yet.
+pub(crate) fn db_file_to_open(data_dir: &Path) -> Option<PathBuf> {
+    ["flyonthewall.db", "looma.db"]
+        .into_iter()
+        .map(|name| data_dir.join(name))
+        .find(|p| p.exists())
 }
 
 fn rename_meeting_dirs(conn: &Connection, data_dir: &Path) -> Result<()> {

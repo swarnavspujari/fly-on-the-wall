@@ -181,9 +181,12 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             let state = app.state::<AppState>();
             match tick(&state, &on_stage, &on_model).await {
                 Tick::Completed(meeting_id) => {
-                    // fresh transcript → new chunks for the semantic index
-                    state.embed_notify.notify_one();
                     ai_pass(&app, &state, &on_stage, &meeting_id).await;
+                    // Fresh transcript → new chunks for the semantic index.
+                    // After the AI pass: nudged before it, the worker would
+                    // start a batch only to abandon it when the pass begins,
+                    // and polish would re-chunk the meeting anyway.
+                    state.embed_notify.notify_one();
                     emit_final(&on_stage, &meeting_id, None)
                 }
                 Tick::Retrying {

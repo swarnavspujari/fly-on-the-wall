@@ -540,6 +540,15 @@ export interface SweepReport {
   held: string | null;
 }
 
+/** `library_status` and the `library:upgrade` event (src-tauri startup.rs).
+ *  `done` / `total` are progress units — a fraction, not meetings; both are 0
+ *  until the upgrade's first report. */
+export interface LibraryStatus {
+  phase: "ready" | "upgrading" | "failed";
+  done: number;
+  total: number;
+}
+
 export interface DiskEncryption {
   state: "on" | "off" | "unknown";
   method: "BitLocker" | "FileVault" | null;

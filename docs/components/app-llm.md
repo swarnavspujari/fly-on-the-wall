@@ -26,7 +26,7 @@ Policy and construction (`llm_commands.rs`):
 | `check_cloud_policy(provider, is_local, on_device, consented, keep_local)` (pure) | 541-566 | `build_provider`, tests |
 | `keep_local_refusal`, `is_consent_refusal`, `record_consent_skip` | 514-519, 438-455 | `build_provider`; `scheduler.rs:404`; `extraction.rs:317` |
 | `is_loopback_url`, `validate_base_url` | 522-533, 1134-1163 | `build_provider`, `set_llm_settings`, `embeddings.rs:172,198` |
-| `migrate_anthropic_model(&Storage)`, `reset_unseen_cloud_consent(&Storage)`, `CLOUD_CONSENT_RESET_FLAG` | 42-59, 72-119 | `lib.rs:111-117` (startup) |
+| `migrate_anthropic_model(&Storage)`, `reset_unseen_cloud_consent(&Storage)`, `CLOUD_CONSENT_RESET_FLAG` | 42-59, 72-119 | `startup.rs:187-195` (startup) |
 | `run_polish(&AppState, meeting_id) -> Result<PolishResult, String>` | 821-907 | `polish_transcript`, `scheduler.rs:393` (background AI pass) |
 | `build_ask_system(&Note, Option<&Transcript>, &PromptProfile)` (the pre-harness whole-transcript prompt) | Ask section | `tests/llm_bench.rs:670` only (the July baseline) |
 
