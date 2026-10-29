@@ -1097,7 +1097,6 @@ export function AskSheet({
   onNoteChanged,
   onOpenSource,
   onShowInserted,
-  turnExtras,
 }: {
   chat: AskChat;
   inputRef: AskInputRef;
@@ -1117,8 +1116,6 @@ export function AskSheet({
   onOpenSource?: OpenSource;
   /** "Show" after an insert: open the note's Enhanced view. */
   onShowInserted?: () => void;
-  /** Extra content for a turn (connector approval cards). */
-  turnExtras?: (turn: AskTurn) => ReactNode;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const { refreshLlm } = chat;
@@ -1267,7 +1264,6 @@ export function AskSheet({
           onOpenSource={onOpenSource}
           onShowInserted={onShowInserted}
           focusComposer={() => inputRef.current?.focus()}
-          extras={turnExtras?.(turn)}
         />
       ))}
 

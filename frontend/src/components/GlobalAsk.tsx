@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import { AskComposer, AskSheet, OPEN_ASK_EVENT } from "./AskPanel";
-import type { AskChat, AskTurn } from "./AskPanel";
+import type { AskChat } from "./AskPanel";
 import type { OpenSource } from "./AskAnswer";
 
 /* Ask over every meeting, from Home: the same composer and answer sheet as
@@ -13,11 +12,9 @@ import type { OpenSource } from "./AskAnswer";
 export default function GlobalAsk({
   chat,
   onOpenSource,
-  turnExtras,
 }: {
   chat: AskChat;
   onOpenSource: OpenSource;
-  turnExtras?: (turn: AskTurn) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -58,7 +55,6 @@ export default function GlobalAsk({
           onTogglePin={() => {}}
           onClose={() => setOpen(false)}
           onOpenSource={onOpenSource}
-          turnExtras={turnExtras}
         />
       )}
     </div>

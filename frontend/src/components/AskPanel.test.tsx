@@ -6,20 +6,28 @@ import { api } from "../api";
 import type { AskReply, AskStreamEvent, LlmSettings, Note, Transcript } from "../types";
 import { AskComposer, AskSheet, useAskChat } from "./AskPanel";
 import type { OpenSource } from "./AskAnswer";
+import { useInlineAskTurns } from "./AskConnectors";
+import { ConnectorCallStack } from "./ConnectorCallCard";
+import { KEEP_LOCAL_NOTICE } from "../connectorsModel";
 import { ConfirmProvider } from "./confirm";
 import { answerConsent, consentRequest, holdConsentRequests } from "./cloudConsentTesting";
 import { confirmChoice, confirmDialog, confirmTitle } from "./confirmTesting";
 
-// The `ask:event` stream: tests fire events at the chat's listener.
-const eventHandlers: Record<string, (e: { payload: unknown }) => void> = {};
+// Backend events (`ask:event`, `connectors:*`): tests fire them at every
+// listener.
+const eventHandlers: Record<string, ((e: { payload: unknown }) => void)[]> = {};
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, handler: (e: { payload: unknown }) => void) => {
-    eventHandlers[event] = handler;
-    return () => delete eventHandlers[event];
+    (eventHandlers[event] ??= []).push(handler);
+    return () => {
+      eventHandlers[event] = (eventHandlers[event] ?? []).filter((h) => h !== handler);
+    };
   }),
 }));
+const fire = (event: string, payload: unknown) =>
+  act(() => (eventHandlers[event] ?? []).forEach((h) => h({ payload })));
 const stream = (askId: string, event: AskStreamEvent) =>
-  act(() => eventHandlers["ask:event"]?.({ payload: { ask_id: askId, event } }));
+  fire("ask:event", { ask_id: askId, event });
 
 /** An `ask_meeting` reply with this text (one unsourced sentence). */
 const reply = (text: string, onDevice = true, extra: Partial<AskReply> = {}): AskReply => ({
@@ -216,6 +224,7 @@ beforeEach(() => {
   vi.spyOn(api, "getTranscript").mockResolvedValue(TRANSCRIPT);
   vi.spyOn(api, "listRecentNotes").mockResolvedValue(NOTES);
   vi.spyOn(api, "listFolders").mockResolvedValue(FOLDERS);
+  vi.spyOn(api, "pendingConnectorCalls").mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -1382,5 +1391,75 @@ describe("Ask harness answers", () => {
     act(() => window.dispatchEvent(new Event("fotw:llm-settings-changed")));
     await flush();
     expect(label().textContent).toBe("On this computer");
+  });
+});
+
+/* ------------------------------------------------------------- connectors */
+
+/** The app's corner stack, as App mounts it. */
+function CornerStack() {
+  const hide = useInlineAskTurns();
+  return <ConnectorCallStack hideTurnIds={hide} />;
+}
+
+const proposal = (turnId: string) => ({
+  proposalId: "cp1",
+  turnId,
+  serverId: "c-crm",
+  serverName: "Example CRM",
+  destination: "crm.example.com",
+  tool: "search_contacts",
+  toolTitle: "Search contacts",
+  kind: "read" as const,
+  destructive: false,
+  args: { query: "Example Co" },
+  inputSchema: { type: "object", properties: { query: { type: "string" } } },
+});
+
+describe("Ask and connectors", () => {
+  it("a connector card shows in the turn it belongs to, not twice", async () => {
+    render(
+      <>
+        <Harness noteId="n1" />
+        <CornerStack />
+      </>,
+    );
+    await openSheet();
+    const { id } = await askHeld("Look it up in the CRM");
+    fire("connectors:proposal", proposal(id));
+    await flush();
+    const inTurn = sheet()!.querySelector<HTMLElement>('[data-testid="ask-connector-cards"]')!;
+    expect(inTurn.getAttribute("aria-label")).toBe("Connector calls for this question");
+    expect(inTurn.textContent).toContain("Example CRM");
+    // the corner stack leaves it to the sheet
+    expect(host!.querySelector('[role=region][aria-label="Connector calls"]')).toBeNull();
+    // another turn's card stays in the corner
+    fire("connectors:proposal", { ...proposal("other-turn"), proposalId: "cp2" });
+    await flush();
+    expect(host!.querySelector('[role=region][aria-label="Connector calls"]')).not.toBeNull();
+    // close the sheet: this turn's card is back in the corner, still one card
+    key(input(), "Escape");
+    await flush();
+    expect(sheet()).toBeNull();
+    const corner = host!.querySelector<HTMLElement>('[role=region][aria-label="Connector calls"]')!;
+    expect(corner.textContent).toContain("1 more call waiting");
+  });
+
+  it("says when connectors were off because the question includes a Keep-local meeting", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue(
+      reply("…", true, {
+        sentences: [sourced("Dana owns pricing.", ["a1"])],
+        sources: [SOURCE_M1],
+        trace: { ...TRACE, tier: "M", connectors_off_keep_local: true },
+      }),
+    );
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("Who owns pricing?");
+    key(input(), "Enter");
+    await flush();
+    expect(sheet()!.querySelector('[data-testid="ask-connectors-off"]')!.textContent).toBe(
+      KEEP_LOCAL_NOTICE,
+    );
   });
 });

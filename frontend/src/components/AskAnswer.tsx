@@ -31,6 +31,8 @@ import {
 } from "../askCitations";
 import type { CiteGroup, CiteStatus, LocatedLine } from "../askCitations";
 import { ALL_SCOPE } from "../askScope";
+import { KEEP_LOCAL_NOTICE } from "../connectorsModel";
+import { AskConnectorCards } from "./AskConnectors";
 import { Button, CitationChip } from "./ui";
 import { SAFE_A, SAFE_IMG } from "./markdownSafe";
 import type { AskChat, AskTurn } from "./AskPanel";
@@ -448,7 +450,6 @@ export function AskTurnView({
   onOpenSource,
   onShowInserted,
   focusComposer,
-  extras,
 }: {
   turn: AskTurn;
   chat: AskChat;
@@ -463,7 +464,6 @@ export function AskTurnView({
   onOpenSource?: OpenSource;
   onShowInserted?: () => void;
   focusComposer: () => void;
-  extras?: ReactNode;
 }) {
   const reply = turn.phase === "done" ? turn.reply : null;
   const { located, check } = useLineStatus(reply);
@@ -775,7 +775,18 @@ export function AskTurnView({
         </ul>
       )}
 
-      {extras}
+      {/* connector calls Ask proposes for this question (connectors beta) */}
+      <AskConnectorCards turnId={turn.id} />
+      {reply?.trace?.connectors_off_keep_local && (
+        <p
+          className="m-0 flex items-start gap-1.5 px-1 text-[12px]"
+          style={{ color: "var(--text-3)" }}
+          data-testid="ask-connectors-off"
+        >
+          <Lock size={12} strokeWidth={1.75} aria-hidden="true" className="mt-0.5 flex-none" />
+          {KEEP_LOCAL_NOTICE}
+        </p>
+      )}
 
       {answered && insertNoteId && (
         <div className="flex flex-wrap items-center gap-2">

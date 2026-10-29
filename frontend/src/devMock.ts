@@ -1006,6 +1006,9 @@ const MOCK_VENDORS: Record<string, string> = {
      "zebra" / "unicorn"        → not found (nothing matched)
      "action" / "follow-up"     → proposals (an action item, a note insert)
      "price" / "pricing"        → a flagged number (the spoken-number check)
+     "crm" / "look up"          → with a cloud provider, the model first
+                                  proposes a connector call (Acme CRM): its
+                                  card shows in the turn, which waits on it
      anything else              → sourced sentences + one unsourced line
    Toggles (localStorage): fotwMockAskReply = unverified | refused forces
    that status; fotwMockAskStale = "1" cites one moved and one changed line;
@@ -1209,95 +1212,120 @@ function mockAsk(args: Record<string, unknown>): Promise<unknown> {
         kept_local_not_searched: keptLocalOut,
       }),
     );
-    if (shaped.status !== "not_found" && forcedStatus !== "refused") {
-      at((t += 150), () => emit({ type: "stage", stage: "answering" }));
-      at((t += 50), () => emit({ type: "turn_start", turn: 1 }));
-      // the model's words, streamed without markers
-      const words = shaped.sentences
-        .map((s) => s.text)
-        .join(" ")
-        .split(/(\s+)/);
-      let so_far = "";
-      for (const w of words) {
-        at((t += step / 3), () => {
-          if (cancelledNow()) return;
-          so_far += w;
-          emit({ type: "frame", turn: 1, text: so_far });
-        });
+    // The rest of the answer, from `start` ms (after a connector card, if
+    // the model asked for one).
+    const rest = (start: number) => {
+      t = start;
+      if (shaped.status !== "not_found" && forcedStatus !== "refused") {
+        at((t += 150), () => emit({ type: "stage", stage: "answering" }));
+        at((t += 50), () => emit({ type: "turn_start", turn: 1 }));
+        // the model's words, streamed without markers
+        const words = shaped.sentences
+          .map((s) => s.text)
+          .join(" ")
+          .split(/(\s+)/);
+        let so_far = "";
+        for (const w of words) {
+          at((t += step / 3), () => {
+            if (cancelledNow()) return;
+            so_far += w;
+            emit({ type: "frame", turn: 1, text: so_far });
+          });
+        }
+        at((t += 200), () => emit({ type: "stage", stage: "checking" }));
       }
-      at((t += 200), () => emit({ type: "stage", stage: "checking" }));
-    }
-    at((t += 300), () => {
-      if (cancelledNow()) return;
-      const status =
-        forcedStatus === "unverified" || forcedStatus === "refused" ? forcedStatus : shaped.status;
-      const sentences =
-        status === "unverified"
-          ? shaped.sentences.map((s) => ({
-              ...s,
-              citations: [],
-              status: "flagged",
-              flags: [{ kind: "uncited_claim" }],
-            }))
-          : status === "refused"
-            ? []
-            : shaped.sentences;
-      const text =
-        status === "not_found"
-          ? "Not found in your meetings."
-          : status === "refused"
-            ? "There's nothing to search here."
-            : sentences
-                .map((s, i) => (i && s.text.startsWith("- ") ? "\n" : i ? " " : "") + s.text)
-                .join("");
-      if (text) emit({ type: "frame", turn: 0, text });
-      const toolCalls =
-        tier === "C" && status === "answered"
-          ? [
-              { tool: "tool_search_passages", ok: true },
-              { tool: "tool_read_segments", ok: true },
-            ]
-          : [];
-      resolve({
-        status,
-        text,
-        sentences,
-        sources: status === "answered" || status === "unverified" ? shaped.sources : [],
-        proposals: status === "answered" ? mockAskProposals(question) : [],
-        refusals:
-          status === "answered" && /action|follow/.test(question.toLowerCase())
-            ? [{ tool: "add_action_item", reason: "unknown_owner" }]
-            : [],
-        trace: {
-          tier,
-          scope: scope.kind,
-          kept_local_not_searched: keptLocalOut,
-          meetings_in_scope: wide ? 4 : 1,
-          passages: status === "not_found" ? 0 : 6,
-          items: status === "not_found" ? 0 : 2,
-          tool_calls: toolCalls,
-          retried: false,
-          context_truncated: false,
-          floor_not_found: status === "not_found",
-          budget_forced: false,
-          connectors_off_keep_local: mockFlag("fotwMockAskConnectorsOff") === "1",
-        },
-        failure: null,
-        timing: { first_token_ms: 1100, total_ms: t + 600 },
-        trace_lines: [wide ? "Searched 4 meetings" : "Searched this meeting"],
-        on_device: local,
-        run_log: {
-          tier,
-          reach: local ? "reach_on_device" : "reach_cloud",
-          provider: `provider_${["ollama", "openai", "anthropic", "nim"].includes(provider) ? provider : "other"}`,
-          prefetch: {
-            searches: wide ? 3 : 2,
-            semantic: true,
-            memory_facts: /dana/.test(question.toLowerCase()) ? 3 : 0,
+      at((t += 300), () => {
+        if (cancelledNow()) return;
+        const status =
+          forcedStatus === "unverified" || forcedStatus === "refused"
+            ? forcedStatus
+            : shaped.status;
+        const sentences =
+          status === "unverified"
+            ? shaped.sentences.map((s) => ({
+                ...s,
+                citations: [],
+                status: "flagged",
+                flags: [{ kind: "uncited_claim" }],
+              }))
+            : status === "refused"
+              ? []
+              : shaped.sentences;
+        const text =
+          status === "not_found"
+            ? "Not found in your meetings."
+            : status === "refused"
+              ? "There's nothing to search here."
+              : sentences
+                  .map((s, i) => (i && s.text.startsWith("- ") ? "\n" : i ? " " : "") + s.text)
+                  .join("");
+        if (text) emit({ type: "frame", turn: 0, text });
+        const toolCalls =
+          tier === "C" && status === "answered"
+            ? [
+                { tool: "tool_search_passages", ok: true },
+                { tool: "tool_read_segments", ok: true },
+              ]
+            : [];
+        resolve({
+          status,
+          text,
+          sentences,
+          sources: status === "answered" || status === "unverified" ? shaped.sources : [],
+          proposals: status === "answered" ? mockAskProposals(question) : [],
+          refusals:
+            status === "answered" && /action|follow/.test(question.toLowerCase())
+              ? [{ tool: "add_action_item", reason: "unknown_owner" }]
+              : [],
+          trace: {
+            tier,
+            scope: scope.kind,
+            kept_local_not_searched: keptLocalOut,
+            meetings_in_scope: wide ? 4 : 1,
+            passages: status === "not_found" ? 0 : 6,
+            items: status === "not_found" ? 0 : 2,
+            tool_calls: toolCalls,
+            retried: false,
+            context_truncated: false,
+            floor_not_found: status === "not_found",
+            budget_forced: false,
+            connectors_off_keep_local: mockFlag("fotwMockAskConnectorsOff") === "1",
           },
-        },
+          failure: null,
+          timing: { first_token_ms: 1100, total_ms: t + 600 },
+          trace_lines: [wide ? "Searched 4 meetings" : "Searched this meeting"],
+          on_device: local,
+          run_log: {
+            tier,
+            reach: local ? "reach_on_device" : "reach_cloud",
+            provider: `provider_${["ollama", "openai", "anthropic", "nim"].includes(provider) ? provider : "other"}`,
+            prefetch: {
+              searches: wide ? 3 : 2,
+              semantic: true,
+              memory_facts: /dana/.test(question.toLowerCase()) ? 3 : 0,
+            },
+          },
+        });
       });
-    });
+    };
+    // A cloud model asking about the CRM proposes a connector call (tier C,
+    // connectors beta): the turn waits on its card, shown in the turn.
+    const crm = /\bcrm\b|look (it )?up/i.test(question) && !local && askId !== null;
+    const acme = mockConnectors.find((c) => c.id === "c-acme");
+    if (crm && acme) {
+      at((t += 150), () => {
+        if (cancelledNow()) return;
+        emit({ type: "stage", stage: "reading" });
+        void mockPropose(
+          acme,
+          mockConnectorTool(acme, "search_contacts"),
+          { query: "Acme", limit: 5 },
+          askId!,
+        ).then(() => rest(0));
+      });
+    } else {
+      rest(t);
+    }
   });
 }
 
