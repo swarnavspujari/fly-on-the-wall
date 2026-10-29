@@ -258,18 +258,32 @@ fn record_capture_health(
             }
         }
     }
-    let lost = |c: &Option<fly_audio::ChannelReport>| c.as_ref().map_or(0, |c| c.audio_lost_ms());
-    if health.audio_lost_ms() >= fly_audio::LOST_AUDIO_WARN_MS {
+    let payload = audio_lost_payload(health, meeting_id, note_id);
+    if payload.mic_lost_ms > 0 || payload.system_lost_ms > 0 {
         use tauri::Emitter;
-        let _ = app.emit(
-            "recording:audio_lost",
-            AudioLost {
-                meeting_id: meeting_id.to_string(),
-                note_id: note_id.to_string(),
-                mic_lost_ms: lost(&health.mic),
-                system_lost_ms: lost(&health.system),
-            },
-        );
+        let _ = app.emit("recording:audio_lost", payload);
+    }
+}
+
+/// What the stop notice reports: each side the live recording bar would have
+/// flagged (≥ `fly_audio::LOST_AUDIO_WARN_MS` lost on that channel), so the
+/// two always agree. Below it, a side reads 0 and no notice is raised for it.
+pub fn audio_lost_payload(
+    health: &fly_audio::CaptureHealthReport,
+    meeting_id: &str,
+    note_id: &str,
+) -> AudioLost {
+    let side = |c: &Option<fly_audio::ChannelReport>| {
+        c.as_ref()
+            .map(|c| c.audio_lost_ms())
+            .filter(|&ms| ms >= fly_audio::LOST_AUDIO_WARN_MS)
+            .unwrap_or(0)
+    };
+    AudioLost {
+        meeting_id: meeting_id.to_string(),
+        note_id: note_id.to_string(),
+        mic_lost_ms: side(&health.mic),
+        system_lost_ms: side(&health.system),
     }
 }
 
@@ -433,6 +447,30 @@ pub async fn open_privacy_settings() -> CmdResult<()> {
 #[cfg(test)]
 mod seed_tests {
     use super::*;
+
+    #[test]
+    fn the_stop_notice_flags_the_same_sides_as_the_live_bar() {
+        let side = |lost_ms| {
+            Some(fly_audio::ChannelReport {
+                lost_ms,
+                ..Default::default()
+            })
+        };
+        // 30 ms + 30 ms: no live chip on either side, so no notice
+        let quiet = fly_audio::CaptureHealthReport {
+            mic: side(30),
+            system: side(30),
+        };
+        let p = audio_lost_payload(&quiet, "m", "n");
+        assert_eq!((p.mic_lost_ms, p.system_lost_ms), (0, 0));
+        // only the side over the threshold is named
+        let one = fly_audio::CaptureHealthReport {
+            mic: side(30),
+            system: side(400),
+        };
+        let p = audio_lost_payload(&one, "m", "n");
+        assert_eq!((p.mic_lost_ms, p.system_lost_ms), (0, 400));
+    }
 
     fn att(email: &str, name: Option<&str>, is_self: bool, declined: bool) -> CalendarAttendee {
         CalendarAttendee {

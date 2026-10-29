@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# the contention bench's marker tone (src-tauri dev-dependency only)
+testtone = []
+
 [dependencies]
 fly-core.workspace = true
 serde.workspace = true

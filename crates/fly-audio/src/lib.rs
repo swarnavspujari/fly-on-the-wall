@@ -12,12 +12,15 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 mod coreaudio_tap;
 pub mod cpal_backend;
+mod gaps;
 pub mod mix;
 pub mod null;
 #[cfg(target_os = "linux")]
 mod pulse_loopback;
 mod sink;
 pub mod tap_messages;
+/// Bench-only (a cpal output player + analyzer): not in the shipped app.
+#[cfg(any(test, feature = "testtone"))]
 pub mod testtone;
 pub mod vad;
 #[cfg(target_os = "windows")]

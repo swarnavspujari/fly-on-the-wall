@@ -23,6 +23,7 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+use crate::gaps::{ChannelKind, Gap, GapTracker, Packet, BACKLOG_SANE_NS};
 use crate::mix::{write_mixdown, write_playback_mix};
 use crate::sink::{self, ChannelProducer, ChannelSink, ChannelStats, WriterThread};
 use crate::{
@@ -170,6 +171,12 @@ impl CaptureHealth {
         .into_iter()
         .flatten()
         {
+            if stats.device_lost.load(Ordering::Relaxed) {
+                out.push(device_lost_warning(mic));
+            }
+            if stats.write_failed.load(Ordering::Relaxed) > 0 {
+                out.push(write_failed_warning(mic));
+            }
             let lost_ms = stats.lost_frames() * 1000 / rate.max(1) as u64;
             if lost_ms >= crate::LOST_AUDIO_WARN_MS {
                 let at = stats
@@ -213,6 +220,35 @@ pub(crate) fn lost_audio_warning(mic: bool, lost_ms: u64, last_at_ms: u64) -> St
     format!(
         "{what} has gaps: {secs:.1} s was lost because the computer was too busy (most \
          recently at {when}). The rest is still recording — closing heavy apps can help."
+    )
+}
+
+/// The device stopped delivering (unplugged, or the default device changed
+/// and loopback stays on the old one). Classifier key: "changed or
+/// disconnected" (+ "microphone" for the side).
+pub(crate) fn device_lost_warning(mic: bool) -> String {
+    if mic {
+        "Your microphone changed or disconnected — your side may be missing from the rest of \
+         this recording. Stop and record again to use the current microphone."
+            .to_string()
+    } else {
+        "The sound output changed or disconnected — the other participants may be missing from \
+         the rest of this recording. Stop and record again to follow the current output."
+            .to_string()
+    }
+}
+
+/// Audio couldn't be written (full disk, I/O error). Classifier key:
+/// "couldn't be saved" (+ "microphone" for the side).
+pub(crate) fn write_failed_warning(mic: bool) -> String {
+    let what = if mic {
+        "your microphone audio"
+    } else {
+        "the other participants' audio"
+    };
+    format!(
+        "Part of {what} couldn't be saved — the disk may be full or unavailable. Free up space; \
+         the recording keeps trying."
     )
 }
 
@@ -612,12 +648,6 @@ fn build_loopback_channel(
     Err(AudioError::LoopbackUnsupported)
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum ChannelKind {
-    Mic,
-    Loopback,
-}
-
 /// WASAPI's own capture buffer. With the default (≈10 ms on common laptop
 /// drivers) any callback delay past one period drops audio; this much
 /// headroom rides out scheduler stalls. Shared mode keeps the callback
@@ -629,28 +659,6 @@ const WASAPI_BUFFER_MS: u32 = 400;
 /// measured to be exact (WASAPI: the device position's QPC time). Elsewhere
 /// a jittery timestamp would insert silence into good audio.
 const TIMESTAMP_GAPS: bool = cfg!(target_os = "windows");
-/// Smaller timestamp jumps are clock jitter, not a dropped packet (one
-/// WASAPI period is 10 ms).
-const GAP_MIN_NS: i128 = 5_000_000;
-
-/// Per-callback state for capture-timestamp gap detection.
-struct GapTracker {
-    epoch: u64,
-    /// Expected capture time of the next packet's first frame.
-    next_capture_ns: Option<i128>,
-    last_callback_ns: i128,
-    /// Device time of the last packet that waited in our buffer for most of
-    /// its length. Our buffer can only overflow after that; a loss with no
-    /// such packet in the second before it happened upstream (audio engine
-    /// or driver).
-    last_backlog_high_ns: Option<i128>,
-    /// Peak |sample| of the previous packet (mono i16).
-    prev_peak: i16,
-}
-
-/// About -60 dBFS: a packet this quiet is silence for the idle rule.
-const SILENT_PEAK: i16 = 33;
-
 /// Now on the QPC clock, ns — the clock WASAPI capture timestamps use.
 /// User-mode and wait-free, so fine in a callback.
 #[cfg(target_os = "windows")]
@@ -679,11 +687,6 @@ fn qpc_frequency() -> i64 {
     1
 }
 
-/// How long after a near-full buffer a loss is still blamed on this app.
-const BACKLOG_BLAME_NS: i128 = 1_000_000_000;
-/// A backlog above this is implausible (a bad timestamp), not measured.
-const BACKLOG_SANE_NS: i128 = 10_000_000_000;
-
 /// Build a capture stream for one channel. On Windows it first asks for a
 /// deep WASAPI buffer; a driver that refuses it still gets a working stream
 /// with the default one.
@@ -699,7 +702,6 @@ fn build_recorder(
     {
         let mut deep = base;
         deep.buffer_size = cpal::BufferSize::Fixed(base.sample_rate * WASAPI_BUFFER_MS / 1000);
-        let high_water_ns = WASAPI_BUFFER_MS as i128 * 1_000_000 * 3 / 4;
         match build_stream(
             device,
             config.sample_format(),
@@ -707,7 +709,7 @@ fn build_recorder(
             &path,
             &clock,
             kind,
-            high_water_ns,
+            WASAPI_BUFFER_MS as i128 * 1_000_000,
         ) {
             Ok(r) => return Ok(r),
             Err(e) => tracing::warn!(
@@ -715,7 +717,7 @@ fn build_recorder(
             ),
         }
     }
-    // the default buffer is about one period: any backlog fills it
+    // the default shared-mode buffer is about a couple of periods
     build_stream(
         device,
         config.sample_format(),
@@ -723,7 +725,7 @@ fn build_recorder(
         &path,
         &clock,
         kind,
-        5_000_000,
+        20_000_000,
     )
 }
 
@@ -745,13 +747,15 @@ fn build_stream(
     path: &std::path::Path,
     clock: &Arc<Clock>,
     kind: ChannelKind,
-    high_water_ns: i128,
+    buffer_ns: i128,
 ) -> Result<(ChannelRecorder, ChannelSink)> {
     let channels = stream_config.channels.max(1) as usize;
     let rate: u32 = stream_config.sample_rate;
     let (producer, sink) = sink::channel(path.to_path_buf(), rate)?;
     let stats = sink.stats();
     let qpf = qpc_frequency();
+    // a backlog at 3/4 of the buffer means it was nearly full
+    let high_water_ns = buffer_ns * 3 / 4;
 
     macro_rules! build_for {
         ($t:ty) => {{
@@ -759,129 +763,103 @@ fn build_stream(
             let clock = clock.clone();
             let err_stats = stats.clone();
             let err_path = path.to_path_buf();
-            let err_fn = move |e: cpal::Error| {
-                if matches!(e.kind(), cpal::ErrorKind::Xrun) {
-                    // WASAPI flags loopback state changes this way too; real
-                    // losses are measured from the timestamps instead
+            let err_fn = move |e: cpal::Error| match e.kind() {
+                // WASAPI flags loopback state changes this way too; real
+                // losses are measured from the timestamps instead
+                cpal::ErrorKind::Xrun => {
                     err_stats.xruns.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    tracing::error!(
+                }
+                // the device went away or the default changed under us:
+                // this stream won't deliver again
+                cpal::ErrorKind::DeviceNotAvailable
+                | cpal::ErrorKind::DeviceChanged
+                | cpal::ErrorKind::StreamInvalidated => {
+                    err_stats.device_lost.store(true, Ordering::Relaxed);
+                    tracing::warn!(
                         file = %err_path.file_name().unwrap_or_default().to_string_lossy(),
-                        "audio stream error: {e}"
+                        "capture device lost: {e}"
                     )
                 }
+                _ => tracing::error!(
+                    file = %err_path.file_name().unwrap_or_default().to_string_lossy(),
+                    "audio stream error: {e}"
+                ),
             };
-            let mut boosted = false;
+            let mut priority: Option<sink::PriorityGuard> = None;
             let mut started = false;
-            let mut gaps = GapTracker {
-                epoch: clock.epoch(),
-                next_capture_ns: None,
-                last_callback_ns: 0,
-                last_backlog_high_ns: None,
-                prev_peak: 0,
-            };
+            let mut gaps = GapTracker::new(kind, rate, buffer_ns, high_water_ns, clock.epoch());
             device.build_input_stream(
                 stream_config,
                 move |data: &[$t], info: &cpal::InputCallbackInfo| {
-                    if !boosted {
-                        boosted = true;
-                        if sink::boost_capture_thread() {
+                    if priority.is_none() {
+                        let guard = sink::boost_capture_thread();
+                        if guard.raised() {
                             producer.stats().boosted.store(true, Ordering::Relaxed);
                         }
+                        priority = Some(guard);
                     }
                     let frames = (data.len() / channels) as u64;
                     let now_ms = clock.elapsed_ms();
                     let ts = info.timestamp();
                     let cap = ts.capture.as_nanos() as i128;
-                    let cb = ts.callback.as_nanos() as i128;
                     // backlog: how long this packet sat in the OS buffer
                     let backlog = if TIMESTAMP_GAPS {
-                        qpc_now_ns(qpf) - cap
+                        Some(qpc_now_ns(qpf) - cap).filter(|b| (0..BACKLOG_SANE_NS).contains(b))
                     } else {
-                        0
+                        None
                     };
-                    let backlog_ok = (0..BACKLOG_SANE_NS).contains(&backlog);
+                    if let Some(b) = backlog {
+                        producer
+                            .stats()
+                            .max_backlog_us
+                            .fetch_max((b / 1000) as u64, Ordering::Relaxed);
+                    }
                     // Judge the packet at the time it was captured, not now:
                     // after a stall the buffer hands over audio up to a
                     // buffer's length old, which isn't behind the clock.
-                    let at_ms = if backlog_ok {
-                        now_ms.saturating_sub((backlog / 1_000_000) as u64)
-                    } else {
-                        now_ms
+                    let at_ms = match backlog {
+                        Some(b) => now_ms.saturating_sub((b / 1_000_000) as u64),
+                        None => now_ms,
                     };
                     let expected = at_ms * rate as u64 / 1000;
 
                     if TIMESTAMP_GAPS {
-                        let epoch = clock.epoch();
-                        if epoch != gaps.epoch {
-                            // resumed after a pause: the jump is the pause
-                            gaps.epoch = epoch;
-                            gaps.next_capture_ns = None;
-                        }
-                        if backlog_ok {
-                            producer
-                                .stats()
-                                .max_backlog_us
-                                .fetch_max((backlog / 1000) as u64, Ordering::Relaxed);
-                            if backlog >= high_water_ns {
-                                gaps.last_backlog_high_ns = Some(cb);
-                            }
-                        }
-                        if let Some(next) = gaps.next_capture_ns {
-                            let gap_ns = cap - next;
-                            let waited_ns = cb - gaps.last_callback_ns;
-                            // our buffer was nearly full just before: this
-                            // app fell behind, whatever else is true
-                            let ours = gaps
-                                .last_backlog_high_ns
-                                .is_some_and(|at| cb - at < BACKLOG_BLAME_NS);
-                            // Loopback stops delivering when nothing plays,
-                            // and the callback then waits as long as the gap.
-                            // Only a gap after silence can be that: meeting
-                            // apps render continuous silence during a call,
-                            // so a gap right after audible output is lost
-                            // audio (an engine stall looks idle by timing
-                            // alone). A gap after silence lost nothing
-                            // audible either way.
-                            let idle = kind == ChannelKind::Loopback
-                                && gap_ns > GAP_MIN_NS
-                                && waited_ns * 2 >= gap_ns
-                                && gaps.prev_peak <= SILENT_PEAK
-                                && !ours;
-                            if gap_ns > GAP_MIN_NS {
-                                // Every gap becomes the same length of silence,
-                                // so the channel follows the device's timeline
-                                // exactly; it counts as a loss unless idle.
-                                let lost = !idle;
-                                if lost && !ours {
+                        // never let a gap put the channel more than half a
+                        // second ahead of the clock
+                        let room = (expected + rate as u64 / 2)
+                            .saturating_sub(producer.timeline() + frames);
+                        let packet = Packet {
+                            capture_ns: cap,
+                            callback_ns: ts.callback.as_nanos() as i128,
+                            backlog_ns: backlog,
+                            frames,
+                            epoch: clock.epoch(),
+                            room,
+                        };
+                        match gaps.observe(&packet) {
+                            Gap::Fill {
+                                frames: fill,
+                                lost,
+                                upstream,
+                            } if fill > 0 => {
+                                if lost && upstream {
                                     producer
                                         .stats()
                                         .upstream_lost_events
                                         .fetch_add(1, Ordering::Relaxed);
                                 }
-                                let gap = (gap_ns * rate as i128 / 1_000_000_000) as u64;
-                                // never run more than half a second ahead of
-                                // the clock, whatever a timestamp claims
-                                let room = (expected + rate as u64 / 2)
-                                    .saturating_sub(producer.timeline() + frames);
-                                let fill = gap.min(room);
-                                producer.silence(fill, lost, now_ms);
-                                if lost && gap > fill {
-                                    producer
-                                        .stats()
-                                        .lost
-                                        .fetch_add(gap - fill, Ordering::Relaxed);
-                                }
+                                producer.silence(fill, lost, at_ms);
                             }
+                            Gap::Resync => {
+                                producer.stats().resyncs.fetch_add(1, Ordering::Relaxed);
+                            }
+                            _ => {}
                         }
-                        gaps.next_capture_ns =
-                            Some(cap + frames as i128 * 1_000_000_000 / rate as i128);
-                        gaps.last_callback_ns = cb;
                     }
 
                     if kind == ChannelKind::Loopback || !started {
                         let pad = idle_pad_frames(expected, producer.timeline() + frames, rate);
-                        producer.silence(pad, false, now_ms);
+                        producer.silence(pad, false, at_ms);
                     }
                     started = true;
 
@@ -896,9 +874,9 @@ fn build_stream(
                         peak = peak.max(sample.saturating_abs());
                         producer.push(sample);
                     }
-                    gaps.prev_peak = peak;
+                    gaps.end_packet(peak);
                     producer.end_packet();
-                    producer.note_time(now_ms);
+                    producer.note_time(at_ms);
                 },
                 err_fn,
                 None,
@@ -949,6 +927,47 @@ mod tests {
         );
         assert!(sys.contains("0.1 s"), "{sys}");
         assert!(sys.contains("1:02:05"), "{sys}");
+    }
+
+    #[test]
+    fn device_and_disk_warnings_match_the_recording_bar_classifier() {
+        // recordingBar.ts: "changed or disconnected" → "Device changed",
+        // "couldn't be saved" → "Not saving"; "microphone" → You side
+        let mic = device_lost_warning(true);
+        assert!(mic.contains("changed or disconnected") && mic.contains("microphone"));
+        let sys = device_lost_warning(false);
+        assert!(sys.contains("changed or disconnected") && !sys.contains("microphone"));
+        let mic = write_failed_warning(true);
+        assert!(mic.contains("couldn't be saved") && mic.contains("microphone"));
+        let sys = write_failed_warning(false);
+        assert!(sys.contains("couldn't be saved") && !sys.contains("microphone"));
+        // none of them may read as lost-to-load audio
+        for w in [device_lost_warning(true), write_failed_warning(false)] {
+            assert!(!w.contains("was lost"), "{w}");
+        }
+    }
+
+    #[test]
+    // the struct update is needed on macOS (the tap field)
+    #[allow(clippy::needless_update)]
+    fn device_loss_and_write_failures_are_warned_per_side() {
+        let mic = Arc::new(ChannelStats::default());
+        let sys = Arc::new(ChannelStats::default());
+        let h = CaptureHealth {
+            mic: Some((mic.clone(), 48_000)),
+            system: Some((sys.clone(), 48_000)),
+            ..Default::default()
+        };
+        assert!(h.warnings().is_empty());
+        sys.device_lost.store(true, Ordering::Relaxed);
+        mic.write_failed.store(480, Ordering::Relaxed);
+        let w = h.warnings();
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w.contains(&write_failed_warning(true)));
+        assert!(w.contains(&device_lost_warning(false)));
+        let r = h.report();
+        assert!(r.system.unwrap().device_lost);
+        assert_eq!(r.mic.unwrap().write_failed_ms, 10);
     }
 
     #[test]

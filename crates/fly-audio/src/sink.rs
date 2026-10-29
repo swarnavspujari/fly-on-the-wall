@@ -78,6 +78,16 @@ pub(crate) struct ChannelStats {
     /// Losses that happened while the callback was running on time: audio
     /// the OS audio engine or driver dropped before this app could read it.
     pub upstream_lost_events: AtomicU64,
+    /// Capture timestamps that couldn't be right (re-anchored, nothing
+    /// inserted).
+    pub resyncs: AtomicU64,
+    /// The device went away or the default changed: the stream stopped.
+    pub device_lost: AtomicBool,
+    /// Frames that failed to reach the file (disk full, I/O error).
+    pub write_failed: AtomicU64,
+    /// Silence still owed to the timeline when the producer closed; the
+    /// writer appends it at finalize.
+    pub unflushed: AtomicU64,
 }
 
 impl ChannelStats {
@@ -103,6 +113,9 @@ impl ChannelStats {
             realtime_priority: self.boosted.load(Ordering::Relaxed),
             max_backlog_ms: self.max_backlog_us.load(Ordering::Relaxed) / 1000,
             upstream_lost_events: self.upstream_lost_events.load(Ordering::Relaxed),
+            timestamp_resyncs: self.resyncs.load(Ordering::Relaxed),
+            device_lost: self.device_lost.load(Ordering::Relaxed),
+            write_failed_ms: ms(self.write_failed.load(Ordering::Relaxed)),
         }
     }
 }
@@ -140,6 +153,16 @@ pub struct ChannelReport {
     /// in-app change can prevent — only report.
     #[serde(default)]
     pub upstream_lost_events: u64,
+    /// Capture timestamps that couldn't be right (re-anchored, nothing
+    /// inserted or counted).
+    #[serde(default)]
+    pub timestamp_resyncs: u64,
+    /// The device disconnected or the default device changed mid-recording.
+    #[serde(default)]
+    pub device_lost: bool,
+    /// Audio that couldn't be written to disk (full disk, I/O error).
+    #[serde(default)]
+    pub write_failed_ms: u64,
 }
 
 impl ChannelReport {
@@ -158,8 +181,32 @@ pub(crate) struct ChannelProducer {
     timeline: u64,
     /// Overflowed frames not yet put back on the timeline as silence.
     owed: u64,
+    /// In an overflow episode: until an audio block gets through again, more
+    /// dropped blocks are the same event.
+    overflowing: bool,
     block: [i16; BLOCK],
     filled: usize,
+}
+
+impl Drop for ChannelProducer {
+    /// The stream is gone: whatever the ring couldn't take is still owed to
+    /// the timeline. The writer appends it at finalize, so the file isn't
+    /// short.
+    fn drop(&mut self) {
+        let mut owed = self.owed;
+        if self.filled > 0 {
+            // a packet cut short (can't happen between callbacks): its
+            // frames are on no timeline yet, so they're lost, not owed
+            self.filled = 0;
+        }
+        if owed > 0
+            && self.ring.slots() > 0
+            && self.ring.push(Block::Silence { frames: owed }).is_ok()
+        {
+            owed = 0;
+        }
+        self.stats.unflushed.fetch_add(owed, Ordering::Relaxed);
+    }
 }
 
 impl ChannelProducer {
@@ -203,9 +250,11 @@ impl ChannelProducer {
                 data: self.block,
             });
             self.stats.captured.fetch_add(frames, Ordering::Relaxed);
+            self.overflowing = false;
         } else {
-            if self.owed == 0 {
+            if !self.overflowing {
                 self.stats.overflow_events.fetch_add(1, Ordering::Relaxed);
+                self.overflowing = true;
             }
             self.owed += frames;
             self.stats.overflow.fetch_add(frames, Ordering::Relaxed);
@@ -297,6 +346,7 @@ pub(crate) fn channel(path: PathBuf, rate: u32) -> Result<(ChannelProducer, Chan
             stats: stats.clone(),
             timeline: 0,
             owed: 0,
+            overflowing: false,
             block: [0; BLOCK],
             filled: 0,
         },
@@ -333,20 +383,23 @@ impl ChannelSink {
         };
         let mut n = 0u64;
         while let Ok(block) = self.ring.pop() {
-            let res = match block {
-                Block::Audio { len, data } => {
-                    n += len as u64;
+            let (frames, res) = match block {
+                Block::Audio { len, data } => (
+                    len as u64,
                     data[..len as usize]
                         .iter()
-                        .try_for_each(|s| wav.write_sample(*s))
-                }
+                        .try_for_each(|s| wav.write_sample(*s)),
+                ),
                 Block::Silence { frames } => {
-                    n += frames;
-                    (0..frames).try_for_each(|_| wav.write_sample(0i16))
+                    (frames, (0..frames).try_for_each(|_| wav.write_sample(0i16)))
                 }
             };
-            if res.is_err() {
+            if res.is_ok() {
+                n += frames;
+            } else {
+                // the block didn't make it (disk full?): not in the file
                 self.stats.write_errors.fetch_add(1, Ordering::Relaxed);
+                self.stats.write_failed.fetch_add(frames, Ordering::Relaxed);
             }
         }
         self.stats.written.fetch_add(n, Ordering::Relaxed);
@@ -366,6 +419,13 @@ impl ChannelSink {
         let Some(mut wav) = self.wav.take() else {
             return Ok(());
         };
+        // silence the producer still owed when it closed (the ring was full)
+        let owed = self.stats.unflushed.swap(0, Ordering::Relaxed);
+        for _ in 0..owed {
+            wav.write_sample(0i16)
+                .map_err(|e| AudioError::Backend(e.to_string()))?;
+        }
+        self.stats.written.fetch_add(owed, Ordering::Relaxed);
         let target = self.tail_to.load(Ordering::Relaxed);
         let have = self.stats.written.load(Ordering::Relaxed);
         if target > have {
@@ -456,28 +516,78 @@ impl Drop for WriterThread {
     }
 }
 
+/// Real-time scheduling for the calling (capture) thread, held for the
+/// thread's life: dropping it (with the callback, on the same thread)
+/// reverts MMCSS.
+pub(crate) struct PriorityGuard {
+    raised: bool,
+    /// The MMCSS task handle, as an integer so the guard is Send.
+    #[cfg(target_os = "windows")]
+    mmcss: Option<isize>,
+}
+
+impl PriorityGuard {
+    pub(crate) fn raised(&self) -> bool {
+        self.raised
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for PriorityGuard {
+    fn drop(&mut self) {
+        if let Some(h) = self.mmcss.take() {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::System::Threading::AvRevertMmThreadCharacteristics;
+            let _ = unsafe { AvRevertMmThreadCharacteristics(HANDLE(h as *mut std::ffi::c_void)) };
+        }
+    }
+}
+
 /// Ask Windows to schedule the calling (capture) thread as real-time audio
-/// (MMCSS "Pro Audio"). Without it the capture thread competes at normal
-/// priority with transcription and embedding threads, and WASAPI's capture
-/// buffer overflows when it is starved. Returns whether it worked. Other
-/// OSes: Core Audio's IO threads are already real-time; no-op.
-pub(crate) fn boost_capture_thread() -> bool {
+/// (MMCSS "Pro Audio"); if MMCSS refuses, at least time-critical priority.
+/// Without it the capture thread competes at normal priority with
+/// transcription and embedding threads, and WASAPI's capture buffer
+/// overflows when it is starved. Other OSes: Core Audio's IO threads are
+/// already real-time; no-op.
+pub(crate) fn boost_capture_thread() -> PriorityGuard {
     #[cfg(target_os = "windows")]
     unsafe {
         use windows::core::w;
-        use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
+        use windows::Win32::System::Threading::{
+            AvSetMmThreadCharacteristicsW, GetCurrentThread, SetThreadPriority,
+            THREAD_PRIORITY_TIME_CRITICAL,
+        };
         let mut task_index = 0u32;
-        AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index).is_ok()
+        if let Ok(h) = AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index) {
+            return PriorityGuard {
+                raised: true,
+                mmcss: Some(h.0 as isize),
+            };
+        }
+        let raised = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL).is_ok();
+        PriorityGuard {
+            raised,
+            mmcss: None,
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        false
+        PriorityGuard { raised: false }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wait for `cond`, polling: a loaded CI box can take a while.
+    fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !cond() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     fn read(path: &std::path::Path) -> Vec<i16> {
         hound::WavReader::open(path)
@@ -537,7 +647,10 @@ mod tests {
         tx.note_time(4_000);
         assert!(stats.overflow.load(Ordering::Relaxed) > 0);
         let writer = WriterThread::spawn(vec![sink]).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
+        // the writer empties the ring (70 blocks)
+        eventually("the ring to drain", || {
+            stats.written.load(Ordering::Relaxed) == (70 * BLOCK) as u64
+        });
         // room again: the next block first settles the owed silence
         for _ in 0..BLOCK {
             tx.push(9);
@@ -591,12 +704,61 @@ mod tests {
             tx.push(5);
         }
         tx.end_packet();
-        std::thread::sleep(FLUSH_EVERY + Duration::from_millis(300));
-        let len = std::fs::metadata(&path).unwrap().len();
-        assert_eq!(len, 44 + 32_000, "flushed audio is on disk mid-recording");
-        // and the header is already current (crash-safe)
-        assert_eq!(read(&path).len(), 16_000);
+        // the periodic flush puts the audio on disk mid-recording…
+        eventually("the audio to reach the file", || {
+            std::fs::metadata(&path).is_ok_and(|m| m.len() == 44 + 32_000)
+        });
+        // …with the header already current (crash-safe)
+        eventually("the header to catch up", || {
+            hound::WavReader::open(&path).is_ok_and(|r| r.len() == 16_000)
+        });
+        assert!(read(&path).iter().all(|&v| v == 5));
         drop(tx);
         writer.finish().unwrap();
+    }
+    #[test]
+    fn silence_still_owed_at_close_reaches_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.wav");
+        let (mut tx, sink) = channel(path.clone(), 100).unwrap(); // 70 slots
+        let stats = sink.stats();
+        let total = 80 * BLOCK;
+        for _ in 0..total {
+            tx.push(4);
+        }
+        // the stream stops while the ring is still full: 10 blocks owed
+        drop(tx);
+        assert_eq!(stats.unflushed.load(Ordering::Relaxed), (10 * BLOCK) as u64);
+        WriterThread::spawn(vec![sink]).unwrap().finish().unwrap();
+        let s = read(&path);
+        assert_eq!(s.len(), total, "the file isn't short");
+        assert!(s[70 * BLOCK..].iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn one_overflow_episode_is_one_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("e.wav");
+        let (mut tx, mut sink) = channel(path, 100).unwrap(); // 70 slots
+        for _ in 0..80 * BLOCK {
+            tx.push(1);
+        }
+        assert_eq!(sink.stats().overflow_events.load(Ordering::Relaxed), 1);
+        // exactly one slot frees: the owed silence takes it, the next block
+        // still doesn't fit — the same episode, not a new one
+        assert!(sink.ring.pop().is_ok());
+        for _ in 0..BLOCK {
+            tx.push(1);
+        }
+        assert_eq!(sink.stats().overflow_events.load(Ordering::Relaxed), 1);
+        // the writer catches up, audio flows, then a new overflow is new
+        while sink.ring.pop().is_ok() {}
+        for _ in 0..BLOCK {
+            tx.push(1);
+        }
+        for _ in 0..80 * BLOCK {
+            tx.push(1);
+        }
+        assert_eq!(sink.stats().overflow_events.load(Ordering::Relaxed), 2);
     }
 }

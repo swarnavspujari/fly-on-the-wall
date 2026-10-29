@@ -29,6 +29,8 @@ The one-row bar pinned above every view while audio is recording: indicator and 
 | Chip label | Matched by | Backend sentence | Rust source | When |
 |---|---|---|---|---|
 | Blocked by macOS (+ "Open Settings") | contains `Screen & System Audio Recording`, or `recording only silence` | "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, … Open System Settings → Privacy & Security → Screen & System Audio Recording …" | `crates/fly-audio/src/tap_messages.rs:15`, `:25-35`; raised by `coreaudio_tap.rs:154-167` through `CaptureHealth` (`cpal_backend.rs:153-158`) | macOS, re-checked every poll |
+| Device changed (You side if it says `microphone`, else Others) | `changed or disconnected` | "Your microphone changed or disconnected — your side may be missing from the rest of this recording. …" / "The sound output changed or disconnected — …" | `cpal_backend.rs` `device_lost_warning` (a `DeviceNotAvailable` / `DeviceChanged` / `StreamInvalidated` stream error) | Any OS, from then on |
+| Not saving (You side if it says `microphone`, else Others) | `couldn't be saved` | "Part of your microphone audio couldn't be saved — the disk may be full or unavailable. …" | `cpal_backend.rs` `write_failed_warning` (the WAV writer failed a block) | Any OS, from then on |
 | Audio lost (You side if it says `microphone`, else Others) | `was lost` | "Your microphone has gaps: 1.2 s was lost because the computer was too busy (most recently at 12:34). The rest is still recording — closing heavy apps can help." / "The other participants' audio has gaps: …" | `crates/fly-audio/src/cpal_backend.rs` `lost_audio_warning`, raised by `CaptureHealth::warnings` once a channel lost ≥ 50 ms (ring overflow or WASAPI capture-timestamp gap); stays for the rest of the recording | Any OS (device-level gaps: Windows only), every poll |
 | Not recorded | `couldn't start` (ASCII apostrophe) | "System audio capture couldn't start (<cause>) — only your microphone is being recorded, so the other participants won't be in this recording." | `crates/fly-audio/src/cpal_backend.rs:359-362` | Any OS, set once at start |
 | Volume at 0% | `volume is at 0%` | "System volume is at 0% — the other participants' audio will record as silence. Raise your system volume." | `cpal_backend.rs:84-88` | Windows only (`cfg`), every poll |
@@ -56,7 +58,7 @@ The bar has no Tauri events of its own: `status` comes from App's 1 s poll, so a
 | Key (or prefix) | Read / write | Webview-settable? (`is_webview_setting_key`) | Meaning |
 |---|---|---|---|
 | `ui.recording.remind_notice` | R `RecordingBar.tsx:62` (written by `RemindNoticeRow`, [ui-notices](ui-notices.md)) | yes (`ui.`) | Show the "Let participants know" reminder at start |
-| devMock toggles | — | n/a | `fotwMockRecording`, `fotwMockRecWarning` (`none` / `muted` / `volume` / `loopback` / `macos` / `worst` / `lost`), `fotwMockTapDenied`, `fotwMockNoAttendees`, `fotwMockAudioLost` (Stop emits `recording:audio_lost`, shown by [ui-notices](ui-notices.md)) |
+| devMock toggles | — | n/a | `fotwMockRecording`, `fotwMockRecWarning` (`none` / `muted` / `volume` / `loopback` / `macos` / `worst` / `lost` / `device` / `disk`), `fotwMockTapDenied`, `fotwMockNoAttendees`, `fotwMockAudioLost` (Stop emits `recording:audio_lost`, shown by [ui-notices](ui-notices.md)) |
 
 ### Database
 None directly. "Participants notified" is stored per meeting behind `get_meeting_privacy` / `set_participants_notified` (see [app-privacy](app-privacy.md)).

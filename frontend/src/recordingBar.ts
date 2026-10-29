@@ -31,16 +31,23 @@ export interface CaptureWarning {
 }
 
 /** Map one backend warning sentence onto a chip. Most are about the
- *  system-audio (others) channel; lost audio names its side — "Your
- *  microphone …" or "The other participants' audio …"
- *  (`lost_audio_warning`, crates/fly-audio/src/cpal_backend.rs). */
+ *  system-audio (others) channel; lost audio, a device change and a disk
+ *  that won't take the audio name their side with "microphone" or not
+ *  (`lost_audio_warning`, `device_lost_warning`, `write_failed_warning`,
+ *  crates/fly-audio/src/cpal_backend.rs — each pinned there by a test). */
 export function classifyWarning(text: string): CaptureWarning {
   const t = text.toLowerCase();
   const privacyPane = text.includes(MACOS_PRIVACY_PANE);
   let side: CaptureSide = "others";
   let label = "Check audio";
   if (privacyPane || t.includes("recording only silence")) label = "Blocked by macOS";
-  else if (t.includes("was lost")) {
+  else if (t.includes("changed or disconnected")) {
+    label = "Device changed";
+    if (t.includes("microphone")) side = "you";
+  } else if (t.includes("couldn't be saved")) {
+    label = "Not saving";
+    if (t.includes("microphone")) side = "you";
+  } else if (t.includes("was lost")) {
     label = "Audio lost";
     if (t.includes("microphone")) side = "you";
   } else if (t.includes("couldn't start")) label = "Not recorded";

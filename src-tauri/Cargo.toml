@@ -63,5 +63,7 @@ tauri-plugin-single-instance = "2"
 rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
 
 [dev-dependencies]
+# the contention bench's marker tone; not in the shipped app
+fly-audio = { workspace = true, features = ["testtone"] }
 tempfile = "3"
 async-trait.workspace = true

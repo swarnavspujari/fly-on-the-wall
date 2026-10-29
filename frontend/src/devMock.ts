@@ -34,12 +34,14 @@
                                      can't convert screen-walkthrough.mp4:
                                      that row shows its cause, the others
                                      convert; "Retry failed file" succeeds
-     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "lost" | "none"
+     fotwMockRecWarning = "muted" | "volume" | "loopback" | "macos" | "worst" | "lost" | "device" | "disk" | "none"
                                    → with fotwMockRecording, the capture's
                                      warnings are the exact backend sentence
                                      for that case (recording bar chips;
                                      "worst": two warnings + a 1 h timer;
-                                     "lost": audio lost on both sides)
+                                     "lost": audio lost on both sides;
+                                     "device": the output changed; "disk":
+                                     the mic's audio couldn't be saved)
      fotwMockAudioLost = "1"       → Stop emits recording:audio_lost (1.2 s
                                      mic, 0.4 s system): the "Part of the last
                                      recording is missing" notice
@@ -1648,6 +1650,13 @@ const MOCK_REC_WARNINGS: Record<string, string[]> = {
   ],
   macos: [
     "System audio is playing but its capture is recording only silence — macOS is blocking system-audio capture for this build, so the other participants may be missing from this recording. Open System Settings → Privacy & Security → Screen & System Audio Recording and allow Fly on the Wall. If it already shows as allowed, the grant belongs to a previously installed build: remove Fly on the Wall from that list with the − button and re-add it (or run `tccutil reset ScreenCapture com.flyonthewall.app` in Terminal), then relaunch.",
+  ],
+  // device_lost_warning / write_failed_warning (crates/fly-audio/src/cpal_backend.rs)
+  device: [
+    "The sound output changed or disconnected — the other participants may be missing from the rest of this recording. Stop and record again to follow the current output.",
+  ],
+  disk: [
+    "Part of your microphone audio couldn't be saved — the disk may be full or unavailable. Free up space; the recording keeps trying.",
   ],
   // lost_audio_warning (crates/fly-audio/src/cpal_backend.rs)
   lost: [

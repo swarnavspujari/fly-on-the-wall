@@ -24,7 +24,27 @@ const MIC_LOST =
 const SYSTEM_LOST =
   "The other participants' audio has gaps: 0.4 s was lost because the computer was too busy (most recently at 3:05). The rest is still recording — closing heavy apps can help.";
 
+// device_lost_warning / write_failed_warning (cpal_backend.rs)
+const DEVICE_MIC =
+  "Your microphone changed or disconnected — your side may be missing from the rest of this recording. Stop and record again to use the current microphone.";
+const DEVICE_SYS =
+  "The sound output changed or disconnected — the other participants may be missing from the rest of this recording. Stop and record again to follow the current output.";
+const DISK_MIC =
+  "Part of your microphone audio couldn't be saved — the disk may be full or unavailable. Free up space; the recording keeps trying.";
+const DISK_SYS =
+  "Part of the other participants' audio couldn't be saved — the disk may be full or unavailable. Free up space; the recording keeps trying.";
+
 describe("classifyWarning", () => {
+  it("labels a device change on the side it happened", () => {
+    expect(classifyWarning(DEVICE_MIC)).toMatchObject({ side: "you", label: "Device changed" });
+    expect(classifyWarning(DEVICE_SYS)).toMatchObject({ side: "others", label: "Device changed" });
+  });
+
+  it("labels audio the disk wouldn't take on the side it happened", () => {
+    expect(classifyWarning(DISK_MIC)).toMatchObject({ side: "you", label: "Not saving" });
+    expect(classifyWarning(DISK_SYS)).toMatchObject({ side: "others", label: "Not saving" });
+  });
+
   it("puts lost microphone audio on the you chip", () => {
     expect(classifyWarning(MIC_LOST)).toMatchObject({ side: "you", label: "Audio lost" });
   });
