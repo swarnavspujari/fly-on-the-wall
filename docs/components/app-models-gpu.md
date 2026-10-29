@@ -1,15 +1,16 @@
 # Artifacts, GPU selection and hardware detection (`app-models-gpu`)
 
 > Layer: backend feature (src-tauri). Described at main `82b7edf` (v2.4.0).
-> In flight: None. #86 (merged) added `ENGINE_MODELS` (Parakeet TDT 0.6B v3 weights from huggingface.co, SHA-256 pinned) outside `registry()`, plus `engine_artifact`, `ensure_engine_model`, `PARAKEET_CLI_NAME`, `parakeet_cli_beside`, and split `ensure_with` into `ensure_artifact`. By design, `download_model` and `artifact()` never resolve the new ids. The Parakeet weights (`ggml-org/parakeet-GGUF` on huggingface.co, pinned by commit and SHA-256) are downloaded only when the pipeline enables Parakeet.
+> In flight: model cleanup ("Free up space", `model_cleanup.rs`, v2.5) adds `model_storage_report` and `delete_model_files`, described below. #86 (merged) added `ENGINE_MODELS` (Parakeet TDT 0.6B v3 weights from huggingface.co, SHA-256 pinned) outside `registry()`, plus `engine_artifact`, `ensure_engine_model`, `PARAKEET_CLI_NAME`, `parakeet_cli_beside`, and split `ensure_with` into `ensure_artifact`. By design, `download_model` and `artifact()` never resolve the new ids. The Parakeet weights (`ggml-org/parakeet-GGUF` on huggingface.co, pinned by commit and SHA-256) are downloaded only when the pipeline enables Parakeet.
 
 ## Purpose
-`models.rs` is the artifact manager: every sidecar binary (whisper.cpp, the Vulkan whisper build, sherpa-onnx, ffmpeg, Ollama) and every model weight (whisper ggml files, pyannote, CAM++) is downloaded on first use into `<data_dir>`, streamed with progress, accepted only if its SHA-256 matches a pin in source, and extracted in-process with path, link and size checks. `gpu.rs` decides, per machine and model, whether post-meeting transcription runs on the pinned Vulkan build (Windows), based on a one-time measured benchmark; any GPU failure pins the machine back to CPU. `hw.rs` detects RAM, cores and GPU to recommend an ASR tier.
+`models.rs` is the artifact manager: every sidecar binary (whisper.cpp, the Vulkan whisper build, sherpa-onnx, ffmpeg, Ollama) and every model weight (whisper ggml files, pyannote, CAM++) is downloaded on first use into `<data_dir>`, streamed with progress, accepted only if its SHA-256 matches a pin in source, and extracted in-process with path, link and size checks. `gpu.rs` decides, per machine and model, whether post-meeting transcription runs on the pinned Vulkan build (Windows), based on a one-time measured benchmark; any GPU failure pins the machine back to CPU. `hw.rs` detects RAM, cores and GPU to recommend an ASR tier. `model_cleanup.rs` reports what each downloaded artifact takes on disk and whether the saved settings use it, and deletes the unused ones plus download leftovers (Settings › Models on this computer).
 
 ## Files it owns
 - `src-tauri/src/models.rs` — artifact registry and pins (`TOOLS` per OS, `MODELS`), `ensure*`, `tool_installed`, `find_on_path`, `best_installed_asr_model`, download / verify / mirror fallback, staged install, pruning, `sweep_stale_downloads`, in-process zip / tar extraction; 34 tests.
 - `src-tauri/src/gpu.rs` — `asr.use_gpu` / `asr.gpu_bench` settings, `GpuBench`, `record_runtime_failure`, `is_apple_silicon` (macOS), `plan` + benchmark (Windows). No tests.
 - `src-tauri/src/hw.rs` — `HwInfo`, `detect` (sysinfo + `nvidia-smi` + PowerShell/WMI), `hw.cache`, `default_model_for_tier`. No tests.
+- `src-tauri/src/model_cleanup.rs` — "Free up space": `Usage` (in-use rules from settings and activity), `build_report`, the leftover scan, `remove_contained`, `delete_requested`, the `model_storage_report` / `delete_model_files` commands; 13 tests.
 - `src-tauri/src/asr_commands.rs:401-417` — the `download_model` command only (the rest of that file belongs to [app-pipeline](app-pipeline.md)).
 
 ## Surface area
@@ -37,8 +38,19 @@
 | Command | Arguments | Returns | Called from (UI) |
 |---|---|---|---|
 | `download_model` | `id: String` (any `registry()` id) | `Result<String, String>` — installed probe path | `ui-app-shell` (`App.tsx:744`, engine install from the notice), `ui-settings` (`SettingsModal.tsx:545` model downloads, `SettingsModal.tsx:597` Ollama runtime install), via `api.downloadModel` (`api.ts:161`) |
+| `model_storage_report` | none | `Result<ModelStorageReport, String>`: `artifacts[]` (`id`, `display`, `installed`, `size_on_disk`, `download_bytes`, `in_use` "Used for …", `note`, `can_delete`, `blocked`), `leftovers[]` and `unrecognised[]` (`path`, `bytes`, `kind`, `label`), `reclaimable_bytes`, `busy` | `ui-settings` (`ModelsOnComputer.tsx`, on open and whenever the saved transcript settings reload), via `api.modelStorageReport` |
+| `delete_model_files` | `ids: Vec<String>`, `paths: Vec<String>` | `Result<DeleteOutcome, String>`: `freed_bytes`, `removed[]`, `skipped[]` (in use now or gone), `failed[]`, `report`. Refused while recording, transcribing or installing | `ui-settings` (`ModelsOnComputer.tsx`: per-row Delete sends one id; Free up sends what its confirm listed), via `api.deleteModelFiles` |
 
 `download_model` has no gate beyond the id being in the registry (`asr_commands.rs:403-417`): the webview can start any pinned download, including the 1.5 GB Ollama runtime. devMock mirrors it (`devMock.ts:1381-1387`) but returns `""` instead of a path and emits no `model:progress`.
+
+**What "in use" means** (`model_cleanup.rs` `use_phrases`, from the same settings and code paths that use the files):
+- whisper model: the one the pipeline asks for (`asr.model_id`, else `hw::default_model_for_tier(tier, asr.max_quality)`; tier `cloud` = backing up Groq), and while that one isn't on disk, the stand-in `best_installed_asr_model` would pick; Whisper small while `live.enabled` isn't `"false"` (live captions, `live::LIVE_MODEL`). Queued and scheduled (re-)transcriptions read the same settings when they start, so they need nothing more.
+- whisper.cpp CPU engine, sherpa-onnx, pyannote, CAM++: always (the CPU engine anchors every chain; diarization runs on every transcription).
+- Vulkan build: while `asr.use_gpu` is on. Parakeet weights: while `asr.engine` (or `FLYONTHEWALL_ASR_ENGINE`) says `parakeet`; listed only once downloaded.
+- ffmpeg: while a screen recording runs or a staged import hasn't transcribed (`Storage::staged_imports_waiting`). Otherwise it's deletable and downloads again on the next screen recording, import or video thumbnail.
+- The Ollama runtime isn't listed (it lives under Ask and Enhance); `models/ollama` is never scanned.
+
+**Leftovers** (deletable, known patterns only): `<id>.download.<pid>.<n>` temps at the data-dir root (not this process's while younger than 1 h); `<dest>.partial` staging folders; anything but the current entry in a versioned tool folder (`bin/whisper*/`, `bin/sherpa/`, `bin/ffmpeg/`, the same rule as the launch prune); an install root whose probe is missing; `models/asr/ggml-*.bin` and `models/diarize/*.onnx` / `sherpa-onnx-pyannote-segmentation-*` that no current entry uses. Everything else under `bin/` and `models/` is **Not recognised**: listed with its size, never deleted.
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
@@ -62,6 +74,7 @@
 ### Files and directories written
 - `<data_dir>/<id>.download.<pid>.<n>` — per-attempt temp download (`models.rs:625-630`); removed on failure, renamed (file) or deleted after extraction (archive); stale ones (untouched ≥ 1 h) swept at launch (`models.rs:440-465`).
 - `<data_dir>/bin/<tool>/…` — tool installs: `bin/whisper/v1.9.5`, `bin/whisper-vulkan/v1.9.5`, `bin/sherpa`, `bin/ffmpeg`, `bin/ollama` (`models.rs:47-202`). Staged in `<dest>.partial`, then promoted entry by entry, probe-holding entry last (`models.rs:784-874`).
+- **Deleted on request** (`delete_model_files`): an unused artifact's install root (the file; `bin/<tool>/<version>`; the extracted folder inside `models/diarize`) and listed leftovers, through `remove_contained` only.
 - Superseded installs under `bin/<whisper|whisper-vulkan|ffmpeg|sherpa>/` are **deleted** after a successful install and at each launch sweep (never following links) (`models.rs:880-935`).
 - `<data_dir>/models/asr/ggml-*.bin`, `<data_dir>/models/diarize/{sherpa-onnx-pyannote-segmentation-3-0/, campplus.onnx}` (`models.rs:206-267`).
 - `%TEMP%/flyonthewall-gpu-bench-<pid>.wav` (Windows) — up to 60 s of speech cut from the meeting being transcribed, deleted after the benchmark (`gpu.rs:298-323`, `gpu.rs:244`, `255`, `259`). It is outside `<data_dir>`: a crash mid-benchmark leaves meeting audio in the system temp folder, where "Delete all my data" and audio retention don't look (inferred).
@@ -103,6 +116,7 @@ None.
 - **A wrong or compromised mirror can only fail the checksum.** docs/MODELS.md "Download sources"; a mismatch skips straight to the next source (`models.rs:499-509`, `models.rs:693-697`).
 - **Archives can't write outside their destination.** Zip: raw names must be plain relative components, symlinks rejected, only the exec bit honored, bytes written capped (`models.rs:1003-1082`). Tar: hard links rejected, symlinks must be descending plain names, `unpack_in` must accept every entry (`models.rs:1084-1151`). Extraction is capped at max(10 × archive size, 1 GiB) (`models.rs:937-949`). docs/SECURITY_AUDIT_2026-10.md Round 3 ("zip 9.0.5 … hardened").
 - **An install is all-or-nothing.** The probe file never exists before everything it needs (`models.rs:777-874`).
+- **Model cleanup deletes only what its own fresh scan lists, never anything in use, and never outside `bin/` and `models/`.** A request's ids and paths are matched against a report built at delete time; a path from the webview is never used as a path. `remove_contained` requires plain-name components under `bin/` or `models/` (or a single download-temp name at the root), refuses `models/ollama`, refuses when any folder between the data dir and the target is a link, junction or other reparse point, and removes the target without following links. Unknown files are reported, never deleted. Nothing is deleted while a recording, transcription or archive install runs (the delete holds the install lock).
 - **Pruning stays inside `bin/<tool>` and never follows links** (`models.rs:895-935`). Ollama is never pruned (its archive root is `bin/ollama`, `models.rs:876-880`).
 - **CPU is canon; the GPU is used only when measured faster on this machine, per model.** DECISIONS.md 2026-07-08; docs/MODELS.md "GPU transcription". `gpu.rs:153-283`. A failed GPU benchmark pins CPU; a failed CPU benchmark stores nothing; an unavailable Vulkan download stores nothing (`gpu.rs:184-192`, `230-258`). A GPU failure mid-pipeline pins CPU (`gpu.rs:66-82`, called at `pipeline.rs:672`).
 - **Intel Macs never use Metal** (silent corruption seen on the Intel smoke test) (`gpu.rs:84-120`, `pipeline.rs:1272`).
@@ -118,6 +132,7 @@ None.
 | unit (in [app-pipeline](app-pipeline.md)) | `src-tauri/src/pipeline.rs` `pinned_cpu_verdict_tracks_the_model_it_was_recorded_for` | 1 | `gpu::record_runtime_failure` + `gpu::stored` pin is per model |
 | ignored e2e/harness | `src-tauri/tests/pipeline_e2e.rs` `gpu_failure_falls_back_to_cpu` | 1 | Windows: planted broken Vulkan exe → CPU fallback and CPU pin. Also needs real artifacts in `<data_dir>` (early-returns "SKIP" without them) |
 | ignored e2e/harness | `src-tauri/tests/clean_machine_extract_e2e.rs` | 1 | Lazy download + in-process `.tar.bz2` extraction on a clean data dir |
+| unit | `src-tauri/src/model_cleanup.rs` | 13 | In-use per tier (Fast, Balanced, Best, Maximum quality, Model pick, Groq, live off); the stand-in kept while the wanted model is missing; engines, diarization, Vulkan by GPU switch, Parakeet by setting and env, ffmpeg by screen recording or waiting import; busy blocks everything; refusing in-use and unknown ids; crafted paths refused; a junction/symlink inside `models/` never followed (scan and delete); leftovers by known pattern while unknown files, the DB, recordings and `models/ollama` stay; old tool versions and half installs; reclaimable total; temp-name parsing |
 | unit | `src-tauri/src/gpu.rs`, `src-tauri/src/hw.rs` | 0 | — |
 
 **Known gaps:**
@@ -136,4 +151,5 @@ None.
 - **Error wording:** the two markers are matched by `scheduler.rs` and `pipelineNotice.ts`; change all three together.
 - **GPU verdict shape** is persisted JSON in `asr.gpu_bench`; renaming fields silently resets every machine to "no verdict" (`stored` drops unparsable JSON). devMock's `fotwMockGpuBench` mirrors the shape (`devMock.ts:602-610`).
 - **Spawning new console tools on Windows:** set `CREATE_NO_WINDOW` (as `hw.rs:113` does and `hw.rs:78` doesn't).
+- **New artifact or a new consumer of one:** add its in-use rule to `model_cleanup::use_phrases` (and a test), or Free up will offer to delete it. A new on-disk layout under `bin/` or `models/` shows as "Not recognised" until `Scanner::classify` knows its leftover pattern.
 - `ENGINE_MODELS` (from #86) is a second, separate registry. Keep `download_model` and `best_installed_asr_model` blind to it. Engine weights are fetched only through `ensure_engine_model`, when the pipeline enables Parakeet.

@@ -216,6 +216,58 @@ export interface ModelStatus {
   installed: boolean;
 }
 
+/** One downloadable model or tool on Settings › Models on this computer
+ *  (model_cleanup.rs ArtifactUsage). */
+export interface ArtifactUsage {
+  id: string;
+  display: string;
+  installed: boolean;
+  /** Bytes on disk now (0 when not installed). */
+  size_on_disk: number;
+  /** Pinned download size, for rows that aren't installed. */
+  download_bytes: number;
+  /** "Used for …" when the current settings use it. */
+  in_use: string | null;
+  /** What it's for, when installed and not in use. */
+  note: string | null;
+  can_delete: boolean;
+  /** Why Delete is disabled on an installed row (in use, or busy). */
+  blocked: string | null;
+}
+
+export type DiskEntryKind =
+  "unfinished_download" | "old_version" | "unused_model_file" | "not_recognised";
+
+/** A leftover or unrecognised file under the models folders. */
+export interface DiskEntry {
+  /** Data-dir-relative, "/"-separated. Sent back to delete_model_files,
+   *  which only accepts paths its own fresh scan lists as leftovers. */
+  path: string;
+  bytes: number;
+  kind: DiskEntryKind;
+  label: string;
+}
+
+export interface ModelStorageReport {
+  artifacts: ArtifactUsage[];
+  leftovers: DiskEntry[];
+  /** Shown with their size and left alone. */
+  unrecognised: DiskEntry[];
+  /** What Free up removes: deletable models + leftovers. */
+  reclaimable_bytes: number;
+  /** Set while nothing can be deleted (recording, transcribing, installing). */
+  busy: string | null;
+}
+
+export interface DeleteOutcome {
+  freed_bytes: number;
+  removed: string[];
+  /** Asked for but in use now, or already gone. */
+  skipped: string[];
+  failed: string[];
+  report: ModelStorageReport;
+}
+
 export interface GpuBench {
   verdict: string; // "gpu" | "cpu"
   reason: string;
@@ -291,6 +343,9 @@ export interface OllamaModel {
   name: string;
   /** On-disk size in bytes. */
   size: number;
+  /** "Used for …" when the app uses it (saved Ask/Enhance model, the search
+   *  embedding model). Deleting those is refused. */
+  used_for?: string | null;
 }
 
 export interface OllamaStatus {

@@ -19,7 +19,7 @@ Three layers:
 | Layer | Where | Components |
 |---|---|---|
 | **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 11 `ui-*` docs |
-| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 127 Tauri commands) | 16 `app-*` docs |
+| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 129 Tauri commands) | 16 `app-*` docs |
 | **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 12 `fly-*` docs |
 
 ## Index
@@ -55,7 +55,7 @@ Three layers:
 | [app-llm](app-llm.md) | `llm_commands.rs`, `extraction.rs` | `build_provider` (the only LLM constructor: consent and keep-local), Enhance, Ask, polish, extraction, templates. |
 | [app-calendar](app-calendar.md) | `calendar_commands.rs`, `calendar_defaults.rs` | Calendar connect/disconnect, upcoming meetings, starting a meeting from an event. |
 | [app-privacy](app-privacy.md) | `privacy.rs` | Keep local, participant notice, audio retention, "Delete all my data", disk-encryption check. |
-| [app-models-gpu](app-models-gpu.md) | `models.rs`, `gpu.rs`, `hw.rs`, `download_model` | Pinned model and tool downloads, GPU verdict, hardware detection. |
+| [app-models-gpu](app-models-gpu.md) | `models.rs`, `model_cleanup.rs`, `gpu.rs`, `hw.rs`, `download_model` | Pinned model and tool downloads, model cleanup ("Free up space"), GPU verdict, hardware detection. |
 | [app-ollama](app-ollama.md) | `ollama.rs` | Managed `ollama serve` child, model pull and delete, status. |
 | [app-mcp-sidecar](app-mcp-sidecar.md) | `commands.rs` (`mcp_config`), `scripts/prepare-sidecars.mjs`, `externalBin` | Shipping and wiring the MCP binary. |
 | [app-screen-recording](app-screen-recording.md) | `screen_commands.rs` | Screen recording and video thumbnails. |
@@ -200,7 +200,7 @@ Back-edges inside `fly-app` that the map doesn't show, measured with `grep crate
 
 ## Command ownership
 
-Each of the 127 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
+Each of the 129 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
 
 | Doc | Commands |
 |---|---|
@@ -213,7 +213,7 @@ Each of the 127 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) 
 | [app-import](app-import.md) | 3 |
 | [app-llm](app-llm.md) | 12 |
 | [app-ollama](app-ollama.md) | 3 |
-| [app-models-gpu](app-models-gpu.md) | 1 |
+| [app-models-gpu](app-models-gpu.md) | 3 |
 | [app-calendar](app-calendar.md) | 8 |
 | [app-screen-recording](app-screen-recording.md) | 5 |
 | [app-privacy](app-privacy.md) | 12 |

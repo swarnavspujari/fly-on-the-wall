@@ -95,6 +95,7 @@ import {
   serverChangeNeedsKey,
 } from "./settingsModel";
 import type {
+  ArtifactUsage,
   Connector,
   ConnectorCallLogEntry,
   ConnectorCallProposal,
@@ -103,6 +104,9 @@ import type {
   ConnectorInput,
   ConnectorPermissionChange,
   ConnectorTool,
+  DeleteOutcome,
+  DiskEntry,
+  ModelStorageReport,
 } from "./types";
 
 const nowIso = () => new Date().toISOString();
@@ -670,33 +674,72 @@ const asrSettings = {
     vram_mb: 18000,
     recommended_tier: "best",
   },
-  // Ids match the real model catalog (fly-asr / models.rs): ggml-* weights
-  // feed the Model select; the rest are tools listed under "Models on this
-  // computer".
+  // Ids, names and sizes match the real Windows catalog (models.rs): ggml-*
+  // weights feed the Model select; the rest are tools and speaker models
+  // listed under "Models on this computer". Medium and ffmpeg are installed
+  // but unused, so "Free up space" has something to show.
   models: [
-    { id: "ggml-small-q5_1", display: "Whisper small (Q5)", bytes: 190_000_000, installed: false },
+    {
+      id: "ggml-small-q5_1",
+      display: "Whisper small (Q5, ~190 MB) — Light tier",
+      bytes: 190_085_487,
+      installed: true,
+    },
+    {
+      id: "ggml-medium-q5_0",
+      display: "Whisper medium (Q5, ~540 MB)",
+      bytes: 539_212_467,
+      installed: true,
+    },
     {
       id: "ggml-large-v3-turbo-q5_0",
-      display: "Whisper large-v3-turbo (Q5)",
-      bytes: 574_000_000,
+      display: "Whisper large-v3-turbo (Q5, ~574 MB) — Balanced/Best default",
+      bytes: 574_041_195,
       installed: true,
     },
     {
       id: "ggml-large-v3-q5_0",
-      display: "Whisper large-v3 (Q5)",
-      bytes: 1_080_000_000,
+      display: "Whisper large-v3 (Q5, ~1 GB) — maximum quality",
+      bytes: 1_081_140_203,
       installed: false,
     },
-    { id: WHISPER_ENGINE_ID, display: "whisper.cpp CLI", bytes: 4_200_000, installed: true },
-    { id: "diarize", display: "pyannote-community-1", bytes: 400_000_000, installed: true },
-    { id: "embed", display: "bge-small-en", bytes: 100_000_000, installed: true },
+    {
+      id: WHISPER_ENGINE_ID,
+      display: "whisper.cpp CLI (CPU, v1.9.5)",
+      bytes: 8_928_640,
+      installed: true,
+    },
     // The engine binary is filtered into its own row; the Vulkan GPU build
     // must stay visible in the Models list (regression QA for the filter).
     {
       id: "whisper-bin-vulkan",
       display: "whisper.cpp CLI (Vulkan GPU, v1.9.1)",
       bytes: 23_632_146,
-      installed: false,
+      installed: true,
+    },
+    {
+      id: "sherpa-bin",
+      display: "sherpa-onnx diarization CLI (v1.13.3)",
+      bytes: 19_413_897,
+      installed: true,
+    },
+    {
+      id: "ffmpeg",
+      display: "ffmpeg (n8.1, screen capture + media import)",
+      bytes: 90_079_410,
+      installed: true,
+    },
+    {
+      id: "pyannote-seg",
+      display: "pyannote segmentation 3.0 (ONNX)",
+      bytes: 6_958_444,
+      installed: true,
+    },
+    {
+      id: "campplus-embedding",
+      display: "3D-Speaker CAM++ speaker embedding (ONNX)",
+      bytes: 28_281_164,
+      installed: true,
     },
   ],
   // whisper-cli readiness (drives the Transcription-engine row + the
@@ -802,6 +845,178 @@ function setAsrSettings(u: {
   asrSettings.use_gpu = u.use_gpu;
   if (u.groq_key != null) asrSettings.has_groq_key = u.groq_key !== "";
   return null;
+}
+
+/* ---- model storage (Settings › Models on this computer) ----
+   Mirrors model_cleanup.rs: in use = the tier's model (or the Model pick),
+   Whisper small for live captions, the engines, the speaker models, the
+   Vulkan build while the GPU switch is on; ffmpeg only while recording the
+   screen. Archives take more room on disk than their download. */
+const MOCK_DISK_BYTES: Record<string, number> = {
+  [WHISPER_ENGINE_ID]: 21_405_184,
+  "whisper-bin-vulkan": 62_914_560,
+  "sherpa-bin": 54_525_952,
+  ffmpeg: 214_958_080,
+  "pyannote-seg": 6_029_312,
+};
+const initialLeftovers = (): DiskEntry[] => [
+  {
+    path: "ggml-large-v3-q5_0.download.4242.0",
+    bytes: 312_475_648,
+    kind: "unfinished_download",
+    label: "Unfinished download of Whisper large-v3",
+  },
+  {
+    path: "bin/whisper/v1.9.1",
+    bytes: 20_971_520,
+    kind: "old_version",
+    label: "Older version of whisper.cpp CLI",
+  },
+  {
+    path: "models/asr/ggml-base.en-q5_1.bin",
+    bytes: 57_671_680,
+    kind: "unused_model_file",
+    label: "Speech model this version no longer uses",
+  },
+];
+let mockLeftovers = initialLeftovers();
+const initialInstalled = new Map(asrSettings.models.map((m) => [m.id, m.installed]));
+
+/** Back to the starting disk state (tests delete models and leftovers). */
+export function resetMockModelStorage() {
+  for (const m of asrSettings.models) m.installed = initialInstalled.get(m.id) ?? m.installed;
+  mockLeftovers = initialLeftovers();
+}
+
+const mockUnrecognised: DiskEntry[] = [
+  {
+    path: "models/asr/my-notes.txt",
+    bytes: 2_048,
+    kind: "not_recognised",
+    label: "Not recognised",
+  },
+];
+
+const ASR_ORDER = [
+  "ggml-small-q5_1",
+  "ggml-medium-q5_0",
+  "ggml-large-v3-turbo-q5_0",
+  "ggml-large-v3-q5_0",
+];
+const TIER_LABEL: Record<string, string> = { light: "Fast", balanced: "Balanced", best: "Best" };
+
+function mockModelReport(): ModelStorageReport {
+  const s = asrSettings;
+  const wanted =
+    s.model_id ||
+    (s.max_quality
+      ? "ggml-large-v3-q5_0"
+      : s.tier === "light"
+        ? "ggml-small-q5_1"
+        : "ggml-large-v3-turbo-q5_0");
+  const installed = (id: string) => s.models.some((m) => m.id === id && m.installed);
+  // the installed model the pipeline falls back to while `wanted` downloads
+  const atOrBelow = ASR_ORDER.slice(0, Math.max(0, ASR_ORDER.indexOf(wanted)) + 1).reverse();
+  const standIn = installed(wanted)
+    ? null
+    : (atOrBelow.find(installed) ?? ASR_ORDER.find(installed) ?? null);
+  const wantedName = (s.models.find((m) => m.id === wanted)?.display ?? wanted).split(" (")[0];
+  const tierPhrase = s.model_id
+    ? "transcription (picked under Model)"
+    : s.tier === "cloud"
+      ? "backing up Groq transcription"
+      : s.max_quality
+        ? "Maximum quality transcription"
+        : TIER_LABEL[s.tier]
+          ? `${TIER_LABEL[s.tier]} transcription`
+          : "transcription";
+  const screen = mockFlag("fotwMockRecording") === "1";
+  const busy = screen ? "Recording now. You can delete models after it ends." : null;
+  const join = (p: string[]) =>
+    p.length < 2 ? (p[0] ?? "") : p.slice(0, -1).join(", ") + " and " + p[p.length - 1];
+  const artifacts: ArtifactUsage[] = s.models.map((m) => {
+    const phrases: string[] = [];
+    if (m.id === WHISPER_ENGINE_ID) phrases.push("transcribing on this computer");
+    else if (m.id === "whisper-bin-vulkan") {
+      if (s.use_gpu) phrases.push("transcribing on the graphics card");
+    } else if (["sherpa-bin", "pyannote-seg", "campplus-embedding"].includes(m.id))
+      phrases.push("telling speakers apart");
+    else if (m.id === "ffmpeg") {
+      if (screen) phrases.push("the screen recording in progress");
+    } else {
+      if (m.id === wanted) phrases.push(tierPhrase);
+      if (m.id === standIn) phrases.push("transcribing until " + wantedName + " downloads");
+      if (m.id === "ggml-small-q5_1") phrases.push("the live transcript while recording");
+    }
+    const inUse = phrases.length ? "Used for " + join(phrases) + "." : null;
+    const blocked = !m.installed ? null : inUse ? "In use, so it can't be deleted. " + inUse : busy;
+    let note: string | null = null;
+    if (m.installed && !inUse) {
+      note =
+        m.id === "whisper-bin-vulkan"
+          ? "Only used when Use the graphics card is on. It downloads again if you turn it on."
+          : m.id === "ffmpeg"
+            ? "Used to record your screen and import files. It downloads again the next time you do either."
+            : "Not used by your current settings. It downloads again if you need it.";
+    }
+    return {
+      id: m.id,
+      display: m.display,
+      installed: m.installed,
+      size_on_disk: m.installed ? (MOCK_DISK_BYTES[m.id] ?? m.bytes) : 0,
+      download_bytes: m.bytes,
+      in_use: inUse,
+      note,
+      can_delete: m.installed && blocked == null,
+      blocked,
+    };
+  });
+  const reclaimable =
+    artifacts.filter((a) => a.can_delete).reduce((n, a) => n + a.size_on_disk, 0) +
+    mockLeftovers.reduce((n, e) => n + e.bytes, 0);
+  return {
+    artifacts,
+    leftovers: mockLeftovers.map((e) => ({ ...e })),
+    unrecognised: mockUnrecognised.map((e) => ({ ...e })),
+    reclaimable_bytes: reclaimable,
+    busy,
+  };
+}
+
+function mockDeleteModelFiles(ids: string[], paths: string[]): DeleteOutcome {
+  const before = mockModelReport();
+  if (before.busy) throw before.busy;
+  const out: DeleteOutcome = {
+    freed_bytes: 0,
+    removed: [],
+    skipped: [],
+    failed: [],
+    report: before,
+  };
+  for (const id of ids) {
+    const row = before.artifacts.find((a) => a.id === id);
+    if (!row) out.skipped.push(id + ": not a model this app manages");
+    else if (!row.can_delete)
+      out.skipped.push(row.display + ": " + (row.installed ? "in use" : "already removed"));
+    else {
+      const m = asrSettings.models.find((x) => x.id === id);
+      if (m) m.installed = false;
+      out.freed_bytes += row.size_on_disk;
+      out.removed.push(row.display);
+    }
+  }
+  for (const p of paths) {
+    const e = mockLeftovers.find((x) => x.path === p);
+    if (!e) {
+      out.skipped.push(p + ": no longer there");
+      continue;
+    }
+    mockLeftovers = mockLeftovers.filter((x) => x !== e);
+    out.freed_bytes += e.bytes;
+    out.removed.push(e.label);
+  }
+  out.report = mockModelReport();
+  return out;
 }
 
 function upcoming() {
@@ -957,10 +1172,23 @@ function ollamaState() {
             : [
                 { name: "llama3.1:latest", size: 4_920_000_000 },
                 { name: "qwen3.5:4b", size: 3_650_000_000 },
+                { name: "embeddinggemma:300m", size: 621_875_000 },
               ],
     };
   }
   return mockOllama;
+}
+
+function mockOllamaUsedFor(name: string): string | null {
+  if (name === "embeddinggemma:300m") return "Used for search.";
+  const selected =
+    llmSettings.provider === "ollama"
+      ? (llmSettings.providers.find((p) => p.id === "ollama")?.model ?? "llama3.1")
+      : null;
+  const bare = selected && !selected.includes(":");
+  if (selected && (name === selected || (bare && name.split(":")[0] === selected)))
+    return "Used for Ask and Enhance.";
+  return null;
 }
 
 /* ---- Ask ---- */
@@ -2402,7 +2630,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         running: o.installed,
         managed: true,
         base_url: "http://localhost:11434",
-        models: o.models.map((m) => ({ ...m })),
+        // ollama.rs used_for: the saved Ask/Enhance model, search embeddings
+        models: o.models.map((m) => ({ ...m, used_for: mockOllamaUsedFor(m.name) })),
       };
     }
     case "ollama_pull": {
@@ -2415,6 +2644,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "ollama_delete": {
       const o = ollamaState();
       const name = String(args.model);
+      if (mockOllamaUsedFor(name) === "Used for search.")
+        throw name + " is what search uses to find things in your notes, so it can't be deleted.";
       o.models = o.models.filter((m) => m.name !== name && m.name.split(":")[0] !== name);
       return null;
     }
@@ -2439,6 +2670,13 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       }
       mockUiSettings[String(args.key)] = String(args.value);
       return null;
+    case "model_storage_report":
+      return mockModelReport();
+    case "delete_model_files":
+      return mockDeleteModelFiles(
+        (args.ids as string[] | undefined) ?? [],
+        (args.paths as string[] | undefined) ?? [],
+      );
     case "download_model": {
       const m = asrSettings.models.find((x) => x.id === args.id);
       if (m) m.installed = true;

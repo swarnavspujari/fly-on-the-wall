@@ -464,6 +464,26 @@ impl Storage {
         }
         Ok(())
     }
+
+    /// Meeting ids with a staged media import that hasn't transcribed yet: an
+    /// `import.staged.<id>` setting and no transcript row. (The setting itself
+    /// is only cleaned up lazily, when the note reopens after transcription.)
+    /// These imports still need the app's media converter.
+    pub fn staged_imports_waiting(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT substr(s.key, length(?1) + 1) FROM settings s
+             WHERE substr(s.key, 1, length(?1)) = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM transcripts t
+                 WHERE t.meeting_id = substr(s.key, length(?1) + 1)
+               )
+             ORDER BY s.key",
+        )?;
+        let ids = stmt
+            .query_map([IMPORT_STAGED_PREFIX], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
 }
 
 pub(crate) fn row_to_meeting(r: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting> {
@@ -757,6 +777,34 @@ mod tests {
         let label = crate::naming::disk_label(meeting.started_at, "Power Writing Course v2");
         assert!(dir.path().join("recordings").join(&label).is_dir());
         assert!(!rec_dir.exists());
+    }
+
+    /// Only staged imports whose meeting has no transcript yet count as
+    /// waiting; other settings that merely share a prefix-like name don't.
+    #[test]
+    fn staged_imports_waiting_skips_transcribed_meetings() {
+        let (_dir, s) = test_storage();
+        assert!(s.staged_imports_waiting().unwrap().is_empty());
+        let note = s.create_note("Imported", None).unwrap();
+        let waiting = s.create_meeting("Imported", &note.id, &[]).unwrap();
+        let done = s.create_meeting("Imported 2", &note.id, &[]).unwrap();
+        for m in [&waiting, &done] {
+            s.set_setting(&format!("{}{}", super::IMPORT_STAGED_PREFIX, m.id), "{}")
+                .unwrap();
+        }
+        s.set_setting("import.stagedX", "{}").unwrap();
+        s.save_transcript(&fly_core::Transcript {
+            meeting_id: done.id.clone(),
+            language: Some("en".into()),
+            engine: "whisper.cpp".into(),
+            segments: vec![],
+            speakers: vec![],
+        })
+        .unwrap();
+        assert_eq!(
+            s.staged_imports_waiting().unwrap(),
+            vec![waiting.id.clone()]
+        );
     }
 
     /// A meeting with a staged media import keeps its folder name: the
