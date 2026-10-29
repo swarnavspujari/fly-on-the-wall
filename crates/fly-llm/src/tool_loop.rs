@@ -103,10 +103,32 @@ const BUDGET_MESSAGE: &str =
 /// Run the loop. `req.tools` are the tools on offer; `exec` performs them.
 pub async fn run_tool_loop(
     provider: &dyn LLMProvider,
-    mut req: ConverseRequest,
+    req: ConverseRequest,
     limits: ToolLoopLimits,
     exec: &mut ToolExecutor<'_>,
 ) -> Result<ToolLoopOutcome> {
+    run_tool_loop_async(provider, req, limits, |name, input| {
+        let out = exec(&name, &input);
+        std::future::ready(out)
+    })
+    .await
+}
+
+/// [`run_tool_loop`] with an async executor: `exec(name, input)` returns a
+/// future of `Ok(observation)` or `Err(message shown to the model)`. For
+/// tools that need I/O between model turns (the Ask harness embeds a
+/// model's search query before running it). The returned future is `Send`
+/// exactly when the executor and its futures are.
+pub async fn run_tool_loop_async<F, Fut>(
+    provider: &dyn LLMProvider,
+    mut req: ConverseRequest,
+    limits: ToolLoopLimits,
+    mut exec: F,
+) -> Result<ToolLoopOutcome>
+where
+    F: FnMut(String, Value) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<String, String>>,
+{
     let mut calls: Vec<ToolCallRecord> = Vec::new();
     let mut usage = Usage::default();
     let mut rounds = 0u32;
@@ -232,7 +254,7 @@ pub async fn run_tool_loop(
                 });
                 continue;
             }
-            let (content, ok) = match exec(&name, &input) {
+            let (content, ok) = match exec(name.clone(), input).await {
                 Ok(obs) => (truncate(&obs, limits.max_observation_chars), true),
                 Err(e) => (truncate(&e, limits.max_observation_chars), false),
             };

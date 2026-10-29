@@ -14,7 +14,7 @@ The `LLMProvider` trait and its two HTTP implementations: `AnthropicProvider` (`
 - `crates/fly-llm/src/conversation.rs`: block types (`ContentBlock`, `Message`, `ToolSpec`, `ToolChoice`, `ConverseRequest`, `ChatResponse`, `StreamEvent`, `Usage`, `Capabilities`) and schema helpers (`closed_schema`, `strict_schema`).
 - `crates/fly-llm/src/stream.rs`: byte→line framing (`LineBuffer`, 8 MiB line cap), `decode_body`, `replay`, `collect`, `Accumulator`.
 - `crates/fly-llm/src/repair.rs`: `classify()` reads a text reply as a plain answer, a recoverable tool call, or a malformed one.
-- `crates/fly-llm/src/tool_loop.rs`: `run_tool_loop` with budgets, a corrective turn, and content-free run records (dormant).
+- `crates/fly-llm/src/tool_loop.rs`: `run_tool_loop` with budgets, a corrective turn, and content-free run records; `run_tool_loop_async` (the same loop with an async executor, used by the Ask harness [fly-ask](fly-ask.md) so a model's search can embed its query; `run_tool_loop` delegates to it).
 - `crates/fly-llm/src/external_tools.rs`: `ExternalTools`, the per-turn interface for tools outside the Ask harness (connectors): `specs()`, `owns()`, `call()`, the Keep-local tripwire `mark_keep_local()`, and `sealed()`, true once an outside service's words are in the turn (the harness then makes no further proposals). The harness and the connector client depend only on this trait, not on each other.
 - `crates/fly-llm/src/mock.rs`: `MockLLMProvider`: canned `chat()` text, or a scripted list of `converse()` replies with request recording.
 - `crates/fly-llm/src/golden.rs` (`#[cfg(test)]`): byte-identity test for legacy `chat()` bodies.
@@ -32,7 +32,7 @@ The `LLMProvider` trait and its two HTTP implementations: `AnthropicProvider` (`
 | Anthropic | `AnthropicProvider { api_key, model, base_url, relax_on_400 }` + `new()` (`anthropic.rs:116-134`), `ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-5-5"`, `ANTHROPIC_FAST_MODEL = "claude-haiku-5-5"`, `successor_model()`, `MAX_STRICT_TOOLS = 20`, `parse_messages_response(_checked)`, `parse_messages_converse` |
 | OpenAI-compatible | `OpenAiCompatProvider { provider_id, base_url, api_key, model, local }` + `openai()`, `nim()`, `ollama()` (`openai_compat.rs:38-76`), `parse_chat_completion`, `parse_native_chat`, `parse_native_response`, `parse_openai_response` |
 | Streaming | `stream::{LineBuffer, MAX_LINE_BYTES, sse_data, replay, response_events, collect, Accumulator, parse_tool_args}` |
-| Tool loop (dormant) | `tool_loop::{run_tool_loop, ToolLoopLimits (default 8 calls / 5 rounds / 6,000 chars), LoopEnd, ToolCallRecord, ToolLoopOutcome, ToolExecutor, UNKNOWN_TOOL}` |
+| Tool loop (fly-ask) | `tool_loop::{run_tool_loop, run_tool_loop_async, ToolLoopLimits (default 8 calls / 5 rounds / 6,000 chars), LoopEnd, ToolCallRecord, ToolLoopOutcome, ToolExecutor, UNKNOWN_TOOL}` |
 | Repair | `repair::{classify, TextToolCall}` |
 | Mock | `mock::MockLLMProvider::{new, with_response, scripted, requests, remaining}` |
 | Unused by the app | `ProviderSettings` (`lib.rs:163-167`) |
@@ -62,7 +62,7 @@ None at runtime. The golden test rewrites `crates/fly-llm/tests/golden/legacy_bo
 | `https://integrate.api.nvidia.com/v1/chat/completions` (`openai_compat.rs:61`), or a custom base URL | NIM provider calls | Same as OpenAI. |
 | `http://localhost:11434/api/chat` and `/api/show` (`openai_compat.rs:71,192-194,253-257,323`), or the configured Ollama URL (any http(s) host) | Ollama `chat` / `converse` / `chat_stream` / `probe_capabilities` (probe is dormant) | No consent (local kind). Keep-local data is refused when the Ollama URL isn't loopback (`on_device`, `llm_commands.rs:612`). |
 
-Retries can repeat a request to the same host: Anthropic re-POSTs after a 400 up to 4 times, each time with one optional feature removed (`anthropic.rs:294-301,332-339`). Ollama retries once without `think` (400 mentioning "think") and once without `num_ctx` (5xx) (`openai_compat.rs:338-355`). There is no retry or backoff for 429 / 529; they come back as `LlmError::Provider("<status>: <first 300 chars>")`.
+Retries can repeat a request to the same host: Anthropic re-POSTs after a 400 up to 4 times, each time with one optional feature removed (`anthropic.rs:294-301,332-339`). Ollama retries once without `think` (400 mentioning "think") and once without `num_ctx` (5xx). A reply after the `num_ctx` retry carries `Usage::context_fallback = true` (omitted from JSON when false), so a caller can treat it as a possibly cut prompt: the Ask harness ends that Ask as `model_failed(Truncated)`. There is no retry or backoff for 429 / 529; they come back as `LlmError::Provider("<status>: <first 300 chars>")`.
 
 Timeouts: the Anthropic client has a 20 s connect / 1,200 s total timeout (`anthropic.rs:492-501`). The OpenAI-compatible tool/stream/probe client has 20 s connect / 600 s read-idle (`openai_compat.rs:88-97`). The legacy `chat()` path builds `reqwest::Client::new()` per call, with no timeout (`openai_compat.rs:126,296`).
 

@@ -8,7 +8,7 @@ The process entry point and the only place platform implementations are chosen. 
 
 ## Files it owns
 - `src-tauri/src/main.rs` — 6-line shim; `windows_subsystem = "windows"` in release.
-- `src-tauri/src/lib.rs` — `run()`: pre-builder startup, plugin order, `setup` (picks the synchronous or background open), command registration (108 commands, `lib.rs:93-202`), Exit hook.
+- `src-tauri/src/lib.rs` — `run()`: pre-builder startup, plugin order, `setup` (picks the synchronous or background open), command registration (134 commands, `lib.rs:96-231`), Exit hook.
 - `src-tauri/src/startup.rs` — the library open on either path: the upgrade check, the background open with progress, the startup gate (`LibraryGate`, `library_status`, `library:upgrade`), the error dialog, and `finish` (everything after the open, in order).
 - `src-tauri/src/state.rs` — `AppState`, data-dir resolution, Looma→FlyOnTheWall folder move, legacy keychain copy.
 - `src-tauri/src/logging.rs` — tracing subscriber, rolling file logs, panic hook, the log-hygiene rule and its lexical test.

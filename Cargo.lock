@@ -1335,12 +1335,14 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "flate2",
+ "fly-ask",
  "fly-asr",
  "fly-audio",
  "fly-calendar",
  "fly-capture-screen",
  "fly-core",
  "fly-diarize",
+ "fly-evals",
  "fly-llm",
  "fly-mcp-client",
  "fly-secrets",
@@ -1371,6 +1373,25 @@ dependencies = [
  "windows",
  "xz2",
  "zip 9.0.5",
+]
+
+[[package]]
+name = "fly-ask"
+version = "2.4.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fly-context",
+ "fly-core",
+ "fly-llm",
+ "fly-storage",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1501,6 +1522,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "fly-ask",
  "fly-context",
  "fly-core",
  "fly-llm",

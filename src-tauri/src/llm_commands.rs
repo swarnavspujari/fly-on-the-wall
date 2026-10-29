@@ -568,6 +568,11 @@ pub enum DataScope<'a> {
     Note(&'a str),
     /// One meeting's transcript (Polish, Extraction).
     Meeting(&'a str),
+    /// Many notes' content (Ask over a folder, a person or everything):
+    /// no single Keep-local switch decides, so the reader excludes Keep-local
+    /// meetings itself for an off-device model (the Ask harness, from
+    /// `BuiltProvider::on_device`). Cloud consent still applies.
+    Wide,
 }
 
 /// Error text when keep-local data meets a cloud provider: names the reason
@@ -631,6 +636,27 @@ pub fn build_provider(
     state: &AppState,
     scope: DataScope<'_>,
 ) -> Result<Box<dyn LLMProvider>, String> {
+    build_provider_with_reach(state, scope).map(|b| b.provider)
+}
+
+/// A provider and where it runs.
+pub struct BuiltProvider {
+    pub provider: Box<dyn LLMProvider>,
+    /// The model runs on this machine: Ollama at a loopback address. This,
+    /// not `provider.is_local()`, decides what Keep-local content a reader
+    /// (the Ask harness) may show it — an Ollama at a remote URL is local in
+    /// kind but sends data off the device.
+    pub on_device: bool,
+    /// The saved base URL (`None`: the provider's default).
+    pub endpoint: Option<String>,
+}
+
+/// [`build_provider`], also reporting `on_device`. The one constructor:
+/// consent and Keep local are enforced here for every caller.
+pub fn build_provider_with_reach(
+    state: &AppState,
+    scope: DataScope<'_>,
+) -> Result<BuiltProvider, String> {
     let storage = state.storage.lock().unwrap();
     let get = |k: &str| {
         storage
@@ -664,7 +690,7 @@ pub fn build_provider(
     // Per-meeting / per-folder "Keep local" (fly-storage privacy.rs):
     // enforced here, the one place every LLM task gets its provider.
     let keep_local = match scope {
-        DataScope::NoMeetingData => false,
+        DataScope::NoMeetingData | DataScope::Wide => false,
         DataScope::Note(id) => storage.note_keep_local(id),
         DataScope::Meeting(id) => storage.meeting_keep_local(id),
     };
@@ -674,6 +700,7 @@ pub fn build_provider(
     check_cloud_policy(&provider, is_local, on_device, consented, keep_local)?;
     drop(storage);
 
+    let endpoint = base_url.clone();
     let key = |name: &'static str| -> Result<String, String> {
         state
             .secrets
@@ -682,7 +709,7 @@ pub fn build_provider(
             .ok_or_else(|| missing_key_error(&provider))
     };
 
-    Ok(match provider.as_str() {
+    let provider: Box<dyn LLMProvider> = match provider.as_str() {
         "openai" => {
             let mut p = fly_llm::openai_compat::OpenAiCompatProvider::openai(
                 key(fly_secrets::keys::OPENAI_API_KEY)?,
@@ -710,6 +737,11 @@ pub fn build_provider(
         _ => Box::new(fly_llm::openai_compat::OpenAiCompatProvider::ollama(
             base_url, model,
         )),
+    };
+    Ok(BuiltProvider {
+        provider,
+        on_device,
+        endpoint,
     })
 }
 
@@ -979,6 +1011,289 @@ pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResu
 pub struct AskMessage {
     pub role: String, // "user" | "assistant"
     pub content: String,
+    /// Assistant turns: the model that wrote it ran on this device (the
+    /// answer's `on_device`). Missing = assumed on device, so the turn is
+    /// never sent to a model that isn't.
+    #[serde(default)]
+    pub on_device: Option<bool>,
+    /// Assistant turns: the segment ids that answer cited.
+    #[serde(default)]
+    pub citations: Vec<String>,
+}
+
+/// Most chat turns (user + assistant messages) kept from the history.
+const MAX_ASK_TURNS: usize = 40;
+
+/// The chat (oldest first, ending on the question) → earlier question /
+/// answer pairs + the question. Empty turns are dropped; a question with no
+/// answer (it failed) is skipped.
+pub fn split_ask_history(history: Vec<AskMessage>) -> Result<(Vec<fly_ask::Turn>, String), String> {
+    let mut msgs: Vec<AskMessage> = history
+        .into_iter()
+        .filter(|m| !m.content.trim().is_empty())
+        .collect();
+    let skip = msgs.len().saturating_sub(MAX_ASK_TURNS);
+    msgs.drain(..skip);
+    let question = match msgs.pop() {
+        Some(m) if m.role != "assistant" => m.content,
+        _ => return Err("ask a question first".into()),
+    };
+    let mut turns = Vec::new();
+    let mut pending: Option<String> = None;
+    for m in msgs {
+        if m.role == "assistant" {
+            if let Some(q) = pending.take() {
+                turns.push(fly_ask::Turn {
+                    question: q,
+                    answer: m.content,
+                    citations: m.citations,
+                    on_device: m.on_device.unwrap_or(true),
+                });
+            }
+        } else {
+            pending = Some(m.content);
+        }
+    }
+    Ok((turns, question))
+}
+
+/// Query embeddings through the local Ollama (`embeddinggemma`), when it's
+/// running; otherwise none (keyword search only).
+struct AppEmbedder<'a>(&'a AppState);
+
+impl fly_ask::QueryEmbedder for AppEmbedder<'_> {
+    fn model(&self) -> &str {
+        crate::embeddings::EMBED_MODEL
+    }
+    async fn embed(&self, text: &str) -> Option<Vec<f32>> {
+        crate::embeddings::embed_query(self.0, text).await
+    }
+}
+
+/// Settings key caching a model's tool smoke test (backend-only; not
+/// webview-writable): per server, model name and model digest, so a model
+/// re-pulled under the same name, or another server's copy, is tested
+/// again.
+fn tool_smoke_key(provider: &dyn LLMProvider, server: &str, digest: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    h.update(server.trim().trim_end_matches('/'));
+    h.update([0]);
+    h.update(provider.model());
+    h.update([0]);
+    h.update(digest);
+    let hex: String = h
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("ask.tool_smoke.{}.{hex}", provider.id())
+}
+
+/// The Ollama server root for a saved base URL (no `/v1`).
+fn ollama_root(endpoint: Option<&str>) -> String {
+    let u = endpoint.unwrap_or("http://localhost:11434").trim();
+    let u = u.trim_end_matches('/');
+    u.strip_suffix("/v1")
+        .unwrap_or(u)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// The digest Ollama lists for `model` (`/api/tags`), if it answers.
+async fn ollama_model_digest(root: &str, model: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Tags {
+        #[serde(default)]
+        models: Vec<Tag>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Tag {
+        name: String,
+        #[serde(default)]
+        digest: String,
+    }
+    let want = if model.contains(':') {
+        model.to_string()
+    } else {
+        format!("{model}:latest")
+    };
+    let tags: Tags = reqwest::Client::new()
+        .get(format!("{root}/api/tags"))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    tags.models
+        .into_iter()
+        .find(|t| t.name == want || t.name == model)
+        .map(|t| t.digest)
+        .filter(|d| !d.is_empty())
+}
+
+/// The Ask tier by measured capability (spec §4.2 step 3): probe the
+/// model's capabilities and, for a large local model that can call tools,
+/// run the tool smoke test once (cached per server, model and digest;
+/// not cached when the digest can't be read).
+pub async fn ask_tier(
+    state: &AppState,
+    provider: &dyn LLMProvider,
+    endpoint: Option<&str>,
+) -> fly_ask::Tier {
+    let caps = provider
+        .probe_capabilities()
+        .await
+        .unwrap_or_else(|_| provider.capabilities());
+    let mut inputs = fly_ask::TierInputs {
+        local_model: provider.is_local(),
+        model: provider.model(),
+        caps,
+        tool_smoke: None,
+    };
+    if fly_ask::tier::smoke_worth_running(inputs) {
+        let root = ollama_root(endpoint);
+        let key = ollama_model_digest(&root, provider.model())
+            .await
+            .map(|d| tool_smoke_key(provider, &root, &d));
+        let cached = key
+            .as_deref()
+            .and_then(|k| state.storage.lock().unwrap().get_setting(k).ok().flatten());
+        let passed = match cached {
+            Some(v) => v == "passed",
+            None => {
+                let r = fly_ask::tool_smoke(provider).await;
+                let code = serde_json::to_value(r)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                // A transport error says nothing about the model: retry next time.
+                if let (Some(k), true) = (&key, r != fly_ask::tier::SmokeResult::Error) {
+                    let _ = state.storage.lock().unwrap().set_setting(k, &code);
+                }
+                r == fly_ask::tier::SmokeResult::Passed
+            }
+        };
+        inputs.tool_smoke = Some(passed);
+    }
+    fly_ask::measure_tier(inputs)
+}
+
+/// The run log file (`<data dir>/logs`); past this size it rolls once.
+const ASK_RUN_LOG: &str = "ask-runs.jsonl";
+const ASK_RUN_LOG_MAX: u64 = 2_000_000;
+
+/// Append an answer's run log (typed, no free text) — the durable record
+/// per answer (spec §4.2 step 7). Best effort: a write failure is logged,
+/// never shown.
+fn record_ask_run(state: &AppState, log: &fly_ask::RunLog) {
+    append_ask_log(
+        state,
+        ASK_RUN_LOG,
+        "ask-runs.1.jsonl",
+        log,
+        "the Ask run log",
+    );
+}
+
+/// Ask approvals' audit rows (ids, codes, time; spec §4.2a #5).
+const ASK_AUDIT_LOG: &str = "ask-approvals.jsonl";
+
+fn record_ask_audit(state: &AppState, row: &crate::ask_approvals::AuditRow) {
+    append_ask_log(
+        state,
+        ASK_AUDIT_LOG,
+        "ask-approvals.1.jsonl",
+        row,
+        "the Ask approvals log",
+    );
+}
+
+/// Append one JSON line to a log under `logs/`, rolling it at
+/// `ASK_RUN_LOG_MAX`.
+fn append_ask_log(state: &AppState, file: &str, rolled: &str, value: &impl Serialize, what: &str) {
+    use std::io::Write as _;
+    let dir = state.data_dir.join(crate::logging::LOGS_DIR);
+    let path = dir.join(file);
+    let result = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > ASK_RUN_LOG_MAX) {
+            std::fs::rename(&path, dir.join(rolled))?;
+        }
+        let line = serde_json::to_string(value).map_err(std::io::Error::other)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        writeln!(f, "{line}")
+    })();
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "couldn't write {what}");
+    }
+}
+
+/// What Ask returns: the harness's answer (sentences with citations and
+/// sourced/unsourced/flagged status, sources, proposals, trace) plus the
+/// trace as display lines. `text` is the answer for a plain renderer.
+#[derive(Serialize)]
+pub struct AskReply {
+    #[serde(flatten)]
+    pub answer: fly_ask::AskAnswer,
+    pub trace_lines: Vec<String>,
+    /// The id `insert_ask_answer` takes to insert this answer (an answer
+    /// with at least one sourced sentence).
+    pub insert_id: Option<String>,
+}
+
+/// An answer worth inserting: answered, with a sourced sentence. The
+/// Markdown of its sourced sentences only, and the lines they cite.
+/// Of those, only sentences whose every citation is one of `own` (the
+/// target note's lines).
+fn insertable_in(
+    a: &fly_ask::AskAnswer,
+    own: &std::collections::HashSet<String>,
+) -> Option<(String, Vec<String>)> {
+    insertable_parts(a.status, &a.sentences, own)
+}
+
+fn insertable_parts(
+    status: fly_ask::AnswerStatus,
+    sentences: &[fly_ask::AnswerSentence],
+    own: &std::collections::HashSet<String>,
+) -> Option<(String, Vec<String>)> {
+    let sourced = |s: &&fly_ask::AnswerSentence| {
+        s.status == fly_ask::SentenceStatus::Sourced
+            && !s.citations.is_empty()
+            && s.citations.iter().all(|c| own.contains(c))
+    };
+    if status != fly_ask::AnswerStatus::Answered || !sentences.iter().any(|s| sourced(&s)) {
+        return None;
+    }
+    // Only what the citations back goes into the note: unsourced and
+    // flagged sentences stay in the answer, where they're marked.
+    let kept: Vec<fly_ask::AnswerSentence> = sentences.iter().filter(sourced).cloned().collect();
+    let mut ids: Vec<String> = Vec::new();
+    for s in &kept {
+        for c in &s.citations {
+            if !ids.contains(c) {
+                ids.push(c.clone());
+            }
+        }
+    }
+    Some((fly_ask::join_sentences(&kept), ids))
+}
+
+/// Payload of the `ask:event` stream (only when the caller passes an
+/// `ask_id`): stage changes, the prefetched sources, sanitized frames.
+#[derive(Serialize, Clone)]
+struct AskEventPayload {
+    ask_id: String,
+    event: fly_ask::AskEvent,
 }
 
 /// Assemble the Ask system prompt (assistant instruction + meeting context)
@@ -1028,70 +1343,281 @@ pub fn build_ask_system(
     ))
 }
 
+/// Ask a question about a note (default), a meeting, a folder, a person or
+/// every meeting, through the Ask harness (fly-ask): deterministic
+/// retrieval, a capability tier, citations validated against what the
+/// model was shown, "not found", proposals that never execute, and a run
+/// log per answer. The provider comes from `build_provider`, which enforces
+/// consent and Keep local; its `on_device` decides Keep-local visibility.
+/// A model failure (empty, cut off, provider error) is an `Err` with a
+/// message for the user, as before.
 #[tauri::command]
 pub async fn ask_meeting(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
-    note_id: String,
+    note_id: Option<String>,
     history: Vec<AskMessage>,
-) -> CmdResult<String> {
-    // The embedding backlog steps aside while this runs.
+    scope: Option<fly_ask::AskScope>,
+    ask_id: Option<String>,
+) -> CmdResult<AskReply> {
+    use tauri::Emitter as _;
+    // The embedding backlog steps aside while this runs (streaming and
+    // tool rounds included); dropped on every return.
     let _foreground = state.foreground_ai();
-    ensure_provider_ready(&state).await?;
-    let provider = build_provider(&state, DataScope::Note(&note_id))?;
-    let profile = profile_for(provider.model());
-    let system = {
-        let storage = state.storage.lock().unwrap();
-        let note = storage.get_note(&note_id).map_err(|e| e.to_string())?;
-        let transcript = match &note.meeting_id {
-            Some(mid) => storage.get_transcript(mid).map_err(|e| e.to_string())?,
-            None => None,
-        };
-        build_ask_system(&note, transcript.as_ref(), profile)
+    // Stop (`cancel_ask`) for this run, until it returns. One run per
+    // ask_id, so Stop and connector cards stay with their answer.
+    let cancel = AskCancel::register(ask_id.as_deref())?;
+    // The note is only the default scope: Home asks with an explicit scope
+    // and no note ("" or none).
+    let note_id = note_id.filter(|n| !n.trim().is_empty());
+    let scope = match (scope, &note_id) {
+        (Some(s), _) => s,
+        (None, Some(n)) => fly_ask::AskScope::Note(n.clone()),
+        (None, None) => return Err("Ask needs a note or a scope to search.".into()),
     };
-
-    let mut messages = vec![ChatMessage::system(system)];
-    // Empty turns are a 400 on Anthropic, and the conversation must end on the
-    // user's question (an assistant last turn is a "prefill", also a 400 on
-    // current Claude models). Bound the history so a runaway chat can't grow
-    // the request without limit.
-    const MAX_ASK_TURNS: usize = 40;
-    let history: Vec<_> = history
-        .into_iter()
-        .filter(|m| !m.content.trim().is_empty())
-        .collect();
-    let skip = history.len().saturating_sub(MAX_ASK_TURNS);
-    // After trimming, the conversation must still open on a user turn.
-    let kept = history
-        .into_iter()
-        .skip(skip)
-        .skip_while(|m| m.role == "assistant");
-    for m in kept {
-        messages.push(if m.role == "assistant" {
-            ChatMessage::assistant(m.content)
-        } else {
-            ChatMessage::user(m.content)
-        });
+    // An answer can be inserted into the note being asked about.
+    let insert_note = note_id.clone().or(match &scope {
+        fly_ask::AskScope::Note(id) => Some(id.clone()),
+        _ => None,
+    });
+    ensure_provider_ready(&state).await?;
+    let data_scope = match &scope {
+        fly_ask::AskScope::Note(id) => DataScope::Note(id),
+        fly_ask::AskScope::Meeting(id) => DataScope::Meeting(id),
+        // The harness excludes Keep-local meetings in its queries for an
+        // off-device model.
+        _ => DataScope::Wide,
+    };
+    let built = build_provider_with_reach(&state, data_scope)?;
+    let (turns, question) = split_ask_history(history)?;
+    let provider = built.provider.as_ref();
+    let tier = ask_tier(&state, provider, built.endpoint.as_deref()).await;
+    let embedder = AppEmbedder(&state);
+    let sink = {
+        let app = app.clone();
+        let id = ask_id.clone().unwrap_or_default();
+        move |event: fly_ask::AskEvent| {
+            let _ = app.emit(
+                "ask:event",
+                AskEventPayload {
+                    ask_id: id.clone(),
+                    event,
+                },
+            );
+        }
+    };
+    // Connectors for this turn (beta; tiers M and C only), keyed by the
+    // UI's ask_id so their approval cards land on this answer. A scope
+    // holding a Keep-local note gets none: the hub offers nothing and
+    // refuses every call; the harness reads ShareableOnly, drops on-device
+    // history and marks the turn if Keep-local content reaches it anyway.
+    let turn_id = ask_id.clone().unwrap_or_else(fly_core::new_id);
+    let keep_local_in_scope = {
+        let s = state.storage.lock().unwrap();
+        fly_ask::scope::explicit_keep_local(&s, &scope)
+    };
+    let external =
+        crate::connectors::turn_for_ask(&app, &turn_id, tier.code(), keep_local_in_scope);
+    // Connectors were there but off because of Keep local (for the trace):
+    // what a non-Keep-local turn would have offered (the registry only).
+    let connectors_off_keep_local = keep_local_in_scope
+        && crate::connectors::turn_for_ask(&app, &turn_id, tier.code(), false)
+            .is_some_and(|t| !t.specs().is_empty());
+    let answer = fly_ask::ask(
+        fly_ask::AskEnv {
+            store: &state.storage,
+            provider,
+            on_device: built.on_device,
+            tier,
+            limits: None,
+            embedder: Some(&embedder),
+            events: ask_id.as_ref().map(|_| &sink as fly_ask::EventSink<'_>),
+            cancel: Some(cancel.flag()),
+            external: external
+                .as_deref()
+                .map(|x| x as &dyn fly_llm::external_tools::ExternalTools),
+        },
+        fly_ask::AskInput {
+            question: &question,
+            history: &turns,
+            scope,
+            now: chrono::Utc::now(),
+        },
+    )
+    .await;
+    let mut answer = answer;
+    answer.trace.connectors_off_keep_local |= connectors_off_keep_local;
+    record_ask_run(&state, &answer.run_log);
+    match answer.status {
+        fly_ask::AnswerStatus::ModelFailed => Err(answer
+            .failure
+            .map(|f| f.message)
+            .unwrap_or_else(|| "The model didn't answer.".into())),
+        fly_ask::AnswerStatus::Cancelled => Err("Ask was cancelled.".into()),
+        _ => {
+            // What the user may approve from this answer, held by id.
+            let now = chrono::Utc::now();
+            let approvals = &crate::ask_approvals::APPROVALS;
+            for p in &answer.proposals {
+                approvals.register_proposal(p, now);
+            }
+            // Only sentences backed by that note's own lines can go into it.
+            let insert_id = insert_note.as_deref().and_then(|n| {
+                let own = {
+                    let s = state.storage.lock().unwrap();
+                    crate::ask_approvals::note_segment_ids(&s, n).ok()?
+                };
+                insertable_in(&answer, &own)
+                    .map(|(md, ids)| approvals.register_answer(n, &md, &ids, now))
+            });
+            Ok(AskReply {
+                trace_lines: answer.trace.lines(),
+                insert_id,
+                answer,
+            })
+        }
     }
-    if messages.len() < 2 || messages.last().map(|m| m.role) != Some(fly_llm::Role::User) {
-        return Err("ask a question first".into());
+}
+
+/// Running Asks' cancel flags, by the caller's `ask_id`.
+static ASK_CANCELS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Longest `ask_id` a Stop can address (the webview picks it).
+const MAX_ASK_ID_CHARS: usize = 128;
+
+/// One Ask's cancel flag, findable by its `ask_id` while it runs and
+/// forgotten when the run returns (any way it returns).
+struct AskCancel {
+    id: Option<String>,
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl AskCancel {
+    /// Err when `ask_id` is already running (a reused id).
+    fn register(ask_id: Option<&str>) -> Result<Self, String> {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let id = ask_id
+            .filter(|id| !id.is_empty() && id.chars().count() <= MAX_ASK_ID_CHARS)
+            .map(str::to_string);
+        if let Some(id) = &id {
+            let mut map = ASK_CANCELS.lock().unwrap_or_else(|p| p.into_inner());
+            if map.contains_key(id) {
+                return Err("That question is still being answered.".into());
+            }
+            map.insert(id.clone(), flag.clone());
+        }
+        Ok(Self { id, flag })
     }
 
-    provider
-        .chat(ChatRequest {
-            effort: profile.effort.ask.map(String::from),
-            messages,
-            temperature: Some(0.3),
-            max_tokens: Some(profile.max_tokens.ask.unwrap_or(2048)),
-            // Same profile-driven opt-out as enhance_note above.
-            thinking: if profile.thinking_disabled() {
-                ThinkingMode::Disabled
-            } else {
-                ThinkingMode::Default
-            },
-            format: None,
-        })
-        .await
-        .map_err(|e| e.to_string())
+    fn flag(&self) -> &std::sync::atomic::AtomicBool {
+        &self.flag
+    }
+}
+
+impl Drop for AskCancel {
+    fn drop(&mut self) {
+        let Some(id) = &self.id else { return };
+        let mut map = ASK_CANCELS.lock().unwrap_or_else(|p| p.into_inner());
+        // Only this run's entry (a newer run may reuse the id).
+        if map
+            .get(id)
+            .is_some_and(|f| std::sync::Arc::ptr_eq(f, &self.flag))
+        {
+            map.remove(id);
+        }
+    }
+}
+
+/// Stop an Ask still running under `ask_id` (the Ask sheet's Stop). The
+/// harness stops at once, even while the model is still reading the
+/// prompt: the request is dropped, nothing is proposed, the run log records
+/// `status_cancelled` and `ask_meeting` returns "Ask was cancelled.". An
+/// id that isn't running (finished, or never started) does nothing.
+#[tauri::command]
+pub fn cancel_ask(ask_id: String) -> CmdResult<()> {
+    if let Some(flag) = ASK_CANCELS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&ask_id)
+    {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// How long the `@` list is reused before the library is scanned again.
+const ASK_PEOPLE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// An `@` list and when it was made.
+type PeopleCache = Option<(std::time::Instant, Vec<String>)>;
+
+/// The last `@` list.
+static ASK_PEOPLE: std::sync::LazyLock<std::sync::Mutex<PeopleCache>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The `@` suggestions for the Ask composer: everyone in the library the
+/// router can match (attendees, speaker labels, item owners). For the
+/// user's own screen; never sent to a model. Async (off the UI thread) and
+/// cached for two minutes: the scan reads many transcripts under the
+/// storage lock.
+#[tauri::command]
+pub async fn list_ask_people(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    if let Some((at, people)) = ASK_PEOPLE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        if at.elapsed() < ASK_PEOPLE_TTL {
+            return Ok(people.clone());
+        }
+    }
+    let people = {
+        let storage = state.storage.lock().unwrap();
+        fly_ask::scope::people_for_suggestions(&storage)
+    };
+    *ASK_PEOPLE.lock().unwrap_or_else(|p| p.into_inner()) =
+        Some((std::time::Instant::now(), people.clone()));
+    Ok(people)
+}
+
+/// "Insert into note" for an Ask answer or an approved `insert_into_note`
+/// proposal, by the id `ask_meeting` returned (`insert_id`, or the
+/// proposal's `id`): appends that AI block, validated again (spec §3.5
+/// #6). Idempotent: a second click returns the note as the first left it.
+#[tauri::command]
+pub fn insert_ask_answer(state: State<'_, AppState>, proposal_id: String) -> CmdResult<Note> {
+    use crate::ask_approvals::{Applied, Kind, APPROVALS};
+    let storage = state.storage.lock().unwrap();
+    let (result, row) = APPROVALS.approve(&storage, &proposal_id, Kind::Insert, chrono::Utc::now());
+    drop(storage);
+    record_ask_audit(&state, &row);
+    match result? {
+        Applied::Note(n) => Ok(n),
+        Applied::Item(_) => Err("That isn't this kind of suggestion.".into()),
+    }
+}
+
+/// Add the action item of an approved Ask `add_action_item` proposal, by
+/// its id: validated again (it cites lines of its meeting; the owner is
+/// nobody or a speaker or attendee, never inferred) and kept across
+/// re-extraction (`extracted_by` = `user:ask`). Idempotent.
+#[tauri::command]
+pub fn add_action_item(
+    state: State<'_, AppState>,
+    proposal_id: String,
+) -> CmdResult<fly_core::MeetingItem> {
+    use crate::ask_approvals::{Applied, Kind, APPROVALS};
+    let storage = state.storage.lock().unwrap();
+    let (result, row) =
+        APPROVALS.approve(&storage, &proposal_id, Kind::ActionItem, chrono::Utc::now());
+    drop(storage);
+    record_ask_audit(&state, &row);
+    match result? {
+        Applied::Item(i) => Ok(i),
+        Applied::Note(_) => Err("That isn't this kind of suggestion.".into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,6 +1909,87 @@ pub async fn test_llm_connection(state: State<'_, AppState>) -> CmdResult<String
 #[cfg(test)]
 mod security_tests {
     use super::{check_cloud_policy, validate_base_url};
+
+    #[test]
+    fn only_sourced_sentences_are_inserted() {
+        use fly_ask::{AnswerSentence, AnswerStatus, SentenceStatus};
+        let s = |text: &str, cites: &[&str], status| AnswerSentence {
+            text: text.into(),
+            citations: cites.iter().map(|c| c.to_string()).collect(),
+            status,
+            flags: vec![],
+        };
+        let sentences = vec![
+            s("The kiln opens Monday.", &["r1"], SentenceStatus::Sourced),
+            s("It costs a fortune.", &[], SentenceStatus::Unsourced),
+            s("- Ilka runs it.", &["r2"], SentenceStatus::Flagged),
+            s(
+                "- Maren books the slots.",
+                &["r3", "r1"],
+                SentenceStatus::Sourced,
+            ),
+        ];
+        let set = |ids: &[&str]| -> std::collections::HashSet<String> {
+            ids.iter().map(|s| s.to_string()).collect()
+        };
+        let own = set(&["r1", "r2", "r3"]);
+        let (md, ids) = super::insertable_parts(AnswerStatus::Answered, &sentences, &own).unwrap();
+        assert_eq!(md, "The kiln opens Monday.\n- Maren books the slots.");
+        assert_eq!(ids, vec!["r1", "r3"]);
+        assert!(super::insertable_parts(AnswerStatus::Unverified, &sentences, &own).is_none());
+        assert!(super::insertable_parts(AnswerStatus::Answered, &sentences[1..3], &own).is_none());
+        // A sentence citing another note's line stays out of this note.
+        let (md, ids) =
+            super::insertable_parts(AnswerStatus::Answered, &sentences, &set(&["r1"])).unwrap();
+        assert_eq!(md, "The kiln opens Monday.");
+        assert_eq!(ids, vec!["r1"]);
+        assert!(super::insertable_parts(AnswerStatus::Answered, &sentences, &set(&[])).is_none());
+    }
+
+    #[test]
+    fn stop_reaches_only_a_running_ask() {
+        use super::{cancel_ask, AskCancel, ASK_CANCELS};
+        use std::sync::atomic::Ordering::Relaxed;
+        let held = |id: &str| ASK_CANCELS.lock().unwrap().contains_key(id);
+        let a = AskCancel::register(Some("ask-test-1")).unwrap();
+        cancel_ask("ask-test-1".into()).unwrap();
+        assert!(a.flag().load(Relaxed));
+        drop(a);
+        assert!(!held("ask-test-1"), "forgotten when the run returns");
+        // A reused id is refused while its first run is in flight, and
+        // free again once it returns.
+        let first = AskCancel::register(Some("ask-test-2")).unwrap();
+        assert!(AskCancel::register(Some("ask-test-2")).is_err());
+        drop(first);
+        let again = AskCancel::register(Some("ask-test-2")).unwrap();
+        cancel_ask("ask-test-2".into()).unwrap();
+        assert!(again.flag().load(Relaxed));
+        drop(again);
+        assert!(!held("ask-test-2"));
+        // No id, or an oversized one, isn't addressable.
+        let long = "x".repeat(200);
+        let _quiet = AskCancel::register(Some(&long)).unwrap();
+        assert!(!held(&long));
+        let anon = AskCancel::register(None).unwrap();
+        cancel_ask(String::new()).unwrap();
+        assert!(!anon.flag().load(Relaxed));
+    }
+
+    #[test]
+    fn the_tool_smoke_cache_is_per_server_model_and_digest() {
+        use super::{ollama_root, tool_smoke_key};
+        let p = fly_llm::mock::MockLLMProvider::new();
+        let a = tool_smoke_key(&p, "http://localhost:11434", "sha256:aa");
+        assert_ne!(a, tool_smoke_key(&p, "http://localhost:11434", "sha256:bb"));
+        assert_ne!(a, tool_smoke_key(&p, "http://10.0.0.5:11434", "sha256:aa"));
+        assert_eq!(
+            a,
+            tool_smoke_key(&p, "http://localhost:11434/", "sha256:aa")
+        );
+        assert!(a.starts_with("ask.tool_smoke.") && a.len() < 64, "{a}");
+        assert_eq!(ollama_root(None), "http://localhost:11434");
+        assert_eq!(ollama_root(Some("http://h.lan:1/v1/")), "http://h.lan:1");
+    }
 
     #[test]
     fn keep_local_refuses_cloud_providers_but_not_ollama() {

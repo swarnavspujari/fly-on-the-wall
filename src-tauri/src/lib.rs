@@ -1,6 +1,7 @@
 //! Composition root: this is the ONLY place where platform impls are picked
 //! and wired to the UI. `fly-core` and the frontend never see an OS API.
 
+pub mod ask_approvals;
 mod asr_commands;
 pub mod audio_store;
 mod calendar_commands;
@@ -159,6 +160,10 @@ pub fn run() {
             llm_commands::edit_note_block,
             llm_commands::keep_note_block,
             llm_commands::ask_meeting,
+            llm_commands::cancel_ask,
+            llm_commands::list_ask_people,
+            llm_commands::insert_ask_answer,
+            llm_commands::add_action_item,
             llm_commands::list_templates,
             llm_commands::save_template,
             llm_commands::delete_template,

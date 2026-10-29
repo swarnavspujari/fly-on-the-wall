@@ -1040,7 +1040,44 @@ const MOCK_VENDORS: Record<string, string> = {
 };
 const MOCK_ASK_ANSWER =
   "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
-function mockAsk(args: Record<string, unknown>): Promise<string> {
+/** Like the backend's approvals: what an answer's id may insert, once. */
+const mockApprovals = new Map<string, { noteId: string; markdown: string; applied: boolean }>();
+/** `ask_meeting`'s reply shape (the harness's answer). Sentences are
+ *  sourced; localStorage `fotwMockAskUnsourced` = "1" marks the last one unsourced and the
+ *  one before it flagged, to see the panel's answer check. */
+function mockAskReply(text: string, noteId = "n1") {
+  const unsourced = mockFlag("fotwMockAskUnsourced") === "1";
+  const local = llmSettings.providers.find((p) => p.id === llmSettings.provider)?.is_local ?? true;
+  const insertId = `mock-insert-${mockApprovals.size + 1}`;
+  mockApprovals.set(insertId, { noteId, markdown: text, applied: false });
+  return {
+    insert_id: insertId,
+    status: "answered",
+    text,
+    sentences: text
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l, i, all) => ({
+        text: l,
+        citations: ["mock-seg"],
+        status: !unsourced
+          ? "sourced"
+          : i === all.length - 1
+            ? "unsourced"
+            : i === all.length - 2
+              ? "flagged"
+              : "sourced",
+      })),
+    sources: [],
+    proposals: [],
+    refusals: [],
+    trace: {},
+    trace_lines: ["Searched this meeting"],
+    on_device: local,
+    run_log: {},
+  };
+}
+function mockAsk(args: Record<string, unknown>): Promise<ReturnType<typeof mockAskReply>> {
   const forced = mockFlag("fotwMockAskError");
   const provider = llmSettings.provider;
   const info = llmSettings.providers.find((p) => p.id === provider);
@@ -1055,7 +1092,11 @@ function mockAsk(args: Record<string, unknown>): Promise<string> {
       error = MOCK_ASK_ERRORS.no_key.replace("OpenAI", MOCK_VENDORS[provider] ?? provider);
   }
   return new Promise((resolve, reject) =>
-    setTimeout(() => (error ? reject(error) : resolve(MOCK_ASK_ANSWER)), 700),
+    setTimeout(
+      () =>
+        error ? reject(error) : resolve(mockAskReply(MOCK_ASK_ANSWER, String(args.noteId ?? "n1"))),
+      700,
+    ),
   );
 }
 
@@ -2378,6 +2419,34 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mcpSnippet;
     case "ask_meeting":
       return mockAsk(args);
+    case "cancel_ask":
+      // Like the backend: an id that isn't running does nothing.
+      return null;
+    case "list_ask_people":
+      return ["Dana Osei", "You"];
+    case "insert_ask_answer": {
+      // Like the backend: only an id it handed out, applied once (links
+      // dropped); a second click returns the note unchanged.
+      const held = mockApprovals.get(String(args.proposalId));
+      if (!held) throw "This suggestion has expired. Ask again to get a fresh one.";
+      if (!held.applied) {
+        const md = held.markdown
+          .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+          .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+          .trim();
+        if (!md) throw "nothing to insert";
+        blocks.push({
+          id: `ask-${blocks.length + 1}`,
+          origin: { kind: "ai", source_segment_ids: [] },
+          markdown: md,
+        });
+        held.applied = true;
+      }
+      return JSON.parse(JSON.stringify(note(held.noteId)));
+    }
+    case "add_action_item":
+      // The mock's answers carry no proposals, so no id is ever valid.
+      throw "This suggestion has expired. Ask again to get a fresh one.";
     case "test_llm_connection": {
       const refused = mockConsentRefusal();
       if (refused) throw refused;

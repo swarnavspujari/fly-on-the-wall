@@ -14,6 +14,8 @@ import type {
   MeetingSeed,
   AppInfo,
   AskMessage,
+  AskReply,
+  MeetingItem,
   Attendee,
   AudioDevice,
   CalendarSettingsUpdate,
@@ -191,8 +193,23 @@ export const api = {
     invoke<Note>("enhance_note", { noteId, templateId }),
   editNoteBlock: (noteId: string, blockId: string, markdown: string) =>
     invoke<Note>("edit_note_block", { noteId, blockId, markdown }),
+  // The Ask harness: a validated answer (sentences with citations and
+  // sourced/unsourced/flagged status, sources, proposals, trace). Scope
+  // defaults to the note; `askId` streams "ask:event" (stage, sources,
+  // sanitized frames) for that id.
   askMeeting: (noteId: string, history: AskMessage[]) =>
-    invoke<string>("ask_meeting", { noteId, history }),
+    invoke<AskReply>("ask_meeting", { noteId, history }),
+  // Stop an answer that is still being written (the Ask sheet's Stop):
+  // the backend drops the request, proposes nothing, and askMeeting rejects
+  // with "Ask was cancelled.". An id that isn't running does nothing.
+  cancelAsk: (askId: string) => invoke<void>("cancel_ask", { askId }),
+  // The composer's `@` suggestions (people the router can match).
+  listAskPeople: () => invoke<string[]>("list_ask_people"),
+  // Approve an Ask result by the id `askMeeting` returned (an answer's
+  // `insert_id`, or a proposal's `id`). The backend applies what it
+  // validated, validates it again, and a second click adds nothing.
+  insertAskAnswer: (proposalId: string) => invoke<Note>("insert_ask_answer", { proposalId }),
+  addActionItem: (proposalId: string) => invoke<MeetingItem>("add_action_item", { proposalId }),
   listTemplates: () => invoke<Template[]>("list_templates"),
   saveTemplate: (template: Template) => invoke<void>("save_template", { template }),
   deleteTemplate: (id: string) => invoke<void>("delete_template", { id }),
