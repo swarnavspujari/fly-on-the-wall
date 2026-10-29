@@ -1190,6 +1190,21 @@ mod tests {
         assert_eq!(c(&["flac"]), "flac");
         assert_eq!(c(&["pcm_s16le"]), "mka");
         assert_eq!(c(&["aac", "opus"]), "mka");
+        // whatever it writes, retention must count it as media
+        for codecs in [
+            &["aac"][..],
+            &["mp3"],
+            &["opus"],
+            &["flac"],
+            &["pcm_s16le"],
+            &[],
+        ] {
+            let name = format!("call.{}", c(codecs));
+            assert!(
+                fly_storage::privacy::is_media_file(Path::new(&name)),
+                "{name} would survive retention"
+            );
+        }
     }
 
     #[test]
