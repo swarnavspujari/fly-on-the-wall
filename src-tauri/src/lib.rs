@@ -6,6 +6,7 @@ mod asr_commands;
 mod calendar_commands;
 mod calendar_defaults;
 mod commands;
+pub mod connectors;
 pub mod embeddings;
 pub mod extraction;
 pub mod gpu;
@@ -204,6 +205,25 @@ pub fn run() {
             privacy::disk_encryption_status,
             privacy::recovered_kept_local,
             privacy::dismiss_recovered_kept_local,
+            connectors::connectors_overview,
+            connectors::connectors_directory,
+            connectors::add_connector,
+            connectors::update_connector,
+            connectors::set_connector_enabled,
+            connectors::remove_connector,
+            connectors::sync_connector_tools,
+            connectors::set_connector_tool_permissions,
+            connectors::approve_connector_tool,
+            connectors::sign_in_connector,
+            connectors::sign_out_connector,
+            connectors::claude_desktop_candidates,
+            connectors::import_claude_desktop_connector,
+            connectors::connector_call_log,
+            connectors::clear_connector_call_log,
+            connectors::pending_connector_calls,
+            connectors::decide_connector_call,
+            connectors::test_connector_tool,
+            connectors::pick_connector_program,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fly on the Wall")
@@ -215,6 +235,8 @@ pub fn run() {
                 if let Some(state) = app.try_state::<state::AppState>() {
                     ollama::shutdown(&state);
                 }
+                // Stdio connector programs stop with the app.
+                connectors::shutdown(app);
             }
         });
 }

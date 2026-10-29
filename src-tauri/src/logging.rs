@@ -40,7 +40,10 @@ pub fn init(data_dir: Option<&Path>) {
     });
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            // rmcp logs OAuth details (an authorization code) at debug;
+            // keep it at warn unless RUST_LOG asks otherwise.
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,rmcp=warn".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .with(file_layer)

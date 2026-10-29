@@ -12,6 +12,7 @@ members = [
     "crates/fly-context",
     "crates/fly-ask",
     "crates/fly-mcp",
+    "crates/fly-mcp-client",
     "crates/fly-secrets",
     "src-tauri",
     # System evals (immutable to AI agents; see evals/README.md).
@@ -36,6 +37,7 @@ fly-capture-screen = { path = "crates/fly-capture-screen" }
 fly-storage = { path = "crates/fly-storage" }
 fly-secrets = { path = "crates/fly-secrets" }
 fly-ask = { path = "crates/fly-ask" }
+fly-mcp-client = { path = "crates/fly-mcp-client" }
 
 # shared external deps — pinned once here so every crate agrees
 serde = { version = "1", features = ["derive"] }

@@ -73,7 +73,9 @@ pub fn is_webview_setting_key(key: &str) -> bool {
 /// webview can still read it. Compared case-insensitively, so no spelling of
 /// the prefix slips through.
 pub fn is_webview_writable_setting_key(key: &str) -> bool {
-    const BACKEND_ONLY: &[&str] = &[crate::llm_commands::CLOUD_CONSENT_PREFIX];
+    // Cloud-AI consent, and connector state (servers, approvals, tool
+    // permissions, call log): both are trust records only the backend writes.
+    const BACKEND_ONLY: &[&str] = &[crate::llm_commands::CLOUD_CONSENT_PREFIX, "connectors."];
     let lower = key.to_ascii_lowercase();
     is_webview_setting_key(key) && !BACKEND_ONLY.iter().any(|p| lower.starts_with(p))
 }
@@ -753,6 +755,25 @@ mod security_tests {
             check_webview_writable_setting_key("llm.provider").unwrap_err(),
             "setting 'llm.provider' can't be accessed from the app UI"
         );
+    }
+
+    /// Connector state (servers, approvals, tool permissions, call log) is
+    /// backend-written: the webview can neither read nor write it, under any
+    /// spelling. The beta switch is a UI preference and stays writable.
+    #[test]
+    fn webview_cannot_touch_connector_state() {
+        for key in [
+            "connectors.registry",
+            "connectors.call_log",
+            "connectors.",
+            "Connectors.Registry",
+            "CONNECTORS.REGISTRY",
+        ] {
+            assert!(!ok(key), "{key}");
+            assert!(!writable(key), "{key}");
+            assert!(check_webview_writable_setting_key(key).is_err(), "{key}");
+        }
+        assert!(writable("ui.beta.connectors"));
     }
 
     #[test]
