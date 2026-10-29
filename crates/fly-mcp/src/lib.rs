@@ -798,10 +798,12 @@ impl Server {
             folder_id: arg_str(args, "folder_id"),
             since: date("since")?,
             until: date("until")?,
+            // A model's call: held to the schema's 1-20 (in-process
+            // callers of fly-context may ask for more).
             limit: args
                 .get("limit")
                 .and_then(|l| l.as_u64())
-                .map(|l| l.min(u64::from(u32::MAX)) as u32),
+                .map(|l| l.min(u64::from(fly_context::tools::MAX_TOOL_LIMIT)) as u32),
             ..Default::default()
         };
         let r = self

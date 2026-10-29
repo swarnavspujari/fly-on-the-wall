@@ -21,9 +21,12 @@
 //! is never indexed. Speaker labels are not indexed: they're display names
 //! that a rename changes, and speakers are a filter (`speaker_key`).
 
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 
-use crate::search::{sanitize_fts_query, SearchFilter};
+use crate::query::{term_expr, FtsQuery, TermOwners, TermStats};
+use crate::search::SearchFilter;
 use crate::{Result, Storage};
 
 /// The rows `transcript_segments` holds for one `transcripts` row, given SQL
@@ -232,11 +235,28 @@ impl Storage {
     /// reveals nothing about hidden meetings). Under `exclude_keep_local` a
     /// meeting whose note row is missing is dropped too: its privacy can't
     /// be checked.
+    ///
+    /// Like [`Storage::search_split`], every word must match unless that
+    /// finds nothing under `filter`; then the query's content terms are
+    /// ORed (see [`crate::query`]).
     pub fn search_segments(&self, query: &str, filter: &SearchFilter) -> Result<Vec<SegmentHit>> {
-        let fts_query = sanitize_fts_query(query);
-        if fts_query.is_empty() {
+        let q = FtsQuery::parse(query);
+        if q.is_empty() {
             return Ok(vec![]);
         }
+        let expr = q.choose(|all| -> Result<bool> {
+            let first = SearchFilter {
+                limit: 1,
+                offset: 0,
+                ..filter.clone()
+            };
+            Ok(!self.segment_hits(all, &first)?.is_empty())
+        })?;
+        self.segment_hits(expr, filter)
+    }
+
+    /// Segment rows matching an FTS5 expression, bm25-ranked.
+    fn segment_hits(&self, fts_query: &str, filter: &SearchFilter) -> Result<Vec<SegmentHit>> {
         let (cte, not_local) = if filter.exclude_keep_local {
             (
                 crate::privacy::KEEP_LOCAL_CTE,
@@ -261,7 +281,7 @@ impl Storage {
         ))?;
         let rows = stmt.query_map(
             rusqlite::params![
-                &fts_query,
+                fts_query,
                 filter.folder_id.as_deref(),
                 filter.since.map(|t| t.to_rfc3339()),
                 filter.until.map(|t| t.to_rfc3339()),
@@ -281,6 +301,154 @@ impl Storage {
                     snippet: r.get(8)?,
                 })
             },
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Keyword statistics for ranking passages over the segment index:
+    /// how many segments are in scope, and per term which meetings hold it
+    /// (and in how many segments). Terms come from
+    /// [`crate::query::query_terms`] and match with its prefix rule.
+    /// Honors `filter`'s folder, dates and `exclude_keep_local` (in SQL,
+    /// failing closed like [`Storage::search_segments`]); `limit`/`offset`
+    /// don't apply.
+    pub fn segment_term_stats(&self, terms: &[String], filter: &SearchFilter) -> Result<TermStats> {
+        // One snapshot: the scope, the cached rowid ranges and the FTS rows
+        // must describe the same database (a commit in between could hand a
+        // reused rowid to another meeting).
+        self.read_snapshot(|| self.segment_term_stats_in_snapshot(terms, filter))
+    }
+
+    fn segment_term_stats_in_snapshot(
+        &self,
+        terms: &[String],
+        filter: &SearchFilter,
+    ) -> Result<TermStats> {
+        // Scope is decided once per meeting, not per matching segment, and a
+        // matching FTS row is mapped to its meeting through the cached rowid
+        // ranges: a common term matches tens of thousands of segments in a
+        // big library, and reading each text-heavy row (or joining it to its
+        // meeting and note) dominated the search.
+        let in_scope = self.meetings_in_scope(filter)?;
+        let ranges = self.segment_ranges()?;
+        let Some(ranges) = ranges.as_ref() else {
+            return self.segment_term_stats_joined(terms, &in_scope);
+        };
+        let scoped: Vec<bool> = ranges
+            .meetings
+            .iter()
+            .map(|m| in_scope.contains(m))
+            .collect();
+        let docs = ranges
+            .counts
+            .iter()
+            .zip(&scoped)
+            .filter(|(_, s)| **s)
+            .map(|(n, _)| *n)
+            .sum();
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT rowid FROM segments_fts WHERE segments_fts MATCH ?1")?;
+        let mut out = Vec::with_capacity(terms.len());
+        for term in terms {
+            let mut per: HashMap<u32, usize> = HashMap::new();
+            let mut rows = stmt.query([term_expr(term)])?;
+            while let Some(r) = rows.next()? {
+                if let Some(m) = ranges.meeting_of(r.get(0)?) {
+                    if scoped[m as usize] {
+                        *per.entry(m).or_default() += 1;
+                    }
+                }
+            }
+            out.push(TermOwners {
+                count: per.values().sum(),
+                owners: per
+                    .into_iter()
+                    .map(|(m, n)| (ranges.meetings[m as usize].clone(), n))
+                    .collect(),
+            });
+        }
+        Ok(TermStats { docs, terms: out })
+    }
+
+    /// [`Storage::segment_term_stats`] by joining each matching row to its
+    /// meeting: the fallback when segment rowid ranges overlap.
+    fn segment_term_stats_joined(
+        &self,
+        terms: &[String],
+        in_scope: &HashSet<String>,
+    ) -> Result<TermStats> {
+        let mut docs = 0usize;
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT meeting_id, count(*) FROM transcript_segments GROUP BY meeting_id",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                if let rusqlite::types::ValueRef::Text(m) = r.get_ref(0)? {
+                    if in_scope.contains(std::str::from_utf8(m).unwrap_or("")) {
+                        docs += r.get::<_, i64>(1)?.max(0) as usize;
+                    }
+                }
+            }
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT ts.meeting_id
+               FROM segments_fts
+               JOIN transcript_segments ts ON ts.id = segments_fts.rowid
+              WHERE segments_fts MATCH ?1",
+        )?;
+        let mut out = Vec::with_capacity(terms.len());
+        for term in terms {
+            let mut owners = TermOwners::default();
+            let mut rows = stmt.query([term_expr(term)])?;
+            while let Some(r) = rows.next()? {
+                let rusqlite::types::ValueRef::Text(m) = r.get_ref(0)? else {
+                    continue;
+                };
+                let m = std::str::from_utf8(m).unwrap_or("");
+                if !in_scope.contains(m) {
+                    continue;
+                }
+                owners.count += 1;
+                match owners.owners.get_mut(m) {
+                    Some(n) => *n += 1,
+                    None => {
+                        owners.owners.insert(m.to_string(), 1);
+                    }
+                }
+            }
+            out.push(owners);
+        }
+        Ok(TermStats { docs, terms: out })
+    }
+
+    /// Ids of the meetings `filter` admits: folder via the owning note,
+    /// dates on the meeting's start, keep-local in SQL. Under
+    /// `exclude_keep_local` a meeting without a note row is out (its privacy
+    /// can't be checked), as in [`Storage::search_segments`].
+    fn meetings_in_scope(&self, filter: &SearchFilter) -> Result<HashSet<String>> {
+        let (cte, not_local) = if filter.exclude_keep_local {
+            (
+                crate::privacy::KEEP_LOCAL_CTE,
+                " AND n.id IS NOT NULL AND m.note_id NOT IN (SELECT id FROM local_notes)",
+            )
+        } else {
+            ("", "")
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "{cte}SELECT m.id FROM meetings m LEFT JOIN notes n ON n.id = m.note_id
+              WHERE (?1 IS NULL OR n.folder_id = ?1)
+                AND (?2 IS NULL OR m.started_at >= ?2)
+                AND (?3 IS NULL OR m.started_at <= ?3){not_local}"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                filter.folder_id.as_deref(),
+                filter.since.map(|t| t.to_rfc3339()),
+                filter.until.map(|t| t.to_rfc3339())
+            ],
+            |r| r.get::<_, String>(0),
         )?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -361,6 +529,140 @@ mod tests {
                 [],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn term_stats_count_segments_per_meeting_within_scope() {
+        let (_dir, s) = test_storage();
+        let mk = |title: &str, lines: &[&str]| {
+            let note = s.create_note(title, None).unwrap();
+            let m = s.create_meeting(title, &note.id, &[]).unwrap();
+            let segs = lines
+                .iter()
+                .enumerate()
+                .map(|(i, t)| seg(&format!("{title}-{i}"), i as u64 * 1000, t))
+                .collect();
+            s.save_transcript(&transcript(&m.id, segs)).unwrap();
+            (m.id, note.id)
+        };
+        let (a, _) = mk("a", &["budget review", "the budgets grew", "hiring plan"]);
+        let (b, b_note) = mk("b", &["budget secret", "nothing else"]);
+        s.set_note_keep_local(&b_note, true).unwrap();
+        let terms = vec!["budget".to_string(), "hiring".to_string(), "zz".to_string()];
+
+        let all = s
+            .segment_term_stats(&terms, &SearchFilter::default())
+            .unwrap();
+        assert_eq!(all.docs, 5);
+        // "budget" also matches "budgets" (prefix rule).
+        assert_eq!(all.terms[0].count, 3);
+        assert_eq!(all.terms[0].owners[&a], 2);
+        assert_eq!(all.terms[0].owners[&b], 1);
+        assert_eq!(all.terms[1].count, 1);
+        assert_eq!(all.terms[2].count, 0);
+        let idf = all.idf();
+        assert!(
+            idf[2] > idf[1] && idf[1] > idf[0],
+            "rarer terms weigh more: {idf:?}"
+        );
+
+        // Keep-local meetings don't count at all: not as owners, not in N.
+        let shareable = s
+            .segment_term_stats(
+                &terms,
+                &SearchFilter {
+                    exclude_keep_local: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(shareable.docs, 3);
+        assert_eq!(shareable.terms[0].count, 2);
+        assert!(!shareable.terms[0].owners.contains_key(&b));
+        // Dates on the meeting's start.
+        let future = s
+            .segment_term_stats(
+                &terms,
+                &SearchFilter {
+                    since: Some(chrono::Utc::now() + chrono::Duration::days(1)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(future.docs, 0);
+        assert_eq!(future.terms[0].count, 0);
+    }
+
+    #[test]
+    fn term_stats_agree_when_rowid_ranges_overlap() {
+        let (_dir, s) = test_storage();
+        let mut ids = Vec::new();
+        for title in ["a", "b"] {
+            let note = s.create_note(title, None).unwrap();
+            let m = s.create_meeting(title, &note.id, &[]).unwrap();
+            let segs = (0..3)
+                .map(|i| seg(&format!("{title}{i}"), i * 1000, "budget talk"))
+                .collect();
+            s.save_transcript(&transcript(&m.id, segs)).unwrap();
+            ids.push(m.id);
+        }
+        let terms = vec!["budget".to_string()];
+        let fast = s
+            .segment_term_stats(&terms, &SearchFilter::default())
+            .unwrap();
+        assert!(s.segment_ranges().unwrap().is_some());
+        // A row of meeting b inside meeting a's rowid range (no trigger
+        // writes this way; the stats must still be right).
+        let a_min: i64 = s
+            .conn
+            .query_row(
+                "SELECT min(id) FROM transcript_segments WHERE meeting_id = ?1",
+                [&ids[0]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE transcript_segments SET meeting_id = ?1 WHERE id = ?2",
+                rusqlite::params![&ids[1], a_min + 1],
+            )
+            .unwrap();
+        assert!(s.segment_ranges().unwrap().is_none(), "overlap detected");
+        let slow = s
+            .segment_term_stats(&terms, &SearchFilter::default())
+            .unwrap();
+        assert_eq!(slow.docs, fast.docs);
+        assert_eq!(slow.terms[0].count, fast.terms[0].count);
+        assert_eq!(slow.terms[0].owners[&ids[0]], 2);
+        assert_eq!(slow.terms[0].owners[&ids[1]], 4);
+    }
+
+    #[test]
+    fn segment_search_falls_back_to_any_word() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("m", None).unwrap();
+        let m = s.create_meeting("m", &note.id, &[]).unwrap();
+        s.save_transcript(&transcript(
+            &m.id,
+            vec![
+                seg("s1", 0, "we approved the budget"),
+                seg("s2", 1000, "hiring stays frozen"),
+            ],
+        ))
+        .unwrap();
+        let f = SearchFilter {
+            limit: 10,
+            ..Default::default()
+        };
+        // No single segment holds both words: AND finds nothing, OR both.
+        let hits = s
+            .search_segments("What about the budget and hiring?", &f)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        // Keywords that one segment holds stay precise.
+        let hits = s.search_segments("hiring frozen", &f).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].segment_id, "s2");
     }
 
     #[test]

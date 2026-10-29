@@ -12,7 +12,7 @@
 //! Arguments deserialize from either form (`null` = absent) and reject
 //! unknown fields, so a model inventing a parameter gets a clear error.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use fly_core::{BlockOrigin, ItemKind, MeetingItem, Transcript};
@@ -23,14 +23,37 @@ use serde_json::{json, Value};
 use crate::passages::{self, PassageKey, Via, Window};
 use crate::{Context, ContextError, QueryVector, Result};
 
-/// Candidates pulled from each keyword list before fusion.
-const FTS_CANDIDATES: usize = 40;
+/// Meetings (and notes) whose windows an unscoped keyword search scores,
+/// picked by the IDF mass of the query terms each holds.
+const KEYWORD_OWNERS: usize = 40;
 /// Vector hits considered before fusion.
 const VECTOR_CANDIDATES: usize = 200;
-/// Passages per meeting/note in one result.
-const PER_OWNER_CAP: usize = 3;
-/// Passages kept per keyword-matched meeting before fusion.
-const PER_MEETING_KEYWORD: usize = 2;
+/// Passages per meeting/note in one result, unless an in-process caller
+/// asks for more (`SearchPassagesArgs::per_meeting`, up to
+/// [`MAX_PER_MEETING`]).
+const DEFAULT_PER_MEETING: u32 = 3;
+/// Most passages per meeting/note an in-process caller may ask for.
+pub const MAX_PER_MEETING: u32 = 12;
+/// Most passages one in-process `search_passages` call returns (the Ask
+/// harness); a model's tool call is held to [`MAX_TOOL_LIMIT`].
+pub const MAX_LIMIT: u32 = 40;
+/// Most passages a model's `search_passages` tool call returns.
+pub const MAX_TOOL_LIMIT: u32 = 20;
+/// Passages returned when the caller doesn't say.
+const DEFAULT_LIMIT: u32 = 8;
+/// The model's similarity floor applies only to queries with at least this
+/// many content words. It is calibrated on questions; a keyword-style query
+/// scores lower against the very passage it is after ("budget" 0.33,
+/// "forecast" 0.21 vs 0.49 asked as a question, real embeddinggemma). On
+/// the retrieval gold set, the cosine of the chunk holding the answer
+/// reached 0.35 for 93% of the questions as asked but only 61% / 36% / 10%
+/// of the same questions cut to their 3 / 2 / 1 rarest words, so shorter
+/// queries keep every ranked semantic hit.
+const FLOOR_MIN_TERMS: usize = 4;
+/// A keyword passage must hold at least this share of the query terms' IDF
+/// mass (tuned on the retrieval gold set with the app's embedder): one
+/// common word shared with a question is not a match.
+const KEYWORD_MIN_COVERAGE: f32 = 0.4;
 /// Longest accepted query.
 pub const MAX_QUERY_CHARS: usize = 1_000;
 /// Most meeting ids one call may scope to.
@@ -330,6 +353,13 @@ pub struct SearchPassagesArgs {
     pub until: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
+    /// At most this many passages per meeting or note, 1-12. In-process
+    /// callers only: it is never read from a model's tool call (a
+    /// `per_meeting` key there is an unknown field). Unset: 3 per meeting,
+    /// and slots that cap would leave empty go to further passages of the
+    /// meetings already shown.
+    #[serde(skip)]
+    pub per_meeting: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -479,11 +509,65 @@ pub struct Passage {
     pub matched_by: Vec<&'static str>,
 }
 
+impl Passage {
+    /// Identifies the passage within a search result:
+    /// `transcript:<meeting id>:<first segment id>` or
+    /// `note:<note id>:<hash of the paragraph text>`. Keys
+    /// [`PassageScores::similarity`], so a caller that drops or reorders
+    /// passages still finds each one's score.
+    pub fn id(&self) -> String {
+        match self.source {
+            PassageSource::Transcript => format!(
+                "transcript:{}:{}",
+                self.meeting_id.as_deref().unwrap_or(""),
+                self.segments.first().map_or_else(
+                    || format!("@{}", self.start_ms.unwrap_or(0)),
+                    |s| s.id.clone()
+                )
+            ),
+            PassageSource::Note => {
+                // FNV-1a: stable across runs and builds (unlike `DefaultHasher`).
+                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                for b in self.text.bytes() {
+                    h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+                }
+                format!("note:{}:{h:016x}", self.note_id)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PassageResults {
     pub passages: Vec<Passage>,
     /// Semantic search ran (a query vector was supplied).
     pub semantic: bool,
+}
+
+/// The raw similarity behind one [`Context::search_passages_scored`] call,
+/// beside its [`PassageResults`]. (`Passage::score` is the rank-based fused
+/// score; these are cosines.)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PassageScores {
+    /// Per passage, by [`Passage::id`]: the cosine of the best semantic hit
+    /// that landed on it. Absent for a passage only keywords found.
+    pub similarity: BTreeMap<String, f32>,
+    /// The best cosine of any chunk in scope, whether or not it reached
+    /// `similarity_floor`. Under the floor, nothing in the library is
+    /// semantically close to the question: one signal for "not found".
+    /// `None` without semantic search.
+    pub top_similarity: Option<f32>,
+    /// The cosine a semantic hit needed to count in this search: the
+    /// model's floor for a question-length unscoped query, `None` for short
+    /// keyword queries, meeting-scoped searches and models without one.
+    pub similarity_floor: Option<f32>,
+}
+
+impl PassageScores {
+    /// The cosine of `p`'s best semantic hit, if semantic search found it.
+    pub fn of(&self, p: &Passage) -> Option<f32> {
+        self.similarity.get(&p.id()).copied()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -584,6 +668,32 @@ struct Loaded {
     windows: Vec<Window>,
 }
 
+/// A note passage summarizes its meeting; the meeting's transcript is the
+/// citable source. Where a note would rank above every transcript passage
+/// of its own meeting (within the first `limit`), the best of those moves
+/// up to just ahead of it, from anywhere in the over-fetched list, and
+/// takes the note's fused score (so scores stay in order). The note stays,
+/// one place lower.
+fn sources_before_notes(found: &mut Vec<(Passage, Option<f32>)>, limit: usize) {
+    let mut i = 0;
+    while i < found.len().min(limit) {
+        if found[i].0.source == PassageSource::Note {
+            let note = found[i].0.note_id.clone();
+            let source = (i + 1..found.len()).find(|&j| {
+                found[j].0.source == PassageSource::Transcript && found[j].0.note_id == note
+            });
+            if let Some(j) = source {
+                let mut moved = found.remove(j);
+                moved.0.score = found[i].0.score;
+                found.insert(i, moved);
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
 pub(crate) fn segment_view(t: &Transcript, i: usize) -> SegmentView {
     let s = &t.segments[i];
     SegmentView {
@@ -613,13 +723,26 @@ impl Context<'_> {
         Ok(cache[meeting_id].is_some())
     }
 
-    /// Hybrid passage search: keyword (FTS, localized to windows) + semantic
-    /// (vector hits mapped onto windows), fused by RRF with a per-meeting cap.
+    /// Hybrid passage search: keyword (IDF-weighted term matches, localized
+    /// to windows) + semantic (vector hits above the model's similarity
+    /// floor, mapped onto windows), fused by RRF with a per-meeting cap.
     pub fn search_passages(
         &self,
         args: &SearchPassagesArgs,
         query_vector: Option<QueryVector<'_>>,
     ) -> Result<PassageResults> {
+        self.search_passages_scored(args, query_vector)
+            .map(|(r, _)| r)
+    }
+
+    /// [`search_passages`](Self::search_passages) plus the raw cosine
+    /// similarity behind it ([`PassageScores`]), for callers that decide
+    /// "not found" or weigh passages themselves.
+    pub fn search_passages_scored(
+        &self,
+        args: &SearchPassagesArgs,
+        query_vector: Option<QueryVector<'_>>,
+    ) -> Result<(PassageResults, PassageScores)> {
         let query = args.query.trim();
         if query.is_empty() {
             return Err(ContextError::InvalidArgs("query must not be empty".into()));
@@ -629,7 +752,11 @@ impl Context<'_> {
                 "query is longer than {MAX_QUERY_CHARS} characters"
             )));
         }
-        let limit = clamp(args.limit, 8, 1, 20);
+        let limit = clamp(args.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+        let per_meeting = clamp(args.per_meeting, DEFAULT_PER_MEETING, 1, MAX_PER_MEETING);
+        // Keyword windows kept per meeting before fusion: at least the
+        // default, so a small cap still has its best windows to choose from.
+        let keyword_per_meeting = per_meeting.max(DEFAULT_PER_MEETING as usize);
         let since = parse_when("since", &args.since, false)?;
         let until = parse_when("until", &args.until, true)?;
         let hidden = self.hidden()?;
@@ -638,7 +765,7 @@ impl Context<'_> {
             folder_id: non_empty(&args.folder_id).map(str::to_string),
             since,
             until,
-            limit: FTS_CANDIDATES,
+            limit: VECTOR_CANDIDATES,
             offset: 0,
             exclude_keep_local: self.shareable_only(),
         };
@@ -657,102 +784,191 @@ impl Context<'_> {
         let mut keyword_t: Vec<PassageKey> = Vec::new();
         let mut keyword_n: Vec<PassageKey> = Vec::new();
 
-        // Which meetings to localize keyword matches in, in rank order.
-        let (meeting_order, note_order): (Vec<String>, Vec<String>) = match &scope {
-            Some(ids) => {
-                let notes_of: Vec<String> = ids
+        // Keyword lists. Each window is scored by the IDF mass of the query
+        // terms it holds (its speaker labels and the meeting title count:
+        // "what did Dana say about the launch" should find Dana's lines in
+        // the launch meeting) and kept only above KEYWORD_MIN_COVERAGE.
+        if !terms.is_empty() {
+            let stats = self.storage().segment_term_stats(&terms, &filter)?;
+            let idf = stats.coverage_weights();
+            // A word the library has never seen counts fully (it weighs
+            // the most): a question about "the Berlin lease" isn't
+            // answered by a window that only shares "lease".
+            let total: f32 = idf.iter().sum();
+            let covers = |s: f32| s > 0.0 && total > 0.0 && s / total >= KEYWORD_MIN_COVERAGE;
+
+            let evidence = owner_evidence(&stats, &idf);
+            let meeting_order: Vec<String> = match &scope {
+                Some(ids) => ids.clone(),
+                None => top_owners(&evidence, KEYWORD_OWNERS),
+            };
+            // (score, own-text score, meeting evidence, started_at, title,
+            // window, key): the title counts toward eligibility and across
+            // meetings; the window's own words decide between windows of
+            // one meeting; remaining ties go to the meeting with more
+            // keyword evidence overall, then the newer one. Content only,
+            // never the (random) ids, so a search ranks the same way every
+            // time.
+            type Scored = (
+                f32,
+                f32,
+                (f32, usize),
+                DateTime<Utc>,
+                String,
+                usize,
+                PassageKey,
+            );
+            let mut scored: Vec<Scored> = Vec::new();
+            for mid in &meeting_order {
+                if !self.load(&mut cache, mid)? {
+                    continue;
+                }
+                let l = cache[mid].as_ref().expect("loaded");
+                if hidden.meeting(&l.meeting.id, &l.meeting.note_id) {
+                    continue; // defense in depth: the term stats already excluded these
+                }
+                if scope.is_some()
+                    && (since.is_some_and(|s| l.meeting.started_at < s)
+                        || until.is_some_and(|u| l.meeting.started_at > u))
+                {
+                    continue;
+                }
+                // (with the title, own text): one pass over each window's
+                // lines and labels, the title matched once per meeting.
+                let in_title = passages::matched_terms(&terms, &l.meeting.title);
+                let mut best: Vec<(f32, f32, usize)> =
+                    passages::window_matches(&terms, &l.transcript, &l.windows)
+                        .iter()
+                        .enumerate()
+                        .map(|(i, own)| {
+                            let (mut with_title, mut alone) = (0f32, 0f32);
+                            for ((o, t), w) in own.iter().zip(&in_title).zip(&idf) {
+                                with_title += if *o || *t { *w } else { 0.0 };
+                                alone += if *o { *w } else { 0.0 };
+                            }
+                            (with_title, alone, i)
+                        })
+                        .filter(|(s, _, _)| covers(*s))
+                        .collect();
+                best.sort_by(|a, b| {
+                    b.0.total_cmp(&a.0)
+                        .then(b.1.total_cmp(&a.1))
+                        .then(a.2.cmp(&b.2))
+                });
+                let meeting_evidence = evidence.get(mid).copied().unwrap_or_default();
+                for (s, own, i) in best.into_iter().take(keyword_per_meeting) {
+                    scored.push((
+                        s,
+                        own,
+                        meeting_evidence,
+                        l.meeting.started_at,
+                        l.meeting.title.clone(),
+                        i,
+                        PassageKey::Transcript(mid.clone(), i),
+                    ));
+                }
+            }
+            scored.sort_by(|a, b| {
+                b.0.total_cmp(&a.0)
+                    .then(b.1.total_cmp(&a.1))
+                    .then(b.2 .0.total_cmp(&a.2 .0))
+                    .then(b.2 .1.cmp(&a.2 .1))
+                    .then(b.3.cmp(&a.3))
+                    .then(a.4.cmp(&b.4))
+                    .then(a.5.cmp(&b.5))
+            });
+            keyword_t.extend(scored.into_iter().map(|(.., k)| k));
+
+            let note_order: Vec<String> = match &scope {
+                Some(ids) => ids
                     .iter()
                     .filter_map(|id| self.storage().get_meeting(id).ok().map(|m| m.note_id))
-                    .collect();
-                (ids.clone(), notes_of)
-            }
-            None => {
-                let (n_hits, t_hits) = self.storage().search_split(query, &filter)?;
-                (
-                    t_hits.into_iter().filter_map(|h| h.meeting_id).collect(),
-                    n_hits.into_iter().map(|h| h.note_id).collect(),
-                )
-            }
-        };
-
-        let mut scored: Vec<(usize, usize, PassageKey)> = Vec::new(); // (score, meeting rank, key)
-        for (rank, mid) in meeting_order.iter().enumerate() {
-            if !self.load(&mut cache, mid)? {
-                continue;
-            }
-            let l = cache[mid].as_ref().expect("loaded");
-            if hidden.meeting(&l.meeting.id, &l.meeting.note_id) {
-                continue; // defense in depth: FTS already excluded these
-            }
-            if scope.is_some()
-                && (since.is_some_and(|s| l.meeting.started_at < s)
-                    || until.is_some_and(|u| l.meeting.started_at > u))
-            {
-                continue;
-            }
-            let mut best: Vec<(usize, usize)> = l
-                .windows
-                .iter()
-                .enumerate()
-                .map(|(i, w)| {
-                    (
-                        passages::lexical_score(&terms, &passages::window_text(&l.transcript, w)),
-                        i,
-                    )
-                })
-                .filter(|(s, _)| *s > 0)
-                .collect();
-            best.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-            for (s, i) in best.into_iter().take(PER_MEETING_KEYWORD) {
-                scored.push((s, rank, PassageKey::Transcript(mid.clone(), i)));
-            }
-        }
-        // Scoped search ranks purely by term overlap; global search keeps
-        // the FTS meeting order (bm25) and orders windows within it.
-        if scope.is_some() {
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        }
-        keyword_t.extend(scored.into_iter().map(|(_, _, k)| k));
-
-        for nid in &note_order {
-            if hidden.note(nid) {
-                continue;
-            }
-            let note = match self.storage().get_note(nid) {
-                Ok(n) => n,
-                Err(fly_storage::StorageError::NotFound(_)) => continue,
-                Err(e) => return Err(e.into()),
+                    .collect(),
+                None => {
+                    let note_stats = self.storage().note_term_stats(&terms, &filter)?;
+                    top_owners(&owner_evidence(&note_stats, &idf), KEYWORD_OWNERS)
+                }
             };
-            let chunks = fly_storage::embeddings::chunk_note(&note);
-            let best = chunks
-                .iter()
-                .enumerate()
-                .map(|(i, c)| (passages::lexical_score(&terms, &c.text), i))
-                .filter(|(s, _)| *s > 0)
-                .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-            if let Some((_, i)) = best {
-                keyword_n.push(PassageKey::Note(nid.clone(), i));
+            // (score, own-text score, updated_at, title, key)
+            let mut scored: Vec<(f32, f32, DateTime<Utc>, String, PassageKey)> = Vec::new();
+            for nid in &note_order {
+                if hidden.note(nid) {
+                    continue;
+                }
+                let note = match self.storage().get_note(nid) {
+                    Ok(n) => n,
+                    Err(fly_storage::StorageError::NotFound(_)) => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                let title = note.title.as_str();
+                let chunks = fly_storage::embeddings::chunk_note(&note);
+                let best = chunks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let own = passages::weighted_match(&terms, &idf, &[(&c.text, 1.0)]);
+                        let texts = [(c.text.as_str(), 1.0), (title, 1.0)];
+                        (passages::weighted_match(&terms, &idf, &texts), own, i)
+                    })
+                    .filter(|(s, _, _)| covers(*s))
+                    .max_by(|a, b| {
+                        a.0.total_cmp(&b.0)
+                            .then(a.1.total_cmp(&b.1))
+                            .then(b.2.cmp(&a.2))
+                    });
+                if let Some((s, own, i)) = best {
+                    scored.push((
+                        s,
+                        own,
+                        note.updated_at,
+                        note.title.clone(),
+                        PassageKey::Note(nid.clone(), i),
+                    ));
+                }
+                notes.insert(nid.clone(), note);
             }
-            notes.insert(nid.clone(), note);
+            scored.sort_by(|a, b| {
+                b.0.total_cmp(&a.0)
+                    .then(b.1.total_cmp(&a.1))
+                    .then(b.2.cmp(&a.2))
+                    .then(a.3.cmp(&b.3))
+            });
+            keyword_n.extend(scored.into_iter().map(|(.., k)| k));
         }
 
-        // Semantic list.
+        // Semantic list: hits at or above the model's similarity floor.
         let mut semantic: Vec<PassageKey> = Vec::new();
+        let mut similarity: HashMap<PassageKey, f32> = HashMap::new();
+        let mut top_similarity: Option<f32> = None;
+        let floor = query_vector
+            .filter(|_| {
+                scope.is_none() && fly_storage::query::content_terms(query).len() >= FLOOR_MIN_TERMS
+            })
+            .and_then(|qv| fly_storage::embeddings::similarity_floor(qv.model));
         if let Some(qv) = query_vector {
             // vector_search filters keep-local (and orphans) inside SQL,
-            // before its limit, so hidden chunks can't crowd the pool. A
-            // meeting scope isn't expressible there, so a scoped search asks
-            // for every hit and caps after its own filter: truncating first
-            // would let out-of-scope chunks crowd in-scope ones out.
-            let pool = if scope.is_some() {
-                ALL_ROWS
+            // before its limit and floor, so hidden chunks can't crowd the
+            // pool. A meeting scope isn't expressible there, so a scoped
+            // search asks for every hit and applies the scope and the cap
+            // itself (truncating first would let out-of-scope chunks crowd
+            // in-scope ones out). It applies no floor: an explicit meeting
+            // scope is the question's subject, so its best passages count,
+            // close or not.
+            let found = if scope.is_some() {
+                self.storage()
+                    .vector_search_floor(qv.vector, qv.model, &filter, ALL_ROWS, None)?
             } else {
-                VECTOR_CANDIDATES
+                let r = self.storage().vector_search_floor(
+                    qv.vector,
+                    qv.model,
+                    &filter,
+                    VECTOR_CANDIDATES,
+                    floor,
+                )?;
+                top_similarity = r.best_score;
+                r
             };
-            let hits = self
-                .storage()
-                .vector_search(qv.vector, qv.model, &filter, pool)?;
-            for h in hits {
+            for h in found.hits {
                 if semantic.len() >= VECTOR_CANDIDATES {
                     break;
                 }
@@ -761,7 +977,7 @@ impl Context<'_> {
                 if self.shareable_only() && (h.note_id.is_empty() || hidden.note(&h.note_id)) {
                     continue;
                 }
-                match h.kind {
+                let key = match h.kind {
                     SearchHitKind::Transcript => {
                         let Some(mid) = h.meeting_id.clone() else {
                             continue;
@@ -769,31 +985,30 @@ impl Context<'_> {
                         if scope.as_ref().is_some_and(|s| !s.contains(&mid)) {
                             continue;
                         }
-                        if !self.load(&mut cache, &mid)? {
+                        if hidden.meeting(&mid, &h.note_id) {
                             continue;
                         }
-                        let l = cache[&mid].as_ref().expect("loaded");
-                        if hidden.meeting(&l.meeting.id, &l.meeting.note_id) {
-                            continue;
+                        if scope.is_some() {
+                            top_similarity =
+                                Some(top_similarity.map_or(h.score, |b| b.max(h.score)));
                         }
-                        // The window holding the chunk's first segment
-                        // (chunks may embed polished text, so their
-                        // boundaries can differ from raw-text windows).
-                        // Chunks an older build wrote carry no ids: fall
-                        // back to the window that starts at/before start_ms.
-                        let by_id = h.segment_ids.first().and_then(|first| {
-                            let pos = l.transcript.segments.iter().position(|s| &s.id == first)?;
-                            l.windows.iter().position(|w| w.segments.contains(&pos))
-                        });
-                        let start = h.start_ms.unwrap_or(0);
-                        let idx = by_id.or_else(|| {
-                            l.windows
-                                .iter()
-                                .position(|w| w.start_ms == start)
-                                .or_else(|| l.windows.iter().rposition(|w| w.start_ms <= start))
-                        });
-                        if let Some(i) = idx {
-                            semantic.push(PassageKey::Transcript(mid, i));
+                        let anchor = match h.segment_ids.first() {
+                            Some(id) => id.clone(),
+                            None => format!("@{}", h.start_ms.unwrap_or(0)),
+                        };
+                        match cache.get(&mid) {
+                            // Loaded by the keyword pass: map it now, so a
+                            // window both lists found fuses into one.
+                            Some(Some(l)) => {
+                                let Some(i) =
+                                    passages::resolve_anchor(&l.transcript, &l.windows, &anchor)
+                                else {
+                                    continue;
+                                };
+                                PassageKey::Transcript(mid, i)
+                            }
+                            Some(None) => continue,
+                            None => PassageKey::Chunk(mid, anchor),
                         }
                     }
                     SearchHitKind::Note => {
@@ -812,28 +1027,59 @@ impl Context<'_> {
                         }
                         let chunks = fly_storage::embeddings::chunk_note(&notes[&nid]);
                         let head = flat_prefix(&h.snippet);
-                        if let Some(i) =
-                            chunks.iter().position(|c| flat(&c.text).starts_with(&head))
-                        {
-                            semantic.push(PassageKey::Note(nid, i));
-                        }
+                        let Some(i) = chunks.iter().position(|c| flat(&c.text).starts_with(&head))
+                        else {
+                            continue;
+                        };
+                        PassageKey::Note(nid, i)
                     }
-                }
+                };
+                let best = similarity.entry(key.clone()).or_insert(h.score);
+                *best = best.max(h.score);
+                semantic.push(key);
             }
         }
 
+        // Over-fetch: a Chunk key can turn out to be a duplicate of another
+        // (two chunks on one window) or unloadable once resolved.
         let fused = passages::fuse(
             &[
                 (Via::Keyword, keyword_t),
                 (Via::Keyword, keyword_n),
                 (Via::Semantic, semantic),
             ],
-            PER_OWNER_CAP,
-            limit,
+            per_meeting,
+            limit * 2,
+            // The default cap gives empty slots to capped-out passages; a
+            // cap the caller chose is strict.
+            args.per_meeting.is_none(),
         );
 
-        let mut out = Vec::with_capacity(fused.len());
+        // Every passage of the over-fetched list (with its best cosine), so
+        // a note's own meeting can be found further down it.
+        let mut found: Vec<(Passage, Option<f32>)> = Vec::with_capacity(limit * 2);
+        let mut seen: std::collections::HashSet<PassageKey> = std::collections::HashSet::new();
         for (key, score, via) in fused {
+            let sim = similarity.get(&key).copied();
+            let key = match key {
+                PassageKey::Chunk(mid, anchor) => {
+                    if !self.load(&mut cache, &mid)? {
+                        continue;
+                    }
+                    let l = cache[&mid].as_ref().expect("loaded");
+                    if hidden.meeting(&l.meeting.id, &l.meeting.note_id) {
+                        continue;
+                    }
+                    match passages::resolve_anchor(&l.transcript, &l.windows, &anchor) {
+                        Some(i) => PassageKey::Transcript(mid, i),
+                        None => continue,
+                    }
+                }
+                k => k,
+            };
+            if !seen.insert(key.clone()) {
+                continue;
+            }
             let matched_by = via
                 .iter()
                 .map(|v| match v {
@@ -845,47 +1091,68 @@ impl Context<'_> {
                 PassageKey::Transcript(mid, i) => {
                     let l = cache[&mid].as_ref().expect("loaded");
                     let w = &l.windows[i];
-                    out.push(Passage {
-                        source: PassageSource::Transcript,
-                        meeting_id: Some(mid.clone()),
-                        note_id: l.meeting.note_id.clone(),
-                        title: l.meeting.title.clone(),
-                        started_at: Some(l.meeting.started_at),
-                        start_ms: Some(w.start_ms),
-                        end_ms: Some(w.end_ms),
-                        segments: w
-                            .segments
-                            .iter()
-                            .map(|&s| segment_view(&l.transcript, s))
-                            .collect(),
-                        text: passages::window_text(&l.transcript, w),
-                        score,
-                        matched_by,
-                    });
+                    found.push((
+                        Passage {
+                            source: PassageSource::Transcript,
+                            meeting_id: Some(mid.clone()),
+                            note_id: l.meeting.note_id.clone(),
+                            title: l.meeting.title.clone(),
+                            started_at: Some(l.meeting.started_at),
+                            start_ms: Some(w.start_ms),
+                            end_ms: Some(w.end_ms),
+                            segments: w
+                                .segments
+                                .iter()
+                                .map(|&s| segment_view(&l.transcript, s))
+                                .collect(),
+                            text: passages::window_text(&l.transcript, w),
+                            score,
+                            matched_by,
+                        },
+                        sim,
+                    ));
                 }
+                PassageKey::Chunk(..) => unreachable!("resolved above"),
                 PassageKey::Note(nid, i) => {
                     let note = &notes[&nid];
                     let chunks = fly_storage::embeddings::chunk_note(note);
-                    out.push(Passage {
-                        source: PassageSource::Note,
-                        meeting_id: note.meeting_id.clone(),
-                        note_id: nid.clone(),
-                        title: note.title.clone(),
-                        started_at: None,
-                        start_ms: None,
-                        end_ms: None,
-                        segments: vec![],
-                        text: chunks[i].text.clone(),
-                        score,
-                        matched_by,
-                    });
+                    found.push((
+                        Passage {
+                            source: PassageSource::Note,
+                            meeting_id: note.meeting_id.clone(),
+                            note_id: nid.clone(),
+                            title: note.title.clone(),
+                            started_at: None,
+                            start_ms: None,
+                            end_ms: None,
+                            segments: vec![],
+                            text: chunks[i].text.clone(),
+                            score,
+                            matched_by,
+                        },
+                        sim,
+                    ));
                 }
             }
         }
-        Ok(PassageResults {
-            passages: out,
-            semantic: query_vector.is_some(),
-        })
+        sources_before_notes(&mut found, limit);
+        found.truncate(limit);
+        let sims: BTreeMap<String, f32> = found
+            .iter()
+            .filter_map(|(p, sim)| sim.map(|c| (p.id(), c)))
+            .collect();
+        let out: Vec<Passage> = found.into_iter().map(|(p, _)| p).collect();
+        Ok((
+            PassageResults {
+                passages: out,
+                semantic: query_vector.is_some(),
+            },
+            PassageScores {
+                similarity: sims,
+                top_similarity,
+                similarity_floor: floor,
+            },
+        ))
     }
 
     /// The lines around one segment (by id, not time — ids survive
@@ -1126,6 +1393,38 @@ impl Context<'_> {
     }
 }
 
+/// The `n` owners (meetings or notes) holding the most IDF mass of the
+/// query terms, best first; ties go to more term occurrences, then id.
+/// Each owner's (meeting's or note's) keyword evidence: the IDF mass of
+/// the query terms it holds anywhere, and how many of its rows hold them.
+fn owner_evidence(
+    stats: &fly_storage::query::TermStats,
+    idf: &[f32],
+) -> HashMap<String, (f32, usize)> {
+    let mut evidence: HashMap<String, (f32, usize)> = HashMap::new();
+    for (term, w) in stats.terms.iter().zip(idf) {
+        for (owner, count) in &term.owners {
+            let e = evidence.entry(owner.clone()).or_default();
+            e.0 += w;
+            e.1 += count;
+        }
+    }
+    evidence
+}
+
+/// The `n` owners with the most evidence, best first (ties: more term
+/// occurrences, then id; the cut only matters past `n` owners).
+fn top_owners(evidence: &HashMap<String, (f32, usize)>, n: usize) -> Vec<String> {
+    let mut ranked: Vec<(&String, &(f32, usize))> = evidence.iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1 .0
+            .total_cmp(&a.1 .0)
+            .then(b.1 .1.cmp(&a.1 .1))
+            .then(a.0.cmp(b.0))
+    });
+    ranked.into_iter().take(n).map(|(o, _)| o.clone()).collect()
+}
+
 fn check_meeting_ids(ids: &[String]) -> Result<()> {
     if ids.len() > MAX_MEETING_IDS {
         return Err(ContextError::InvalidArgs(format!(
@@ -1180,7 +1479,11 @@ pub fn call(
     use crate::render;
     match name {
         SEARCH_PASSAGES => {
-            let r = ctx.search_passages(&parse_args(name, args)?, query_vector)?;
+            let mut a: SearchPassagesArgs = parse_args(name, args)?;
+            // A model's call gets at most MAX_TOOL_LIMIT passages (the
+            // schema says 1-20); only in-process callers go higher.
+            a.limit = Some(clamp(a.limit, DEFAULT_LIMIT, 1, MAX_TOOL_LIMIT) as u32);
+            let r = ctx.search_passages(&a, query_vector)?;
             output(&r, render::passages(&r))
         }
         READ_SEGMENTS => {
