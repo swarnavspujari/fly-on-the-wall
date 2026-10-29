@@ -110,6 +110,79 @@ pub fn set_participants_notified(
         .map_err(err_str)
 }
 
+/// A meeting self-heal restored and set to Keep local because its manifest
+/// didn't record the setting, as the review notice shows it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RecoveredMeeting {
+    pub meeting_id: String,
+    pub note_id: String,
+    pub title: String,
+}
+
+/// Event carrying the current `Vec<RecoveredMeeting>` after self-heal.
+pub const RECOVERED_KEPT_LOCAL_EVENT: &str = "privacy:recovered-kept-local";
+
+/// `ids` as notice entries; meetings that no longer exist are left out.
+fn recovered_entries(storage: &Storage, ids: &[String]) -> Vec<RecoveredMeeting> {
+    ids.iter()
+        .filter_map(|id| {
+            let meeting = storage.get_meeting(id).ok()?;
+            let title = storage
+                .get_note(&meeting.note_id)
+                .map(|n| n.title)
+                .unwrap_or(meeting.title);
+            Some(RecoveredMeeting {
+                meeting_id: meeting.id,
+                note_id: meeting.note_id,
+                title,
+            })
+        })
+        .collect()
+}
+
+/// Remember the meetings this launch's self-heal kept local only because
+/// their manifest didn't say, and return them as notice entries.
+pub fn note_recovered_kept_local(state: &AppState, ids: &[String]) -> Vec<RecoveredMeeting> {
+    let mut list = state.recovered_kept_local.lock().unwrap();
+    for id in ids {
+        if !list.contains(id) {
+            list.push(id.clone());
+        }
+    }
+    recovered_entries(&state.storage.lock().unwrap(), &list)
+}
+
+/// Meetings restored this launch with Keep local set because their privacy
+/// setting couldn't be confirmed (the notice catches up on these at mount;
+/// later changes arrive as [`RECOVERED_KEPT_LOCAL_EVENT`]).
+#[tauri::command]
+pub fn recovered_kept_local(state: State<'_, AppState>) -> Vec<RecoveredMeeting> {
+    let ids = state.recovered_kept_local.lock().unwrap().clone();
+    recovered_entries(&state.storage.lock().unwrap(), &ids)
+}
+
+/// Take one meeting (the one being reviewed) or, with no id, all of them off
+/// the list. Returns what's left. Changes nothing about Keep local itself.
+#[tauri::command]
+pub fn dismiss_recovered_kept_local(
+    state: State<'_, AppState>,
+    meeting_id: Option<String>,
+) -> Vec<RecoveredMeeting> {
+    dismiss_recovered(&state, meeting_id.as_deref())
+}
+
+fn dismiss_recovered(state: &AppState, meeting_id: Option<&str>) -> Vec<RecoveredMeeting> {
+    let ids = {
+        let mut list = state.recovered_kept_local.lock().unwrap();
+        match meeting_id {
+            Some(id) => list.retain(|m| m != id),
+            None => list.clear(),
+        }
+        list.clone()
+    };
+    recovered_entries(&state.storage.lock().unwrap(), &ids)
+}
+
 /// Longest recording notice the clipboard helper accepts, in characters.
 const MAX_NOTICE_CHARS: usize = 2000;
 
@@ -1458,5 +1531,50 @@ mod tests {
         let r = sweep_retention(&s, Utc::now(), &|_| true, false);
         assert_eq!(r.meetings, 0);
         assert!(r.held.is_none());
+    }
+
+    /// The review list for meetings heal kept local without a recorded
+    /// setting: entries carry the note's title, unknown meetings are left
+    /// out, repeats are ignored, and Review / Dismiss take entries off.
+    #[test]
+    fn recovered_meetings_list_for_the_review_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        let (a, b) = {
+            let storage = state.storage.lock().unwrap();
+            let na = storage.create_note("Board prep", None).unwrap();
+            let nb = storage.create_note("Vendor call", None).unwrap();
+            (
+                storage.create_meeting("Board prep", &na.id, &[]).unwrap(),
+                storage.create_meeting("Vendor call", &nb.id, &[]).unwrap(),
+            )
+        };
+        let ids = vec![a.id.clone(), "gone".to_string(), b.id.clone()];
+        let entries = super::note_recovered_kept_local(&state, &ids);
+        assert_eq!(
+            entries,
+            vec![
+                super::RecoveredMeeting {
+                    meeting_id: a.id.clone(),
+                    note_id: a.note_id.clone(),
+                    title: "Board prep".into(),
+                },
+                super::RecoveredMeeting {
+                    meeting_id: b.id.clone(),
+                    note_id: b.note_id.clone(),
+                    title: "Vendor call".into(),
+                },
+            ]
+        );
+        // the same report again adds nothing
+        assert_eq!(super::note_recovered_kept_local(&state, &ids).len(), 2);
+        let left = super::dismiss_recovered(&state, Some(&a.id));
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].meeting_id, b.id);
+        assert!(super::dismiss_recovered(&state, None).is_empty());
     }
 }

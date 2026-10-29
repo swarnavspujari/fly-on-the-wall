@@ -320,6 +320,40 @@ describe("Settings overlay", () => {
     await choose(runsOn, "anthropic");
   });
 
+  it("moving a provider to another server asks for consent again, naming the server", async () => {
+    await open();
+    const runsOn = $<HTMLSelectElement>('select[aria-label="Runs on"]')!;
+    nextConsent(true);
+    await choose(runsOn, "openai");
+    expect(await api.getAppSetting("consent.cloud_llm.openai")).toBe("true");
+    await click($('[aria-labelledby="settings-h-ai"] .fly-sgroup-more'));
+    await type(
+      $<HTMLInputElement>('input[aria-label="Base URL"]')!,
+      "https://proxy.example:8443/v1",
+    );
+    await type($<HTMLInputElement>("input[type=password]")!, "sk-qa-placeholder");
+    const asked = consentDialog.mock.calls.length;
+    nextConsent(false);
+    await click(byText("button", "Save"));
+    expect(consentDialog.mock.calls.length).toBe(asked + 1);
+    expect(consentText()).toContain(
+      "sent to the server at proxy.example:8443 (your custom OpenAI endpoint) for processing",
+    );
+    expect(await api.getAppSetting("consent.cloud_llm.openai")).toBeNull();
+    expect(host!.textContent).toContain("Nothing is sent to the new server until you allow it");
+
+    // Test asks again; a yes records it for the new server
+    nextConsent(true);
+    await click(byText("button", "Test"));
+    expect(await api.getAppSetting("consent.cloud_llm.openai")).toBe("true");
+
+    // restore the mock's OpenAI entry and provider
+    await act(async () => {
+      await api.setLlmSettings({ provider: "openai", model: null, base_url: null, api_key: "" });
+    });
+    await choose(runsOn, "anthropic");
+  });
+
   it("deleting a local model asks first, and Cancel keeps it", async () => {
     const del = vi.spyOn(api, "ollamaDelete");
     await open();

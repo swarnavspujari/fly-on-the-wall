@@ -11,7 +11,9 @@ import {
   matchSections,
   mcpCommand,
   qualityHelper,
+  customServerHost,
   serverChangeNeedsKey,
+  serverChanged,
 } from "./settingsModel";
 import type { AsrSettings, LlmSettings } from "./types";
 
@@ -269,5 +271,22 @@ describe("serverChangeNeedsKey", () => {
     // Anthropic's host is fixed and Ollama has no key
     expect(serverChangeNeedsKey("anthropic", true, null, "https://other.example")).toBe(false);
     expect(serverChangeNeedsKey("ollama", true, null, "http://10.0.0.2:11434")).toBe(false);
+  });
+});
+
+describe("serverChanged / customServerHost", () => {
+  it("compares servers by origin, with or without a saved key", () => {
+    expect(serverChanged("openai", null, "https://other.example/v1")).toBe(true);
+    expect(serverChanged("nim", null, "https://integrate.api.nvidia.com/v1")).toBe(false);
+    expect(serverChanged("nim", "https://p.example/v1", "https://p.example/x")).toBe(false);
+    expect(serverChanged("anthropic", null, "https://other.example")).toBe(false);
+  });
+
+  it("names a custom server's host (and port) for the consent dialog", () => {
+    expect(customServerHost("openai", null)).toBeNull();
+    expect(customServerHost("openai", "https://api.openai.com/v1")).toBeNull();
+    expect(customServerHost("openai", "https://proxy.example:8443/v1")).toBe("proxy.example:8443");
+    expect(customServerHost("nim", "https://nim.example/v1")).toBe("nim.example");
+    expect(customServerHost("anthropic", "https://other.example")).toBeNull();
   });
 });

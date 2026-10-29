@@ -53,7 +53,8 @@ pub use privacy::{
     AudioPurge, EraseOutcome, MeetingPrivacy, AUDIO_RETENTION_SETTING, RETENTION_CHOICES,
 };
 pub use recovery::{
-    HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR, RECORDING_MANIFEST,
+    HealReport, PortableNote, RecordingManifest, MANIFEST_VERSION, NOTE_MIRROR,
+    NOTE_MIRROR_VERSION, RECORDING_MANIFEST,
 };
 pub use search::{SearchFilter, SearchHit, SearchHitKind};
 pub use segments::SegmentHit;

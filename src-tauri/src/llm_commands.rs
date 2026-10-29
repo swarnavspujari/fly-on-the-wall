@@ -149,9 +149,30 @@ pub struct ConsentPrompt {
 /// adds why the app is asking unprompted (the saved provider is a cloud one
 /// without consent) and declines with "Not now" instead of "Cancel".
 pub fn cloud_consent_prompt(provider: &str, at_launch: bool) -> ConsentPrompt {
+    cloud_consent_prompt_for(provider, at_launch, None)
+}
+
+/// Who receives the content, as the disclosure names it: the vendor, or the
+/// custom server's host when the provider's base URL points elsewhere.
+pub fn consent_recipient(provider: &str, custom_host: Option<&str>) -> String {
     let vendor = provider_vendor(provider);
+    match custom_host {
+        Some(host) => format!("the server at {host} (your custom {vendor} endpoint)"),
+        None => vendor.to_string(),
+    }
+}
+
+/// [`cloud_consent_prompt`], naming `custom_host` as the recipient when the
+/// provider is set to a server other than its default.
+pub fn cloud_consent_prompt_for(
+    provider: &str,
+    at_launch: bool,
+    custom_host: Option<&str>,
+) -> ConsentPrompt {
+    let vendor = provider_vendor(provider);
+    let who = consent_recipient(provider, custom_host);
     let disclosure = format!(
-        "Your notes and full meeting transcripts will be sent to {vendor} for processing \
+        "Your notes and full meeting transcripts will be sent to {who} for processing \
          whenever you run Enhance or Ask, and automatically for transcript cleanup and \
          action items after each transcription. Their data-retention terms apply (see their \
          privacy / data-usage policy).\n\n\
@@ -212,7 +233,16 @@ pub fn cloud_consent_question(
     }
     let saved = storage.get_setting("llm.provider").ok().flatten();
     let at_launch = at_launch && saved.as_deref() == Some(provider);
-    Ok(Some(cloud_consent_prompt(provider, at_launch)))
+    let base_url = storage
+        .get_setting(&format!("llm.{provider}.base_url"))
+        .ok()
+        .flatten();
+    let host = custom_endpoint_host(provider, base_url.as_deref());
+    Ok(Some(cloud_consent_prompt_for(
+        provider,
+        at_launch,
+        host.as_deref(),
+    )))
 }
 
 /// Two declines for one provider this close together…
@@ -1185,6 +1215,28 @@ fn key_endpoint(provider: &str, base_url: Option<&str>) -> Option<String> {
     )
 }
 
+/// The host of `base_url` when it sends `provider`'s key somewhere other
+/// than the provider's default endpoint (for the consent dialog), else
+/// `None`.
+fn custom_endpoint_host(provider: &str, base_url: Option<&str>) -> Option<String> {
+    let custom = key_endpoint(provider, base_url)?;
+    if Some(&custom) == key_endpoint(provider, None).as_ref() {
+        return None;
+    }
+    let url = base_url?.trim();
+    Some(
+        tauri::Url::parse(url)
+            .ok()
+            .and_then(|u| {
+                u.host_str().map(|h| match u.port() {
+                    Some(p) => format!("{h}:{p}"),
+                    None => h.to_string(),
+                })
+            })
+            .unwrap_or_else(|| url.to_string()),
+    )
+}
+
 /// Refusal when an endpoint change arrives without the key.
 pub fn endpoint_needs_key(provider: &str) -> String {
     format!(
@@ -1236,6 +1288,14 @@ pub fn apply_llm_settings(state: &AppState, update: LlmSettingsUpdate) -> CmdRes
                 .delete(secret_name)
                 .map_err(|e| e.to_string())?;
         }
+        // Consent was given for the old server: ask again (naming the new
+        // one) before anything is sent there.
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .delete_setting(&cloud_consent_key(&update.provider))
+            .map_err(|e| e.to_string())?;
     }
     {
         let storage = state.storage.lock().unwrap();
@@ -1603,8 +1663,15 @@ mod security_tests {
         }
         let joined = joined
             .replace("\\n", "\n")
+            .replace("${host}", "other.example")
+            .replace("${who}", "OpenAI")
             .replace("${vendor}", "OpenAI")
             .replace("${disclosure}", "");
+        // the custom-server wording names the same recipient
+        assert!(
+            joined.contains(&super::consent_recipient("openai", Some("other.example"))),
+            "devMock custom-server wording differs:\n{joined}"
+        );
         let rust = cloud_consent_prompt("openai", false);
         assert!(
             joined.contains(&rust.message),
@@ -1793,5 +1860,102 @@ mod security_tests {
                 .as_deref(),
             Some("sk-ant")
         );
+    }
+
+    /// Consent belongs to the server it was given for. Moving OpenAI or NIM
+    /// to another server (with its key) clears the provider's consent, the
+    /// dialog then names the new server, and nothing is built until it's
+    /// allowed again. Another path on the same server keeps consent.
+    #[test]
+    fn a_new_server_needs_consent_again_and_the_dialog_names_it() {
+        use super::{
+            apply_llm_settings, build_provider, cloud_consent_key, cloud_consent_question,
+            consent_recipient, endpoint_needs_key, is_consent_refusal, record_cloud_consent,
+            ConsentAnswer, DataScope, LlmSettingsUpdate,
+        };
+        for (provider, default_url) in [
+            ("openai", "https://api.openai.com/v1"),
+            ("nim", "https://integrate.api.nvidia.com/v1"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let secrets = std::sync::Arc::new(fly_secrets::MemorySecretStore::default());
+            let state =
+                crate::state::AppState::init_with(dir.path().to_path_buf(), secrets).unwrap();
+            let send = |base_url: &str, api_key: Option<&str>| {
+                let update: LlmSettingsUpdate = serde_json::from_value(serde_json::json!({
+                    "provider": provider,
+                    "model": null,
+                    "base_url": base_url,
+                    "api_key": api_key,
+                }))
+                .unwrap();
+                apply_llm_settings(&state, update)
+            };
+            let consented = || {
+                state
+                    .storage
+                    .lock()
+                    .unwrap()
+                    .get_setting(&cloud_consent_key(provider))
+                    .unwrap()
+            };
+            let allow = || {
+                record_cloud_consent(
+                    &state.storage.lock().unwrap(),
+                    provider,
+                    ConsentAnswer::Allow,
+                )
+                .unwrap()
+            };
+            let question =
+                || cloud_consent_question(&state.storage.lock().unwrap(), provider, false).unwrap();
+
+            send("", Some("sk-one")).unwrap();
+            allow();
+            assert!(build_provider(&state, DataScope::NoMeetingData).is_ok());
+
+            // the default spelled out is the same server: consent stays
+            send(default_url, None).unwrap();
+            assert_eq!(consented().as_deref(), Some("true"), "{provider}");
+
+            // another server without the key: refused, nothing changes
+            assert_eq!(
+                send("https://proxy.example:8443/v1", None),
+                Err(endpoint_needs_key(provider))
+            );
+            assert_eq!(consented().as_deref(), Some("true"), "{provider}");
+
+            // with the key: saved, consent cleared, dialog names the server
+            send("https://proxy.example:8443/v1", Some("sk-two")).unwrap();
+            assert_eq!(consented(), None, "{provider}");
+            let prompt = question().expect("asks again");
+            assert!(
+                prompt
+                    .message
+                    .contains(&consent_recipient(provider, Some("proxy.example:8443"))),
+                "{}",
+                prompt.message
+            );
+            let err = build_provider(&state, DataScope::NoMeetingData)
+                .err()
+                .expect("refused until allowed again");
+            assert!(is_consent_refusal(&err), "{err}");
+            allow();
+            assert!(build_provider(&state, DataScope::NoMeetingData).is_ok());
+
+            // same server, another path: consent stays
+            send("https://proxy.example:8443/other/v1", None).unwrap();
+            assert_eq!(consented().as_deref(), Some("true"), "{provider}");
+
+            // back to the default server: asked again, naming the vendor
+            send("", Some("sk-three")).unwrap();
+            assert_eq!(consented(), None, "{provider}");
+            let prompt = question().expect("asks again");
+            assert!(!prompt.message.contains("server at"), "{}", prompt.message);
+            assert!(prompt.message.contains(&format!(
+                "sent to {} for",
+                consent_recipient(provider, None)
+            )));
+        }
     }
 }

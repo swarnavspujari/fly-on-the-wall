@@ -234,17 +234,38 @@ function endpointOrigin(provider: string, url: string): string | null {
   }
 }
 
+/** True when `draftUrl` points `provider` at another server (scheme, host
+ *  or port) than `savedUrl`. The backend then drops the saved key and the
+ *  provider's cloud consent, so both are asked for again. */
+export function serverChanged(
+  provider: string,
+  savedUrl: string | null,
+  draftUrl: string,
+): boolean {
+  return endpointOrigin(provider, savedUrl ?? "") !== endpointOrigin(provider, draftUrl);
+}
+
 /** True when saving `draftUrl` would send `provider`'s saved key to another
- *  server (scheme, host or port): the backend then wants the key entered
- *  again with the change. */
+ *  server: the backend then wants the key entered again with the change. */
 export function serverChangeNeedsKey(
   provider: string,
   hasKey: boolean,
   savedUrl: string | null,
   draftUrl: string,
 ): boolean {
-  if (!hasKey) return false;
-  return endpointOrigin(provider, savedUrl ?? "") !== endpointOrigin(provider, draftUrl);
+  return hasKey && serverChanged(provider, savedUrl, draftUrl);
+}
+
+/** The host (with any port) of `url` when it isn't `provider`'s default
+ *  server, as the consent dialog names it (llm_commands.rs
+ *  custom_endpoint_host), else null. */
+export function customServerHost(provider: string, url: string | null): string | null {
+  if (!serverChanged(provider, null, url ?? "")) return null;
+  try {
+    return new URL((url ?? "").trim()).host || null;
+  } catch {
+    return (url ?? "").trim() || null;
+  }
 }
 
 /* ------------------------------------------------------------- data tiles */

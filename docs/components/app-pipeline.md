@@ -109,7 +109,7 @@ In-memory state (`src-tauri/src/state.rs`): `pipeline_stage: HashMap<meeting_id,
 | `<scratch_root>/<meeting_id>/rediarize.16k.wav` | `pipeline.rs:839-856` | deleted right after diarization |
 | `%TEMP%/flyonthewall-{whisper,spill}-<uuid>.*` | fly-asr per batch | see [fly-asr](fly-asr.md) |
 | `<data_dir>/recordings/<meeting folder>/transcript.*` mirrors | `storage.save_transcript` ([fly-storage](fly-storage.md)) | permanent |
-| `recordings/_unlinked/<name>` renamed back to `recordings/<name>` | `restore_parked_recording` (`pipeline.rs:1323-1347`) | self-heal for a raced v2 migration |
+| `recordings/_unlinked/<name>` renamed back to `recordings/<name>` | `restore_parked_recording` | self-heal for a raced v2 migration; the target must be a plain `recordings/<folder>` (`contained_recordings_dir`), else nothing moves |
 
 Intermediates never go next to the recordings: a title or date edit renames the meeting folder mid-run. That rename caused the 2026-07-19 import incident (`pipeline.rs:462-475`, `crates/fly-storage/src/scratch.rs:1-18`).
 

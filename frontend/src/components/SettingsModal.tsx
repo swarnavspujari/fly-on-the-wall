@@ -53,6 +53,7 @@ import {
   providerVendor,
   qualityHelper,
   serverChangeNeedsKey,
+  serverChanged,
   type AsrDraft,
   type MadeOn,
   type Quality,
@@ -118,6 +119,11 @@ const CALENDAR_NAMES: Record<string, string> = {
 
 const MONO_KEY: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: "12px" };
 const SMALL: CSSProperties = { margin: 0, fontSize: 12, lineHeight: 1.5 };
+
+/** After a save that moved a cloud provider to another server, when the
+ *  consent dialog for that server was declined. */
+const NEW_SERVER_NOT_ALLOWED =
+  "Saved. Nothing is sent to the new server until you allow it (Test asks again).";
 const MONO_SMALL: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 11 };
 const LIST_ROW =
   "flex items-center justify-between gap-3 border-t border-line-2 py-2 first:border-t-0";
@@ -699,6 +705,13 @@ export default function SettingsModal({
       });
   };
 
+  /** Whether the Base URL being saved points the provider at another server
+   *  than the saved one (the backend then asks for consent again). */
+  const movedServer = () => {
+    const saved = llm?.providers.find((p) => p.id === llmProvider);
+    return !!saved && !saved.is_local && serverChanged(llmProvider, saved.base_url, llmBaseUrl);
+  };
+
   const saveLlm = async () => {
     if (!(await confirmCloudProvider(llmProvider))) {
       setLlmTest("Not saved. Cloud processing wasn't confirmed.");
@@ -710,6 +723,7 @@ export default function SettingsModal({
     // guided swap (llm state is reloaded below).
     const ollamaInfo = llm?.providers.find((p) => p.id === "ollama");
     const prevModel = (ollamaInfo?.model ?? ollamaInfo?.default_model ?? "").trim() || null;
+    const moved = movedServer();
     try {
       await api.setLlmSettings({
         provider: llmProvider,
@@ -720,6 +734,10 @@ export default function SettingsModal({
       setLlmKey("");
       await loadLlm();
       setLlmTest("Saved.");
+      // A new server clears the provider's consent: ask now, naming it.
+      if (moved && !(await confirmCloudProvider(llmProvider))) {
+        setLlmTest(NEW_SERVER_NOT_ALLOWED);
+      }
       // Guided swap: a just-saved Ollama model that isn't installed would
       // fail at first use — offer the pull (with progress) right here.
       if (llmProvider === "ollama") {
@@ -781,6 +799,7 @@ export default function SettingsModal({
     if (!(await confirmCloudProvider(llmProvider))) return;
     setLlmBusy(true);
     setLlmTest("Testing…");
+    const moved = movedServer();
     try {
       await api.setLlmSettings({
         provider: llmProvider,
@@ -789,6 +808,11 @@ export default function SettingsModal({
         api_key: llmKey ? llmKey : null,
       });
       setLlmKey("");
+      if (moved && !(await confirmCloudProvider(llmProvider))) {
+        setLlmTest(NEW_SERVER_NOT_ALLOWED);
+        await loadLlm();
+        return;
+      }
       setLlmTest(await api.testLlmConnection());
       await loadLlm();
     } catch (e) {

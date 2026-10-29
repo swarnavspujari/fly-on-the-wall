@@ -8,11 +8,11 @@ use crate::{Result, Storage, StorageError};
 
 impl Storage {
     /// The note's `attachments/<note_id>/` folder, or `None` when the id
-    /// isn't one plain path component. Stored ids are treated as untrusted
+    /// isn't a safe id (`safe_path::is_safe_id`). Stored ids are treated as untrusted
     /// here, so every write or delete under a note's attachments goes
     /// through this.
     pub fn note_attachments_dir(&self, note_id: &str) -> Option<std::path::PathBuf> {
-        crate::safe_path::is_plain_name(note_id)
+        crate::safe_path::is_safe_id(note_id)
             .then(|| {
                 crate::safe_path::contained(
                     &self.data_dir,
@@ -22,6 +22,23 @@ impl Storage {
                 )
             })
             .flatten()
+    }
+
+    /// `rel_path` resolved inside the data dir when it names a file directly
+    /// in this note's `attachments/<note_id>/` folder, else `None`.
+    fn note_attachment_file(&self, note_id: &str, rel_path: &str) -> Option<std::path::PathBuf> {
+        self.note_attachments_dir(note_id)?;
+        let unified = rel_path.replace('\\', "/");
+        let (dir, file) = unified.rsplit_once('/')?;
+        if dir != format!("attachments/{note_id}") {
+            return None;
+        }
+        crate::safe_path::contained(
+            &self.data_dir,
+            &format!("{dir}/{file}"),
+            &["attachments"],
+            3,
+        )
     }
 
     /// Copy `src_path` into the note's attachment dir and record it.
@@ -78,10 +95,8 @@ impl Storage {
             )));
         };
         let removed = attachments.remove(pos);
-        // Only a file inside the app's attachments folder is ever deleted.
-        if let Some(path) =
-            crate::safe_path::contained(&self.data_dir, &removed.rel_path, &["attachments"], 3)
-        {
+        // Only a file inside this note's own attachments folder is deleted.
+        if let Some(path) = self.note_attachment_file(note_id, &removed.rel_path) {
             let _ = std::fs::remove_file(path);
         }
         self.set_note_attachments(note_id, &attachments)
@@ -107,15 +122,7 @@ impl Storage {
     pub fn add_attachment_in_place(&self, note_id: &str, rel_path: &str) -> Result<Note> {
         let note = self.get_note(note_id)?;
         let abs = self
-            .note_attachments_dir(note_id)
-            .and_then(|_| {
-                crate::safe_path::contained(&self.data_dir, rel_path, &["attachments"], 3)
-            })
-            .filter(|_| {
-                rel_path
-                    .replace('\\', "/")
-                    .starts_with(&format!("attachments/{note_id}/"))
-            })
+            .note_attachment_file(note_id, rel_path)
             .ok_or_else(|| {
                 StorageError::Invalid(format!("not inside this note's attachments: {rel_path}"))
             })?;
@@ -206,5 +213,30 @@ mod tests {
             );
         }
         assert!(s.attachment_abs_path("attachments/n1/report.txt").is_ok());
+    }
+
+    /// Removing an attachment deletes a file only inside that note's own
+    /// folder, whatever path its record holds.
+    #[test]
+    fn remove_deletes_only_inside_the_notes_own_folder() {
+        let (dir, s) = test_storage();
+        let a = s.create_note("a", None).unwrap();
+        let b = s.create_note("b", None).unwrap();
+        let src = dir.path().join("report.txt");
+        std::fs::write(&src, "hello").unwrap();
+        let a_file = s.add_attachment(&a.id, &src).unwrap().attachments[0]
+            .rel_path
+            .clone();
+        let foreign = fly_core::Attachment {
+            id: "att-1".into(),
+            file_name: "report.txt".into(),
+            rel_path: a_file.clone(),
+            mime: Some("text/plain".into()),
+            added_at: chrono::Utc::now(),
+        };
+        s.set_note_attachments(&b.id, &[foreign]).unwrap();
+        s.remove_attachment(&b.id, "att-1").unwrap();
+        assert!(dir.path().join(&a_file).is_file(), "a's file stays");
+        assert!(s.add_attachment_in_place(&b.id, &a_file).is_err());
     }
 }
