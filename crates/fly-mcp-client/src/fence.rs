@@ -202,6 +202,11 @@ fn host_of(candidate: &str) -> Option<String> {
         .and_then(|u| u.host_str().map(str::to_string))
 }
 
+/// Whether `prev` (the byte before a match) starts a new word.
+fn word_start(prev: Option<u8>) -> bool {
+    prev.is_none_or(|b| !b.is_ascii_alphanumeric())
+}
+
 /// Whether `prev` (the byte before a match) starts a new word for `www.`.
 fn www_start(prev: Option<u8>) -> bool {
     prev.is_none_or(|b| !b.is_ascii_alphanumeric() && b != b'.')
@@ -252,13 +257,20 @@ pub fn strip_links(s: &str) -> String {
         } else if SCRIPT_SCHEMES.iter().any(|p| rest.starts_with(p))
             || (rest.starts_with("data:")
                 && rest[5..].starts_with(|c: char| !c.is_whitespace())
-                && lower[i..end()].contains(['/', ',']))
+                && (word_start(prev) || lower[i..end()].contains(['/', ',', '%'])))
         {
-            // Script and `data:` links have no host to show.
+            // Script and `data:` links have no host to show. Mid-word,
+            // `data:` needs a sign of a payload, so "metadata:x" survives.
             Some((end(), None))
-        } else if rest.starts_with("mailto:") && lower[i..end()].contains('@') {
+        } else if rest.starts_with("mailto:") && rest[7..].starts_with(|c: char| !c.is_whitespace())
+        {
+            // Every mailto link, wherever it is (an `@` may be encoded).
             let e = end();
-            Some((e, s[i..e].rsplit('@').next().and_then(net_host)))
+            let host = s[i..e]
+                .contains('@')
+                .then(|| s[i..e].rsplit('@').next().and_then(net_host))
+                .flatten();
+            Some((e, host))
         } else if (rest.starts_with("//") || rest.starts_with("\\\\")) && path_start(prev) {
             // `//host/…` or `\\host\…`: a link when a host follows.
             net_host(&s[i + 2..])
@@ -386,6 +398,13 @@ mod tests {
         ] {
             assert!(out.contains(&format!("[link: {host}]")), "{host}: {out}");
         }
+        let encoded = strip_links(
+            "write to mailto:attacker%40evil.example?body=NOTES8 or data:text%2Fhtml%2CPAYLOAD9",
+        );
+        assert!(
+            !encoded.contains("NOTES8") && !encoded.contains("PAYLOAD9"),
+            "{encoded}"
+        );
         for leak in ["d=1", "d=2", "d=3", "d=4", "d=5", "PAYLOAD6", "d7"] {
             assert!(!out.contains(leak), "{leak}: {out}");
         }

@@ -201,7 +201,10 @@ fn clean_schema(v: &mut Value, depth: usize) -> Result<(), &'static str> {
                 }
                 if (k == "description" || k == "title") && child.is_string() {
                     let s = child.as_str().unwrap_or_default();
-                    let unlinked = crate::fence::strip_links(s);
+                    // Hidden characters go first: one inside a scheme would
+                    // otherwise hide the link from strip_links.
+                    let visible = crate::sanitize::clean_text(s);
+                    let unlinked = crate::fence::strip_links(&visible);
                     *child = Value::String(clean_capped(&unlinked, MAX_DESCRIPTION_CHARS));
                 } else {
                     clean_schema(child, depth + 1)?;
@@ -538,6 +541,22 @@ pub fn model_tool_name(slug: &str, tool: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_hidden_character_cannot_shield_a_link_in_a_schema() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {"q": {
+                "type": "string",
+                "description": "See ht\u{200B}tps://attacker.example/x?d=NOTES",
+                "title": "w\u{2060}ww.attacker.example/y?d=NOTES"
+            }}
+        });
+        clean_schema(&mut schema, 0).unwrap();
+        let text = schema.to_string();
+        assert!(!text.contains("NOTES"), "{text}");
+        assert!(text.contains("[link: attacker.example]"), "{text}");
+    }
+
     use super::*;
 
     fn tool(name: &str, desc: &str) -> LiveTool {
