@@ -644,7 +644,12 @@ struct GapTracker {
     /// such packet in the second before it happened upstream (audio engine
     /// or driver).
     last_backlog_high_ns: Option<i128>,
+    /// Peak |sample| of the previous packet (mono i16).
+    prev_peak: i16,
 }
+
+/// About -60 dBFS: a packet this quiet is silence for the idle rule.
+const SILENT_PEAK: i16 = 33;
 
 /// Now on the QPC clock, ns — the clock WASAPI capture timestamps use.
 /// User-mode and wait-free, so fine in a callback.
@@ -773,6 +778,7 @@ fn build_stream(
                 next_capture_ns: None,
                 last_callback_ns: 0,
                 last_backlog_high_ns: None,
+                prev_peak: 0,
             };
             device.build_input_stream(
                 stream_config,
@@ -811,24 +817,30 @@ fn build_stream(
                         if let Some(next) = gaps.next_capture_ns {
                             let gap_ns = cap - next;
                             let waited_ns = cb - gaps.last_callback_ns;
+                            // our buffer was nearly full just before: this
+                            // app fell behind, whatever else is true
+                            let ours = gaps
+                                .last_backlog_high_ns
+                                .is_some_and(|at| cb - at < BACKLOG_BLAME_NS);
+                            // Loopback stops delivering when nothing plays,
+                            // and the callback then waits as long as the gap.
+                            // Only a gap after silence can be that: meeting
+                            // apps render continuous silence during a call,
+                            // so a gap right after audible output is lost
+                            // audio (an engine stall looks idle by timing
+                            // alone). A gap after silence lost nothing
+                            // audible either way.
                             let idle = kind == ChannelKind::Loopback
                                 && gap_ns > GAP_MIN_NS
-                                && waited_ns * 2 >= gap_ns;
+                                && waited_ns * 2 >= gap_ns
+                                && gaps.prev_peak <= SILENT_PEAK
+                                && !ours;
                             if gap_ns > GAP_MIN_NS {
                                 // Every gap becomes the same length of silence,
                                 // so the channel follows the device's timeline
-                                // exactly. It counts as a loss unless it can be
-                                // idle output. (An audio-engine stall looks
-                                // like idle on loopback — the callback waits
-                                // as long as the gap — so loopback losses can
-                                // be undercounted, never overcounted; the mic,
-                                // which never idles, reports such stalls.)
+                                // exactly; it counts as a loss unless idle.
                                 let lost = !idle;
-                                if lost
-                                    && !gaps
-                                        .last_backlog_high_ns
-                                        .is_some_and(|at| cb - at < BACKLOG_BLAME_NS)
-                                {
+                                if lost && !ours {
                                     producer
                                         .stats()
                                         .upstream_lost_events
@@ -860,14 +872,18 @@ fn build_stream(
                     }
                     started = true;
 
+                    let mut peak: i16 = 0;
                     for frame in data.chunks(channels) {
                         let sum: f32 = frame
                             .iter()
                             .map(|s| <f32 as cpal::FromSample<$t>>::from_sample_(*s))
                             .sum();
                         let mono = (sum / channels as f32).clamp(-1.0, 1.0);
-                        producer.push((mono * i16::MAX as f32) as i16);
+                        let sample = (mono * i16::MAX as f32) as i16;
+                        peak = peak.max(sample.saturating_abs());
+                        producer.push(sample);
                     }
+                    gaps.prev_peak = peak;
                     producer.end_packet();
                     producer.note_time(now_ms);
                 },
