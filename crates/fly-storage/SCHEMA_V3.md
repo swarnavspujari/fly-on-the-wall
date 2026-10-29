@@ -106,7 +106,7 @@ Every released build (v1.0.3 through v2.4.0) has `SCHEMA_VERSION = 2`, stamps `u
   - polish changes re-embed;
   - the startup chunk pass holds the storage lock.
   - Spec §4.2a #3 wants the backfill at lowest priority and throttled.
-- **fly-context keyword path:** switch to `search_segments`, and add `meeting_items` as a third ranked list.
+- **fly-context keyword path:** it now ranks on `segments_fts` statistics (`segment_term_stats`, v2.5 search-quality PR); adding `meeting_items` as a third ranked list is still open.
 - **FTS5 `secure-delete`** for `notes_fts` and `transcripts_fts`, which still keep deleted terms in their pages.
 - **Trigger optimization:** skip the segment rebuild when `$.segments` is unchanged (a relabel currently rebuilds that meeting's rows).
 - **Dev tooling:** warn about a stale `flyonthewall-mcp` sidecar.

@@ -1,0 +1,14 @@
+{
+  "why": "Embeds an iframe.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Blue Tansy wants offline mode [seg:m11-03]. <iframe src=\"https://player.example.invalid/x\"></iframe>"
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}
