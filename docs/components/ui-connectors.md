@@ -15,7 +15,7 @@ The safety rules live in the backend. The UI asks the backend for every change a
 - `frontend/src/connectorsModel.ts`: pure logic:
   - permissions: order, labels, `loosens`, `allowedPermissions`, groups, `groupValue` ("Mixed"), `planGroupChange`;
   - statuses, badges and the review banner;
-  - directory search and the probe summary;
+  - directory search;
   - the Add custom and Add local forms → `ConnectorInput` (with Edit prefills), `parseCommand` for "Paste a command", and `willRunPreview`;
   - the call cards' argument fields (`schemaFields`, `argsFromFields`) and JSON editing;
   - "Try…": `canTry` and the `argsTemplate` it starts from;
@@ -47,21 +47,21 @@ The safety rules live in the backend. The UI asks the backend for every change a
   - Other states: the empty state with [Browse connectors], skeleton rows while loading, and "Couldn't load connectors." [Try again].
 - **Browse.**
   - Search, then cards (icon, description, "Made by vendor", [+]).
-  - [+] opens a preview first: what it can do, its address, the tools grouped from `probe_connector`, "Sign-in happens in your browser." (OAuth) or a key field (API key).
-  - [Connect] → native dialog → for OAuth, "Finish signing in in your browser… [Cancel]" → the detail page, with every tool on Needs approval. Cancel only hides the wait. A sign-in that finishes later still updates the connector.
+  - [+] opens a preview first: what it does, its full address, "Sign-in happens in your browser." (OAuth) or a key field (API key), and "You'll see its tools after you approve it. Fly on the Wall doesn't contact <host> before then." Nothing is sent before the native dialog.
+  - [Connect] → native dialog → for OAuth, "Finish signing in in your browser… [Cancel]" → the detail page, which lists the tools found, every one on Needs approval. Cancel only hides the wait. A sign-in that finishes later still updates the connector.
   - No results: "Nothing matches '…'." [Add custom connector].
 - **Add custom.**
   - Fields: Name and Web address (https only). "How does it sign in?" has three radios with none pre-selected. The API key is a password field.
   - Advanced has request headers (key/value, Secret switch) and the OAuth client ID and secret.
-  - A trust note sits above the buttons. [Continue] → "Checking…" (`probe_connector`) → "Found N tools: R read-only, W can make changes" → native dialog.
-  - Errors: "That address didn't answer like a connector." If the server wants a browser sign-in and "No sign-in" was chosen, the form says so.
+  - A trust note sits above the buttons. [Continue] → native dialog (the full address, headers and secret names) → the detail page.
+  - Errors: form errors stay on the form. A server that doesn't answer, or wants a browser sign-in when "No sign-in" was chosen, shows on the detail page after adding ("That address didn't answer like a connector.", "Sign in to this connector first.").
 - **Add local.**
   - A warning stays visible throughout. Fields: Name; Program (npx, uvx, or Choose a file…, which opens the backend's native file picker); one argument per row; and Settings (environment) as key/value rows with a Secret switch.
-  - "Paste a command" fills the rows and never runs anything. The monospace "Will run:" preview shows secret values as ••••.
+  - "Paste a command" fills the rows and never runs anything. The monospace "Will run:" preview shows secret values as ••••. The native dialog shows the program's full path, found on PATH once at approval (a program that isn't found is an error before the dialog).
   - Errors are the backend's words. Text after "\n---\n" (program output, secrets scrubbed by the backend) goes under [Show details].
 - **Import from Claude Desktop.**
   - "We found N connectors in Claude Desktop." Every checkbox starts unchecked. Details show the command and masked setting names ("will move to your keychain").
-  - [Review N] steps through them one at a time ("1 of 2"), each with its own native dialog.
+  - [Review N] steps through them one at a time ("1 of 2"), each with its own native dialog. Each step notes that a key written into the command or address isn't moved to the keychain (Claude Desktop configs sometimes hold one there): skip it and add the connector by hand with the key as a secret.
   - If none is found: "No Claude Desktop setup found on this computer."
 - **Detail.**
   - The header shows the status and the ⋯ menu. Reconnect signs in again for OAuth connectors; for the others it checks the tools.
@@ -102,7 +102,6 @@ The safety rules live in the backend. The UI asks the backend for every change a
 |---|---|---|---|
 | `connectors_overview` | `connectorsOverview` | section mount, `connectors:changed`, after changes | — |
 | `connectors_directory` | `connectorsDirectory` | section (badges), Browse | — |
-| `probe_connector` | `probeConnector` | Browse preview, Add custom ("Checking…") | — |
 | `add_connector` | `addConnector` | Browse, Add custom, Add local | Yes (add, or "Run a program on this computer?") |
 | `update_connector` | `updateConnector` | ⋯ › Edit | Yes |
 | `set_connector_enabled` | `setConnectorEnabled` | list switch | When turning on |
@@ -113,20 +112,20 @@ The safety rules live in the backend. The UI asks the backend for every change a
 | `sign_in_connector` / `sign_out_connector` | `signInConnector` / `signOutConnector` | Browse, Add custom, detail | — (opens the system browser) |
 | `claude_desktop_candidates` / `import_claude_desktop_connector` | `claudeDesktopCandidates` / `importClaudeDesktopConnector` | Import | On each import |
 | `pick_connector_program` | `pickConnectorProgram` | Add local › Choose a file… | Native file picker |
-| `connector_call_log` / `clear_connector_call_log` | `connectorCallLog` / `clearConnectorCallLog` | Activity | — |
+| `connector_call_log` / `clear_connector_call_log` | `connectorCallLog` / `clearConnectorCallLog` | Activity | Clearing: "Clear connector activity?" (no in-app confirm) |
 | `pending_connector_calls` | `pendingConnectorCalls` | `useConnectorProposals` | — |
 | `decide_connector_call` | `decideConnectorCall` | call cards (`deny`, `allow_once`, `always_allow`) | `always_allow` on a read tool; `allow_once` on a write tool |
-| `test_connector_tool` | `testConnectorTool` | Tools › Try… | as for the call it proposes (its approval card, then the native confirm for a write) |
+| `test_connector_tool` | `testConnectorTool` | Tools › Try… | Always its card (Always allow too), then the native confirm for a write |
 | `get_app_setting` / `set_app_setting` | `getAppSetting` / `setAppSetting` | the beta switch only | — |
 
-devMock mirrors all 20 connector commands in memory:
+devMock mirrors all 19 connector commands in memory:
 - **Fixtures.**
   - "Acme CRM" is a web connector with OAuth. Its tools cover read, write, destructive, unlabelled, changed-with-diff, new and unusable.
   - "Docs search" is a local `npx -y @example/docs-server` with a secret `DOCS_TOKEN`.
   - "Team wiki" is a web connector with an API key, a secret header, and its switch off.
   - Also four synthetic directory entries and two Claude Desktop candidates.
 - **Dialogs.** Native dialogs are stood in for by one `mockNativeDialog` helper behind an `eslint-disable`.
-- **Toggles.** `fotwMockSignIn = "cancel" | "offline"` and `fotwMockClaudeImport = "none"`. A local connector with a `--crash` argument stops right away, with details. A host containing `not-a-connector` doesn't answer like a connector.
+- **Toggles.** `fotwMockSignIn = "cancel" | "offline"` and `fotwMockClaudeImport = "none"`. A local connector with a `--crash` argument stops right away, with details; the program `missing-program` isn't found at approval; bare program names are pinned to `/usr/local/bin/<name>`. A host containing `not-a-connector` is added, then doesn't answer like a connector.
 - **QA hook.** `fotwMockConnectorCall(tool)` puts a card on screen for any Acme CRM tool.
 - **Settings.** Mock `set_app_setting` refuses `connectors.*`, like the backend.
 - **Tests.** Tests reset the fixtures with `resetMockConnectors()`.
@@ -171,10 +170,10 @@ None read. API keys, client secrets and secret header or setting values are type
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| vitest | `frontend/src/connectorsModel.test.ts` | 35 | Keep-local copy; details split; permissions (loosening, allowed values, groups, Mixed, group plans, chips); statuses, badges, directory search, probe summary, directory input; Add custom (https, sign-in choice, headers, secrets, API key, OAuth, edit prefill); Add local (program, file, args, settings, preview with ••••, Paste a command, edit prefill); card fields (simple schemas, fallback to code, values ⇄ args, `__proto__`); JSON editing; decided labels; proposal merge; activity results and times; Try… availability and the args template (`__proto__` stays a key) |
+| vitest | `frontend/src/connectorsModel.test.ts` | 35 | Keep-local copy; details split; permissions (loosening, allowed values, groups, Mixed, group plans, chips); statuses, badges, directory search, directory input; Add custom (https, sign-in choice, headers, secrets, API key, OAuth, edit prefill); Add local (program, file, args, settings, preview with ••••, Paste a command, edit prefill); card fields (simple schemas, fallback to code, values ⇄ args, `__proto__`); JSON editing; decided labels; proposal merge; activity results and times; Try… availability and the args template (`__proto__` stays a key) |
 | vitest (jsdom, mocked `listen`, fake timers) | `frontend/src/components/ConnectorCallCard.test.tsx` | 17 | read card words and focus; the 700 ms arm delay on mount and when the visible card changes (double click); null vs edited args; Show as code; the code fallback; Always allow; a native no keeps the card quietly; Deny/Esc collapse and removal; a failed deny; not stealing focus while typing; hostile text; write card markers and no Always allow; events, turn filter, races, unlisten |
 | vitest (jsdom, devMock) | `frontend/src/components/ConnectorsSection.test.tsx` | 18 | beta switch writes only the flag; list rows, badges, statuses, Add menu; switch on asks and off applies at once; empty, error and retry; hostile text; detail heading focus, tabs, groups, chips, blocked-only states, Back focus; tighten vs loosen (declined keeps the value, announced); write Always allow warning; group menu; review (keep blocked, approve declined then accepted, both tools); About; sign-in wait and Cancel; sign-in error; Activity rows, filter and clear; Disconnect copy; Edit prefill and save; Try… through the approval card (allowed and denied) and on Always allow (no card) |
-| vitest (jsdom, devMock) | `frontend/src/components/ConnectorAdd.test.tsx` | 13 | Browse search, no results, preview, Connect declined then accepted; OAuth wait and Cancel; sign-in error; API-key directory entry; Add custom validation, probe summary, native dialog, bad address, API key and secret header; Add local preview and run dialog; Paste a command and Choose a file…; program crash with Show details; Claude Desktop import steps and not-found |
+| vitest (jsdom, devMock) | `frontend/src/components/ConnectorAdd.test.tsx` | 13 | Browse search, no results, preview without contact, Connect declined then accepted; OAuth wait and Cancel; sign-in error; API-key directory entry; Add custom validation, native dialog, bad address on the detail page, API key and secret header; Add local preview and run dialog; Paste a command and Choose a file…; program crash with Show details; Claude Desktop import steps and not-found |
 | vitest (other docs) | `SettingsModal.test.tsx`, `settingsModel.test.ts` | — | the eighth section, its title, order and search |
 
 **Known gaps:**

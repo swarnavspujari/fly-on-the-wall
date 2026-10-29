@@ -20,7 +20,12 @@ pub const MAX_ENV: usize = 16;
 pub const MAX_HEADERS: usize = 16;
 pub const MAX_VALUE_CHARS: usize = 4096;
 pub const MAX_SCOPES: usize = 16;
-pub const MAX_URL_CHARS: usize = 2048;
+/// Longest web address; the approval dialog shows it in full.
+pub const MAX_URL_CHARS: usize = 512;
+/// Longest program line (program + arguments); shown in full.
+pub const MAX_RUN_LINE_CHARS: usize = 1000;
+/// Longest non-secret setting or header value; shown in full.
+pub const MAX_SHOWN_VALUE_CHARS: usize = 200;
 
 const CONFIG_HASH_DOMAIN: &str = "fotw.connector.config.v2";
 
@@ -109,18 +114,38 @@ fn bad(msg: impl Into<String>) -> ConfigError {
     ConfigError(msg.into())
 }
 
-/// Variables that change how a program loads code, where its runtime fetches
-/// packages from, or which TLS certificates it trusts. A local connector
-/// can't set them.
-const RESERVED_ENV: &[&str] = &[
+/// Variables a local connector inherits from FOTW's own environment
+/// (everything else is cleared before it starts).
+pub const INHERITED_ENV: &[&str] = &[
     "PATH",
     "PATHEXT",
-    "COMSPEC",
     "SYSTEMROOT",
-    "NODE_OPTIONS",
-    "NODE_PATH",
-    "NODE_EXTRA_CA_CERTS",
-    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "USER",
+    "LOGNAME",
+    "XDG_RUNTIME_DIR",
+];
+
+/// Variables that change how a program loads code, where it finds its
+/// config, where its runtime fetches packages from, how it reaches the
+/// network or which certificates it trusts. A local connector can't set
+/// them, as a plain or a secret setting (secret values are never shown).
+const RESERVED_ENV: &[&str] = &[
     "RUBYOPT",
     "RUBYLIB",
     "PERL5OPT",
@@ -135,24 +160,49 @@ const RESERVED_ENV: &[&str] = &[
     "SSL_CERT_DIR",
     "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE",
-    "GIT_SSL_NO_VERIFY",
+    "SHELL",
+    "BASH_ENV",
+    "ENV",
+    "ZDOTDIR",
+    "PSMODULEPATH",
 ];
 
-/// Prefixes of the same kinds of variables (preloading, package registries,
-/// runtime hooks).
+/// Prefixes of the same kinds of variables.
 const RESERVED_ENV_PREFIXES: &[&str] = &[
     "LD_",
     "DYLD_",
     "PYTHON",
-    "NPM_CONFIG_",
+    "NODE_",
+    "NPM_",
     "YARN_",
     "PNPM_",
     "BUN_",
+    "DENO_",
     "PIP_",
     "UV_",
+    "CARGO_",
+    "RUSTUP_",
+    "GIT_",
+    "XDG_",
+    "ELECTRON_",
     "CORECLR_",
     "COR_PROFILER",
 ];
+
+/// Whether a local connector may not set `name` (compared without case).
+pub fn is_reserved_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    INHERITED_ENV.contains(&upper.as_str())
+        || RESERVED_ENV.contains(&upper.as_str())
+        || RESERVED_ENV_PREFIXES.iter().any(|p| upper.starts_with(p))
+        || upper.ends_with("_PROXY")
+}
+
+/// Text a person couldn't see in full in a dialog.
+fn hidden(s: &str) -> bool {
+    s.chars()
+        .any(|c| c.is_control() || crate::sanitize::is_hidden_char(c))
+}
 
 /// Headers FOTW sets itself or that change how the request is framed.
 const RESERVED_HEADERS: &[&str] = &[
@@ -214,13 +264,16 @@ impl ServerConfig {
                 "The name must be 1–{MAX_NAME_CHARS} characters."
             )));
         }
-        if self.name.chars().any(char::is_control) {
-            return Err(bad("The name can't contain control characters."));
+        if hidden(&self.name) {
+            return Err(bad("The name can't contain hidden or control characters."));
         }
         match &self.transport {
             TransportConfig::Http { url, headers } => {
-                if url.len() > MAX_URL_CHARS {
+                if url.chars().count() > MAX_URL_CHARS {
                     return Err(bad("The address is too long."));
+                }
+                if hidden(url) {
+                    return Err(bad("The address can't contain hidden characters."));
                 }
                 let parsed = policy.parse_and_check(url).map_err(|e| match e {
                     crate::netguard::NetError::NotHttps(_)
@@ -251,7 +304,7 @@ impl ServerConfig {
                         return Err(bad(format!("{} is listed twice.", h.name)));
                     }
                     if let Some(v) = &h.value {
-                        check_value(v, &h.name)?;
+                        check_shown_value(v, &h.name)?;
                     }
                 }
             }
@@ -259,18 +312,32 @@ impl ServerConfig {
                 if command.is_empty() || command.chars().count() > MAX_COMMAND_CHARS {
                     return Err(bad("Choose the program to run."));
                 }
-                if command.chars().any(char::is_control) {
-                    return Err(bad("The program can't contain control characters."));
+                if hidden(command) {
+                    return Err(bad(
+                        "The program can't contain hidden or control characters.",
+                    ));
+                }
+                let has_dir = command.contains(['/', '\\']);
+                if has_dir && !std::path::Path::new(command).is_absolute() {
+                    return Err(bad(
+                        "Choose the program with Choose a file…, or use npx or uvx.",
+                    ));
                 }
                 if args.len() > MAX_ARGS {
                     return Err(bad(format!("At most {MAX_ARGS} arguments.")));
                 }
                 for a in args {
-                    if a.chars().count() > MAX_ARG_CHARS || a.chars().any(char::is_control) {
+                    if a.chars().count() > MAX_ARG_CHARS || hidden(a) {
                         return Err(bad(
-                            "An argument is too long or contains control characters.",
+                            "An argument is too long or contains hidden or control characters.",
                         ));
                     }
+                }
+                if self.will_run().unwrap_or_default().chars().count() > MAX_RUN_LINE_CHARS {
+                    return Err(bad(format!(
+                        "The program and its arguments must fit in {MAX_RUN_LINE_CHARS} characters, \
+                         so the approval can show all of it."
+                    )));
                 }
                 if env.len() > MAX_ENV {
                     return Err(bad(format!("At most {MAX_ENV} settings.")));
@@ -281,16 +348,14 @@ impl ServerConfig {
                         return Err(bad(format!("{:?} isn't a valid setting name.", e.name)));
                     }
                     let upper = e.name.to_ascii_uppercase();
-                    if RESERVED_ENV.contains(&upper.as_str())
-                        || RESERVED_ENV_PREFIXES.iter().any(|p| upper.starts_with(p))
-                    {
+                    if is_reserved_env(&e.name) {
                         return Err(bad(format!("{} can't be set for a connector.", e.name)));
                     }
                     if !seen.insert(upper) {
                         return Err(bad(format!("{} is listed twice.", e.name)));
                     }
                     if let Some(v) = &e.value {
-                        check_value(v, &e.name)?;
+                        check_shown_value(v, &e.name)?;
                     }
                 }
                 if !matches!(self.auth, AuthConfig::None) {
@@ -316,7 +381,7 @@ impl ServerConfig {
                 }
             }
             if let Some(id) = client_id {
-                if id.len() > 256 || id.chars().any(|c| c.is_control() || c.is_whitespace()) {
+                if id.len() > 256 || hidden(id) || id.chars().any(char::is_whitespace) {
                     return Err(bad("The OAuth client ID isn't valid."));
                 }
             }
@@ -408,10 +473,16 @@ impl ServerConfig {
     }
 }
 
-fn check_value(v: &str, name: &str) -> Result<(), ConfigError> {
-    if v.chars().count() > MAX_VALUE_CHARS || v.contains(['\0', '\r', '\n']) {
+/// A value the approval dialog shows: short, and nothing hidden.
+fn check_shown_value(v: &str, name: &str) -> Result<(), ConfigError> {
+    if v.chars().count() > MAX_SHOWN_VALUE_CHARS {
         return Err(bad(format!(
-            "The value for {name} is too long or has line breaks."
+            "The value for {name} is longer than {MAX_SHOWN_VALUE_CHARS} characters; make it a secret."
+        )));
+    }
+    if hidden(v) {
+        return Err(bad(format!(
+            "The value for {name} has hidden characters or line breaks."
         )));
     }
     Ok(())
@@ -603,6 +674,101 @@ mod tests {
         let mut cfg = local(vec![]);
         cfg.auth = AuthConfig::ApiKey;
         assert!(cfg.validate(&p).is_err(), "sign-in options are web-only");
+    }
+
+    #[test]
+    fn everything_the_dialog_shows_is_visible_and_whole() {
+        let p = NetPolicy::strict();
+        let zw = "\u{200B}";
+        let tag = "\u{E0041}";
+        let vs = "\u{FE0F}";
+        let mut bad_name = http("https://mcp.example.com/mcp");
+        bad_name.name = format!("Docs{zw}");
+        assert!(bad_name.validate(&p).is_err());
+        assert!(http(&format!("https://mcp.example.com/m{tag}cp"))
+            .validate(&p)
+            .is_err());
+        let with_arg = |a: String| ServerConfig {
+            name: "Local".into(),
+            transport: TransportConfig::Stdio {
+                command: "npx".into(),
+                args: vec![a],
+                env: vec![],
+            },
+            auth: AuthConfig::None,
+        };
+        assert!(with_arg(format!("-y{vs}")).validate(&p).is_err());
+        assert!(
+            with_arg("x".repeat(MAX_RUN_LINE_CHARS))
+                .validate(&p)
+                .is_err(),
+            "too long to show"
+        );
+        let with_value = |v: String| {
+            local(vec![EnvConfig {
+                name: "REGION".into(),
+                value: Some(v),
+            }])
+        };
+        assert!(with_value(format!("eu{zw}")).validate(&p).is_err());
+        assert!(with_value("e".repeat(MAX_SHOWN_VALUE_CHARS + 1))
+            .validate(&p)
+            .is_err());
+        assert!(with_value("eu".into()).validate(&p).is_ok());
+        assert!(http(&format!(
+            "https://mcp.example.com/{}",
+            "a".repeat(MAX_URL_CHARS)
+        ))
+        .validate(&p)
+        .is_err());
+    }
+
+    #[test]
+    fn inherited_and_config_variables_are_reserved() {
+        let p = NetPolicy::strict();
+        for name in [
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "TEMP",
+            "TMP",
+            "XDG_CONFIG_HOME",
+            "NODE_ENV",
+            "GIT_SSH_COMMAND",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "ELECTRON_RUN_AS_NODE",
+            "NPM_TOKEN",
+            "CARGO_HOME",
+        ] {
+            let cfg = local(vec![EnvConfig {
+                name: name.into(),
+                value: None,
+            }]);
+            assert!(cfg.validate(&p).is_err(), "{name} (secret) must be refused");
+        }
+        assert!(local(vec![EnvConfig {
+            name: "ACME_TOKEN".into(),
+            value: None
+        }])
+        .validate(&p)
+        .is_ok());
+    }
+
+    #[test]
+    fn relative_program_paths_are_refused() {
+        let p = NetPolicy::strict();
+        for cmd in ["./server", "bin/server", "..\\tools\\srv.exe"] {
+            let mut cfg = local(vec![]);
+            cfg.transport = TransportConfig::Stdio {
+                command: cmd.into(),
+                args: vec![],
+                env: vec![],
+            };
+            assert!(cfg.validate(&p).is_err(), "{cmd}");
+        }
     }
 
     #[test]

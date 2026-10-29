@@ -305,7 +305,6 @@ pub fn run() {
             privacy::dismiss_recovered_kept_local,
             connectors::connectors_overview,
             connectors::connectors_directory,
-            connectors::probe_connector,
             connectors::add_connector,
             connectors::update_connector,
             connectors::set_connector_enabled,

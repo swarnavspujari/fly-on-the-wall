@@ -7,7 +7,10 @@
 //!   the authorization URL is checked before the browser opens.
 //! * The user signs in in their own browser; FOTW never sees a password. The
 //!   browser returns to a one-shot listener on `127.0.0.1` (RFC 8252), and
-//!   rmcp checks the `state` and PKCE verifier on the code exchange.
+//!   rmcp checks the `state`, the PKCE verifier and the reply's issuer
+//!   (`iss`, RFC 9207) on the code exchange.
+//! * The authorization server found at sign-in is pinned with the connector;
+//!   token refreshes use it instead of discovering again.
 //! * Tokens land in the keychain through [`KeychainCredentials`].
 
 use std::sync::Arc;
@@ -28,6 +31,9 @@ use crate::secrets::KeychainCredentials;
 pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CLIENT_NAME: &str = "Fly on the Wall";
 const MAX_CALLBACK_REQUEST: usize = 8 * 1024;
+/// How long one connection to the sign-in listener may take to send its
+/// request (a stalled connection can't hold the listener).
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum OAuthError {
@@ -109,20 +115,23 @@ async fn manager(
     Ok(mgr)
 }
 
-/// Run the browser sign-in for one connector and store its tokens.
+/// Run the browser sign-in for one connector and store its tokens. Returns
+/// the authorization server metadata to pin with the connector.
 pub async fn sign_in(
     entry: &ServerEntry,
     secrets: Arc<dyn SecretStore>,
     policy: NetPolicy,
     opener: &dyn BrowserOpener,
     timeout: Duration,
-) -> Result<(), OAuthError> {
+) -> Result<serde_json::Value, OAuthError> {
     let (url, scopes, client_id) = http_url(entry)?;
     let creds = KeychainCredentials::new(secrets.clone(), entry.id.clone());
     let mut mgr = manager(entry, url, secrets, policy).await?;
 
     let resolution = mgr.resolve_metadata().await?;
     check_metadata(&resolution.metadata, &policy)?;
+    let pinned =
+        serde_json::to_value(&resolution.metadata).map_err(|e| OAuthError::Auth(e.to_string()))?;
     mgr.set_metadata(resolution.metadata);
 
     let listener = TcpListener::bind(("127.0.0.1", 0))
@@ -166,10 +175,10 @@ pub async fn sign_in(
     let reply = tokio::time::timeout(timeout, wait_for_callback(listener))
         .await
         .map_err(|_| OAuthError::TimedOut)??;
-    mgr.exchange_code_for_token(&reply.code, &reply.state)
+    mgr.exchange_code_for_token_with_issuer(&reply.code, &reply.state, reply.iss.as_deref())
         .await?;
     tracing::info!(connector = %entry.id, "connector sign-in complete");
-    Ok(())
+    Ok(pinned)
 }
 
 /// A current access token, refreshed when it's about to expire.
@@ -185,9 +194,15 @@ pub async fn access_token(
         return Err(OAuthError::SignInRequired);
     };
     let mut mgr = manager(entry, url, secrets, policy).await?;
-    let resolution = mgr.resolve_metadata().await?;
-    check_metadata(&resolution.metadata, &policy)?;
-    mgr.set_metadata(resolution.metadata);
+    // The server pinned at sign-in; a connector signed in before pinning
+    // existed discovers once more.
+    let metadata = match &entry.oauth_metadata {
+        Some(pinned) => serde_json::from_value::<AuthorizationMetadata>(pinned.clone())
+            .map_err(|_| OAuthError::SignInRequired)?,
+        None => mgr.resolve_metadata().await?.metadata,
+    };
+    check_metadata(&metadata, &policy)?;
+    mgr.set_metadata(metadata);
     if !mgr.initialize_from_store().await? {
         return Err(OAuthError::SignInRequired);
     }
@@ -206,17 +221,14 @@ pub async fn access_token(
 struct CallbackReply {
     code: String,
     state: String,
+    iss: Option<String>,
 }
 
-/// Accept connections until one hits `/callback` with a code (or an error).
-async fn wait_for_callback(listener: TcpListener) -> Result<CallbackReply, OAuthError> {
-    loop {
-        let (mut sock, _) = listener
-            .accept()
-            .await
-            .map_err(|e| OAuthError::Listener(e.to_string()))?;
-        let mut buf = Vec::with_capacity(1024);
-        let mut chunk = [0u8; 1024];
+/// Read one request head, giving up on a connection that stalls.
+async fn read_head(sock: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    let read = async {
         loop {
             let n = match sock.read(&mut chunk).await {
                 Ok(0) | Err(_) => break,
@@ -227,6 +239,19 @@ async fn wait_for_callback(listener: TcpListener) -> Result<CallbackReply, OAuth
                 break;
             }
         }
+    };
+    let _ = tokio::time::timeout(CALLBACK_READ_TIMEOUT, read).await;
+    buf
+}
+
+/// Accept connections until one hits `/callback` with a code (or an error).
+async fn wait_for_callback(listener: TcpListener) -> Result<CallbackReply, OAuthError> {
+    loop {
+        let (mut sock, _) = listener
+            .accept()
+            .await
+            .map_err(|e| OAuthError::Listener(e.to_string()))?;
+        let buf = read_head(&mut sock).await;
         let head = String::from_utf8_lossy(&buf);
         let target = head
             .lines()
@@ -274,7 +299,11 @@ async fn wait_for_callback(listener: TcpListener) -> Result<CallbackReply, OAuth
                     "Signed in. You can close this tab and go back to Fly on the Wall.",
                 )
                 .await;
-                return Ok(CallbackReply { code, state });
+                return Ok(CallbackReply {
+                    code,
+                    state,
+                    iss: get("iss"),
+                });
             }
             _ => respond(&mut sock, 400, "The sign-in reply was incomplete.").await,
         }

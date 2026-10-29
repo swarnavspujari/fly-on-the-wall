@@ -14,11 +14,15 @@
 //!   events and wait for `decide_connector_call`. Edited arguments are
 //!   re-validated here; a change tool's call also needs the native confirm
 //!   showing the final arguments. "Always allow" from a card is offered only
-//!   for read-only tools.
+//!   for read-only tools. Every native dialog is paced like cloud consent:
+//!   two declines in a row and that kind of dialog stays quiet for a minute.
+//! * Nothing reaches a connector before its approval: the add dialog comes
+//!   first, then the first connection lists its tools.
 //! * Secret values (API keys, secret headers and settings) go straight to the
 //!   keychain and are never returned to the webview.
-//! * "Delete all my data" removes every connector keychain entry
-//!   ([`stored_secret_keys`]).
+//! * "Delete all my data" closes every connection and removes every connector
+//!   keychain entry ([`stored_secret_keys`]: the registry, ids still readable
+//!   in a damaged one, and the keychain's own index).
 //!
 //! The Ask harness gets a per-turn tool set from [`turn_for_ask`].
 
@@ -34,7 +38,7 @@ use fly_mcp_client::config::{AuthConfig, ServerConfig, TransportConfig};
 use fly_mcp_client::directory::{self, DirectoryEntry};
 use fly_mcp_client::hub::{
     args_problem, CallApprover, CallProposal, ConnectorHub, Decision, HubError, NewSecrets,
-    ProbeResult, TurnOptions,
+    TurnOptions,
 };
 use fly_mcp_client::oauth::BrowserOpener;
 use fly_mcp_client::pin::{self, model_tool_name, FieldChange, Permission, ToolKind};
@@ -43,12 +47,13 @@ use fly_mcp_client::registry::{
 };
 use fly_mcp_client::sanitize::clean_capped;
 use fly_mcp_client::session::SessionError;
+use fly_secrets::SecretStore;
 use fly_storage::Storage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::llm_commands::{ask_consent_natively, ConsentAnswer, ConsentPrompt};
+use crate::llm_commands::{ask_consent_natively, ConsentAnswer, ConsentPacing, ConsentPrompt};
 use crate::state::AppState;
 
 type CmdResult<T> = Result<T, String>;
@@ -70,6 +75,9 @@ const DECISION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Longest argument text a native confirm shows. Longer arguments are
 /// refused rather than cut, so the dialog always shows what is sent.
 const DIALOG_ARGS_CHARS: usize = 3000;
+/// Arguments longer than this many lines when pretty-printed are shown
+/// compact instead, so the dialog's buttons stay on screen.
+const DIALOG_ARGS_LINES: usize = 40;
 /// Longest program output shown under "Show details".
 const DETAILS_CHARS: usize = 1500;
 
@@ -128,6 +136,8 @@ pub struct ConnectorsState {
     pending: Mutex<HashMap<String, PendingCall>>,
     /// One native dialog at a time.
     dialog: tokio::sync::Mutex<()>,
+    /// Declined twice in a row: that kind of dialog stays quiet a minute.
+    pacing: Mutex<ConsentPacing>,
 }
 
 /// Build and manage the connector state (called once from `setup`).
@@ -142,6 +152,7 @@ pub fn init(app: &AppHandle) {
         hub: Arc::new(hub),
         pending: Mutex::new(HashMap::new()),
         dialog: tokio::sync::Mutex::new(()),
+        pacing: Mutex::new(ConsentPacing::default()),
     });
 }
 
@@ -179,18 +190,69 @@ pub fn turn_for_ask(
     )))
 }
 
-/// Every keychain key the stored connectors may own (read before "Delete all
-/// my data" empties the database).
-pub fn stored_secret_keys(storage: &Storage) -> Vec<String> {
-    match storage.get_setting(REGISTRY_KEY) {
-        Ok(Some(json)) => Registry::from_json(&json).secret_keys(),
-        _ => Vec::new(),
+/// Every keychain key a connector may own (read before "Delete all my data"
+/// empties the database): from the registry, from connector ids still
+/// readable in a registry that no longer parses, and from the keychain's own
+/// index of connector keys.
+pub fn stored_secret_keys(storage: &Storage, secrets: &dyn SecretStore) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(Some(json)) = storage.get_setting(REGISTRY_KEY) {
+        keys.extend(Registry::from_json(&json).secret_keys());
+        for id in Registry::ids_in_raw(&json) {
+            keys.extend(fly_mcp_client::registry::slot_keys_for_id(&id));
+        }
+    }
+    keys.extend(fly_mcp_client::secrets::indexed_keys(secrets));
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// Close every connector connection (local programs stop) before "Delete
+/// all my data".
+pub async fn close_all(app: &AppHandle) {
+    if let Some(st) = app.try_state::<ConnectorsState>() {
+        st.hub.close_all().await;
     }
 }
 
-async fn ask(st: &ConnectorsState, app: &AppHandle, prompt: &ConsentPrompt) -> bool {
+const PACED: &str =
+    "You said no to this twice in a row, so Fly on the Wall won't ask again for a minute.";
+
+/// Ask in a native dialog. `kind` names the dialog for pacing. Err when the
+/// dialog is paced (asked and declined twice in the last minute).
+async fn ask(
+    st: &ConnectorsState,
+    app: &AppHandle,
+    kind: &str,
+    prompt: &ConsentPrompt,
+) -> CmdResult<bool> {
     let _one = st.dialog.lock().await;
-    ask_consent_natively(app, prompt).await == ConsentAnswer::Allow
+    ask_held(st, app, kind, prompt).await
+}
+
+/// [`ask`] for a caller already holding the dialog lock.
+async fn ask_held(
+    st: &ConnectorsState,
+    app: &AppHandle,
+    kind: &str,
+    prompt: &ConsentPrompt,
+) -> CmdResult<bool> {
+    let key = format!("connector.{kind}");
+    if st
+        .pacing
+        .lock()
+        .unwrap()
+        .is_quiet(&key, std::time::Instant::now())
+    {
+        return Err(PACED.into());
+    }
+    let answer = ask_consent_natively(app, prompt).await;
+    st.pacing
+        .lock()
+        .unwrap()
+        .record(&key, answer, std::time::Instant::now());
+    Ok(answer == ConsentAnswer::Allow)
 }
 
 fn q(s: &str, max: usize) -> String {
@@ -202,26 +264,21 @@ fn q(s: &str, max: usize) -> String {
 // ---------------------------------------------------------------------------
 
 fn add_prompt(c: &ServerConfig, turning_on: bool) -> ConsentPrompt {
-    if let Some(run) = c.will_run() {
-        let mut body = format!(
-            "{} will run: {}\n\nIt has the same access to your files as you.",
-            q(&c.name, 60),
-            clean_capped(&run, 600)
-        );
-        if let TransportConfig::Stdio { env, .. } = &c.transport {
-            let shown: Vec<String> = env
-                .iter()
-                .filter_map(|e| {
-                    e.value
-                        .as_deref()
-                        .map(|v| format!("{}={}", e.name, clean_capped(v, 120)))
-                })
-                .collect();
-            if !shown.is_empty() {
-                body.push_str(&format!("\n\nWith these settings: {}.", shown.join(", ")));
-            }
+    // Everything shown here passed `ServerConfig::validate`: short enough to
+    // show in full, with no hidden or control characters. Nothing is cut.
+    let name = format!("\"{}\"", c.name);
+    let secrets = c.secret_names();
+    if let TransportConfig::Stdio { env, .. } = &c.transport {
+        let run = c.will_run().unwrap_or_default();
+        let mut body =
+            format!("{name} will run:\n{run}\n\nIt has the same access to your files as you.");
+        let shown: Vec<String> = env
+            .iter()
+            .filter_map(|e| e.value.as_deref().map(|v| format!("{}={v}", e.name)))
+            .collect();
+        if !shown.is_empty() {
+            body.push_str(&format!("\n\nWith these settings: {}.", shown.join(", ")));
         }
-        let secrets = c.secret_names();
         if !secrets.is_empty() {
             body.push_str(&format!(
                 "\n\nIt gets these settings from your system keychain: {}.",
@@ -240,20 +297,37 @@ fn add_prompt(c: &ServerConfig, turning_on: bool) -> ConsentPrompt {
             decline: "Cancel".into(),
         };
     }
-    let mut body = format!(
-        "It can receive questions and meeting details you approve, sent to {}. Every tool starts \
-         as Needs approval.",
-        clean_capped(&c.destination(), 120)
-    );
+    let mut body =
+        String::from("It can receive questions and meeting details you approve, sent to:");
+    if let TransportConfig::Http { url, headers } = &c.transport {
+        body.push_str(&format!("\n{url}"));
+        let shown: Vec<String> = headers
+            .iter()
+            .filter_map(|h| h.value.as_deref().map(|v| format!("{}: {v}", h.name)))
+            .collect();
+        if !shown.is_empty() {
+            body.push_str(&format!("\n\nWith these headers: {}.", shown.join(", ")));
+        }
+    }
+    if !secrets.is_empty() {
+        body.push_str(&format!(
+            "\n\nIt sends these from your system keychain: {}.",
+            secrets.join(", ")
+        ));
+    }
+    if matches!(c.auth, AuthConfig::ApiKey) {
+        body.push_str("\n\nIt sends your API key from your system keychain.");
+    }
+    body.push_str("\n\nEvery tool starts as Needs approval.");
     if c.uses_oauth() {
-        body.push_str("\n\nYou'll sign in in your browser next.");
+        body.push_str(" You'll sign in in your browser next.");
     }
     body.push_str("\n\nFly on the Wall hasn't checked this connector. Only add ones you trust.");
     ConsentPrompt {
         title: if turning_on {
-            format!("Turn on {}?", q(&c.name, 60))
+            format!("Turn on {name}?")
         } else {
-            format!("Add {} connector?", q(&c.name, 60))
+            format!("Add {name} connector?")
         },
         message: body,
         allow: if turning_on {
@@ -268,7 +342,7 @@ fn add_prompt(c: &ServerConfig, turning_on: bool) -> ConsentPrompt {
 
 fn edit_prompt(c: &ServerConfig, moved: bool) -> ConsentPrompt {
     let mut p = add_prompt(c, false);
-    p.title = format!("Save changes to {}?", q(&c.name, 60));
+    p.title = format!("Save changes to \"{}\"?", c.name);
     p.allow = "Save changes".into();
     if moved {
         p.message.push_str(
@@ -376,9 +450,15 @@ fn review_prompt(entry: &ServerEntry, tool: &pin::ToolPin) -> ConsentPrompt {
 }
 
 /// The final arguments for a native confirm, or why they can't be shown in
-/// full.
+/// full. Pretty-printed when short; compact (one wrapped line) when the
+/// pretty form would push the buttons off screen. Never cut.
 fn dialog_args(args: &Value) -> Result<String, String> {
-    let s = serde_json::to_string_pretty(args).map_err(err_str)?;
+    let pretty = serde_json::to_string_pretty(args).map_err(err_str)?;
+    let s = if pretty.lines().count() <= DIALOG_ARGS_LINES {
+        pretty
+    } else {
+        serde_json::to_string(args).map_err(err_str)?
+    };
     if s.chars().count() > DIALOG_ARGS_CHARS {
         return Err(
             "These details are too long to show in the confirm dialog. Shorten them and try again."
@@ -566,7 +646,19 @@ pub async fn decide_connector_call(
             errs.join("; ")
         ))));
     }
-    match (action, proposal.kind) {
+    // The tool may have been re-labelled while the card waited: a change tool
+    // now, or then, gets the change-tool treatment.
+    let current = st
+        .hub
+        .registry()
+        .server(&proposal.server_id)
+        .and_then(|e| e.tool(&proposal.tool).map(pin::kind));
+    let kind = if proposal.kind == ToolKind::Read && current == Some(ToolKind::Read) {
+        ToolKind::Read
+    } else {
+        ToolKind::Write
+    };
+    match (action, kind) {
         (CardAction::AlwaysAllow, ToolKind::Write) => {
             return Ok(stay(Some(
                 "Tools that can change data can only be set to Always allow in Settings.".into(),
@@ -585,8 +677,10 @@ pub async fn decide_connector_call(
                 .hub
                 .plan_permissions(&proposal.server_id, &changes)
                 .map_err(err_str)?;
-            if !ask(&st, &app, &loosen_prompt(entry, &plan.loosen)).await {
-                return Ok(stay(None));
+            match ask(&st, &app, "loosen", &loosen_prompt(entry, &plan.loosen)).await {
+                Ok(true) => {}
+                Ok(false) => return Ok(stay(None)),
+                Err(e) => return Ok(stay(Some(e))),
             }
             st.hub
                 .apply_loosening(&proposal.server_id, &changes, &plan.loosen)
@@ -602,10 +696,10 @@ pub async fn decide_connector_call(
             if !st.pending.lock().unwrap().contains_key(&proposal_id) {
                 return Ok(done);
             }
-            if ask_consent_natively(&app, &send_prompt(&proposal, &text)).await
-                != ConsentAnswer::Allow
-            {
-                return Ok(stay(None));
+            match ask_held(&st, &app, "send", &send_prompt(&proposal, &text)).await {
+                Ok(true) => {}
+                Ok(false) => return Ok(stay(None)),
+                Err(e) => return Ok(stay(Some(e))),
             }
         }
         _ => {}
@@ -876,24 +970,10 @@ pub struct ConnectorInput {
     secrets: NewSecrets,
 }
 
-/// Look at a web connector before it's added ("Checking…"): its tools, or
-/// that it wants a browser sign-in. Local programs are never started here.
-#[tauri::command]
-pub async fn probe_connector(
-    st: State<'_, ConnectorsState>,
-    input: ConnectorInput,
-) -> CmdResult<ProbeResult> {
-    let secrets: Vec<String> = input
-        .secrets
-        .values
-        .values()
-        .cloned()
-        .chain(input.secrets.api_key.clone())
-        .collect();
-    st.hub
-        .probe(input.config, &input.secrets)
-        .await
-        .map_err(|e| describe(e, &secrets))
+/// The config as the approval dialog will show it: checked, and a local
+/// program pinned to its full path.
+fn pinned(st: &ConnectorsState, config: ServerConfig) -> CmdResult<ServerConfig> {
+    st.hub.pin_program(config).map_err(|e| describe(e, &[]))
 }
 
 /// After adding (or editing): list tools now when no browser sign-in is
@@ -918,7 +998,7 @@ pub async fn add_connector(
     st: State<'_, ConnectorsState>,
     input: ConnectorInput,
 ) -> CmdResult<SaveResult> {
-    let cfg = st.hub.check_config(input.config).map_err(err_str)?;
+    let cfg = pinned(&st, input.config)?;
     if st
         .hub
         .registry()
@@ -928,7 +1008,7 @@ pub async fn add_connector(
     {
         return Err("A connector with that name already exists.".into());
     }
-    if !ask(&st, &app, &add_prompt(&cfg, false)).await {
+    if !ask(&st, &app, "add", &add_prompt(&cfg, false)).await? {
         return Ok(SaveResult {
             saved: false,
             connector: None,
@@ -954,9 +1034,9 @@ pub async fn update_connector(
     id: String,
     input: ConnectorInput,
 ) -> CmdResult<SaveResult> {
-    let cfg = st.hub.check_config(input.config).map_err(err_str)?;
+    let cfg = pinned(&st, input.config)?;
     let moved = st.hub.edit_moves(&id, &cfg).map_err(err_str)?;
-    if !ask(&st, &app, &edit_prompt(&cfg, moved)).await {
+    if !ask(&st, &app, "edit", &edit_prompt(&cfg, moved)).await? {
         return Ok(SaveResult {
             saved: false,
             connector: Some(view_of(&st.hub, &id)?),
@@ -990,10 +1070,10 @@ pub async fn set_connector_enabled(
             .server(&id)
             .cloned()
             .ok_or("No connector with that id.")?;
-        if !entry.is_approved() {
+        if !entry.is_approved() || st.hub.check_config(entry.config.clone()).is_err() {
             return Err("Edit this connector to approve it again.".into());
         }
-        if !ask(&st, &app, &add_prompt(&entry.config, true)).await {
+        if !ask(&st, &app, "turn_on", &add_prompt(&entry.config, true)).await? {
             return Ok(SaveResult {
                 saved: false,
                 connector: Some(view_of(&st.hub, &id)?),
@@ -1009,11 +1089,13 @@ pub async fn set_connector_enabled(
     })
 }
 
-/// Remove a connector, its keychain entries and its connection.
+/// Remove a connector, its keychain entries and its connection. Keychain
+/// entries that couldn't be deleted stay in the keychain's connector index,
+/// so "Delete all my data" still finds them.
 #[tauri::command]
 pub async fn remove_connector(st: State<'_, ConnectorsState>, id: String) -> CmdResult<()> {
-    st.hub.remove(&id).await.map_err(err_str)?;
-    tracing::info!(connector = %id, "connector removed");
+    let failed = st.hub.remove(&id).await.map_err(err_str)?;
+    tracing::info!(connector = %id, leftover = failed.len(), "connector removed");
     Ok(())
 }
 
@@ -1056,7 +1138,7 @@ pub async fn set_connector_tool_permissions(
     if plan.grants_trust() {
         let reg = st.hub.registry();
         let entry = reg.server(&id).ok_or("No connector with that id.")?;
-        if ask(&st, &app, &loosen_prompt(entry, &plan.loosen)).await {
+        if ask(&st, &app, "loosen", &loosen_prompt(entry, &plan.loosen)).await? {
             st.hub
                 .apply_loosening(&id, &changes, &plan.loosen)
                 .map_err(err_str)?;
@@ -1088,7 +1170,7 @@ pub async fn approve_connector_tool(
     if pin::review_hash(pin) != Some(review_hash.as_str()) {
         return Err("The tool changed again; review the latest change.".into());
     }
-    if !ask(&st, &app, &review_prompt(entry, pin)).await {
+    if !ask(&st, &app, "review", &review_prompt(entry, pin)).await? {
         return Ok(SaveResult {
             saved: false,
             connector: Some(view_of(&st.hub, &id)?),
@@ -1247,8 +1329,8 @@ pub async fn import_claude_desktop_connector(
             .find(|n| !taken(n))
             .unwrap_or(base);
     }
-    let cfg = st.hub.check_config(cfg).map_err(err_str)?;
-    if !ask(&st, &app, &add_prompt(&cfg, false)).await {
+    let cfg = pinned(&st, cfg)?;
+    if !ask(&st, &app, "add", &add_prompt(&cfg, false)).await? {
         return Ok(SaveResult {
             saved: false,
             connector: None,
@@ -1270,9 +1352,26 @@ pub fn connector_call_log(st: State<'_, ConnectorsState>) -> Vec<CallLogEntry> {
     st.hub.call_log()
 }
 
+/// Clear the call log after a yes in a native dialog. Returns whether it
+/// was cleared.
 #[tauri::command]
-pub fn clear_connector_call_log(st: State<'_, ConnectorsState>) -> CmdResult<()> {
-    st.hub.clear_call_log().map_err(err_str)
+pub async fn clear_connector_call_log(
+    app: AppHandle,
+    st: State<'_, ConnectorsState>,
+) -> CmdResult<bool> {
+    let prompt = ConsentPrompt {
+        title: "Clear connector activity?".into(),
+        message: "This removes the record of which connector tools ran and when. It can't be \
+                  undone."
+            .into(),
+        allow: "Clear activity".into(),
+        decline: "Keep it".into(),
+    };
+    if !ask(&st, &app, "clear_log", &prompt).await? {
+        return Ok(false);
+    }
+    st.hub.clear_call_log().map_err(err_str)?;
+    Ok(true)
 }
 
 #[derive(Debug, Serialize)]
@@ -1283,7 +1382,9 @@ pub struct TestResult {
 }
 
 /// Try one tool from Settings. Goes through the same rules as an Ask turn,
-/// including the confirm card for tools on Needs approval.
+/// and always shows the confirm card (Always allow too: these arguments
+/// come from the webview, not the model); a change tool also needs the
+/// native confirm.
 #[tauri::command]
 pub async fn test_connector_tool(
     app: AppHandle,
@@ -1304,6 +1405,7 @@ pub async fn test_connector_tool(
         keep_local_in_scope: false,
         max_calls: 1,
         max_result_chars: fly_mcp_client::fence::DEFAULT_MAX_RESULT_CHARS,
+        force_approval: true,
     };
     let turn = st
         .hub
@@ -1402,7 +1504,10 @@ mod tests {
     fn stored_secret_keys_come_from_the_registry() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path()).unwrap();
-        assert!(stored_secret_keys(&storage).is_empty());
+        let none = fly_secrets::MemorySecretStore::default();
+        assert!(stored_secret_keys(&storage, &none)
+            .iter()
+            .all(|k| k.starts_with(fly_mcp_client::secrets::INDEX_KEY)));
         let mut reg = Registry::default();
         let id = reg
             .add_approved(
@@ -1421,10 +1526,31 @@ mod tests {
             )
             .unwrap();
         storage.set_setting(REGISTRY_KEY, &reg.to_json()).unwrap();
-        let keys = stored_secret_keys(&storage);
+        let keys = stored_secret_keys(&storage, &none);
         assert!(keys.contains(&format!("connector.{id}.access")));
         assert!(keys.contains(&format!("connector.{id}.refresh")));
         assert!(keys.contains(&format!("connector.{id}.apikey")));
+
+        // A registry that no longer parses still gives up its ids, and the
+        // keychain index lists the rest (a variable named only in config).
+        let mut raw = reg.to_json();
+        raw.truncate(raw.len() - 3);
+        storage.set_setting(REGISTRY_KEY, &raw).unwrap();
+        let indexed = fly_secrets::MemorySecretStore::default();
+        let mut local = reg.server(&id).unwrap().clone();
+        local.config.transport = TransportConfig::Stdio {
+            command: "/opt/docs/server".into(),
+            args: vec![],
+            env: vec![EnvConfig {
+                name: "DOCS_TOKEN".into(),
+                value: None,
+            }],
+        };
+        fly_mcp_client::secrets::index_record(&indexed, &local).unwrap();
+        let keys = stored_secret_keys(&storage, &indexed);
+        assert!(keys.contains(&format!("connector.{id}.refresh")));
+        assert!(keys.contains(&format!("connector.{id}.env.DOCS_TOKEN")));
+        assert!(keys.contains(&fly_mcp_client::secrets::INDEX_KEY.to_string()));
     }
 
     fn proposal(kind: ToolKind, destructive: bool) -> CallProposal {
@@ -1456,7 +1582,7 @@ mod tests {
         let local = ServerConfig {
             name: "Docs".into(),
             transport: TransportConfig::Stdio {
-                command: "npx".into(),
+                command: "/usr/bin/npx".into(),
                 args: vec!["-y".into(), "@example/docs".into()],
                 env: vec![EnvConfig {
                     name: "DOCS_TOKEN".into(),
@@ -1477,7 +1603,9 @@ mod tests {
             .contains("With these settings: REGION=eu."));
         let add = add_prompt(&local, false);
         assert_eq!(add.title, "Run a program on this computer?");
-        assert!(add.message.contains("will run: npx -y @example/docs"));
+        assert!(add
+            .message
+            .contains("will run:\n/usr/bin/npx -y @example/docs"));
         assert!(add.message.contains("DOCS_TOKEN"));
         assert_eq!(
             (add.allow.as_str(), add.decline.as_str()),
@@ -1487,14 +1615,42 @@ mod tests {
         let web = ServerConfig {
             name: "Docs".into(),
             transport: TransportConfig::Http {
-                url: "https://mcp.example.com/mcp".into(),
-                headers: vec![],
+                url: "https://mcp.example.com/v1/mcp?team=7".into(),
+                headers: vec![
+                    fly_mcp_client::config::HeaderConfig {
+                        name: "X-Team".into(),
+                        value: Some("seven".into()),
+                    },
+                    fly_mcp_client::config::HeaderConfig {
+                        name: "X-Api-Key".into(),
+                        value: None,
+                    },
+                ],
             },
             auth: AuthConfig::None,
         };
         let add = add_prompt(&web, false);
         assert_eq!(add.title, "Add \"Docs\" connector?");
-        assert!(add.message.contains("sent to mcp.example.com"));
+        assert!(
+            add.message
+                .contains("sent to:\nhttps://mcp.example.com/v1/mcp?team=7"),
+            "the full address: {}",
+            add.message
+        );
+        assert!(add.message.contains("With these headers: X-Team: seven."));
+        assert!(add
+            .message
+            .contains("from your system keychain: X-Api-Key."));
+    }
+
+    #[test]
+    fn long_arguments_are_shown_compact_not_cut() {
+        let list: Vec<u32> = (0..100).collect();
+        let text = dialog_args(&serde_json::json!({ "ids": list })).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("99]"));
+        let short = dialog_args(&serde_json::json!({"id": "c-1"})).unwrap();
+        assert!(short.contains("\n  \"id\""), "short args stay pretty");
     }
 
     #[test]

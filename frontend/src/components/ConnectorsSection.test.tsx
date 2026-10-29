@@ -391,9 +391,12 @@ describe("Settings › Connectors: detail", () => {
     await click(host().querySelector('input[type="checkbox"]'));
     expect(rows().map((r) => r[0])).toEqual(["search_contacts", "delete_contact"]);
 
+    // The backend asks natively (a script can't clear the record).
     await click(btn("Clear activity…"));
-    expect(confirmTitle()).toBe("Clear connector activity?");
-    await act(async () => confirmChoice(true).click());
+    expect(String(nativeDialog.mock.lastCall?.[0])).toContain("Clear connector activity?");
+    expect(host().textContent).not.toContain("No calls yet.");
+    nativeDialog.mockReturnValueOnce(true);
+    await click(btn("Clear activity…"));
     await flush();
     expect(host().textContent).toContain("No calls yet.");
   });

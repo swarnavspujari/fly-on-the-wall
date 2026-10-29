@@ -4,7 +4,7 @@
 //! Removes characters that hide text from a reader while a model still sees
 //! it: control characters (except newline and tab), zero-width and
 //! bidirectional controls, Unicode "tag" characters (ASCII smuggling) and
-//! variation-selector runs.
+//! variation selectors.
 
 /// True for characters [`clean_text`] removes.
 pub fn is_hidden_char(c: char) -> bool {
@@ -17,6 +17,7 @@ pub fn is_hidden_char(c: char) -> bool {
             | 0x2060..=0x206F
             | 0x3164 | 0xFEFF | 0xFFA0
             | 0xFFF0..=0xFFF8
+            | 0xFE00..=0xFE0F
             | 0xE0000..=0xE007F
             | 0xE0100..=0xE01EF)
 }

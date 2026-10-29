@@ -104,10 +104,12 @@ async fn a_stdio_program_that_changes_its_tools_is_caught() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_program_is_reported_by_name() {
-    let (hub, id) = hub_for("fotw-no-such-program", vec![]);
+    let missing = std::env::temp_dir().join("fotw-no-such-program.exe");
+    let missing = missing.to_string_lossy().to_string();
+    let (hub, id) = hub_for(&missing, vec![]);
     let err = hub.sync_tools(&id).await.unwrap_err();
     assert!(
-        matches!(err, HubError::Session(SessionError::ProgramNotFound(ref p)) if p == "fotw-no-such-program"),
+        matches!(err, HubError::Session(SessionError::ProgramNotFound(ref p)) if *p == missing),
         "{err:?}"
     );
     let reg = hub.registry();
@@ -115,6 +117,55 @@ async fn a_missing_program_is_reported_by_name() {
         reg.server(&id).unwrap().last_problem,
         Some(ConnectProblem::ProgramNotFound)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_program_that_was_never_pinned_does_not_run() {
+    // Approval pins a bare name like `npx` to a full path first; a bare name
+    // that reaches the transport (never shown in full) is refused.
+    let (hub, id) = hub_for("fotw-bare-name", vec![]);
+    let err = hub.sync_tools(&id).await.unwrap_err();
+    assert!(err.to_string().contains("pinned"), "{err}");
+    assert!(matches!(
+        hub.pin_program(ServerConfig {
+            name: "x".into(),
+            transport: TransportConfig::Stdio {
+                command: "fotw-bare-name".into(),
+                args: vec![],
+                env: vec![],
+            },
+            auth: AuthConfig::None,
+        }),
+        Err(HubError::Session(SessionError::ProgramNotFound(_)))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn disconnecting_stops_the_whole_process_tree() {
+    let beat =
+        std::env::temp_dir().join(format!("fotw-heartbeat-{}", uuid::Uuid::new_v4().simple()));
+    let (hub, id) = hub_for(
+        FIXTURE,
+        vec!["--grandchild".into(), beat.to_string_lossy().to_string()],
+    );
+    hub.sync_tools(&id).await.unwrap();
+    let read = || std::fs::read_to_string(&beat).unwrap_or_default();
+    let mut alive = false;
+    for _ in 0..50 {
+        let a = read();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        if !a.is_empty() && read() != a {
+            alive = true;
+            break;
+        }
+    }
+    assert!(alive, "the grandchild started");
+    hub.close_all().await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let a = read();
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert_eq!(read(), a, "the grandchild was stopped with the connector");
+    let _ = std::fs::remove_file(&beat);
 }
 
 #[tokio::test(flavor = "multi_thread")]

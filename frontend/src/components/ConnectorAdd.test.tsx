@@ -75,23 +75,26 @@ describe("Browse connectors", () => {
     expect(dialog().textContent).toContain("Add custom connector");
   });
 
-  it("[+] previews the tools first; Connect asks natively, then opens the detail page", async () => {
+  it("[+] previews without contacting it; Connect asks natively, then lists its tools", async () => {
     await open();
+    const sync = vi.spyOn(api, "syncConnectorTools");
     await click(buttonIn(host(), "Browse connectors"));
     await click(dialog().querySelector('[aria-label="Add Open Docs"]'));
     expect(dialog().textContent).toContain("Made by Open Docs Project");
-    expect(dialog().textContent).toContain("Connects to mcp.open-docs.example");
-    expect(dialog().textContent).toContain("Found 9 tools: 4 read-only, 5 can make changes");
-    expect(dialog().textContent).toContain("Read-only tools (4)");
-    expect(dialog().textContent).toContain("Tools that can change or delete (5)");
+    expect(dialog().textContent).toContain("Connects to https://mcp.open-docs.example/");
+    expect(dialog().textContent).toContain("You'll see its tools after you approve it.");
+    expect(dialog().textContent).toContain(
+      "Fly on the Wall doesn't contact mcp.open-docs.example before then.",
+    );
     expect(dialog().textContent).toContain("Every tool starts on Needs approval.");
 
     const add = vi.spyOn(api, "addConnector");
     await click(inDialog("Connect"));
     expect(add).toHaveBeenCalledTimes(1);
     expect(lastDialogText()).toContain('Add "Open Docs" connector?');
-    expect(lastDialogText()).toContain("sent to mcp.open-docs.example");
+    expect(lastDialogText()).toContain("sent to:\nhttps://mcp.open-docs.example/");
     expect(dialog()).not.toBeNull(); // declined: still on the preview
+    expect(sync).not.toHaveBeenCalled();
 
     nativeDialog.mockReturnValueOnce(true);
     await click(inDialog("Connect"));
@@ -115,7 +118,9 @@ describe("Browse connectors", () => {
     await click(buttonIn(host(), "Browse connectors"));
     await click(dialog().querySelector('[aria-label="Add Example Notes"]'));
     expect(dialog().textContent).toContain("Sign-in happens in your browser.");
-    expect(dialog().textContent).toContain("You'll see its tools after you sign in.");
+    expect(dialog().textContent).toContain(
+      "You'll see its tools after you approve it and sign in.",
+    );
     nativeDialog.mockReturnValueOnce(true);
     await click(inDialog("Connect"));
     expect(dialog().textContent).toContain("Finish signing in in your browser…");
@@ -141,7 +146,6 @@ describe("Browse connectors", () => {
     await open();
     await click(buttonIn(host(), "Browse connectors"));
     await click(dialog().querySelector('[aria-label="Add Demo Search"]'));
-    expect(dialog().textContent).toContain("Enter your key to see its tools.");
     await click(inDialog("Connect"));
     expect(dialog().textContent).toContain("Enter your key.");
     const key = fieldIn(dialog(), "Demo Search API key");
@@ -157,20 +161,20 @@ describe("Browse connectors", () => {
 });
 
 describe("Add custom connector", () => {
-  it("checks the form, then the server, then asks natively", async () => {
+  it("checks the form, then asks natively; nothing is contacted first", async () => {
     await open();
     await addMenu("Custom (web address)");
     expect(dialog().textContent).toContain(
       "Fly on the Wall hasn't checked this connector. Only add ones from people you trust.",
     );
     expect(dialog().querySelector('input[type="radio"]:checked')).toBeNull();
-    const probe = vi.spyOn(api, "probeConnector");
+    const add = vi.spyOn(api, "addConnector");
     await type(fieldIn(dialog(), "Name"), "Team tracker");
     await type(fieldIn(dialog(), "Web address"), "http://tracker.example.com/mcp");
     await click(inDialog("Continue"));
     expect(dialog().textContent).toContain("Use an address that starts with https://");
     expect(dialog().textContent).toContain("Choose how it signs in.");
-    expect(probe).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
 
     await type(fieldIn(dialog(), "Web address"), "https://tracker.example.com/mcp");
     await click(
@@ -178,10 +182,7 @@ describe("Add custom connector", () => {
         r.parentElement?.textContent?.includes("No sign-in"),
       ) ?? null,
     );
-    const add = vi.spyOn(api, "addConnector");
     await click(inDialog("Continue"));
-    expect(probe).toHaveBeenCalledTimes(1);
-    expect(dialog().textContent).toContain("Found 12 tools: 4 read-only, 8 can make changes");
     expect(add).toHaveBeenCalledTimes(1);
     expect(lastDialogText()).toContain('Add "Team tracker" connector?');
     expect(dialog()).not.toBeNull(); // declined
@@ -192,7 +193,7 @@ describe("Add custom connector", () => {
     expect(host().textContent).toContain("Custom");
   });
 
-  it("says when an address isn't a connector", async () => {
+  it("says on the detail page when an address isn't a connector", async () => {
     await open();
     await addMenu("Custom (web address)");
     await type(fieldIn(dialog(), "Name"), "Nope");
@@ -202,12 +203,13 @@ describe("Add custom connector", () => {
         r.parentElement?.textContent?.includes("No sign-in"),
       ) ?? null,
     );
-    const add = vi.spyOn(api, "addConnector");
+    nativeDialog.mockReturnValueOnce(true);
     await click(inDialog("Continue"));
-    expect(dialog().querySelector('[role="alert"]')!.textContent).toBe(
+    expect(lastDialogText()).toContain('Add "Nope" connector?');
+    expect(host().querySelector("h3")!.textContent).toBe("Nope");
+    expect(host().querySelector('[role="alert"]')!.textContent).toBe(
       "That address didn't answer like a connector.",
     );
-    expect(add).not.toHaveBeenCalled();
   });
 
   it("API key and a secret header: password fields, values only to the keychain", async () => {
@@ -288,7 +290,9 @@ describe("Add local connector", () => {
     nativeDialog.mockReturnValueOnce(true);
     await click(inDialog("Add connector"));
     expect(lastDialogText()).toContain("Run a program on this computer?");
-    expect(lastDialogText()).toContain('"Notes server" will run: npx -y @example/notes-server');
+    expect(lastDialogText()).toContain(
+      '"Notes server" will run:\n/usr/local/bin/npx -y @example/notes-server',
+    );
     expect(host().querySelector("h3")!.textContent).toBe("Notes server");
   });
 

@@ -607,17 +607,6 @@ export interface ConnectorDirectoryEntry {
   keyLabel: string | null;
 }
 
-export interface ConnectorProbe {
-  needsSignIn: boolean;
-  tools: {
-    name: string;
-    title: string | null;
-    description: string;
-    kind: "read" | "write";
-    labelled: boolean;
-  }[];
-}
-
 export interface ConnectorImportCandidate {
   key: string;
   name: string;

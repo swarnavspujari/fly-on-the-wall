@@ -1021,7 +1021,6 @@ function Field({ label, text }: { label: string; text: string }) {
 /* ------------------------------------------------------------- activity */
 
 function ActivityTab({ c }: { c: Connector }) {
-  const confirm = useConfirm();
   const [log, setLog] = useState<ConnectorCallLogEntry[] | null>(null);
   const [readAt, setReadAt] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -1059,19 +1058,11 @@ function ActivityTab({ c }: { c: Connector }) {
     };
   }, []);
 
+  // The backend asks in a native dialog (a script can't clear the record).
   const clear = async () => {
-    const ok = await confirm({
-      title: "Clear connector activity?",
-      message:
-        "This clears the activity of every connector. Connectors and their tools stay as they are.",
-      confirmLabel: "Clear activity",
-      tone: "danger",
-    });
-    if (!ok) return;
     setBusy(true);
     try {
-      await api.clearConnectorCallLog();
-      setLog([]);
+      if (await api.clearConnectorCallLog()) setLog([]);
     } catch (e) {
       setError(String(e));
     } finally {

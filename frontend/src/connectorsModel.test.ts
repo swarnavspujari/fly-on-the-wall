@@ -29,7 +29,6 @@ import {
   parseCommand,
   planGroupChange,
   prettyArgs,
-  probeSummary,
   quoteArg,
   relativeTime,
   reviewBanner,
@@ -254,27 +253,6 @@ describe("connectors", () => {
     expect(filterDirectory(dir, "").length).toBe(2);
     expect(filterDirectory(dir, "sample issues").map((e) => e.id)).toEqual(["t"]);
     expect(filterDirectory(dir, "nothing here")).toEqual([]);
-  });
-
-  it("summarises what a probe found", () => {
-    const t = (kind: "read" | "write") => ({
-      name: "x",
-      title: null,
-      description: "",
-      kind,
-      labelled: true,
-    });
-    expect(
-      probeSummary({
-        needsSignIn: false,
-        tools: [...Array(4)].map(() => t("read")).concat([...Array(8)].map(() => t("write"))),
-      }),
-    ).toBe("Found 12 tools: 4 read-only, 8 can make changes");
-    expect(probeSummary({ needsSignIn: false, tools: [t("read")] })).toBe(
-      "Found 1 tool: 1 read-only, 0 can make changes",
-    );
-    expect(probeSummary({ needsSignIn: true, tools: [] })).toContain("sign in with your browser");
-    expect(probeSummary({ needsSignIn: false, tools: [] })).toBe("Found no tools.");
   });
 
   it("turns a directory entry into an add request", () => {

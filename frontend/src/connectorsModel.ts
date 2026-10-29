@@ -18,7 +18,6 @@ import type {
   ConnectorKV,
   ConnectorPermission,
   ConnectorPermissionChange,
-  ConnectorProbe,
   ConnectorRefusal,
   ConnectorTool,
 } from "./types";
@@ -206,18 +205,6 @@ export function filterDirectory(
     const hay = `${e.name} ${e.vendor} ${e.description}`.toLowerCase();
     return words.every((w) => hay.includes(w));
   });
-}
-
-/** "Found 12 tools: 4 read-only, 8 can make changes". */
-export function probeSummary(p: ConnectorProbe): string {
-  const n = p.tools.length;
-  if (n === 0) {
-    return p.needsSignIn
-      ? "It asks you to sign in with your browser. You'll see its tools after you sign in."
-      : "Found no tools.";
-  }
-  const read = p.tools.filter((t) => t.kind === "read").length;
-  return `Found ${n} tool${n === 1 ? "" : "s"}: ${read} read-only, ${n - read} can make changes`;
 }
 
 /** A directory entry's configuration, as the Add form would send it. */

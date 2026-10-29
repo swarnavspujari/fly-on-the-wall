@@ -12,7 +12,7 @@ use fly_secrets::SecretStore;
 use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use serde_json::Value;
 
-use crate::registry::{secret_key, SecretSlot, MAX_SECRET_CHUNKS};
+use crate::registry::{secret_key, secret_keys_for, SecretSlot, ServerEntry, MAX_SECRET_CHUNKS};
 
 /// Longest value stored in one keychain entry, in chars.
 pub const CHUNK_CHARS: usize = 1000;
@@ -29,7 +29,16 @@ pub enum ChunkError {
 }
 
 pub fn put_chunked(store: &dyn SecretStore, base: &str, value: &str) -> Result<(), ChunkError> {
-    delete_chunked(store, base)?;
+    put_chunked_max(store, base, value, MAX_SECRET_CHUNKS)
+}
+
+fn put_chunked_max(
+    store: &dyn SecretStore,
+    base: &str,
+    value: &str,
+    max_chunks: usize,
+) -> Result<(), ChunkError> {
+    delete_chunked_max(store, base, max_chunks)?;
     let chars: Vec<char> = value.chars().collect();
     if chars.len() <= CHUNK_CHARS && !value.starts_with(CHUNK_HEADER) {
         store.set(base, value)?;
@@ -39,7 +48,7 @@ pub fn put_chunked(store: &dyn SecretStore, base: &str, value: &str) -> Result<(
         .chunks(CHUNK_CHARS)
         .map(|c| c.iter().collect())
         .collect();
-    if chunks.len() > MAX_SECRET_CHUNKS {
+    if chunks.len() > max_chunks {
         return Err(ChunkError::TooLong);
     }
     for (i, c) in chunks.iter().enumerate() {
@@ -50,6 +59,14 @@ pub fn put_chunked(store: &dyn SecretStore, base: &str, value: &str) -> Result<(
 }
 
 pub fn get_chunked(store: &dyn SecretStore, base: &str) -> Result<Option<String>, ChunkError> {
+    get_chunked_max(store, base, MAX_SECRET_CHUNKS)
+}
+
+fn get_chunked_max(
+    store: &dyn SecretStore,
+    base: &str,
+    max_chunks: usize,
+) -> Result<Option<String>, ChunkError> {
     let Some(head) = store.get(base)? else {
         return Ok(None);
     };
@@ -57,7 +74,7 @@ pub fn get_chunked(store: &dyn SecretStore, base: &str) -> Result<Option<String>
         return Ok(Some(head));
     };
     let n: usize = n.parse().map_err(|_| ChunkError::Damaged)?;
-    if n == 0 || n > MAX_SECRET_CHUNKS {
+    if n == 0 || n > max_chunks {
         return Err(ChunkError::Damaged);
     }
     let mut out = String::new();
@@ -72,11 +89,71 @@ pub fn get_chunked(store: &dyn SecretStore, base: &str) -> Result<Option<String>
 }
 
 pub fn delete_chunked(store: &dyn SecretStore, base: &str) -> Result<(), ChunkError> {
+    delete_chunked_max(store, base, MAX_SECRET_CHUNKS)
+}
+
+fn delete_chunked_max(
+    store: &dyn SecretStore,
+    base: &str,
+    max_chunks: usize,
+) -> Result<(), ChunkError> {
     store.delete(base)?;
-    for i in 0..MAX_SECRET_CHUNKS {
+    for i in 0..max_chunks {
         store.delete(&format!("{base}.{i}"))?;
     }
     Ok(())
+}
+
+/// The keychain's own list of every connector key ever written, by connector
+/// id. "Delete all my data" reads it as well as the registry, so keys can't
+/// be orphaned by a registry that's gone or unreadable.
+pub const INDEX_KEY: &str = "connector.index";
+const INDEX_CHUNKS: usize = 32;
+
+type Index = std::collections::BTreeMap<String, Vec<String>>;
+
+fn index_load(store: &dyn SecretStore) -> Index {
+    get_chunked_max(store, INDEX_KEY, INDEX_CHUNKS)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn index_save(store: &dyn SecretStore, index: &Index) -> Result<(), ChunkError> {
+    if index.is_empty() {
+        return delete_chunked_max(store, INDEX_KEY, INDEX_CHUNKS);
+    }
+    let json = serde_json::to_string(index).unwrap_or_default();
+    put_chunked_max(store, INDEX_KEY, &json, INDEX_CHUNKS)
+}
+
+/// Record every key `entry` may own (merged with what was recorded before).
+pub fn index_record(store: &dyn SecretStore, entry: &ServerEntry) -> Result<(), ChunkError> {
+    let mut index = index_load(store);
+    let keys = index.entry(entry.id.clone()).or_default();
+    for k in secret_keys_for(entry) {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    index_save(store, &index)
+}
+
+pub fn index_forget(store: &dyn SecretStore, id: &str) -> Result<(), ChunkError> {
+    let mut index = index_load(store);
+    if index.remove(id).is_some() {
+        index_save(store, &index)?;
+    }
+    Ok(())
+}
+
+/// Every key in the index, plus the index's own entries.
+pub fn indexed_keys(store: &dyn SecretStore) -> Vec<String> {
+    let mut keys: Vec<String> = index_load(store).into_values().flatten().collect();
+    keys.push(INDEX_KEY.into());
+    keys.extend((0..INDEX_CHUNKS).map(|i| format!("{INDEX_KEY}.{i}")));
+    keys
 }
 
 /// rmcp's credential store, backed by the keychain for one connector.
@@ -199,6 +276,37 @@ mod tests {
         put_chunked(&s, "k", &"x".repeat(CHUNK_CHARS * 2)).unwrap();
         s.delete("k.1").unwrap();
         assert!(matches!(get_chunked(&s, "k"), Err(ChunkError::Damaged)));
+    }
+
+    #[test]
+    fn the_index_lists_keys_until_forgotten() {
+        let s = MemorySecretStore::default();
+        let mut reg = crate::registry::Registry::default();
+        let id = reg
+            .add_approved(
+                crate::config::ServerConfig {
+                    name: "Docs".into(),
+                    transport: crate::config::TransportConfig::Stdio {
+                        command: "srv".into(),
+                        args: vec![],
+                        env: vec![crate::config::EnvConfig {
+                            name: "TOKEN".into(),
+                            value: None,
+                        }],
+                    },
+                    auth: crate::config::AuthConfig::None,
+                },
+                0,
+            )
+            .unwrap();
+        index_record(&s, reg.server(&id).unwrap()).unwrap();
+        let keys = indexed_keys(&s);
+        assert!(keys.contains(&format!("connector.{id}.env.TOKEN")));
+        assert!(keys.contains(&format!("connector.{id}.refresh")));
+        assert!(keys.contains(&INDEX_KEY.to_string()));
+        index_forget(&s, &id).unwrap();
+        assert!(!indexed_keys(&s).iter().any(|k| k.contains(&id)));
+        assert!(s.get(INDEX_KEY).unwrap().is_none());
     }
 
     #[tokio::test]

@@ -19,7 +19,7 @@ Three layers:
 | Layer | Where | Components |
 |---|---|---|
 | **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 11 `ui-*` docs |
-| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 127 Tauri commands) | 16 `app-*` docs |
+| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 126 Tauri commands) | 16 `app-*` docs |
 | **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 12 `fly-*` docs |
 
 ## Index
@@ -200,7 +200,7 @@ Back-edges inside `fly-app` that the map doesn't show, measured with `grep crate
 
 ## Command ownership
 
-Each of the 127 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
+Each of the 126 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
 
 | Doc | Commands |
 |---|---|
@@ -234,7 +234,7 @@ Every host the app or its child processes contact. Detail and gates are in each 
 | `github.com` releases (whisper.cpp, sherpa-onnx, FFmpeg builds, Ollama, this repo's tool builds), `huggingface.co`, and `hf-mirror.com` (on by default, tried after 2 failed huggingface.co attempts; `FLYONTHEWALL_NO_HF_MIRROR` turns it off) | No | First use of a model or tool | SHA-256 pinned | [app-models-gpu](app-models-gpu.md) |
 | `registry.ollama.ai` (from the Ollama child process) | No | Model pull, including the embedding model | — | [app-ollama](app-ollama.md), [app-search](app-search.md) |
 | `github.com/…/releases/latest/download/latest.json` and the release assets | No | Update check 5 s after launch; Update now | Minisign-verified | [app-updater](app-updater.md) |
-| The https address of each connector the user added (beta), and its OAuth server | Only what the user lets through: the arguments of calls the user allowed on a card, or of tools the user set to Always allow | "Checking…" before adding; then only after approval: refresh tools, sign in, calls | Native-dialog approval bound to the config hash; per-tool permission; https only, private addresses blocked; Keep-local turns get no connectors | [fly-mcp-client](fly-mcp-client.md), [app-connectors](app-connectors.md) |
+| The https address of each connector the user added (beta), and its OAuth server | Only what the user lets through: the arguments of calls the user allowed on a card, or of tools the user set to Always allow | Only after approval: list and refresh tools, sign in, calls | Native-dialog approval bound to the config hash; per-tool permission; https only, private addresses blocked; Keep-local turns get no connectors | [fly-mcp-client](fly-mcp-client.md), [app-connectors](app-connectors.md) |
 | `127.0.0.1:<ephemeral>` (inbound) | — | OAuth redirect | One-shot listener with a `state` check | [fly-calendar](fly-calendar.md), [fly-mcp-client](fly-mcp-client.md) |
 
 `ARCHITECTURE.md`'s "exactly two things touch the network" predates calendars, the updater and model downloads. Only the first three rows can carry meeting content.

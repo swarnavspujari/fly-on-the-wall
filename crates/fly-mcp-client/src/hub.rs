@@ -229,25 +229,6 @@ pub enum HubError {
     Store(String),
 }
 
-/// What a quick look at a web connector found, before the user approves it.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProbeResult {
-    /// The server wants a browser sign-in before it lists tools.
-    pub needs_sign_in: bool,
-    pub tools: Vec<ToolPreview>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolPreview {
-    pub name: String,
-    pub title: Option<String>,
-    pub description: String,
-    pub kind: ToolKind,
-    pub labelled: bool,
-}
-
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -327,6 +308,20 @@ impl ConnectorHub {
     }
 
     /// Check a configuration (normalized) before asking the user to approve it.
+    /// Pin a local connector's program to a full path before the user sees
+    /// the approval dialog: a bare name like `npx` is looked up on PATH once,
+    /// here, and the dialog and the stored config show the path that will
+    /// run. A later PATH change can't swap the program; only a new approval
+    /// can.
+    pub fn pin_program(&self, config: ServerConfig) -> Result<ServerConfig, HubError> {
+        let mut config = self.check_config(config)?;
+        if let TransportConfig::Stdio { command, .. } = &mut config.transport {
+            let resolved = session::resolve_program(command)?;
+            *command = resolved.to_string_lossy().into_owned();
+        }
+        self.check_config(config)
+    }
+
     pub fn check_config(&self, config: ServerConfig) -> Result<ServerConfig, HubError> {
         let config = config.normalized();
         config.validate(&self.policy)?;
@@ -356,69 +351,6 @@ impl ConnectorHub {
         Ok(())
     }
 
-    /// Look at a web connector before it's approved: list its tools, or find
-    /// out it wants a browser sign-in. Sends nothing but the MCP handshake
-    /// and a tool listing. Local programs are never started before approval.
-    pub async fn probe(
-        &self,
-        config: ServerConfig,
-        secrets: &NewSecrets,
-    ) -> Result<ProbeResult, HubError> {
-        let config = self.check_config(config)?;
-        let TransportConfig::Http { headers, .. } = &config.transport else {
-            return Err(HubError::Invalid(
-                "A local program runs only after you approve it.".into(),
-            ));
-        };
-        if config.uses_oauth() {
-            return Ok(ProbeResult {
-                needs_sign_in: true,
-                tools: Vec::new(),
-            });
-        }
-        let mut opts = ConnectOptions::default();
-        for h in headers {
-            let v = h
-                .value
-                .clone()
-                .or_else(|| secrets.values.get(&h.name).cloned());
-            if let Some(v) = v.filter(|v| !v.is_empty()) {
-                opts.headers.push((h.name.clone(), v));
-            }
-        }
-        if matches!(config.auth, AuthConfig::ApiKey) {
-            opts.bearer = secrets.api_key.clone().filter(|k| !k.is_empty());
-        }
-        let conn = match session::connect(&config, self.policy, opts).await {
-            Ok(c) => c,
-            Err(SessionError::AuthRequired) => {
-                return Ok(ProbeResult {
-                    needs_sign_in: true,
-                    tools: Vec::new(),
-                })
-            }
-            Err(e) => return Err(e.into()),
-        };
-        let live = conn.list_tools().await?;
-        conn.close().await;
-        let mut pins = Vec::new();
-        pin::reconcile(&mut pins, &live, now(), true)
-            .map_err(|e| HubError::Invalid(e.to_string()))?;
-        Ok(ProbeResult {
-            needs_sign_in: false,
-            tools: pins
-                .iter()
-                .map(|p| ToolPreview {
-                    name: p.name.clone(),
-                    title: p.definition.title.clone(),
-                    description: p.definition.description.clone(),
-                    kind: kind(p),
-                    labelled: p.labelled(),
-                })
-                .collect(),
-        })
-    }
-
     /// Store a configuration the user approved in a native dialog. The
     /// approval is bound to the configuration's hash.
     pub fn add_approved(
@@ -433,6 +365,7 @@ impl ConnectorHub {
             let _ = self.update(|reg| Ok(reg.remove(&id)));
             return Err(e);
         }
+        self.record_in_index(&id);
         Ok(id)
     }
 
@@ -516,8 +449,19 @@ impl ConnectorHub {
             }
         }
         self.store_secrets(id, secrets)?;
+        self.record_in_index(id);
         self.drop_connection(id).await;
         Ok(())
+    }
+
+    /// Keep the keychain's own list of connector secrets current, so "Delete
+    /// all my data" finds them even if the registry is unreadable.
+    fn record_in_index(&self, id: &str) {
+        if let Some(entry) = self.registry().server(id) {
+            if let Err(e) = crate::secrets::index_record(self.secrets.as_ref(), entry) {
+                tracing::warn!(error = %e, "couldn't update the connector keychain index");
+            }
+        }
     }
 
     /// Write the non-empty secret values the form sent.
@@ -627,16 +571,25 @@ impl ConnectorHub {
         Ok(())
     }
 
-    /// Remove a connector, its keychain entries and its connection.
-    pub async fn remove(&self, id: &str) -> Result<(), HubError> {
+    /// Remove a connector, its keychain entries and its connection. Returns
+    /// the keychain entries that couldn't be deleted (the connector stays in
+    /// the keychain index until they are).
+    pub async fn remove(&self, id: &str) -> Result<Vec<String>, HubError> {
         let removed = self.update(|reg| reg.remove(id).ok_or(HubError::NotFound))?;
+        self.drop_connection(id).await;
+        let mut failed = Vec::new();
         for key in secret_keys_for(&removed) {
             if let Err(e) = self.secrets.delete(&key) {
                 tracing::warn!(key, error = %e, "couldn't delete a connector keychain entry");
+                failed.push(key);
             }
         }
-        self.drop_connection(id).await;
-        Ok(())
+        if failed.is_empty() {
+            if let Err(e) = crate::secrets::index_forget(self.secrets.as_ref(), id) {
+                tracing::warn!(error = %e, "couldn't update the connector keychain index");
+            }
+        }
+        Ok(failed)
     }
 
     /// Connect, list tools and update the pins. Tools in the first listing
@@ -650,6 +603,9 @@ impl ConnectorHub {
             .ok_or(HubError::NotFound)?;
         if !entry.is_approved() {
             return Err(HubError::Invalid("This connector isn't approved.".into()));
+        }
+        if !entry.enabled {
+            return Err(HubError::Invalid("Turn this connector on first.".into()));
         }
         let conn = self.connection(&entry).await?;
         let live = match conn.list_tools().await {
@@ -753,8 +709,11 @@ impl ConnectorHub {
         if !entry.is_approved() {
             return Err(HubError::Invalid("This connector isn't approved.".into()));
         }
+        if !entry.enabled {
+            return Err(HubError::Invalid("Turn this connector on first.".into()));
+        }
         self.drop_connection(id).await;
-        oauth::sign_in(
+        let metadata = oauth::sign_in(
             &entry,
             self.secrets.clone(),
             self.policy,
@@ -762,6 +721,14 @@ impl ConnectorHub {
             oauth::SIGN_IN_TIMEOUT,
         )
         .await?;
+        // Pin the authorization server found at sign-in; refreshes use it
+        // instead of discovering again.
+        self.update(|reg| {
+            if let Some(e) = reg.server_mut(id) {
+                e.oauth_metadata = Some(metadata.clone());
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -772,6 +739,12 @@ impl ConnectorHub {
             .cloned()
             .ok_or(HubError::NotFound)?;
         self.drop_connection(id).await;
+        self.update(|reg| {
+            if let Some(e) = reg.server_mut(id) {
+                e.oauth_metadata = None;
+            }
+            Ok(())
+        })?;
         KeychainCredentials::new(self.secrets.clone(), entry.id)
             .clear_tokens()
             .map_err(|e| HubError::Store(e.to_string()))
@@ -884,6 +857,9 @@ pub struct TurnOptions {
     /// Most connector proposals this turn.
     pub max_calls: u32,
     pub max_result_chars: usize,
+    /// Show the card even for tools on Always allow (Settings › Try, where
+    /// the arguments come from the webview, not the model).
+    pub force_approval: bool,
 }
 
 impl TurnOptions {
@@ -900,6 +876,7 @@ impl TurnOptions {
             keep_local_in_scope,
             max_calls,
             max_result_chars: DEFAULT_MAX_RESULT_CHARS,
+            force_approval: false,
         }
     }
 }
@@ -986,8 +963,11 @@ impl ConnectorTurn {
                     specs.push(ToolSpec {
                         name: name.clone(),
                         description: format!(
-                            "[{} connector, {label}; the user may review each call] {what}{}",
-                            entry.config.name, d.description
+                            "[{} connector, {label}; the user may review each call] The \
+                             service describes it as: \"{}{}\"",
+                            entry.config.name,
+                            fence::strip_links(&what),
+                            fence::strip_links(&d.description)
                         ),
                         input_schema: d.input_schema.clone(),
                         strict: false,
@@ -1103,9 +1083,20 @@ impl ConnectorTurn {
     }
 }
 
-/// A transport error for the local log: cleaned and short.
-fn short_err(e: &SessionError) -> String {
-    crate::sanitize::clean_capped(&e.to_string(), 300)
+/// What kind of failure, for the local log. Never the error text: a
+/// server's error message can echo the arguments it was sent.
+fn err_kind(e: &SessionError) -> &'static str {
+    match e {
+        SessionError::Spawn(_) => "spawn",
+        SessionError::ProgramNotFound(_) => "program_not_found",
+        SessionError::Exited(_) => "exited",
+        SessionError::Connect(_) => "connect",
+        SessionError::AuthRequired => "auth_required",
+        SessionError::Timeout => "timeout",
+        SessionError::Listing(_) => "listing",
+        SessionError::Call(_) => "call",
+        SessionError::Unsupported(_) => "unsupported",
+    }
 }
 
 fn schema_errors(errs: Vec<String>) -> String {
@@ -1167,7 +1158,7 @@ impl ExternalTools for ConnectorTurn {
         let conn = match self.hub.connection(&entry).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector unreachable");
+                tracing::warn!(connector = %route.server_id, error = err_kind(&e), "connector unreachable");
                 self.log(&route, CallOutcome::Failed, None, LogExtra::default());
                 return Err(self.server_error(
                     &route,
@@ -1183,7 +1174,7 @@ impl ExternalTools for ConnectorTurn {
             Ok(None) => return self.refuse(&route, RefusalCode::ToolChanged, CHANGED_MSG),
             Err(e) => {
                 self.hub.drop_connection(&route.server_id).await;
-                tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector tool check failed");
+                tracing::warn!(connector = %route.server_id, error = err_kind(&e), "connector tool check failed");
                 self.log(&route, CallOutcome::Failed, None, LogExtra::default());
                 return Err(self.server_error(
                     &route,
@@ -1195,6 +1186,11 @@ impl ExternalTools for ConnectorTurn {
             }
         };
 
+        let permission = if self.opts.force_approval && permission == Permission::AlwaysAllow {
+            Permission::NeedsApproval
+        } else {
+            permission
+        };
         let (final_args, approval) = match permission {
             Permission::Blocked => {
                 return self.refuse(&route, RefusalCode::NotOffered, BLOCKED_MSG)
@@ -1226,6 +1222,22 @@ impl ExternalTools for ConnectorTurn {
                 }
             }
         };
+        // The card can wait minutes: check again what may have changed.
+        if self.state.lock().unwrap().keep_local {
+            return self.refuse(&route, RefusalCode::KeepLocal, KEEP_LOCAL_MSG);
+        }
+        let still_allowed = self
+            .hub
+            .registry()
+            .server(&route.server_id)
+            .filter(|e| e.is_active())
+            .and_then(|e| e.tool(&route.tool))
+            .is_some_and(|p| {
+                p.offerable() && kind(p) == route.kind && p.permission != Permission::Blocked
+            });
+        if !still_allowed {
+            return self.refuse(&route, RefusalCode::ToolChanged, CHANGED_MSG);
+        }
         if let Some(p) = args_problem(&final_args) {
             return self.refuse(&route, RefusalCode::InvalidArguments, p);
         }
@@ -1249,7 +1261,7 @@ impl ExternalTools for ConnectorTurn {
         match result {
             Err(e) => {
                 self.hub.drop_connection(&route.server_id).await;
-                tracing::warn!(connector = %route.server_id, error = %short_err(&e), "connector call failed");
+                tracing::warn!(connector = %route.server_id, error = err_kind(&e), "connector call failed");
                 self.log(
                     &route,
                     CallOutcome::Failed,

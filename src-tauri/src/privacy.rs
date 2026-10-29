@@ -870,6 +870,8 @@ pub async fn delete_all_data(
     if confirmation != WIPE_CONFIRMATION {
         return Err("confirmation text doesn't match — nothing was deleted".into());
     }
+    // Stop connector programs and drop connections before their keys go.
+    crate::connectors::close_all(&app).await;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         if let Some(why) = busy_reason(&state) {
@@ -907,7 +909,10 @@ fn perform_delete_all(
     let mut report = WipeReport::default();
     // Connector keychain entries are named after connector ids, which live in
     // the database: list them before the database is emptied.
-    let connector_keys = crate::connectors::stored_secret_keys(&state.storage.lock().unwrap());
+    let connector_keys = crate::connectors::stored_secret_keys(
+        &state.storage.lock().unwrap(),
+        state.secrets.as_ref(),
+    );
     // The storage lock covers only the database work, never file deletes.
     let erased = state
         .storage

@@ -29,7 +29,6 @@ import type {
   ConnectorDirectoryEntry,
   ConnectorInput,
   ConnectorPermissionChange,
-  ConnectorProbe,
   ConnectorSaveResult,
   ConnectorsOverview,
   ConnectorTestResult,
@@ -296,7 +295,6 @@ export const api = {
   connectorsOverview: () => invoke<ConnectorsOverview>("connectors_overview"),
   connectorsDirectory: () => invoke<ConnectorDirectoryEntry[]>("connectors_directory"),
   /** Web connectors only: its tools, or that it wants a browser sign-in. */
-  probeConnector: (input: ConnectorInput) => invoke<ConnectorProbe>("probe_connector", { input }),
   addConnector: (input: ConnectorInput) => invoke<ConnectorSaveResult>("add_connector", { input }),
   updateConnector: (id: string, input: ConnectorInput) =>
     invoke<ConnectorSaveResult>("update_connector", { id, input }),
@@ -322,7 +320,8 @@ export const api = {
   pickConnectorProgram: () => invoke<string | null>("pick_connector_program"),
   /** Oldest first. Never holds arguments or results. */
   connectorCallLog: () => invoke<ConnectorCallLogEntry[]>("connector_call_log"),
-  clearConnectorCallLog: () => invoke<void>("clear_connector_call_log"),
+  /** Asks natively first; false when the user kept the log. */
+  clearConnectorCallLog: () => invoke<boolean>("clear_connector_call_log"),
   pendingConnectorCalls: () => invoke<ConnectorCallProposal[]>("pending_connector_calls"),
   /** `args` null = send the proposed arguments unchanged. */
   decideConnectorCall: (

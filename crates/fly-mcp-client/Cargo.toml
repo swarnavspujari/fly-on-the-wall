@@ -40,6 +40,14 @@ rmcp = { version = "=3.8.0", default-features = false, features = [
     "reqwest",
 ] }
 
+# Stop a local connector's whole process tree (npx.cmd → node → …), not just
+# the first process: a Job Object on Windows, a process group on Unix.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 fly-mcp-client = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["net", "io-util"] }

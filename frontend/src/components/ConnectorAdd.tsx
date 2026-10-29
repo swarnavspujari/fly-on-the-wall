@@ -7,7 +7,6 @@ import {
   KEYCHAIN_NOTE,
   LOCAL_WARNING,
   MASK,
-  UNLABELLED_CHIP,
   candidateSummary,
   customDraftFrom,
   directoryInput,
@@ -16,7 +15,6 @@ import {
   filterDirectory,
   localDraftFrom,
   parseCommand,
-  probeSummary,
   sameAddress,
   validateCustom,
   validateLocal,
@@ -26,12 +24,7 @@ import {
   type LocalDraft,
   type SignInChoice,
 } from "../connectorsModel";
-import type {
-  Connector,
-  ConnectorClaudeImport,
-  ConnectorDirectoryEntry,
-  ConnectorProbe,
-} from "../types";
+import type { Connector, ConnectorClaudeImport, ConnectorDirectoryEntry } from "../types";
 import {
   COLUMN,
   Callout,
@@ -52,7 +45,8 @@ import { Badge, Button, Checkbox, Input, Modal, Segmented } from "./ui";
    Add custom (a web address), Add local (a program on this computer) and
    Import from Claude Desktop. The same forms edit a connector. Every add
    or edit is approved by the backend in a native dialog; a decline leaves
-   the form as it was, with nothing alarming. */
+   the form as it was, with nothing alarming. Nothing reaches a connector
+   before that approval: its tools are listed on the detail page after. */
 
 export interface AddCallbacks {
   onClose: () => void;
@@ -67,72 +61,12 @@ const H3 = { margin: 0, fontSize: 13.5, fontWeight: 600 } as const;
 
 /* ------------------------------------------------------------- browse */
 
-/** Tools a probe found, grouped like the detail page. */
-function ToolPreview({ probe }: { probe: ConnectorProbe }) {
-  const read = probe.tools.filter((t) => t.kind === "read");
-  const write = probe.tools.filter((t) => t.kind !== "read");
-  if (probe.tools.length === 0) {
-    return (
-      <p className="text-text-2" style={SMALL}>
-        {probeSummary(probe)}
-      </p>
-    );
-  }
-  const group = (title: string, tools: ConnectorProbe["tools"]) =>
-    tools.length > 0 && (
-      <div style={COLUMN}>
-        <h4 style={H3}>
-          {title} ({tools.length})
-        </h4>
-        <ul style={{ margin: 0, paddingLeft: 0, listStyle: "none", ...COLUMN }}>
-          {tools.map((t) => (
-            <li key={t.name} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              <span style={{ fontSize: 13, fontWeight: 600, overflowWrap: "anywhere" }}>
-                {t.title ?? t.name}{" "}
-                {t.title && (
-                  <span className="text-text-3" style={{ ...MONO, fontWeight: 400 }}>
-                    {t.name}
-                  </span>
-                )}
-              </span>
-              {!t.labelled && (
-                <span>
-                  <Badge tone="warning">{UNLABELLED_CHIP}</Badge>
-                </span>
-              )}
-              {t.description && (
-                <span className="text-text-2" style={{ ...SMALL, overflowWrap: "anywhere" }}>
-                  {t.description}
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>
-      </div>
-    );
-  return (
-    <div style={{ ...COLUMN, gap: 12 }}>
-      <p className="text-text-2" style={SMALL}>
-        {probeSummary(probe)}
-      </p>
-      {group("Read-only tools", read)}
-      {group("Tools that can change or delete", write)}
-    </div>
-  );
-}
-
 function Preview({
   entry,
   onBack,
   onDone,
   onChanged,
 }: { entry: ConnectorDirectoryEntry; onBack: () => void } & Omit<AddCallbacks, "onClose">) {
-  const [probe, setProbe] = useState<
-    | { state: "idle" }
-    | { state: "checking" }
-    | { state: "done"; probe: ConnectorProbe }
-    | { state: "error"; error: string }
-  >({ state: entry.auth === "api_key" ? "idle" : "checking" });
   const [apiKey, setApiKey] = useState("");
   const [keyError, setKeyError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
@@ -146,20 +80,6 @@ function Preview({
       return entry.url;
     }
   })();
-
-  const check = async (key: string) => {
-    setProbe({ state: "checking" });
-    try {
-      setProbe({ state: "done", probe: await api.probeConnector(directoryInput(entry, key)) });
-    } catch (e) {
-      setProbe({ state: "error", error: String(e) });
-    }
-  };
-  useEffect(() => {
-    if (entry.auth !== "api_key") void check("");
-    // check once per entry
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entry.id]);
 
   const connect = async () => {
     if (entry.auth === "api_key" && !apiKey.trim()) {
@@ -210,8 +130,8 @@ function Preview({
       <p className="text-text" style={SMALL}>
         {entry.description}
       </p>
-      <p className="text-text-2" style={SMALL}>
-        Connects to <span style={MONO}>{host}</span>
+      <p className="text-text-2" style={{ ...SMALL, overflowWrap: "anywhere" }}>
+        Connects to <span style={MONO}>{entry.url}</span>
       </p>
       {entry.auth === "oauth" && (
         <p className="text-text-2" style={SMALL}>
@@ -231,32 +151,16 @@ function Preview({
               setKeyError(undefined);
             }}
           />
-          <div>
-            <Button
-              variant="outline"
-              size="xs"
-              disabled={!apiKey.trim() || probe.state === "checking"}
-              onClick={() => void check(apiKey)}
-            >
-              Show its tools
-            </Button>
-          </div>
         </div>
       )}
       <section aria-label="What it can do" style={COLUMN}>
         <h4 style={H3}>What it can do</h4>
-        {probe.state === "idle" && (
-          <p className="text-text-3" style={SMALL}>
-            Enter your key to see its tools.
-          </p>
-        )}
-        {probe.state === "checking" && (
-          <p role="status" className="text-text-2" style={SMALL}>
-            Checking…
-          </p>
-        )}
-        {probe.state === "error" && <ErrorText error={probe.error} />}
-        {probe.state === "done" && <ToolPreview probe={probe.probe} />}
+        <p className="text-text-2" style={SMALL}>
+          {entry.auth === "oauth"
+            ? "You'll see its tools after you approve it and sign in."
+            : "You'll see its tools after you approve it."}{" "}
+          Fly on the Wall doesn't contact {host} before then.
+        </p>
         <p className="text-text-3" style={SMALL}>
           Every tool starts on Needs approval.
         </p>
@@ -392,8 +296,7 @@ export function CustomSheet({ editing, ...cb }: { editing?: Connector | null } &
   const [advanced, setAdvanced] = useState(
     () => !!editing && (d.headers.length > 0 || !!d.clientId),
   );
-  const [phase, setPhase] = useState<"form" | "checking" | "adding">("form");
-  const [summary, setSummary] = useState<string | null>(null);
+  const [phase, setPhase] = useState<"form" | "adding">("form");
   const [error, setError] = useState<string | null>(null);
   const [added, setAdded] = useState<Connector | null>(null);
   const signIn = useSignIn(cb.onChanged);
@@ -406,7 +309,6 @@ export function CustomSheet({ editing, ...cb }: { editing?: Connector | null } &
     setD((x) => ({ ...x, ...p }));
     setErrors({});
     setError(null);
-    setSummary(null);
   };
 
   const submit = async () => {
@@ -424,23 +326,6 @@ export function CustomSheet({ editing, ...cb }: { editing?: Connector | null } &
       } finally {
         setPhase("form");
       }
-      return;
-    }
-    setPhase("checking");
-    setSummary(null);
-    let needsSignIn = false;
-    try {
-      const probe = await api.probeConnector(input);
-      setSummary(probeSummary(probe));
-      needsSignIn = probe.needsSignIn;
-    } catch (e) {
-      setError(String(e));
-      setPhase("form");
-      return;
-    }
-    if (needsSignIn && d.signIn !== "oauth") {
-      setError("This connector asks you to sign in. Choose “Sign in with my browser”.");
-      setPhase("form");
       return;
     }
     setPhase("adding");
@@ -477,15 +362,13 @@ export function CustomSheet({ editing, ...cb }: { editing?: Connector | null } &
             Cancel
           </Button>
           <Button variant="primary" size="sm" disabled={busy} onClick={() => void submit()}>
-            {phase === "checking"
-              ? "Checking…"
-              : phase === "adding"
-                ? editing
-                  ? "Saving…"
-                  : "Adding…"
-                : editing
-                  ? "Save changes"
-                  : "Continue"}
+            {phase === "adding"
+              ? editing
+                ? "Saving…"
+                : "Adding…"
+              : editing
+                ? "Save changes"
+                : "Continue"}
           </Button>
         </>
       }
@@ -597,16 +480,6 @@ export function CustomSheet({ editing, ...cb }: { editing?: Connector | null } &
         <Callout role="note" icon={<ShieldAlert size={15} strokeWidth={1.75} />}>
           {CUSTOM_TRUST_NOTE}
         </Callout>
-        {phase === "checking" && (
-          <p role="status" className="text-text-2" style={SMALL}>
-            Checking…
-          </p>
-        )}
-        {summary && (
-          <p role="status" className="text-text" style={SMALL}>
-            {summary}
-          </p>
-        )}
         {signIn.waiting && (
           <SignInWaiting
             onCancel={() => {
@@ -986,6 +859,10 @@ export function ImportSheet({
         <CandidateDetails c={c} />
         <p className="text-text-3" style={SMALL}>
           Permissions aren&apos;t imported: every tool starts on Needs approval.
+        </p>
+        <p className="text-text-3" style={SMALL}>
+          A key written into the command or address isn&apos;t moved to your keychain. If you see
+          one, skip this and add the connector yourself with the key as a secret.
         </p>
         {stepError && <ErrorText error={stepError} />}
       </div>

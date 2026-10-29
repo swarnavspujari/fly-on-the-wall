@@ -69,6 +69,10 @@ pub struct ServerEntry {
     pub last_sync: Option<i64>,
     #[serde(default)]
     pub last_problem: Option<ConnectProblem>,
+    /// The OAuth authorization server metadata found at sign-in; refreshes
+    /// use it instead of discovering again.
+    #[serde(default)]
+    pub oauth_metadata: Option<serde_json::Value>,
 }
 
 fn yes() -> bool {
@@ -163,6 +167,7 @@ impl Registry {
             baseline_done: false,
             last_sync: None,
             last_problem: None,
+            oauth_metadata: None,
         });
         Ok(id)
     }
@@ -177,23 +182,36 @@ impl Registry {
     pub fn secret_keys(&self) -> Vec<String> {
         self.servers.iter().flat_map(secret_keys_for).collect()
     }
+
+    /// Connector ids in stored text even when it no longer parses, so
+    /// "Delete all my data" can still find their keychain entries.
+    pub fn ids_in_raw(raw: &str) -> Vec<String> {
+        let b = raw.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while let Some(pos) = raw[i..].find("\"c") {
+            let start = i + pos + 1;
+            let end = start + 13;
+            if end < b.len()
+                && b[end] == b'"'
+                && b[start + 1..end].iter().all(|c| c.is_ascii_hexdigit())
+            {
+                let id = raw[start..end].to_string();
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+            i = start;
+        }
+        out
+    }
 }
 
 /// Keychain key names for one connector. Long values may be split into
 /// chunks (Windows caps an entry at ~1,280 characters), so every chunk name
 /// is listed.
 pub fn secret_keys_for(entry: &ServerEntry) -> Vec<String> {
-    let mut keys = Vec::new();
-    for slot in [
-        SecretSlot::Access,
-        SecretSlot::Refresh,
-        SecretSlot::Client,
-        SecretSlot::ApiKey,
-    ] {
-        let base = secret_key(&entry.id, slot);
-        keys.extend((0..MAX_SECRET_CHUNKS).map(|i| format!("{base}.{i}")));
-        keys.push(base);
-    }
+    let mut keys = slot_keys_for_id(&entry.id);
     match &entry.config.transport {
         TransportConfig::Stdio { env, .. } => {
             keys.extend(env.iter().map(|e| env_secret_key(&entry.id, &e.name)))
@@ -203,6 +221,24 @@ pub fn secret_keys_for(entry: &ServerEntry) -> Vec<String> {
                 .iter()
                 .map(|h| header_secret_key(&entry.id, &h.name)),
         ),
+    }
+    keys
+}
+
+/// The token, client-secret and API-key entries (with their chunks) any
+/// connector with this id may own. Variables and headers are named by the
+/// config; the keychain index ([`crate::secrets::indexed_keys`]) lists them.
+pub fn slot_keys_for_id(id: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for slot in [
+        SecretSlot::Access,
+        SecretSlot::Refresh,
+        SecretSlot::Client,
+        SecretSlot::ApiKey,
+    ] {
+        let base = secret_key(id, slot);
+        keys.extend((0..MAX_SECRET_CHUNKS).map(|i| format!("{base}.{i}")));
+        keys.push(base);
     }
     keys
 }
@@ -475,6 +511,16 @@ mod tests {
         let mut r = Registry::default();
         r.add_approved(cfg("Docs"), 1).unwrap();
         assert_eq!(Registry::from_json(&r.to_json()), r);
+    }
+
+    #[test]
+    fn ids_survive_a_registry_that_no_longer_parses() {
+        let mut r = Registry::default();
+        let id = r.add_approved(cfg("Docs"), 1).unwrap();
+        let mut raw = r.to_json();
+        raw.truncate(raw.len() - 5);
+        assert_eq!(Registry::from_json(&raw), Registry::default());
+        assert_eq!(Registry::ids_in_raw(&raw), vec![id]);
     }
 
     #[test]

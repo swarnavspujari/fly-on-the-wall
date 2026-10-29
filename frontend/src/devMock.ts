@@ -70,8 +70,10 @@
      fotwMockSignIn = "cancel" | "offline" → sign-in fails that way
      fotwMockClaudeImport = "none"         → no Claude Desktop setup found
    A local connector whose arguments include "--crash" stops right away
-   (Show details); the program "missing-program" isn't found. A web address
-   on a "not-a-connector" host doesn't answer like a connector.
+   (Show details); the program "missing-program" isn't found (at approval:
+   a bare name is pinned to a full path before the dialog). A web address
+   on a "not-a-connector" host is added, then doesn't answer like a
+   connector.
    QA hook: fotwMockConnectorCall("search_contacts" | "update_deal_stage" |
    "delete_contact" | "sync_notes") puts a call card on screen.
 
@@ -1525,6 +1527,16 @@ function mockWillRun(command: string, args: string[]): string {
 }
 
 /** Checks a configuration like check_config; returns destination + will-run. */
+/** A bare program name pinned to a full path, the way the backend looks it
+ *  up on PATH once at approval. */
+function mockPinProgram(command: string): string {
+  const c = command.trim();
+  if (c === "missing-program") throw "Couldn't find missing-program. Check the program.";
+  if (/^([a-zA-Z]:[\\/]|[\\/])/.test(c)) return c;
+  if (/[\\/]/.test(c)) throw "Choose the program with Choose a file…, or use npx or uvx.";
+  return `/usr/local/bin/${c}`;
+}
+
 function mockCheckConfig(input: ConnectorInput): { destination: string; willRun: string | null } {
   const cfg = input?.config;
   const name = String(cfg?.name ?? "").trim();
@@ -1542,16 +1554,18 @@ function mockCheckConfig(input: ConnectorInput): { destination: string; willRun:
   }
   if (t?.kind === "stdio") {
     if (!t.command?.trim()) throw "Choose the program to run.";
-    const file = t.command.trim().split(/[\\/]/).pop();
-    return { destination: `local program ${file}`, willRun: mockWillRun(t.command.trim(), t.args) };
+    t.command = mockPinProgram(t.command);
+    const file = t.command.split(/[\\/]/).pop();
+    return { destination: `local program ${file}`, willRun: mockWillRun(t.command, t.args) };
   }
   throw "Unknown connector type.";
 }
 
-function mockAddPrompt(name: string, destination: string, willRun: string | null): string {
+function mockAddPrompt(input: ConnectorInput, name: string, willRun: string | null): string {
+  const t = input.config.transport;
   return willRun !== null
-    ? `Run a program on this computer?\n\n"${name}" will run: ${willRun}. It has the same access to your files as you.`
-    : `Add "${name}" connector?\n\nIt can receive questions and meeting details you approve, sent to ${destination}. Every tool starts as Needs approval.`;
+    ? `Run a program on this computer?\n\n"${name}" will run:\n${willRun}\n\nIt has the same access to your files as you.`
+    : `Add "${name}" connector?\n\nIt can receive questions and meeting details you approve, sent to:\n${t.kind === "http" ? t.url : ""}\n\nEvery tool starts as Needs approval.`;
 }
 
 /** Secret flags after saving: what was set stays set; new values set. */
@@ -1587,9 +1601,9 @@ function mockFirstSync(c: Connector): string | null {
     mockProblems.set(c.id, "could_not_start");
     return "The program stopped right away.\n---\nError: DOCS_TOKEN is missing\n    at start (server.js:12:9)\n    at main (server.js:40:3)";
   }
-  if (t.kind === "stdio" && t.command === "missing-program") {
-    mockProblems.set(c.id, "could_not_start");
-    return "Couldn't find missing-program. Check the program.";
+  if (t.kind === "http" && new URL(t.url).host.includes("not-a-connector")) {
+    mockProblems.set(c.id, "unreachable");
+    return "That address didn't answer like a connector.";
   }
   mockProblems.delete(c.id);
   if (c.tools.length === 0)
@@ -1626,10 +1640,10 @@ const nameTaken = (name: string, except?: string) =>
   mockConnectors.some((c) => c.id !== except && c.name.toLowerCase() === name.toLowerCase());
 
 function mockAddConnector(input: ConnectorInput) {
-  const { destination, willRun } = mockCheckConfig(input);
+  const { willRun } = mockCheckConfig(input);
   const name = input.config.name.trim();
   if (nameTaken(name)) throw "A connector with that name already exists.";
-  if (!mockNativeDialog(mockAddPrompt(name, destination, willRun))) {
+  if (!mockNativeDialog(mockAddPrompt(input, name, willRun))) {
     return { saved: false, connector: null, error: null };
   }
   const c = mockNewConnector(input, name);
@@ -1641,9 +1655,7 @@ function mockUpdateConnector(id: unknown, input: ConnectorInput) {
   const { destination, willRun } = mockCheckConfig(input);
   const name = input.config.name.trim();
   if (nameTaken(name, c.id)) throw "A connector with that name already exists.";
-  if (
-    !mockNativeDialog(`Save changes to "${name}"?\n\n${mockAddPrompt(name, destination, willRun)}`)
-  ) {
+  if (!mockNativeDialog(`Save changes to "${name}"?\n\n${mockAddPrompt(input, name, willRun)}`)) {
     return { saved: false, connector: mockView(c), error: null };
   }
   c.secrets = mockSecretsAfter(input, c.secrets);
@@ -1662,7 +1674,10 @@ function mockSetEnabled(id: unknown, enabled: boolean) {
   const c = mockConnector(id);
   if (enabled && !c.enabled) {
     if (!c.approved) throw "Edit this connector to approve it again.";
-    if (!mockNativeDialog(mockAddPrompt(c.name, c.destination, c.willRun))) {
+    const input = {
+      config: { name: c.name, transport: c.transport, auth: c.auth },
+    } as ConnectorInput;
+    if (!mockNativeDialog(mockAddPrompt(input, c.name, c.willRun))) {
       return { saved: false, connector: mockView(c), error: null };
     }
   }
@@ -1755,26 +1770,6 @@ function mockSignIn(id: unknown): Promise<unknown> {
   );
 }
 
-function mockProbe(input: ConnectorInput) {
-  const t = input?.config?.transport;
-  if (t?.kind !== "http") throw "Only web connectors are checked before they're added.";
-  mockCheckConfig(input);
-  const host = new URL(t.url).host;
-  if (host.includes("not-a-connector")) throw "That address didn't answer like a connector.";
-  if (input.config.auth.kind === "oauth") return { needsSignIn: true, tools: [] };
-  const kind = MOCK_DIRECTORY.some((d) => new URL(d.url).host === host) ? "web" : "custom";
-  return {
-    needsSignIn: false,
-    tools: mockToolsFor(kind).map((x) => ({
-      name: x.name,
-      title: x.title,
-      description: x.description,
-      kind: x.kind,
-      labelled: x.labelled,
-    })),
-  };
-}
-
 /** fotwMockClaudeImport = "none" previews "No Claude Desktop setup found". */
 function mockClaudeCandidates() {
   return mockFlag("fotwMockClaudeImport") === "none"
@@ -1812,8 +1807,8 @@ function mockImportClaude(key: unknown) {
       ),
     },
   };
-  const { destination, willRun } = mockCheckConfig(input);
-  if (!mockNativeDialog(mockAddPrompt(name, destination, willRun))) {
+  const { willRun } = mockCheckConfig(input);
+  if (!mockNativeDialog(mockAddPrompt(input, name, willRun))) {
     return { saved: false, connector: null, error: null };
   }
   const c = mockNewConnector(input, name);
@@ -2321,8 +2316,6 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       };
     case "connectors_directory":
       return mockClone(MOCK_DIRECTORY);
-    case "probe_connector":
-      return mockProbe(args.input as ConnectorInput);
     case "add_connector":
       return mockAddConnector(args.input as ConnectorInput);
     case "update_connector":
@@ -2355,8 +2348,9 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "connector_call_log":
       return mockClone(mockCallLog);
     case "clear_connector_call_log":
+      if (!mockNativeDialog("Clear connector activity?")) return false;
       mockCallLog = [];
-      return null;
+      return true;
     case "pending_connector_calls":
       return [...mockProposals.values()].map((p) => mockClone(p.proposal));
     case "decide_connector_call":

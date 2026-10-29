@@ -42,32 +42,6 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(20);
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Parent environment variables a stdio connector inherits.
-const INHERITED_ENV: &[&str] = &[
-    "PATH",
-    "PATHEXT",
-    "SYSTEMROOT",
-    "SYSTEMDRIVE",
-    "WINDIR",
-    "COMSPEC",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
-    "HOME",
-    "USERPROFILE",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "PROGRAMDATA",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "LANG",
-    "LC_ALL",
-    "TZ",
-    "USER",
-    "LOGNAME",
-    "XDG_RUNTIME_DIR",
-];
-
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("couldn't start the connector program: {0}")]
@@ -169,6 +143,84 @@ pub struct Connection {
     tools_changed: Arc<AtomicBool>,
     refusals: Arc<Refusals>,
     _child: Option<tokio::process::Child>,
+    /// Dropped last: stops every process the program started.
+    _tree: Option<ProcessTree>,
+}
+
+/// A local connector's process tree. Dropping it kills every process in it,
+/// so a runner like `npx.cmd` can't leave `node` behind.
+pub struct ProcessTree {
+    #[cfg(windows)]
+    job: windows_sys::Win32::Foundation::HANDLE,
+    #[cfg(unix)]
+    pgid: i32,
+}
+
+// The job handle is owned and only closed once, on drop.
+#[cfg(windows)]
+unsafe impl Send for ProcessTree {}
+#[cfg(windows)]
+unsafe impl Sync for ProcessTree {}
+
+impl ProcessTree {
+    /// Put `child` (and everything it starts later) under one handle.
+    #[cfg(windows)]
+    fn adopt(child: &tokio::process::Child) -> Option<Self> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        let process = child.raw_handle()?;
+        // SAFETY: plain Win32 calls on handles we own; the job handle is
+        // closed exactly once (here on failure, or in Drop).
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set == 0 || AssignProcessToJobObject(job, process as _) == 0 {
+                CloseHandle(job);
+                return None;
+            }
+            Some(Self { job })
+        }
+    }
+
+    #[cfg(unix)]
+    fn adopt(child: &tokio::process::Child) -> Option<Self> {
+        // The child leads its own process group (set before spawn).
+        child.id().map(|pid| Self { pgid: pid as i32 })
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    fn adopt(_child: &tokio::process::Child) -> Option<Self> {
+        None
+    }
+}
+
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        // SAFETY: closing our own job handle (KILL_ON_JOB_CLOSE ends every
+        // process in it) / signalling our own child's process group.
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.job);
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::killpg(self.pgid, libc::SIGKILL);
+        }
+    }
 }
 
 /// Inputs for [`connect`] the configuration doesn't hold: resolved values.
@@ -212,6 +264,10 @@ pub fn resolve_program(command: &str) -> Result<std::path::PathBuf, SessionError
     };
     let path = std::env::var_os("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&path) {
+        // A relative PATH entry (like `.`) depends on the working directory.
+        if !dir.is_absolute() {
+            continue;
+        }
         for ext in &exts {
             let candidate: PathBuf = dir.join(format!("{command}{ext}"));
             if candidate.is_file() {
@@ -229,10 +285,21 @@ pub async fn connect(
 ) -> Result<Connection, SessionError> {
     match &config.transport {
         TransportConfig::Stdio { command, args, env } => {
-            let program = resolve_program(command)?;
+            // The program was pinned to a full path when the user approved it
+            // (`resolve_program`); a bare name here was never shown in full.
+            let program = std::path::PathBuf::from(command);
+            if !program.is_absolute() {
+                return Err(SessionError::Spawn(
+                    "the program isn't pinned to a full path; edit the connector to approve it"
+                        .into(),
+                ));
+            }
+            if !program.is_file() {
+                return Err(SessionError::ProgramNotFound(command.clone()));
+            }
             let mut cmd = tokio::process::Command::new(&program);
             cmd.args(args).env_clear();
-            for name in INHERITED_ENV {
+            for name in crate::config::INHERITED_ENV {
                 if let Some(v) = std::env::var_os(name) {
                     cmd.env(name, v);
                 }
@@ -251,9 +318,17 @@ pub async fn connect(
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
+            #[cfg(unix)]
+            cmd.process_group(0);
             let mut child = cmd
                 .spawn()
                 .map_err(|e| SessionError::Spawn(e.to_string()))?;
+            let tree = ProcessTree::adopt(&child);
+            if tree.is_none() {
+                tracing::warn!(
+                    "couldn't group a connector's processes; only the first will be stopped"
+                );
+            }
             let stdout = child
                 .stdout
                 .take()
@@ -283,6 +358,7 @@ pub async fn connect(
             match connect_io(stdout, stdin).await {
                 Ok(mut conn) => {
                     conn._child = Some(child);
+                    conn._tree = tree;
                     Ok(conn)
                 }
                 Err(e) => {
@@ -338,6 +414,7 @@ pub async fn connect(
                 tools_changed,
                 refusals,
                 _child: None,
+                _tree: None,
             })
         }
     }
@@ -383,6 +460,7 @@ where
         tools_changed,
         refusals,
         _child: None,
+        _tree: None,
     })
 }
 

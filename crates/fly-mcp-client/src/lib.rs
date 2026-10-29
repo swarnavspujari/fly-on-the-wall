@@ -9,8 +9,8 @@
 //! |---|---|
 //! | Approval is bound to a hash of the server config | [`config::ServerConfig::hash`], [`registry::ServerEntry::is_approved`] |
 //! | Each tool definition is pinned by hash; a change disables it and keeps a diff | [`pin`] |
-//! | Annotations only make a tool stricter; tools are writes until the user marks them read-only | [`pin::kind`] |
-//! | Exact, editable arguments on a confirm card for every call | [`hub::CallApprover`] |
+//! | Annotations only make a tool stricter: a tool is read-only only when the server says so (`readOnlyHint`, and not destructive); the user's permission decides whether it asks | [`pin::kind`] |
+//! | Exact, editable arguments on a confirm card for every call on Needs approval (Always allow is set only in Settings, through a native dialog) | [`hub::CallApprover`] |
 //! | A connector result can't lead to another proposal in the same turn | [`hub::ConnectorTurn`] |
 //! | Results fenced, schema-validated and size-capped | [`fence`] |
 //! | https only; private addresses blocked (OAuth discovery included) | [`netguard`], [`oauth`] |

@@ -178,44 +178,82 @@ fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(&sorted).unwrap_or_default()
 }
 
-/// Schemes whose links are rewritten.
+/// Schemes whose links are rewritten wherever they appear, even mid-word
+/// (`xhttps://…` still renders as a link in some places).
 const LINK_SCHEMES: &[&str] = &[
     "https://",
     "http://",
     "ftp://",
     "file://",
-    "data:",
     "javascript:",
-    "mailto:",
     "vbscript:",
 ];
 
-/// Replace every link with `[link: host]` (`[link]` when there's no host).
+/// Schemes rewritten only at the start of a word, so prose like
+/// "metadata: …" survives.
+const WORD_SCHEMES: &[&str] = &["data:", "mailto:"];
+
+/// Where a link ends.
+fn link_end(s: &str, from: usize) -> usize {
+    s[from..]
+        .find(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '}' | '`')
+        })
+        .map_or(s.len(), |n| from + n)
+}
+
+/// A host for `[link: host]`, if `candidate` parses as a URL with one.
+fn host_of(candidate: &str) -> Option<String> {
+    url::Url::parse(candidate)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+}
+
+/// Whether `prev` (the byte before a match) starts a new word.
+fn word_start(prev: Option<u8>) -> bool {
+    prev.is_none_or(|b| !b.is_ascii_alphanumeric() && !matches!(b, b'.' | b'_' | b'-' | b'@'))
+}
+
+/// Replace every link with `[link: host]` (`[link]` when there's no host):
+/// scheme links, protocol-relative `//host/…` and bare `www.host…`.
 pub fn strip_links(s: &str) -> String {
     let lower = s.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
-    'scan: while i < s.len() {
-        for scheme in LINK_SCHEMES {
-            if lower[i..].starts_with(scheme)
-                && (i == 0 || !lower.as_bytes()[i - 1].is_ascii_alphanumeric())
-            {
-                let end = s[i..]
-                    .find(|c: char| {
-                        c.is_whitespace()
-                            || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '}' | '`')
-                    })
-                    .map_or(s.len(), |n| i + n);
-                let host = url::Url::parse(&s[i..end])
-                    .ok()
-                    .and_then(|u| u.host_str().map(str::to_string));
-                match host {
-                    Some(h) => out.push_str(&format!("[link: {h}]")),
-                    None => out.push_str("[link]"),
-                }
-                i = end;
-                continue 'scan;
+    while i < s.len() {
+        let prev = i.checked_sub(1).map(|p| bytes[p]);
+        let rest = &lower[i..];
+        let scheme = LINK_SCHEMES.iter().any(|p| rest.starts_with(p))
+            || (word_start(prev) && WORD_SCHEMES.iter().any(|p| rest.starts_with(p)));
+        let found = if scheme {
+            let end = link_end(s, i);
+            Some((end, host_of(&s[i..end])))
+        } else if rest.starts_with("//")
+            && prev != Some(b':')
+            && prev != Some(b'/')
+            && rest[2..].starts_with(|c: char| c.is_ascii_alphanumeric())
+        {
+            // `//host/…`: a link when what follows is a dotted host.
+            let end = link_end(s, i);
+            host_of(&format!("https:{}", &s[i..end]))
+                .filter(|h| h.contains('.'))
+                .map(|h| (end, Some(h)))
+        } else if rest.starts_with("www.") && word_start(prev) {
+            let end = link_end(s, i);
+            host_of(&format!("https://{}", &s[i..end]))
+                .filter(|h| h.len() > 4 && h[4..].contains('.'))
+                .map(|h| (end, Some(h)))
+        } else {
+            None
+        };
+        if let Some((end, host)) = found {
+            match host {
+                Some(h) => out.push_str(&format!("[link: {h}]")),
+                None => out.push_str("[link]"),
             }
+            i = end;
+            continue;
         }
         let ch = s[i..].chars().next().unwrap_or(' ');
         out.push(ch);
@@ -290,6 +328,20 @@ mod tests {
         assert_eq!(r.raw_chars, 5_000_000);
         assert!(r.text.chars().count() < DEFAULT_MAX_RESULT_CHARS + 500);
         assert!(r.text.ends_with("</connector_result>"));
+    }
+
+    #[test]
+    fn links_hidden_mid_word_or_without_a_scheme_are_reduced_too() {
+        let s = "Xhttps://a.example/x?d=1 then ![p](//b.example/p.png) and www.c.example/q?d=2 \
+                 or (www.d.example) but not metadata: fine, // a comment, or e.g. www.";
+        let out = strip_links(s);
+        for host in ["a.example", "b.example", "www.c.example", "www.d.example"] {
+            assert!(out.contains(&format!("[link: {host}]")), "{host}: {out}");
+        }
+        assert!(!out.contains("d=1") && !out.contains("d=2"), "{out}");
+        assert!(out.contains("metadata: fine"), "{out}");
+        assert!(out.contains("// a comment"), "{out}");
+        assert!(out.ends_with("e.g. www."), "{out}");
     }
 
     #[test]

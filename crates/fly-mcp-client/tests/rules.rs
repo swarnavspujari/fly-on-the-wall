@@ -817,25 +817,165 @@ async fn a_stale_loosening_plan_is_rejected() {
     assert_eq!(s.permission("search_contacts"), Permission::Blocked);
 }
 
+/// Counts connection attempts.
+#[derive(Default)]
+struct Counting(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl Connector for Counting {
+    async fn connect(&self, _entry: &ServerEntry) -> Result<Connection, SessionError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(SessionError::Connect("refused".into()))
+    }
+}
+
 #[tokio::test]
-async fn probing_never_starts_a_local_program() {
-    let s = setup().await;
-    let err = s.hub.probe(config(), &token()).await.unwrap_err();
-    assert!(err.to_string().contains("only after you approve"), "{err}");
-    // A sign-in connector reports that without any network traffic.
-    let oauth = ServerConfig {
+async fn nothing_reaches_a_connector_before_it_is_approved() {
+    let counting = Arc::new(Counting::default());
+    let hub = ConnectorHub::new(
+        Arc::new(MemoryConnectorStore::default()),
+        Arc::new(MemorySecretStore::default()),
+        NetPolicy::local_test(),
+        counting.clone(),
+    );
+    let web = ServerConfig {
         name: "Docs".into(),
         transport: TransportConfig::Http {
             url: "https://mcp.example.com/mcp".into(),
             headers: vec![],
         },
-        auth: AuthConfig::OAuth {
-            scopes: vec![],
-            client_id: None,
-        },
+        auth: AuthConfig::None,
     };
-    let p = s.hub.probe(oauth, &NewSecrets::default()).await.unwrap();
-    assert!(p.needs_sign_in && p.tools.is_empty());
+    // What the add flow does before the native dialog: check and pin.
+    let shown = hub.pin_program(web.clone()).unwrap();
+    assert_eq!(shown, web, "a web connector shows as entered");
+    assert_eq!(counting.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // After the yes: added, then the first connection.
+    let id = hub.add_approved(shown, &NewSecrets::default()).unwrap();
+    assert_eq!(counting.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let _ = hub.sync_tools(&id).await;
+    assert_eq!(counting.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_switched_off_connector_does_not_connect() {
+    let counting = Arc::new(Counting::default());
+    let hub = ConnectorHub::new(
+        Arc::new(MemoryConnectorStore::default()),
+        Arc::new(MemorySecretStore::default()),
+        NetPolicy::local_test(),
+        counting.clone(),
+    );
+    let id = hub.add_approved(config(), &token()).unwrap();
+    hub.set_enabled(&id, false).await.unwrap();
+    let err = hub.sync_tools(&id).await.unwrap_err();
+    assert!(err.to_string().contains("Turn this connector on"), "{err}");
+    assert_eq!(counting.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn trying_a_tool_from_settings_always_shows_the_card() {
+    let s = setup().await;
+    s.set("search_contacts", Permission::AlwaysAllow);
+    let approver = Approver::with(vec![Decision::Decline]);
+    let mut opts = TurnOptions::for_tier("try", "C", false);
+    opts.force_approval = true;
+    let turn = s.hub.turn(opts, approver.clone());
+    turn.call(&s.name("search_contacts"), json!({"query": "Dana"}))
+        .await
+        .unwrap_err();
+    assert_eq!(approver.seen().len(), 1, "the card, despite Always allow");
+    assert!(s.calls().is_empty());
+}
+
+/// Changes something while the card is up, then answers Run.
+struct ChangeWhileWaiting {
+    hub: Arc<ConnectorHub>,
+    id: String,
+}
+
+#[async_trait]
+impl CallApprover for ChangeWhileWaiting {
+    async fn decide(&self, proposal: CallProposal) -> Decision {
+        let changes = vec![PermissionChange {
+            tool: proposal.tool.clone(),
+            permission: Permission::Blocked,
+        }];
+        self.hub.apply_tightening(&self.id, &changes).unwrap();
+        Decision::Run {
+            args: proposal.args,
+        }
+    }
+}
+
+#[tokio::test]
+async fn what_changes_while_the_card_waits_is_checked_again() {
+    // Blocked while the card was up: not sent.
+    let s = setup().await;
+    let turn = s.hub.turn(
+        TurnOptions::for_tier("t1", "C", false),
+        Arc::new(ChangeWhileWaiting {
+            hub: s.hub.clone(),
+            id: s.id.clone(),
+        }),
+    );
+    let err = turn
+        .call(&s.name("search_contacts"), json!({"query": "Dana"}))
+        .await
+        .unwrap_err();
+    assert!(s.calls().is_empty(), "{err}");
+    assert_eq!(
+        s.store.load_log().last().unwrap().refusal,
+        Some(RefusalCode::ToolChanged)
+    );
+
+    // Keep-local content arrived while the card was up: not sent.
+    let s = setup().await;
+    let slot: Arc<Mutex<Option<Arc<fly_mcp_client::ConnectorTurn>>>> = Arc::default();
+    struct Late(Arc<Mutex<Option<Arc<fly_mcp_client::ConnectorTurn>>>>);
+    #[async_trait]
+    impl CallApprover for Late {
+        async fn decide(&self, proposal: CallProposal) -> Decision {
+            if let Some(t) = self.0.lock().unwrap().as_ref() {
+                t.mark_keep_local();
+            }
+            Decision::Run {
+                args: proposal.args,
+            }
+        }
+    }
+    let turn = Arc::new(s.hub.turn(
+        TurnOptions::for_tier("t2", "C", false),
+        Arc::new(Late(slot.clone())),
+    ));
+    *slot.lock().unwrap() = Some(turn.clone());
+    let err = turn
+        .call(&s.name("search_contacts"), json!({"query": "Dana"}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("keeps local"), "{err}");
+    assert!(s.calls().is_empty());
+}
+
+#[tokio::test]
+async fn links_in_tool_descriptions_never_reach_the_model() {
+    let s = setup().await;
+    let specs = s.turn(Approver::with(vec![])).specs();
+    for spec in &specs {
+        assert!(
+            !spec.description.contains("://") && !spec.description.contains("/x?"),
+            "{}",
+            spec.description
+        );
+        assert!(spec.description.contains("The service describes it as"));
+        assert!(!spec.description.contains("NOTES"), "{}", spec.description);
+    }
+    let deals = specs
+        .iter()
+        .find(|s| s.description.contains("Count open deals"))
+        .unwrap();
+    assert!(deals.description.contains("[link: attacker.example]"));
+    assert!(deals.description.contains("[link: www.attacker.example]"));
 }
 
 #[tokio::test]
