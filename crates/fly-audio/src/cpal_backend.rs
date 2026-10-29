@@ -791,21 +791,34 @@ fn build_stream(
                     }
                     let frames = (data.len() / channels) as u64;
                     let now_ms = clock.elapsed_ms();
-                    let expected = now_ms * rate as u64 / 1000;
+                    let ts = info.timestamp();
+                    let cap = ts.capture.as_nanos() as i128;
+                    let cb = ts.callback.as_nanos() as i128;
+                    // backlog: how long this packet sat in the OS buffer
+                    let backlog = if TIMESTAMP_GAPS {
+                        qpc_now_ns(qpf) - cap
+                    } else {
+                        0
+                    };
+                    let backlog_ok = (0..BACKLOG_SANE_NS).contains(&backlog);
+                    // Judge the packet at the time it was captured, not now:
+                    // after a stall the buffer hands over audio up to a
+                    // buffer's length old, which isn't behind the clock.
+                    let at_ms = if backlog_ok {
+                        now_ms.saturating_sub((backlog / 1_000_000) as u64)
+                    } else {
+                        now_ms
+                    };
+                    let expected = at_ms * rate as u64 / 1000;
 
                     if TIMESTAMP_GAPS {
-                        let ts = info.timestamp();
-                        let cap = ts.capture.as_nanos() as i128;
-                        let cb = ts.callback.as_nanos() as i128;
                         let epoch = clock.epoch();
                         if epoch != gaps.epoch {
                             // resumed after a pause: the jump is the pause
                             gaps.epoch = epoch;
                             gaps.next_capture_ns = None;
                         }
-                        // backlog: how long this packet sat in the OS buffer
-                        let backlog = qpc_now_ns(qpf) - cap;
-                        if (0..BACKLOG_SANE_NS).contains(&backlog) {
+                        if backlog_ok {
                             producer
                                 .stats()
                                 .max_backlog_us
