@@ -419,9 +419,20 @@ fn history_messages(history: &[Turn], on_device: bool) -> Vec<Message> {
     out
 }
 
-/// Tell the connector turn when any of `meetings` is Keep local.
-pub fn mark_if_keep_local<S: StoreAccess>(x: &dyn ExternalTools, meetings: &[String], store: &S) {
-    if store.with(|s| meetings.iter().any(|m| s.meeting_keep_local(m))) {
+/// Tell the connector turn when any of `meetings` or `notes` is Keep
+/// local (a failed lookup counts as Keep local). Takes the store's lock:
+/// never call it from inside `store.with`.
+pub fn mark_if_keep_local<S: StoreAccess>(
+    x: &dyn ExternalTools,
+    meetings: &[String],
+    notes: &[String],
+    store: &S,
+) {
+    let keep_local = store.with(|s| {
+        meetings.iter().any(|m| s.meeting_keep_local(m))
+            || notes.iter().any(|n| s.note_keep_local(n))
+    });
+    if keep_local {
         x.mark_keep_local();
     }
 }
@@ -673,7 +684,7 @@ pub async fn ask<S: StoreAccess, E: QueryEmbedder>(
     // meeting's line reached the context anyway, every connector call is
     // refused from here on.
     if let Some(x) = external {
-        mark_if_keep_local(x, pf.evidence.meetings(), env.store);
+        mark_if_keep_local(x, &pf.touched_meetings, &pf.touched_notes, env.store);
     }
     run.log.prefetch = pf.stats.clone();
     run.trace.passages = pf.stats.transcript_passages;

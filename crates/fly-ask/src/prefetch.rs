@@ -251,6 +251,11 @@ pub struct Prefetch {
     /// similarity floor (an unscoped question of 4+ content words with a
     /// measured embedder).
     pub similarity: Option<Similarity>,
+    /// Every meeting and note the context draws on (lines shown whole or
+    /// clipped, items, memory facts, note passages, the user's notes): the
+    /// connector turn's Keep-local backstop.
+    pub touched_meetings: Vec<String>,
+    pub touched_notes: Vec<String>,
 }
 
 /// The best cosine against the floor the search applied.
@@ -681,9 +686,12 @@ pub fn prefetch(
     }
     stats.transcript_passages = kept.len() as u32;
 
+    let mut touched_meetings: HashSet<String> = HashSet::new();
+    let mut touched_notes: HashSet<String> = HashSet::new();
     // Same-meeting excerpts read in transcript order.
     let mut by_meeting: Vec<(String, Vec<Excerpt>)> = Vec::new();
     for e in kept {
+        touched_meetings.insert(e.meeting_id.clone());
         match by_meeting.iter_mut().find(|(m, _)| *m == e.meeting_id) {
             Some((_, v)) => v.push(e),
             None => by_meeting.push((e.meeting_id.clone(), vec![e])),
@@ -864,6 +872,7 @@ pub fn prefetch(
                 notes_text.push_str(&evidence::safe(&truncate(pad, b.note_chars)));
                 notes_text.push('\n');
                 stats.notes_included = true;
+                touched_notes.insert(note_id.clone());
             }
         }
     }
@@ -877,6 +886,7 @@ pub fn prefetch(
             break;
         }
         note_used += t.len();
+        touched_notes.insert(p.note_id.clone());
         notes_text.push_str(&format!(
             "## {}\n{}\n",
             evidence::safe(&p.title),
@@ -912,6 +922,7 @@ pub fn prefetch(
 
     // Exactly what was shown counts as retrieved: marker and whole text.
     let mut ev = Evidence::default();
+    touched_meetings.extend(shown.iter().map(|s| s.meeting_id.clone()));
     ev.add_shown(&context, shown);
     stats.segments = ev.len() as u32;
     stats.context_chars = context.len() as u32;
@@ -922,6 +933,8 @@ pub fn prefetch(
         context,
         evidence: ev,
         stats,
+        touched_meetings: touched_meetings.into_iter().collect(),
+        touched_notes: touched_notes.into_iter().collect(),
     })
 }
 

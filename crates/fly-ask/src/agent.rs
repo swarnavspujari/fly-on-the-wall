@@ -11,7 +11,7 @@
 //!   markers that survive into the observation join the retrieved set;
 //! * proposal tools go to the gate in `proposals.rs` and never write.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -78,6 +78,9 @@ pub struct ToolState<'a, S, E> {
     pub cancel: Option<&'a std::sync::atomic::AtomicBool>,
     /// The proposals the user's question asked for.
     pub requested: proposals::Requested,
+    /// Meetings and notes any tool result drew on (shown whole, clipped or
+    /// a note passage), for the connector turn's Keep-local backstop.
+    touched: Mutex<(HashSet<String>, HashSet<String>)>,
 }
 
 fn args<T: DeserializeOwned>(tool: &str, v: &Value) -> Result<T, String> {
@@ -158,6 +161,7 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
             external: None,
             cancel: None,
             requested: proposals::Requested::default(),
+            touched: Mutex::new((HashSet::new(), HashSet::new())),
         }
     }
 
@@ -201,12 +205,33 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
 
     /// Register the segments whose markers made it into `observation`.
     /// Register what `observation` really shows: marker and whole text.
+    /// Never touches the store: it runs inside `self.store.with`, and the
+    /// app's store is a `Mutex` (the Keep-local check runs after the read
+    /// returns, in [`Self::call`]).
     fn register(&self, observation: &str, found: &[SegmentInfo]) {
         let mut ev = self.evidence.lock().unwrap_or_else(|p| p.into_inner());
         ev.add_shown(observation, found.iter().cloned());
-        if let Some(x) = self.external {
-            crate::mark_if_keep_local(x, ev.meetings(), self.store);
+        let mut t = self.touched.lock().unwrap_or_else(|p| p.into_inner());
+        t.0.extend(found.iter().map(|f| f.meeting_id.clone()));
+    }
+
+    /// A note a tool result drew on (a note passage or the note itself).
+    fn touch_note(&self, note_id: &str) {
+        if !note_id.is_empty() {
+            let mut t = self.touched.lock().unwrap_or_else(|p| p.into_inner());
+            t.1.insert(note_id.to_string());
         }
+    }
+
+    /// The connector backstop, outside any store lock: Keep-local content in
+    /// a tool result trips the turn.
+    fn backstop(&self) {
+        let Some(x) = self.external else { return };
+        let (meetings, notes): (Vec<String>, Vec<String>) = {
+            let t = self.touched.lock().unwrap_or_else(|p| p.into_inner());
+            (t.0.iter().cloned().collect(), t.1.iter().cloned().collect())
+        };
+        crate::mark_if_keep_local(x, &meetings, &notes, self.store);
     }
 
     /// The scope's meeting ids, for the memory tools' `*_in` (`None` = all
@@ -245,6 +270,12 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
 
     /// Run one tool call.
     pub async fn call(&self, name: String, input: Value) -> Result<String, String> {
+        let out = self.call_inner(name, input).await;
+        self.backstop();
+        out
+    }
+
+    async fn call_inner(&self, name: String, input: Value) -> Result<String, String> {
         emit(
             self.sink,
             AskEvent::Stage {
@@ -333,6 +364,7 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
                 });
                 let mut found = Vec::new();
                 for p in &mut r.passages {
+                    self.touch_note(&p.note_id);
                     defuse_segments(&mut p.segments);
                     p.text = defuse_markers(&p.text);
                     p.title = defuse_markers(&p.title);
@@ -417,6 +449,7 @@ impl<'t, S: StoreAccess, E: QueryEmbedder> ToolState<'t, S, E> {
                     return Err(OUTSIDE_SCOPE.into());
                 }
                 let mut n = ctx.get_note(&a).map_err(e)?;
+                self.touch_note(&n.note_id);
                 n.scratchpad = n.scratchpad.map(|t| defuse_markers(&t));
                 let mut found = Vec::new();
                 if let Some(blocks) = &mut n.enhanced {

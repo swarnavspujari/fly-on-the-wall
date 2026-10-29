@@ -1246,9 +1246,9 @@ async fn with_connectors_offered_the_turn_reads_without_keep_local_content() {
 fn keep_local_content_in_the_context_trips_the_connector_turn() {
     let f = fx();
     let ext = Connector::default();
-    fly_ask::mark_if_keep_local(&ext, std::slice::from_ref(&f.launch), &f.s);
+    fly_ask::mark_if_keep_local(&ext, std::slice::from_ref(&f.launch), &[], &f.s);
     assert!(!ext.marked.load(std::sync::atomic::Ordering::SeqCst));
-    fly_ask::mark_if_keep_local(&ext, &[f.launch.clone(), f.osprey.clone()], &f.s);
+    fly_ask::mark_if_keep_local(&ext, &[f.launch.clone(), f.osprey.clone()], &[], &f.s);
     assert!(ext.marked.load(std::sync::atomic::Ordering::SeqCst));
 }
 
@@ -1536,4 +1536,67 @@ async fn connector_calls_count_against_the_tier_budget() {
         .iter()
         .all(|c| c.tool == fly_ask::runlog::ToolName::Connector));
     assert_eq!(a.run_log.tool_calls.len() as u32, calls);
+}
+
+/// The app's store is a `Mutex<Storage>`: a connector turn whose model reads
+/// with a tool must not lock it twice (it used to hang the app).
+#[test]
+fn a_connector_turn_on_the_apps_locked_store_never_deadlocks() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let f = fx();
+        let store = std::sync::Mutex::new(Storage::open(f._dir.path()).unwrap());
+        let ext = Connector::default();
+        let m = Model::new(
+            false,
+            vec![
+                ChatResponse::tool_call(
+                    "t1",
+                    "read_segments",
+                    json!({"meeting_id": f.launch, "around_segment_id": "a02"}),
+                ),
+                ChatResponse::text_reply("Ewan repaints the lobby sign by Friday [seg:a03]."),
+            ],
+        );
+        let a = rt.block_on(ask(
+            AskEnv {
+                store: &store,
+                provider: &m,
+                on_device: false,
+                tier: Tier::C,
+                limits: None,
+                embedder: Some(&Bow),
+                events: None,
+                cancel: None,
+                external: Some(&ext),
+            },
+            AskInput {
+                question: "Who is repainting the lobby sign?",
+                history: &[],
+                scope: AskScope::Meeting(f.launch.clone()),
+                now: now(),
+            },
+        ));
+        let _ = tx.send((a.status, ext.marked.load(SeqCst), m.requests().len()));
+    });
+    let (status, marked, calls) = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the Ask finished: no second lock of the app's store");
+    assert_eq!(status, AnswerStatus::Answered);
+    assert!(!marked, "nothing Keep-local was read");
+    assert_eq!(calls, 2, "the tool round ran");
+}
+
+#[test]
+fn a_keep_local_note_also_trips_the_connector_turn() {
+    let f = fx();
+    let ext = Connector::default();
+    let note = f.s.get_meeting(&f.osprey).unwrap().note_id;
+    fly_ask::mark_if_keep_local(&ext, &[], std::slice::from_ref(&note), &f.s);
+    assert!(ext.marked.load(std::sync::atomic::Ordering::SeqCst));
 }
