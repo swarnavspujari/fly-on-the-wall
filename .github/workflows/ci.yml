@@ -106,7 +106,9 @@ jobs:
           printf 'Changed files:\n%s\n' "$files"
           has() { if grep -qE "$1" <<<"$files"; then echo true; else echo false; fi; }
 
-          rust=$(has '^(crates/|src-tauri/|Cargo\.(toml|lock)$|rust-toolchain|\.cargo/|\.?(clippy|rustfmt)\.toml$)')
+          # evals/: the fly-evals workspace crate (evals/runner) and the
+          # fixtures and gold sets its unit tests validate.
+          rust=$(has '^(crates/|src-tauri/|evals/|Cargo\.(toml|lock)$|rust-toolchain|\.cargo/|\.?(clippy|rustfmt)\.toml$)')
           frontend=$(has '^frontend/')
           deps=$(has '(^|/)(Cargo\.toml|Cargo\.lock|package\.json|package-lock\.json)$|^deny\.toml$')
           ci=$(has '^\.github/')

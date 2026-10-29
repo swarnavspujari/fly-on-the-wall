@@ -1,0 +1,182 @@
+{
+  "why": "Never stops calling search: the harness must stop at the tier budget.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 0",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 1",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 2",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 3",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 4",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 5",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 6",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 7",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 8",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 9",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 10",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "search_passages",
+          "input": {
+            "query": "escalation timing attempt 11",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Urgent tickets escalate after two hours [seg:m14-084]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

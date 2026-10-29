@@ -1,0 +1,50 @@
+{
+  "id": "m27",
+  "title": "Vendor demo: Tidepost helpdesk",
+  "started_at": "2026-07-22T16:00:00Z",
+  "folder": "Support",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Lotte Brink", "email": "lotte@quillmark.example" },
+    { "name": "Callum Reyes", "email": "callum@quillmark.example" },
+    { "name": "Juno Ashby", "email": "juno@tidepost.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Lotte Brink", "spk_1": "Callum Reyes", "spk_2": "Juno Ashby" },
+  "scratchpad": "Tidepost demo - no decision\n$65/agent/mo (escalation rules + help center plan)\nmacros import as-is -> tidy first\n30 day sandbox, Lotte owns eval",
+  "segments": [
+    ["m27-01", "spk_2", "0:05", "Thanks for having me. I'll keep the slides short and spend most of the time in the product, since you've all used a helpdesk before."],
+    ["m27-02", "spk_0", "0:18", "Please do. We're on Burrowdesk today, and we know exactly what we don't like about it, so show us the real thing."],
+    ["m27-03", "mic", "0:30", "The context is that our ticket volume has grown a lot this year, and the tool is slowing the team down more than the tickets are."],
+    ["m27-04", "spk_2", "0:46", "Understood. Let me start with macros, since that's usually what support teams care about first."],
+    ["m27-05", "spk_2", "0:58", "You can import macros straight from Burrowdesk. They come over exactly as they are, including the old ones nobody uses, so most teams tidy up before they move."],
+    ["m27-06", "spk_1", "1:16", "That's a polite way of saying our macros are a mess. We have a lot of duplicates with slightly different greetings."],
+    ["m27-07", "spk_2", "1:28", "Everyone does. Tidepost shows usage per macro from the first day, so the unused ones are easy to spot later on."],
+    ["m27-08", "spk_0", "1:40", "What about escalations? Today we escalate to engineering by hand, and things sit for days."],
+    ["m27-09", "spk_2", "1:50", "Escalation rules are timers. You define what urgent means, pick a timer, and when it runs out the ticket moves to an engineering queue and pings whoever you choose."],
+    ["m27-10", "spk_1", "2:07", "Can the timer differ by category? Login problems and invoice problems aren't the same kind of urgent at all."],
+    ["m27-11", "spk_2", "2:19", "Yes, per category, and per customer plan if you want. Most teams start with one rule and refine it once they've lived with it."],
+    ["m27-12", "mic", "2:32", "And reporting? I'd like to see first response time in business hours, not around the clock."],
+    ["m27-13", "spk_2", "2:43", "Business hours calendars are built in. Every report can be filtered to them, with weekends excluded if you like."],
+    ["m27-14", "spk_0", "2:57", "That alone would save me hours every month. Today I do it by hand in a spreadsheet."],
+    ["m27-15", "spk_2", "3:08", "Help center next. Articles have versions, and a screenshot can be swapped in every article that uses it, in one step."],
+    ["m27-16", "spk_1", "3:22", "That's the feature I'd pay for. Half our help articles still show screens from before the redesign."],
+    ["m27-17", "spk_0", "3:32", "Migration question. We have years of attachments in Burrowdesk. How does the import handle that?"],
+    ["m27-18", "spk_2", "3:43", "Our importer is fast, but Burrowdesk's export interface is throttled, so big archives take a while on their side. Some teams only bring over the last two years and archive the rest."],
+    ["m27-19", "spk_0", "4:02", "Good to know before we plan anything."],
+    ["m27-20", "mic", "4:08", "Pricing?"],
+    ["m27-21", "spk_2", "4:13", "Sixty five dollars per agent per month, on the plan with escalation rules and the help center."],
+    ["m27-22", "spk_1", "4:23", "That's more than we pay now, I think."],
+    ["m27-23", "spk_0", "4:30", "A bit more, yes. But we already pay in hours for everything Burrowdesk can't do."],
+    ["m27-24", "spk_2", "4:39", "I can set you up with a thirty day sandbox, with your real macros imported, so you can try it on actual work instead of my demo data."],
+    ["m27-25", "spk_0", "4:57", "Yes, let's do the sandbox. We'll decide after that. Nothing gets signed until the team has tried it on real tickets."],
+    ["m27-26", "mic", "5:12", "Agreed. Lotte owns the evaluation. Callum, can you help her pick the macros to test with?"],
+    ["m27-27", "spk_1", "5:25", "Sure. I'll pick the ones we lean on most, so we see the import at its worst."],
+    ["m27-28", "spk_2", "5:35", "Great. I'll send the sandbox details this afternoon."]
+  ],
+  "items": [
+    { "kind": "figure", "text": "Tidepost costs $65 per agent per month on the plan with escalation rules and the help center", "segments": ["m27-21"] },
+    { "kind": "decision", "text": "Run a thirty-day Tidepost sandbox before deciding; nothing signed until the team has tried it", "segments": ["m27-25"] },
+    { "kind": "action_item", "text": "Own the Tidepost evaluation", "owner": "Lotte Brink", "segments": ["m27-25"] }
+  ]
+}

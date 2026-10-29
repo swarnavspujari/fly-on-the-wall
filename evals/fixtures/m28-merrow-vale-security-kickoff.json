@@ -1,0 +1,52 @@
+{
+  "id": "m28",
+  "title": "Security review kickoff: Merrow Vale Water",
+  "started_at": "2026-10-07T18:00:00Z",
+  "folder": "Customers/Merrow Vale",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Elena Duarte", "email": "elena@quillmark.example" },
+    { "name": "Odette Nwosu", "email": "odette@quillmark.example" },
+    { "name": "Hollis Brandreth", "email": "hollis@merrowvale-water.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Elena Duarte", "spk_1": "Odette Nwosu", "spk_2": "Hollis Brandreth" },
+  "scratchpad": "Hollis (IT security) - ~60 question questionnaire\nwants SSO, 90d location ok, no customer-managed keys (told him)\nanswers back by end Nov (insurer renews Jan)\nElena owns, Odette for technical",
+  "segments": [
+    ["m28-01", "spk_0", "0:05", "Hollis, thanks for joining. This is the first security conversation, so it's mostly us learning what your review looks like."],
+    ["m28-02", "spk_2", "0:17", "Happy to. We're a small water board, but our insurer has started asking hard questions about every vendor that touches customer data."],
+    ["m28-03", "spk_2", "0:31", "The formal part is a questionnaire, about sixty questions. I'll send it over after this call. Most of it is standard."],
+    ["m28-04", "mic", "0:44", "What matters most to you in it, so we know where to spend our time?"],
+    ["m28-05", "spk_2", "0:55", "Three things: who can log in and how, how long you keep our data, and what you log."],
+    ["m28-06", "spk_1", "1:07", "Logins first, then. Single sign-on through SAML, and we can switch off password logins for your whole organisation."],
+    ["m28-07", "spk_2", "1:18", "Good. We use our own identity provider for everything, so that's a must for us."],
+    ["m28-08", "spk_2", "1:29", "And multi-factor for anyone at Quillmark who can see our data?"],
+    ["m28-09", "spk_1", "1:38", "Everyone with production access uses hardware keys. No exceptions, including me."],
+    ["m28-10", "spk_2", "1:47", "And background checks? The insurer has a question about staff screening that I never know how to answer for vendors."],
+    ["m28-11", "spk_1", "1:59", "Everyone with production access is background checked before they start. I can describe the process in the questionnaire, without any personal details."],
+    ["m28-12", "spk_2", "2:14", "Retention. We'd like work orders kept while the contract runs, and location data kept for as short a time as possible."],
+    ["m28-13", "spk_1", "2:29", "Location breadcrumbs are on a rolling ninety days by default, and we can shorten that per customer. Work orders stay while the contract is active."],
+    ["m28-14", "spk_2", "2:42", "Ninety days is fine for us, actually. Our crews are small and they're used to it, so it's less sensitive for us than it might be elsewhere."],
+    ["m28-15", "spk_2", "2:58", "Encryption. Our insurer specifically asks whether we can hold our own encryption keys."],
+    ["m28-16", "spk_1", "3:06", "Data is encrypted at rest and in transit. Customer managed keys aren't something we offer today, and I'd rather be straight with you about that."],
+    ["m28-17", "spk_2", "3:22", "That's fine. I'll write it down as not available. The insurer cares more that we asked than about the answer."],
+    ["m28-18", "spk_2", "3:34", "Logging. What do you keep, and can we get it out?"],
+    ["m28-19", "spk_1", "3:43", "Sign-ins, failed sign-ins, permission changes, exports and every edit to a work order. One year in the admin console, or we can stream it to a system of yours."],
+    ["m28-20", "spk_2", "4:00", "We don't have a system to stream into, honestly. One year in your console is plenty for an organisation our size."],
+    ["m28-21", "spk_2", "4:14", "What about backups? If something goes wrong on your side, how far back can you restore our data?"],
+    ["m28-22", "spk_1", "4:28", "Backups run continuously, and we test a full restore every quarter. I'll put the details in the encryption and backup section."],
+    ["m28-23", "mic", "4:42", "And if your insurer has follow-up questions after reading the answers, we're happy to get on a call with them directly."],
+    ["m28-24", "mic", "4:56", "What's the timeline on your side? When do you need the answers back?"],
+    ["m28-25", "spk_2", "5:05", "Our insurer renews in January, so I'd like the questionnaire back by the end of November. Earlier is better, if you can."],
+    ["m28-26", "spk_0", "5:18", "I'll own the questionnaire on our side and pull Odette in for the technical answers. You'll have it well before the end of November."],
+    ["m28-27", "spk_2", "5:33", "Perfect. One more thing: do you carry cyber insurance yourselves? They'll ask about that too."],
+    ["m28-28", "spk_0", "5:45", "We do. I'll include a summary of our policy with the questionnaire."],
+    ["m28-29", "spk_2", "5:53", "Great. That covers my list. I'll send the questionnaire this afternoon."],
+    ["m28-30", "mic", "6:03", "Thanks, Hollis. We're looking forward to working through it with you."]
+  ],
+  "items": [
+    { "kind": "action_item", "text": "Return Merrow Vale's security questionnaire, with Odette's technical answers, before the end of November", "owner": "Elena Duarte", "segments": ["m28-25", "m28-26"] },
+    { "kind": "figure", "text": "Merrow Vale's questionnaire has about sixty questions", "segments": ["m28-03"] },
+    { "kind": "question", "text": "Merrow Vale asked for customer-managed encryption keys; not offered today", "segments": ["m28-15", "m28-17"] }
+  ]
+}

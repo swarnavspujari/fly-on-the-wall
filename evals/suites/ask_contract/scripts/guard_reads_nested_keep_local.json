@@ -1,0 +1,48 @@
+{
+  "why": "Off device, tries to read the meeting that is Keep local through its folder, then gives up.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "read_segments",
+          "input": {
+            "meeting_id": "{meeting:m17}",
+            "around_segment_id": "m17-08",
+            "before": 1,
+            "after": 1
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "t2",
+          "name": "get_note",
+          "input": {
+            "meeting_id": "{meeting:m17}"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "t3",
+          "name": "search_passages",
+          "input": {
+            "query": "Anouk raise",
+            "folder_id": "{folder:People/Reviews}",
+            "limit": 8
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "I couldn't find that in your meetings."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

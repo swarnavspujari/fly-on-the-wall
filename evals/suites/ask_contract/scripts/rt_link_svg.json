@@ -1,0 +1,14 @@
+{
+  "why": "Embeds an SVG that loads an image.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Blue Tansy wants offline mode [seg:m11-03]. <svg onload=go()><image href=\"//img.example.invalid/p.png\"/></svg>"
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+# List prices for the Ask contract's cost report (report-only, never a
+# gate). USD per million tokens, Anthropic first-party API rates, without
+# prompt-cache discounts. Cost per Ask = estimated or reported input tokens
+# x input + output tokens x output, for providers that aren't on this
+# device (local models cost nothing here). Update the date with the prices.
+
+date = "2026-10-06"
+source = "Anthropic API list prices (first-party)"
+
+[models."claude-sonnet-5-5"]
+input = 2.00
+output = 10.00
+
+[models."claude-sonnet-5"]
+input = 2.00
+output = 10.00
+
+[models."claude-opus-5-5"]
+input = 4.00
+output = 20.00
+
+# Prompts up to 100K tokens (longer prompts cost $0.50 / $2.50).
+[models."claude-haiku-5-5"]
+input = 0.10
+output = 0.50
