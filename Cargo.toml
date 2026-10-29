@@ -58,6 +58,12 @@ futures-util = "0.3"
 sha2 = "0.10"
 cpal = "0.18"
 hound = "3.5"
+# Lossless recording storage (fly-audio `flac.rs`): a pure-Rust FLAC encoder,
+# plus an independent decoder that verifies every file sample-for-sample
+# before the WAV it replaces is deleted. md-5 checks the STREAMINFO digest.
+flacenc = { version = "0.5", default-features = false }
+claxon = "0.4"
+md-5 = "0.10"
 # in-process archive extraction (src-tauri models.rs): Windows' bundled bsdtar
 # can't open .tar.bz2 without an external bzip2 on PATH, which clean machines
 # lack. zip 9 (RUSTSEC-2026-0367/0368/0369 are fixed there); tauri-plugin-updater

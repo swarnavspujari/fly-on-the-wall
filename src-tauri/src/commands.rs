@@ -309,6 +309,11 @@ pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String
             stages.contains_key(&m.id)
         };
         if !running {
+            // Background compression may be writing in the folder.
+            if !crate::audio_store::stop_meeting(&state, &m.id, std::time::Duration::from_secs(15))
+            {
+                tracing::warn!(meeting_id = %m.id, "recording compression didn't stop before the purge");
+            }
             crate::import_commands::purge_staged_import(&state, &m.id);
             if let Err(e) = state.storage.lock().unwrap().purge_meeting(&m.id) {
                 tracing::warn!(meeting_id = %m.id, error = %e, "purging deleted note's meeting failed");

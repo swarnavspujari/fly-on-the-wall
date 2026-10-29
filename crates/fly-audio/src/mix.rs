@@ -41,9 +41,20 @@ pub fn read_wav_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
 
     let mono: Vec<f32> = interleaved
         .chunks(channels)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .map(|frame| crate::derive::frame_to_mono(frame, channels))
         .collect();
     Ok((mono, spec.sample_rate))
+}
+
+/// [`read_wav_mono`] for any stored recording: a WAV, or a FLAC written by
+/// recording storage v2 (sniffed by content). A FLAC yields exactly the f32
+/// samples its original WAV did, so everything downstream (resampling, ASR
+/// input, diarization) is bit-identical.
+pub fn read_audio_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
+    if crate::flac::is_flac(path) {
+        return crate::derive::MonoFile::open(path)?.read_all();
+    }
+    read_wav_mono(path)
 }
 
 /// Linear-interpolation resample. Fine for speech; avoids a DSP dependency.
