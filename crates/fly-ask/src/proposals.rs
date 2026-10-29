@@ -621,7 +621,7 @@ pub fn addressed_to_assistant(text: &str) -> bool {
     }
     // A clause that opens with a sensitive imperative.
     text.to_lowercase()
-        .split(|c: char| matches!(c, '.' | ',' | ':' | ';' | '!' | '?' | '—' | '\n'))
+        .split(['.', ',', ':', ';', '!', '?', '—', '\n'])
         .any(|clause| {
             let mut ws = clause
                 .split_whitespace()
