@@ -35,7 +35,7 @@ The process entry point and the only place platform implementations are chosen. 
 | `recording` | `Mutex<Option<ActiveRecording>>` | Set/taken by recording.rs; read by commands.rs (`delete_note` guard), live.rs, scheduler.rs (`recording_active`, used by privacy.rs) |
 | `secrets` | `Arc<dyn SecretStore>` (keychain) | asr_commands, calendar_commands (+ `secrets_arc` for providers), llm_commands, pipeline, privacy (delete-all), state.rs (migration) |
 | `pipeline_stage` | `Mutex<HashMap<meeting_id, stage>>` | Written by pipeline.rs and scheduler.rs; read by asr_commands (`pipeline_stage` cmd), commands.rs (`delete_note`), privacy.rs (busy check, cleared on delete-all) |
-| `cancel_requests` | `Mutex<HashSet<meeting_id>>` | Inserted by scheduler.rs (`cancel`), polled/cleared by pipeline.rs |
+| `cancel_requests` | `Mutex<HashSet<meeting_id>>` | Inserted by scheduler.rs (`cancel`), polled by pipeline.rs between batches; cleared by scheduler.rs only (when a run ends, cancelled or not, and when `enqueue` creates a new job), so a retry never drops a pending cancel |
 | `screen` | `Mutex<Option<ActiveScreenRecording>>` | Set/taken by screen_commands.rs; read by scheduler.rs:469 |
 | `jobs_notify` | `tokio::sync::Notify` | Notified by recording.rs, screen_commands.rs, scheduler.rs; awaited by the scheduler worker |
 | `ollama` | `Mutex<Option<Child>>` | ollama.rs only (spawn, status, `shutdown` on Exit) |

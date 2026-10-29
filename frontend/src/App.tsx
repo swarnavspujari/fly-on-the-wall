@@ -4,6 +4,7 @@ import { PanelLeft } from "lucide-react";
 import { api } from "./api";
 import { pickInProgressEvent, seedFromEvent } from "./calendarMatch";
 import { WHISPER_ENGINE_ID } from "./types";
+import type { SettingsFocus } from "./settingsModel";
 import type {
   AppInfo,
   CalendarEvent,
@@ -149,7 +150,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   // When Settings is opened from the transcribe error, deep-link to the engine
   // row; null for a normal open.
-  const [settingsFocus, setSettingsFocus] = useState<"engine" | "groq" | null>(null);
+  const [settingsFocus, setSettingsFocus] = useState<SettingsFocus | null>(null);
   const [showFirstRun, setShowFirstRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Run the interactive OAuth flow: a first connect from Up next, or a
@@ -1103,6 +1104,7 @@ export default function App() {
         onDismissAppError={() => setError(null)}
         pipelineFailures={shownFailures}
         engine={engine}
+        onOpenNote={(noteId) => void openNoteById(noteId)}
         onOpenFailedNote={(f) => {
           if (!f.noteId) return;
           setDrawerOpen(false);
@@ -1116,6 +1118,10 @@ export default function App() {
         onDismissPipelineFailure={(meetingId) => dispatchFailures({ type: "dismiss", meetingId })}
         onOpenEngineSettings={() => {
           setSettingsFocus("engine");
+          setShowSettings(true);
+        }}
+        onOpenLlmKeySettings={() => {
+          setSettingsFocus("llm-key");
           setShowSettings(true);
         }}
         updater={updater}

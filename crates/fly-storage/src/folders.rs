@@ -100,7 +100,7 @@ impl Storage {
 
     /// Notes with a recorded meeting, filed in `folder_id` or any folder
     /// below it — the ones whose manifests carry this folder's path.
-    fn recorded_notes_in_subtree(&self, folder_id: &str) -> Result<Vec<String>> {
+    pub(crate) fn recorded_notes_in_subtree(&self, folder_id: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE sub(id) AS (
                  SELECT ?1
@@ -118,35 +118,49 @@ impl Storage {
     /// Folder names from the root down to (and including) `folder_id` —
     /// the machine-independent identity of a folder that the portability
     /// manifest carries (ids are local to one database).
-    pub(crate) fn folder_path_names(&self, folder_id: &str) -> Result<Vec<String>> {
-        let mut names = Vec::new();
+    /// Folder names from the root down to (and including) `folder_id`, each
+    /// with its own "Keep local" flag: the machine-independent identity of a
+    /// folder that the portability manifest carries (ids are local to one
+    /// database).
+    pub(crate) fn folder_path_entries(&self, folder_id: &str) -> Result<Vec<(String, bool)>> {
+        let mut entries = Vec::new();
         let mut cursor = Some(folder_id.to_string());
         while let Some(id) = cursor {
-            let (name, parent): (String, Option<String>) = self
+            let (name, parent, keep_local): (String, Option<String>, i64) = self
                 .conn
                 .query_row(
-                    "SELECT name, parent_id FROM folders WHERE id = ?1",
+                    "SELECT name, parent_id, keep_local FROM folders WHERE id = ?1",
                     [&id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?
                 .ok_or_else(|| StorageError::NotFound(format!("folder {id}")))?;
-            names.push(name);
+            entries.push((name, keep_local != 0));
             cursor = parent;
-            if names.len() > 100 {
+            if entries.len() > 100 {
                 break; // corrupt parent cycle — stop rather than spin
             }
         }
-        names.reverse();
-        Ok(names)
+        entries.reverse();
+        Ok(entries)
     }
 
     /// Find-or-create the nested folder path `names` (root → leaf), matching
     /// by name at each level, and return the leaf's id. Empty input maps to
-    /// `None` (unfiled).
-    pub(crate) fn ensure_folder_path(&self, names: &[String]) -> Result<Option<String>> {
+    /// `None` (unfiled). A folder this creates gets its "Keep local" flag
+    /// from `keep_local` (same order as `names`); one that already exists
+    /// keeps its own.
+    pub(crate) fn ensure_folder_path(
+        &self,
+        names: &[String],
+        keep_local: Option<&[bool]>,
+    ) -> Result<Option<String>> {
+        let flags = keep_local.filter(|f| f.len() == names.len());
         let mut parent: Option<String> = None;
-        for name in names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        for (i, name) in names.iter().map(|n| n.trim()).enumerate() {
+            if name.is_empty() {
+                continue;
+            }
             let existing: Option<String> = self
                 .conn
                 .query_row(
@@ -159,7 +173,13 @@ impl Storage {
                 .optional()?;
             parent = Some(match existing {
                 Some(id) => id,
-                None => self.create_folder(name, parent.as_deref())?.id,
+                None => {
+                    let id = self.create_folder(name, parent.as_deref())?.id;
+                    if flags.is_some_and(|f| f[i]) {
+                        self.set_folder_keep_local(&id, true)?;
+                    }
+                    id
+                }
             });
         }
         Ok(parent)

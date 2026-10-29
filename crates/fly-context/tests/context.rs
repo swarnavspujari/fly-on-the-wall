@@ -664,7 +664,10 @@ fn schemas_are_strict_compatible_and_args_round_trip() {
             "list_meetings",
             "get_event",
             "get_note",
-            "get_items"
+            "get_items",
+            "get_briefing",
+            "open_items",
+            "whats_changed"
         ]
     );
     for d in &defs {
