@@ -189,6 +189,18 @@ fn split_coordination(clause: &str) -> Vec<String> {
         start = b;
     }
     parts.push(clause[start..].trim().to_string());
+    // "pricing, hiring, and the launch": the ", " cut leaves "and …".
+    for p in &mut parts {
+        for lead in ["and ", "or "] {
+            // (`get` so a multibyte first char can't split a slice)
+            if p.len() > lead.len()
+                && p.get(..lead.len())
+                    .is_some_and(|h| h.eq_ignore_ascii_case(lead))
+            {
+                *p = p[lead.len()..].trim().to_string();
+            }
+        }
+    }
     parts.retain(|p| !p.is_empty());
     parts
 }
@@ -465,6 +477,11 @@ pub fn fan_out<R: Readers>(
     };
     for keys in &order {
         for k in keys {
+            // Covered already (another query's pick was this one's best):
+            // don't spend a second slot on it.
+            if picked.contains(k) {
+                break;
+            }
             if acc.contains_key(k) && try_take(k, &mut picked) {
                 break;
             }
@@ -558,6 +575,22 @@ mod tests {
         assert_eq!(
             decompose("pricing and travel spend", 4),
             vec!["pricing and travel spend", "pricing", "travel spend"]
+        );
+    }
+
+    #[test]
+    fn an_oxford_comma_leaves_no_stray_and() {
+        assert_eq!(
+            decompose(
+                "What did we decide about pricing, hiring, and the launch?",
+                4
+            ),
+            vec![
+                "What did we decide about pricing, hiring, and the launch?",
+                "What did we decide about pricing",
+                "What did we decide about hiring",
+                "What did we decide about the launch"
+            ]
         );
     }
 

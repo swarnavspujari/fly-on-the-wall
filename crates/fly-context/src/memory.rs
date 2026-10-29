@@ -61,6 +61,9 @@ const OPEN_SCAN: usize = 1_000;
 const FULL_TEXT_HITS: usize = 20;
 /// Newest meetings a person briefing reads (each needs its transcript).
 const PERSON_MEETINGS: usize = 30;
+/// Transcripts read for speaker labels when looking for a person who isn't
+/// an attendee or item owner (newest meetings first).
+const PERSON_LABEL_SCAN: usize = 30;
 /// Most series one question-level prefetch covers.
 const PREFETCH_SERIES: usize = 3;
 /// Facts a prefetch or a `get_briefing` call keeps (the newest).
@@ -191,6 +194,10 @@ pub struct TimelineEntry {
     pub has_transcript: bool,
     /// Every extracted item of the meeting (not only the facts shown).
     pub item_count: usize,
+    /// Attendees, then named speakers (current labels).
+    pub people: Vec<String>,
+    /// The series key it belongs to, in a series briefing.
+    pub series: Option<String>,
 }
 
 /// One extracted item, with its provenance.
@@ -258,13 +265,38 @@ pub struct OpenItems {
     pub evidence: Vec<CitedSegment>,
 }
 
+/// The participant list for `meetings`: each meeting's people, first seen
+/// first, case-insensitively unique.
+fn union_people(meetings: &[TimelineEntry]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in meetings {
+        for p in &m.people {
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(p)) {
+                out.push(p.clone());
+            }
+        }
+    }
+    out
+}
+
 impl Briefing {
-    /// Keep only meetings `keep` allows (e.g. an Ask scope): timeline,
-    /// facts and evidence alike.
+    /// Keep only meetings `keep` allows (e.g. an Ask scope). Timeline,
+    /// facts and evidence are filtered, and participants and series names
+    /// are rebuilt from what remains, so nothing out of scope is left.
     pub fn retain_meetings(&mut self, keep: impl Fn(&str) -> bool) {
         self.meetings.retain(|m| keep(&m.meeting_id));
         self.facts.retain(|f| keep(&f.meeting_id));
         self.evidence.retain(|e| keep(&e.meeting_id));
+        self.participants = union_people(&self.meetings);
+        let left: Vec<&str> = self
+            .meetings
+            .iter()
+            .filter_map(|m| m.series.as_deref())
+            .collect();
+        self.series.retain(|s| left.contains(&s.as_str()));
+        if self.meetings.is_empty() && self.matched_by != MatchedBy::Person {
+            self.matched_by = MatchedBy::None;
+        }
     }
 
     /// The cited segment for `(meeting_id, segment_id)`, if it resolved.
@@ -486,13 +518,25 @@ const CHANGE_WORDS: &[&str] = &[
     "progress",
 ];
 
-const FIRST_PERSON: &[&str] = &["i", "me", "my", "mine", "myself"];
+/// Possessive first person: "my action items", "anything of mine".
+const MY: &[&str] = &["my", "mine", "myself"];
+/// Verbs that make "I …" about the user's own items ("what did I commit
+/// to", "what do I owe Dana"). A bare "I" or "me" ("remind me", "I missed
+/// the weekly") is not.
+#[rustfmt::skip]
+const I_OWN: &[&str] = &[
+    "owe", "owed", "commit", "committed", "promise", "promised", "own", "agree", "agreed",
+    "decide", "decided", "volunteer", "volunteered", "signed", "said", "say",
+];
 
 /// A question as words: lowercase tokens plus whether each was written
-/// capitalized.
+/// capitalized, and the title-normalized form series names are matched
+/// against.
 struct Words {
     lower: Vec<String>,
     capitalized: Vec<bool>,
+    /// [`normalize_title`] tokens ("Q3 planning" → "q planning").
+    title: Vec<String>,
 }
 
 impl Words {
@@ -507,11 +551,38 @@ impl Words {
                 .iter()
                 .map(|w| w.chars().next().is_some_and(char::is_uppercase))
                 .collect(),
+            title: normalize_title(text)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
         }
     }
 
     fn has(&self, word: &str) -> bool {
         self.lower.iter().any(|w| w == word)
+    }
+
+    /// Some capitalized word that isn't a question word ("What did Priya
+    /// say?"): the question may name a person.
+    fn may_name_someone(&self) -> bool {
+        self.lower
+            .iter()
+            .zip(&self.capitalized)
+            .any(|(w, cap)| *cap && !STOPWORDS.contains(&w.as_str()))
+    }
+
+    /// The question is about the user's own items.
+    fn asks_about_me(&self) -> bool {
+        MY.iter().any(|w| self.has(w))
+            || self
+                .lower
+                .windows(2)
+                .any(|w| w[0] == "i" && I_OWN.contains(&w[1].as_str()))
+    }
+
+    /// `tokens` as a contiguous run of title words.
+    fn has_title_run(&self, tokens: &[String]) -> bool {
+        !tokens.is_empty() && self.title.windows(tokens.len()).any(|w| w == tokens)
     }
 
     /// `tokens` as a contiguous run.
@@ -527,10 +598,10 @@ impl Words {
         })
     }
 
-    /// Matches `key_token` exactly, or as a plural/prefix for longer words
-    /// ("renewals" ~ "renewal").
+    /// A title word matching `key_token` exactly, or as a plural/prefix for
+    /// longer words ("renewals" ~ "renewal").
     fn has_like(&self, key_token: &str) -> bool {
-        self.lower.iter().any(|w| {
+        self.title.iter().any(|w| {
             w == key_token
                 || (key_token.chars().count() >= 4
                     && (w.starts_with(key_token) || key_token.starts_with(w.as_str()))
@@ -644,6 +715,8 @@ struct Plan {
     query: String,
     matched_by: MatchedBy,
     series: Vec<String>,
+    /// Meeting id → series key, for series briefings.
+    series_of: HashMap<String, String>,
     meetings: Vec<Meeting>,
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
@@ -661,12 +734,36 @@ impl<'c, 'a> Reader<'c, 'a> {
         })
     }
 
+    /// A meeting's transcript, loaded once per call. Word timings are
+    /// dropped on load: nothing here needs them, and a long series would
+    /// otherwise hold every meeting's words in memory at once.
     fn transcript(&mut self, meeting_id: &str) -> Result<Option<&Transcript>> {
         if !self.transcripts.contains_key(meeting_id) {
-            let t = self.ctx.storage().get_transcript(meeting_id)?;
+            let t = self.ctx.storage().get_transcript(meeting_id)?.map(|mut t| {
+                for s in &mut t.segments {
+                    s.words = Vec::new();
+                }
+                t
+            });
             self.transcripts.insert(meeting_id.to_string(), t);
         }
         Ok(self.transcripts[meeting_id].as_ref())
+    }
+
+    /// Named speaker labels in the newest [`PERSON_LABEL_SCAN`] meetings of
+    /// `visible` (for finding a person known only as a relabeled speaker).
+    fn recent_speaker_labels(&mut self, visible: &[Meeting]) -> Result<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        for m in visible.iter().take(PERSON_LABEL_SCAN) {
+            if let Some(t) = self.transcript(&m.id)? {
+                for s in &t.speakers {
+                    if !out.iter().any(|o| o.eq_ignore_ascii_case(&s.label)) {
+                        out.push(s.label.clone());
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Every meeting this view may see, newest first. Keep local is
@@ -757,6 +854,7 @@ impl<'c, 'a> Reader<'c, 'a> {
             query,
             matched_by,
             series,
+            series_of,
             mut meetings,
             since,
             until,
@@ -794,32 +892,29 @@ impl<'c, 'a> Reader<'c, 'a> {
             return Ok(b);
         }
 
-        // Participants: attendee union, then named speakers.
+        // Timeline, each meeting with its people: attendees, then named
+        // speakers (participants = their union, first seen first).
         for m in &meetings {
+            let mut people: Vec<String> = Vec::new();
+            let mut add = |name: &str| {
+                if !name.is_empty() && !people.iter().any(|p| p.eq_ignore_ascii_case(name)) {
+                    people.push(name.to_string());
+                }
+            };
             for a in &m.attendees {
-                let name = a.display_name();
-                if !name.is_empty() && !b.participants.iter().any(|p| p.eq_ignore_ascii_case(name))
-                {
-                    b.participants.push(name.to_string());
-                }
+                add(a.display_name());
             }
-            if let Some(t) = self.transcript(&m.id)? {
-                for s in &t.speakers {
-                    if !s.label.starts_with("Speaker ")
-                        && !b
-                            .participants
-                            .iter()
-                            .any(|p| p.eq_ignore_ascii_case(&s.label))
-                    {
-                        b.participants.push(s.label.clone());
+            let has_transcript = match self.transcript(&m.id)? {
+                Some(t) => {
+                    for s in &t.speakers {
+                        if !s.label.starts_with("Speaker ") {
+                            add(&s.label);
+                        }
                     }
+                    true
                 }
-            }
-        }
-
-        // Timeline.
-        for m in &meetings {
-            let has_transcript = self.transcript(&m.id)?.is_some();
+                None => false,
+            };
             let item_count = self.ctx.storage().get_meeting_items(&m.id)?.len();
             b.meetings.push(TimelineEntry {
                 meeting_id: m.id.clone(),
@@ -828,8 +923,11 @@ impl<'c, 'a> Reader<'c, 'a> {
                 started_at: m.started_at,
                 has_transcript,
                 item_count,
+                people,
+                series: series_of.get(&m.id).cloned(),
             });
         }
+        b.participants = union_people(&b.meetings);
 
         // Facts, chronological by meeting (stable: extraction order within).
         let by_id: HashMap<&str, &Meeting> = meetings.iter().map(|m| (m.id.as_str(), m)).collect();
@@ -864,8 +962,18 @@ impl<'c, 'a> Reader<'c, 'a> {
         Ok(b)
     }
 
-    /// Meetings where `person` attended or owns an item, newest first.
-    fn person_meetings(&self, person: &PersonKey, visible: &[Meeting]) -> Result<Vec<Meeting>> {
+    /// Meetings in `visible` (newest first) where `person` attended, owns
+    /// an item, or is a named speaker — at most `limit`, newest first.
+    /// Speaker labels are read from at most [`PERSON_LABEL_SCAN`]
+    /// transcripts of meetings that didn't match otherwise.
+    fn person_meetings(
+        &mut self,
+        person: &PersonKey,
+        visible: &[Meeting],
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<Meeting>> {
         let ids: HashSet<&str> = visible.iter().map(|m| m.id.as_str()).collect();
         let owned: HashSet<String> = self
             .items(
@@ -880,17 +988,30 @@ impl<'c, 'a> Reader<'c, 'a> {
             .filter(|i| i.owner.as_deref().is_some_and(|o| person.matches(o)))
             .map(|i| i.meeting_id)
             .collect();
-        Ok(visible
-            .iter()
-            .filter(|m| {
-                owned.contains(&m.id)
-                    || m.attendees.iter().any(|a| {
-                        person.matches(&a.name)
-                            || a.email.as_deref().is_some_and(|e| person.matches(e))
-                    })
-            })
-            .cloned()
-            .collect())
+        let mut out = Vec::new();
+        let mut scanned = 0;
+        for m in visible {
+            if out.len() >= limit {
+                break;
+            }
+            if since.is_some_and(|s| m.started_at < s) || until.is_some_and(|u| m.started_at > u) {
+                continue;
+            }
+            let mut hit = owned.contains(&m.id)
+                || m.attendees.iter().any(|a| {
+                    person.matches(&a.name) || a.email.as_deref().is_some_and(|e| person.matches(e))
+                });
+            if !hit && scanned < PERSON_LABEL_SCAN {
+                scanned += 1;
+                hit = self
+                    .transcript(&m.id)?
+                    .is_some_and(|t| t.speakers.iter().any(|s| person.matches(&s.label)));
+            }
+            if hit {
+                out.push(m.clone());
+            }
+        }
+        Ok(out)
     }
 
     /// Item owners of visible meetings (for person matching).
@@ -912,6 +1033,13 @@ impl<'c, 'a> Reader<'c, 'a> {
         Ok(owners)
     }
 
+    /// `person` takes part in at least one meeting this view may see.
+    fn person_is_visible(&mut self, person: &PersonKey, visible: &[Meeting]) -> Result<bool> {
+        Ok(!self
+            .person_meetings(person, visible, None, None, 1)?
+            .is_empty())
+    }
+
     fn person_briefing(
         &mut self,
         query: &str,
@@ -921,15 +1049,13 @@ impl<'c, 'a> Reader<'c, 'a> {
         until: Option<DateTime<Utc>>,
         opts: BriefingOptions,
     ) -> Result<Briefing> {
-        let mut meetings = self.person_meetings(&person, visible)?;
-        meetings.retain(|m| since.is_none_or(|s| m.started_at >= s));
-        meetings.retain(|m| until.is_none_or(|u| m.started_at <= u));
         // visible is newest first; read at most PERSON_MEETINGS transcripts
-        meetings.truncate(PERSON_MEETINGS);
+        let meetings = self.person_meetings(&person, visible, since, until, PERSON_MEETINGS)?;
         self.assemble(Plan {
             query: query.to_string(),
             matched_by: MatchedBy::Person,
             series: Vec::new(),
+            series_of: HashMap::new(),
             meetings,
             since,
             until,
@@ -938,6 +1064,20 @@ impl<'c, 'a> Reader<'c, 'a> {
             max_meetings: opts.max_meetings,
         })
     }
+}
+
+/// Series keys, their meetings, and each meeting's series key.
+fn series_plan(matched: &[&Series]) -> (Vec<String>, Vec<Meeting>, HashMap<String, String>) {
+    let keys = matched.iter().map(|s| s.key.clone()).collect();
+    let mut meetings = Vec::new();
+    let mut series_of = HashMap::new();
+    for s in matched {
+        for m in &s.meetings {
+            series_of.insert(m.id.clone(), s.key.clone());
+            meetings.push(m.clone());
+        }
+    }
+    (keys, meetings, series_of)
 }
 
 /// The start of the newest meeting in `meetings` that has extracted items
@@ -951,13 +1091,6 @@ fn latest_start(ctx: &Context<'_>, meetings: &[Meeting]) -> Result<Option<DateTi
         }
     }
     Ok(sorted.first().map(|m| m.started_at))
-}
-
-fn series_meetings(matched: &[&Series]) -> Vec<Meeting> {
-    matched
-        .iter()
-        .flat_map(|s| s.meetings.iter().cloned())
-        .collect()
 }
 
 fn check_query(field: &str, q: &str) -> Result<()> {
@@ -1001,8 +1134,12 @@ impl Context<'_> {
         let mut matched_by = MatchedBy::Series;
         if matched.is_empty() && opts.resolve_person && person.is_none() {
             let owners = r.owners(&visible)?;
-            if let Some(p) = find_person(query, &known_names(&visible, &owners)) {
-                return r.person_briefing(query, p, &visible, since, None, opts);
+            let mut known = known_names(&visible, &owners);
+            known.extend(r.recent_speaker_labels(&visible)?);
+            if let Some(p) = find_person(query, &known) {
+                if r.person_is_visible(&p, &visible)? {
+                    return r.person_briefing(query, p, &visible, since, None, opts);
+                }
             }
         }
         if matched.is_empty() {
@@ -1025,11 +1162,13 @@ impl Context<'_> {
                 .filter(|s| s.meetings.iter().any(|m| ids.contains(&m.id)))
                 .collect();
         }
+        let (keys, meetings, series_of) = series_plan(&matched);
         r.assemble(Plan {
             query: query.to_string(),
             matched_by,
-            series: matched.iter().map(|s| s.key.clone()).collect(),
-            meetings: series_meetings(&matched),
+            series: keys,
+            series_of,
+            meetings,
             since,
             until: None,
             person,
@@ -1051,7 +1190,7 @@ impl Context<'_> {
         let visible = r.visible_meetings()?;
         let series = detect_series(visible);
         let matched = series_matching(&series, series_name);
-        let meetings = series_meetings(&matched);
+        let (keys, meetings, series_of) = series_plan(&matched);
         let since = match since {
             Some(s) => Some(s),
             None => latest_start(self, &meetings)?,
@@ -1059,7 +1198,8 @@ impl Context<'_> {
         r.assemble(Plan {
             query: series_name.to_string(),
             matched_by: MatchedBy::Series,
-            series: matched.iter().map(|s| s.key.clone()).collect(),
+            series: keys,
+            series_of,
             meetings,
             since,
             until: None,
@@ -1209,7 +1349,8 @@ impl Context<'_> {
 
     /// Deterministic memory for one question, with no model tool call
     /// (Ask tier S). `Some` only when the question names a known person
-    /// (attendee or item owner; "I"/"my" = the user's own "You") or a
+    /// (attendee, item owner or a recent named speaker; "my …" / "what did
+    /// I commit to" = the user's own "You") or a
     /// recurring series / project from the user's meeting titles — all
     /// validated against meetings this view may see. "What changed …"
     /// about a series narrows to its newest meeting with items, unless
@@ -1229,18 +1370,28 @@ impl Context<'_> {
         }
         let words = Words::new(question);
         let owners = r.owners(&visible)?;
-        let known = known_names(&visible, &owners);
+        let mut known = known_names(&visible, &owners);
         let person = match opts.people.iter().find_map(|p| PersonKey::new(p)) {
             Some(p) => Some(p),
-            None => find_person(question, &known).or_else(|| {
-                // "my action items": the user's own, when "You" owns or
-                // says anything.
-                FIRST_PERSON
-                    .iter()
-                    .any(|w| words.has(w))
-                    .then(PersonKey::you)
-                    .filter(|_| owners.iter().any(|o| o.eq_ignore_ascii_case("you")))
-            }),
+            None => {
+                let mut found = find_person(question, &known);
+                // A person known only as a (relabeled) speaker: read recent
+                // speaker labels, but only when the question may name
+                // someone (a capitalized word that isn't a question word).
+                if found.is_none() && words.may_name_someone() {
+                    known.extend(r.recent_speaker_labels(&visible)?);
+                    found = find_person(question, &known);
+                }
+                // "my action items", "what did I commit to": the user's own
+                // (the microphone speaker's default label, "You").
+                found.or_else(|| words.asks_about_me().then(PersonKey::you))
+            }
+        };
+        // Router-supplied or detected, a person must take part in a meeting
+        // this view may see; otherwise they narrow nothing.
+        let person = match person {
+            Some(p) if r.person_is_visible(&p, &visible)? => Some(p),
+            _ => None,
         };
         let person_tokens: HashSet<String> = person
             .as_ref()
@@ -1276,7 +1427,7 @@ impl Context<'_> {
                 },
             )?
         } else {
-            let meetings = series_meetings(&matched);
+            let (keys, meetings, series_of) = series_plan(&matched);
             let since = match opts.since {
                 Some(s) => Some(s),
                 None if CHANGE_WORDS.iter().any(|w| words.has(w)) => latest_start(self, &meetings)?,
@@ -1285,7 +1436,8 @@ impl Context<'_> {
             r.assemble(Plan {
                 query: question.to_string(),
                 matched_by: MatchedBy::Series,
-                series: matched.iter().map(|s| s.key.clone()).collect(),
+                series: keys,
+                series_of,
                 meetings,
                 since,
                 until: opts.until,
@@ -1331,13 +1483,13 @@ fn series_in_question<'s>(
                 toks.iter().all(|t| words.has_like(t))
             } else {
                 // an all-generic name ("weekly sync") only as written
-                toks.len() >= 2 && words.has_run(&toks)
+                toks.len() >= 2 && words.has_title_run(&toks)
             }
         })
         .collect();
     if full.is_empty() {
         let project: Vec<&String> = words
-            .lower
+            .title
             .iter()
             .filter(|w| w.chars().count() >= 4 && distinctive(w))
             .collect();

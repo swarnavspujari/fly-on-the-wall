@@ -795,6 +795,182 @@ fn prefetch_routes_people_series_and_projects_and_nothing_else() {
     assert!(capped.facts_omitted > 0);
 }
 
+#[test]
+fn first_person_narrows_only_when_asking_about_ones_own_items() {
+    let f = fixture();
+    let ctx = f.shared();
+    let opts = MemoryPrefetch::default();
+    // "me" / "I missed" are not about the user's own items
+    for q in [
+        "Remind me what changed in the launch weekly",
+        "I missed the launch weekly, what happened?",
+    ] {
+        let b = ctx.memory_prefetch(q, &opts).unwrap().unwrap();
+        assert_eq!(b.person, None, "{q}");
+        assert!(
+            b.facts.iter().any(|x| x.text == "Share the deck by Friday"),
+            "{q}: {:?}",
+            b.facts
+        );
+    }
+    // owning phrasing is
+    let b = ctx
+        .memory_prefetch("What did I commit to in the launch weekly?", &opts)
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.person.as_deref(), Some("You"));
+    assert!(b
+        .facts
+        .iter()
+        .all(|x| x.owner.as_deref() == Some("You") || x.said_by.as_deref() == Some("You")));
+}
+
+#[test]
+fn renderers_never_claim_none_when_items_were_left_out() {
+    let f = fixture();
+    // an open item with no transcript source at all
+    f.storage
+        .replace_meeting_items(
+            &f.budget,
+            &[item(
+                &f.budget,
+                ItemKind::ActionItem,
+                "Freeze travel spend",
+                Some("Sam"),
+                Some("open"),
+                None,
+                &[],
+            )],
+        )
+        .unwrap();
+    let o = f
+        .shared()
+        .open_items(&OpenItemsArgs {
+            scope: Some("budget review".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let text = render::open_items(&o);
+    assert!(
+        text.starts_with("1 open item(s) in \"budget review\""),
+        "{text}"
+    );
+    assert!(text.contains("1 more open item(s) not shown"), "{text}");
+    assert!(!text.contains("No open"), "{text}");
+
+    let b = f
+        .shared()
+        .get_briefing(&briefing_args("budget review"))
+        .unwrap();
+    let text = render::briefing(&b);
+    assert!(text.contains("1 item(s) not shown"), "{text}");
+    assert!(!text.contains("No extracted"), "{text}");
+}
+
+#[test]
+fn scoping_a_briefing_rebuilds_participants_and_series() {
+    let f = fixture();
+    let b = f
+        .shared()
+        .memory_prefetch("Where are we on the launch?", &MemoryPrefetch::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.series, vec!["launch retro", "launch weekly"]);
+    assert!(b.participants.contains(&"Sam Ortiz".to_string()));
+
+    let mut retro = b.clone();
+    retro.retain_meetings(|m| m == f.retro);
+    assert_eq!(retro.series, vec!["launch retro"]);
+    assert!(
+        !retro.participants.contains(&"Sam Ortiz".to_string()),
+        "{:?}",
+        retro.participants
+    );
+    assert!(retro.facts.iter().all(|x| x.meeting_id == f.retro));
+
+    let mut none = b.clone();
+    none.retain_meetings(|_| false);
+    assert!(none.series.is_empty() && none.participants.is_empty());
+    assert_eq!(none.matched_by, MatchedBy::None);
+    let text = render::briefing(&none);
+    assert!(
+        !text.contains("launch retro") && !text.contains("launch weekly"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_person_known_only_as_a_relabeled_speaker_is_found() {
+    let f = fixture();
+    // not an attendee, owns nothing: only a speaker label
+    f.storage
+        .relabel_speaker(&f.budget, "spk_1", "Priya")
+        .unwrap();
+    // and a label that exists only in a Keep-local meeting
+    f.storage
+        .relabel_speaker(&f.legal, "spk_1", "Quinn")
+        .unwrap();
+    let shared = f.shared();
+    let b = shared
+        .memory_prefetch("What did Priya say?", &MemoryPrefetch::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.person.as_deref(), Some("Priya"));
+    let texts: Vec<&str> = b.facts.iter().map(|x| x.text.as_str()).collect();
+    assert_eq!(texts, vec!["Freeze travel spend"]);
+    assert_eq!(
+        shared
+            .get_briefing(&briefing_args("Priya"))
+            .unwrap()
+            .matched_by,
+        MatchedBy::Person
+    );
+    // the hidden-only label is nobody when shared, somebody locally
+    assert!(shared
+        .memory_prefetch("What did Quinn say?", &MemoryPrefetch::default())
+        .unwrap()
+        .is_none());
+    assert!(f
+        .local()
+        .memory_prefetch("What did Quinn say?", &MemoryPrefetch::default())
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn router_names_must_be_visible_to_narrow_anything() {
+    let f = fixture();
+    let b = f
+        .shared()
+        .memory_prefetch(
+            "What changed in the launch weekly?",
+            &MemoryPrefetch {
+                people: vec!["Zed Quill".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.person, None);
+    assert!(!b.facts.is_empty());
+    f.assert_briefing_clean("router name", &b);
+}
+
+#[test]
+fn series_names_with_numbers_are_found() {
+    let f = fixture();
+    meeting(&f.storage, "Q3 Planning", None, 21, &[]);
+    let b = f
+        .shared()
+        .memory_prefetch(
+            "What did we decide in Q3 planning?",
+            &MemoryPrefetch::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.series, vec!["q planning"]);
+}
+
 // ---------------------------------------------------------------------------
 // Keep local
 // ---------------------------------------------------------------------------

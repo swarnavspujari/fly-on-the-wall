@@ -447,10 +447,18 @@ pub fn briefing_within(b: &Briefing, max_chars: usize) -> String {
             any = true;
         }
     }
+    // Never claim "none" when items exist but weren't shown.
     let sourced = lines.iter().filter(|l| l.is_some()).count();
+    let unsourced = lines.len() - sourced;
     let not_shown = b.facts_omitted + sourced - keep.iter().filter(|k| **k).count();
-    if !any {
-        out.push_str("No extracted decisions, action items or other facts with a source yet.\n");
+    if !any && unsourced == 0 && not_shown == 0 {
+        out.push_str("No extracted decisions, action items or other facts yet.\n");
+    }
+    if unsourced > 0 {
+        let _ = writeln!(
+            out,
+            "({unsourced} item(s) not shown: they have no transcript line left to cite.)"
+        );
     }
     if not_shown > 0 {
         let _ = writeln!(out, "({not_shown} older item(s) not shown.)");
@@ -485,7 +493,10 @@ pub fn open_items(o: &OpenItems) -> String {
         .iter()
         .filter_map(|f| fact_block(f, |m, id| o.cited(m, id), true))
         .collect();
-    if lines.is_empty() {
+    // Items whose transcript lines are gone can't be cited, but they are
+    // still open: say so rather than claim there are none.
+    let unsourced = o.facts.len() - lines.len();
+    if o.facts.is_empty() {
         let _ = writeln!(out, "No open action items or commitments{who}{scope}.");
         return out;
     }
@@ -493,11 +504,18 @@ pub fn open_items(o: &OpenItems) -> String {
         out,
         "{} open item(s){who}{scope}, newest meeting first (status as stated in that meeting; \
          a later meeting may have closed it):",
-        lines.len()
+        o.facts.len()
     );
     for l in lines {
         out.push_str(&l);
         out.push('\n');
+    }
+    if unsourced > 0 {
+        let _ = writeln!(
+            out,
+            "({unsourced} more open item(s) not shown: they have no transcript line left to \
+             cite.)"
+        );
     }
     out
 }

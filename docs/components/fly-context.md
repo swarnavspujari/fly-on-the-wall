@@ -64,7 +64,9 @@ A `Context` is built with a `Visibility`. Under `ShareableOnly` (any cloud model
 ### Memory
 What "memory" means here is the knowledge the app has already extracted, offered as cited context. It is not free-form model memory. No model runs at query time.
 - **Series:** meetings grouped by normalized title ("Weekly Sync 2026-07-01" → `weekly sync`) and attendee overlap (Jaccard ≥ 0.34 with the group's first meeting).
-- **People:** attendee names and emails plus item owners of visible meetings.
+- **People:** attendee names and emails, item owners, and named speaker labels, all from visible meetings.
+  - Speaker labels come from the newest 30 transcripts (`PERSON_LABEL_SCAN`). The prefetch reads them only when the question has a capitalized non-question word, so a person known only as a relabeled speaker is found.
+  - A person, including one the router supplies, narrows a briefing only if they take part in a meeting this view may see. Otherwise they are ignored, so a name validated against unfiltered data can't be echoed.
   - `PersonKey::matches` treats "Dana" ~ "Dana Lee" ~ `dana.lee@…`, but "Dana Lee" ≁ "Dana Kim".
   - A bare first name shared by two different full names is ambiguous, so no person is chosen.
   - A first name that is also a common word ("Will", "May") counts only when capitalized mid-sentence.
@@ -74,13 +76,14 @@ What "memory" means here is the knowledge the app has already extracted, offered
   - Ids a re-transcribe removed don't resolve. The model-facing renderers leave out a fact with no resolvable id: it can't be cited.
 - **Routing:**
   - `get_briefing`: a series whose name holds every query word, else a known person the query names, else series holding meetings whose transcript or notes match the query (FTS, 20 hits).
-  - `memory_prefetch` (tier S, no model tool call) returns `Some` only when the question names a known person or names a series or project. "I" / "my" maps to the user's own "You" when "You" owns something.
-    - A series matches on every word of its name. An all-generic name such as "weekly sync" must appear as written.
+  - `memory_prefetch` (tier S, no model tool call) returns `Some` only when the question names a known person or names a series or project. Owning first-person phrasing ("my …", "mine", "what did I commit to / do I owe") maps to the user's own "You", the microphone speaker's label. A bare "me" or "I" ("remind me", "I missed the weekly") doesn't narrow anything.
+    - A series matches on every word of its name, compared in title-normalized form ("Q3 planning" ~ `q planning`). An all-generic name such as "weekly sync" must appear as written.
     - A project matches on one distinctive question word found in series names ("launch" → `launch weekly` + `launch retro`, newest 3).
     - "What changed …" narrows a series to its newest meeting with items.
     - Router-supplied `people` / `since` / `until` win.
   - Ask-facing calls cap at the newest 12 meetings and 40 facts (`DEFAULT_MAX_MEETINGS`, `DEFAULT_MAX_FACTS`). `facts_omitted` counts the cut.
-- **Cost:** each meeting in a briefing loads its transcript once per call (participants, `said_by`, evidence). A person briefing reads at most the 30 newest candidate meetings.
+- **Scoping:** `retain_meetings` filters the timeline, facts and evidence, then rebuilds participants (from each `TimelineEntry.people`) and series names (from `TimelineEntry.series`). Nothing out of scope remains.
+- **Cost:** each meeting in a briefing loads its transcript once per call (participants, `said_by`, evidence), with word timings dropped on load. A person briefing reads at most the 30 newest candidate meetings, plus at most 30 transcripts for speaker labels.
 - **The MCP entry points** (`memory::mcp::*`) keep fly-mcp's historical routing: no person routing, no caps, and no evidence for `open_items`. Their text is rendered by fly-mcp.
 
 ### Using it from the Ask harness
@@ -116,7 +119,7 @@ Facts are extraction paraphrases ("Launch budget is $40k" from "forty thousand d
 - **`fan_out`:**
   - Runs at most `max_searches` searches (duplicates and blanks cost nothing), `max_parallel` at a time, on scoped threads. Each thread builds its own `Context` with the caller's `Visibility`.
   - Any failed search fails the whole call.
-  - Merges by RRF (k = 60) after a coverage pass that gives each query its best passage, then applies `max_passages`, `per_meeting` and `max_chars`.
+  - Merges by RRF (k = 60) after a coverage pass that gives each query its best passage not already picked, then applies `max_passages`, `per_meeting` and `max_chars`.
   - Under `ShareableOnly`, re-checks the merged set against the Keep-local sets (fail closed).
 - **Readers:**
   - `Mutex<Storage>` (the app's handle) runs searches one at a time.
@@ -200,19 +203,20 @@ None.
 | unit | `src/passages.rs` | 4 | chunker lockstep, window coverage, query terms / lexical score, RRF fusion and per-owner cap |
 | unit | `src/render.rs` | 1 | `clock()` formatting |
 | unit | `src/memory.rs` | 7 | title normalization, series grouping and matching, person keys, people found only when named and known (common-word names, ambiguity), series/project words in a question |
-| unit | `src/fanout.rs` | 4 | `decompose`: no split, clauses, noun lists and shared last words, caps and dedupe |
+| unit | `src/fanout.rs` | 5 | `decompose`: no split, clauses, noun lists and shared last words, Oxford comma, caps and dedupe |
 | integration (runs in CI) | `tests/context.rs` | 13 | the six read tools on a real SQLite fixture: Keep-local exclusion per path and in aggregate, no metadata leak, vector-pool starvation, schemas for all nine tools, argument limits |
-| integration (runs in CI) | `tests/memory.rs` | 15 | briefings with provenance and current labels, relabel flow, person and narrowed briefings, what-changed default, open items (owner, scope, done), budgeted rendering, citation-planting defense, prefetch routing; Keep local on every memory path, including the tool path and a hidden-only person; fail-closed with a broken Keep-local lookup; fan-out merge/attribution, every budget, real parallelism (`OpenPerWorker`) vs serialized `Mutex<Storage>`, Keep-local exclusion |
+| integration (runs in CI) | `tests/memory.rs` | 21 | briefings with provenance, source quotes and current labels, relabel flow, a person known only as a relabeled speaker, first-person narrowing only on owning phrasing, router names that must be visible, "Q3"-style series names, scoped rebuild of participants and series, no false "none" when items are left out, person and narrowed briefings, what-changed default, open items (owner, scope, done), budgeted rendering, citation-planting defense, prefetch routing; Keep local on every memory path, including the tool path and a hidden-only person; fail-closed with a broken Keep-local lookup; fan-out merge/attribution, every budget, real parallelism (`OpenPerWorker`) vs serialized `Mutex<Storage>`, Keep-local exclusion |
 
 **Known gaps:**
 - **The fail-closed path is tested for memory and fan-out only.** No test makes the lookups fail for the six read tools.
 - **`get_items` relies only on the SQL filter**, with no post-filter. The memory paths add one.
 - **Model-proposed arguments aren't checked against an Ask scope** (spec §4.2a #13). The harness does that, with `retain_meetings` for memory results.
 - **Prefetch routing is heuristic.**
-  - People come from attendees and item owners, not from speaker labels. Loading every transcript's labels per question is too slow, so the Ask router's validated `people` should be passed in.
+  - Speaker labels are read from only the newest 30 transcripts. An older meeting where someone only spoke is found only through attendees, owners or the router's `people`.
   - Status is as stated in each meeting. A later meeting saying "done" doesn't close an earlier item.
 - **`decompose` is English-only.** It has no semantic check, and a junk sub-query only costs one search.
 - **Cost:** `list_meetings` and memory load every meeting row per call; briefings load one transcript per meeting shown.
+- **Error handling:** a corrupt transcript or item row now fails a memory call. The old MCP code skipped such rows silently.
 
 ## Changing it safely
 - Run `cargo test -p fly-context`, plus `cargo test -p fly-mcp` when you touch `memory.rs`: fly-mcp's `tests/context_golden.rs` pins the MCP's briefing and open-items text byte for byte. Also run `cargo test -p fly-storage` when you touch chunking, search or privacy SQL.
