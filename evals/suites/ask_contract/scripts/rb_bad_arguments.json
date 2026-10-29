@@ -1,0 +1,44 @@
+{
+  "why": "Calls read_segments with arguments of the wrong type, then recovers.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "read_segments",
+          "input": {
+            "meeting_id": 5,
+            "around_segment_id": null
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "tool_use",
+          "id": "t1",
+          "name": "read_segments",
+          "input": {
+            "meeting_id": "{meeting:m07}",
+            "around_segment_id": "m07-14",
+            "before": 1,
+            "after": 1
+          }
+        }
+      ],
+      "stop_reason": "tool_use"
+    },
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Greta will model it and send the numbers by next Tuesday [seg:m07-14]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

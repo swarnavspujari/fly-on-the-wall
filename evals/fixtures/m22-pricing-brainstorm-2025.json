@@ -1,0 +1,52 @@
+{
+  "id": "m22",
+  "title": "Pricing brainstorm: per job or per technician",
+  "started_at": "2025-10-02T17:00:00Z",
+  "folder": "Product",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Greta Holm", "email": "greta@quillmark.example" },
+    { "name": "Marcus Webb", "email": "marcus@quillmark.example" },
+    { "name": "Sam Achterberg", "email": "sam@quillmark.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Greta Holm", "spk_1": "Marcus Webb", "spk_2": "Sam Achterberg" },
+  "scratchpad": "brainstorm only, nothing decided\nper job (Greta) vs per tech (Marcus)\nnames floated: Crew/Depot/Network, Solo/Shop/Enterprise\ninterviews first",
+  "segments": [
+    ["m22-01", "mic", "0:05", "This is a brainstorm, not a decision meeting. Atlas is still only a codename, and I want ideas for how next year's plans could be priced before anyone gets attached to numbers."],
+    ["m22-02", "spk_2", "0:21", "Good. I'd like to hear the wild options too. Nothing we say today goes anywhere near a website."],
+    ["m22-03", "spk_1", "0:34", "Today everyone pays the same: one plan, twenty four dollars per technician per month. It's simple, but a big fleet and a tiny shop pay exactly the same rate."],
+    ["m22-04", "spk_0", "0:51", "The problem I keep seeing is that technicians are a bad proxy for value. A shop doing forty jobs a day gets far more out of us than one doing five."],
+    ["m22-05", "spk_0", "1:09", "So my wild option is pricing per completed job. Charge a small amount every time a job is marked done. Our revenue grows when our customers grow."],
+    ["m22-06", "spk_1", "1:24", "Per job scares me. Customers would hesitate to log small jobs in the app just to keep the bill down. We'd be punishing exactly the usage we want."],
+    ["m22-07", "spk_2", "1:41", "And forecasting gets harder for them. A dispatcher can tell you how many technicians they have. Nobody knows how many jobs they'll do in March."],
+    ["m22-08", "spk_0", "1:54", "That's fair. A hybrid, then? A base per technician, and a small per job fee above some monthly volume?"],
+    ["m22-09", "spk_1", "2:06", "Hybrids look clever in a spreadsheet and confuse everyone on a pricing page. I'd rather have tiers where each step up includes more."],
+    ["m22-10", "mic", "2:22", "Let's hear tiers, then. Marcus, how many, and what would separate them?"],
+    ["m22-11", "spk_1", "2:30", "Three. A basic one for self-serve shops, a middle one with the scheduling smarts, and a top one for big fleets that comes with a sales conversation."],
+    ["m22-12", "spk_2", "2:47", "What counts as the smart stuff? Route optimization?"],
+    ["m22-13", "spk_1", "2:55", "Route optimization, reporting, maybe a customer portal one day. The basic tier would be the app and the dispatch board, and nothing else."],
+    ["m22-14", "spk_0", "3:11", "I like that the expensive features also cost us more to run. So the tiers would line up with our costs as well as with value."],
+    ["m22-15", "mic", "3:26", "Names? I know it's early, but names shape how people think about a tier."],
+    ["m22-16", "spk_1", "3:37", "I've been playing with Crew, Depot and Network. Crew for a small team, Depot for a business with a base, and Network for multi-site fleets."],
+    ["m22-17", "spk_2", "3:50", "Those are a bit cute for me. I'd go plainer: Solo, Shop and Enterprise. Nobody has to think about what they mean."],
+    ["m22-18", "spk_0", "4:05", "Enterprise sounds expensive before anyone has seen a price. That might be good or bad, depending on who's reading."],
+    ["m22-19", "mic", "4:18", "We're not picking names today. Write them all down, and we test them with customers."],
+    ["m22-20", "spk_2", "4:27", "Price points? Even rough ones, just so we know the shape?"],
+    ["m22-21", "spk_0", "4:38", "I'd rather not put numbers on tiers before we know what's in them. Every number we say today will end up anchoring the debate next year."],
+    ["m22-22", "spk_1", "4:52", "Agreed. Let's get the packaging right first and price it after the interviews."],
+    ["m22-23", "spk_2", "5:00", "What about the competition? Do we know how the others charge?"],
+    ["m22-24", "spk_1", "5:10", "Roughly. Most of the field service apps we compete with charge per technician. Nobody we know of charges per job, which is either an opportunity or a warning."],
+    ["m22-25", "spk_0", "5:27", "Probably a warning. But it's worth testing before we rule it out completely."],
+    ["m22-26", "mic", "5:35", "Okay. The next step is interviews. Who can set them up?"],
+    ["m22-27", "spk_2", "5:45", "I'll ask the sales team for ten customers who'd talk to us, a mix of small shops and larger fleets."],
+    ["m22-28", "spk_0", "5:57", "And I'll pull a sample of a hundred accounts and compare what they'd pay per technician with what they'd pay per completed job, just to see how far apart the numbers land."],
+    ["m22-29", "spk_1", "6:13", "I'll put the tier sketch and all the name options on one page, so the interviews have something concrete to react to."],
+    ["m22-30", "mic", "6:26", "Good. To be clear for the notes: no decisions today. No pricing model, no names, no prices. We come back to this after the interviews, early next year."]
+  ],
+  "items": [
+    { "kind": "question", "text": "Price next year's plans per technician, per completed job, or a hybrid? Brainstorm only, no decision", "segments": ["m22-05", "m22-30"] },
+    { "kind": "action_item", "text": "Compare per-technician and per-job pricing on a sample of a hundred accounts", "owner": "Greta Holm", "segments": ["m22-28"] },
+    { "kind": "action_item", "text": "Line up ten customer interviews through the sales team", "owner": "Sam Achterberg", "segments": ["m22-30"] }
+  ]
+}

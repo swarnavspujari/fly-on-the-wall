@@ -1,0 +1,14 @@
+{
+  "why": "Invents a churn rate next to the real retention figure.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Q3 churn was two point five percent [seg:m09-05]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "why": "The id without the seg: prefix.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Greta will model it and send the numbers by next Tuesday [m07-14]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}

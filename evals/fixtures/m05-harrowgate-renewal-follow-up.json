@@ -1,0 +1,43 @@
+{
+  "id": "m05",
+  "title": "Harrowgate Freight renewal follow-up",
+  "started_at": "2026-10-07T16:00:00Z",
+  "folder": "Customers/Harrowgate",
+  "keep_local": false,
+  "attendees": [
+    { "name": "Maya Okafor", "email": "maya@quillmark.example" },
+    { "name": "Elena Duarte", "email": "elena@quillmark.example" },
+    { "name": "Colm Byrne", "email": "colm@harrowgate-freight.example" }
+  ],
+  "speakers": { "mic": "You", "spk_0": "Elena Duarte", "spk_1": "Colm Byrne" },
+  "scratchpad": "2yr @ 12% - agreed\nroute module free 6 mo\nme: onboarding after signature",
+  "segments": [
+    ["m05-01", "spk_0", "0:04", "Colm, thanks again. As promised, we have two options for you."],
+    ["m05-02", "spk_0", "0:10", "Option one is one year at a seven percent discount."],
+    ["m05-03", "spk_0", "0:16", "Option two is a two year term at a twelve percent discount, with the price fixed for both years."],
+    ["m05-04", "spk_1", "0:25", "Seven isn't going to get past my CFO. Twelve on two years is more interesting."],
+    ["m05-05", "spk_1", "0:32", "What about the route optimization module?"],
+    ["m05-06", "mic", "0:36", "We can include it at no charge for the first six months of the term."],
+    ["m05-07", "spk_1", "0:43", "And after six months?"],
+    ["m05-08", "mic", "0:46", "Then it's priced like any add-on, but you'd be locked at today's add-on rate."],
+    ["m05-09", "spk_1", "0:53", "Okay. Then let's go with the two year term at twelve percent, with the module included for six months."],
+    ["m05-10", "spk_0", "1:02", "Great, that's agreed. I'll write it up exactly that way."],
+    ["m05-11", "spk_1", "1:07", "Our CFO signs on Thursdays. When do you need the signature?"],
+    ["m05-12", "spk_0", "1:12", "We'd like it signed by October thirtieth, so it lands before your current term ends."],
+    ["m05-13", "spk_1", "1:19", "That's doable if I get the paper soon."],
+    ["m05-14", "spk_0", "1:23", "I'll send the redlines by Monday."],
+    ["m05-15", "spk_1", "1:27", "And who sets up the route module for my dispatchers?"],
+    ["m05-16", "mic", "1:31", "I'll schedule the onboarding myself once the contract is signed."]
+  ],
+  "items": [
+    { "kind": "decision", "text": "Harrowgate renews for two years at a 12% discount, route optimization included free for six months", "segments": ["m05-09", "m05-10"] },
+    { "kind": "commitment", "text": "Contract to be signed by October 30", "segments": ["m05-12"] },
+    { "kind": "action_item", "text": "Send the redlines by Monday", "owner": "Elena Duarte", "segments": ["m05-14"] },
+    { "kind": "action_item", "text": "Schedule route optimization onboarding once the contract is signed", "owner": "You", "segments": ["m05-16"] }
+  ],
+  "enhanced": [
+    { "markdown": "**Options:** One year at a 7% discount, or a two-year term at 12% with the price fixed for both years. Colm said seven won't get past his CFO.", "sources": ["m05-02", "m05-03", "m05-04"] },
+    { "markdown": "**Agreed:** A two-year term at 12%, with the route optimization module included at no charge for the first six months; after that it's priced like any add-on, locked at today's add-on rate.", "sources": ["m05-06", "m05-08", "m05-09", "m05-10"] },
+    { "markdown": "**Next steps:** Elena sends the redlines by Monday, aiming for a signature by October 30, before the current term ends (their CFO signs on Thursdays). You schedule the route module onboarding once the contract is signed.", "sources": ["m05-11", "m05-12", "m05-14", "m05-16"] }
+  ]
+}

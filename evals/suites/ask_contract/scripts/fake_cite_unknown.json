@@ -1,0 +1,14 @@
+{
+  "why": "Cites a segment id that doesn't exist.",
+  "responses": [
+    {
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Harrowgate pays forty two thousand dollars a year for sixty technician seats [seg:m04-99]."
+        }
+      ],
+      "stop_reason": "end_turn"
+    }
+  ]
+}
