@@ -21,7 +21,8 @@ Policy and construction (`llm_commands.rs`):
 | `build_provider(&AppState, DataScope) -> Result<Box<dyn LLMProvider>, String>` | 569-575 (delegates) | Enhance, polish, extraction, Test connection |
 | `build_provider_with_reach(&AppState, DataScope) -> Result<BuiltProvider{provider, on_device}, String>` (the one constructor; `build_provider` calls it) | after `build_provider` | Ask (`on_device` decides Keep-local visibility in the harness), `build_provider` |
 | `split_ask_history(Vec<AskMessage>) -> (Vec<fly_ask::Turn>, question)` | Ask section | `ask_meeting` |
-| `ask_tier(&AppState, &dyn LLMProvider) -> fly_ask::Tier` (probe + cached tool smoke test) | Ask section | `ask_meeting` |
+| `ask_tier(&AppState, &dyn LLMProvider, endpoint: Option<&str>) -> fly_ask::Tier` (probe + tool smoke test, cached per server, model and digest) | Ask section | `ask_meeting` |
+| `ask_approvals::APPROVALS` (`register_proposal`, `register_answer`, `approve`) | `src-tauri/src/ask_approvals.rs` | `ask_meeting`, `insert_ask_answer`, `add_action_item` |
 | `ensure_provider_ready(&AppState)` (starts managed Ollama when provider = `ollama`) | 482-497 | the same five callers, always **before** `build_provider` |
 | `check_cloud_policy(provider, is_local, on_device, consented, keep_local)` (pure) | 541-566 | `build_provider`, tests |
 | `keep_local_refusal`, `is_consent_refusal`, `record_consent_skip` | 514-519, 438-455 | `build_provider`; `scheduler.rs:404`; `extraction.rs:317` |
@@ -49,7 +50,7 @@ No network call happens inside `build_provider`. But each caller runs `ensure_pr
 | Caller | Scope | Line | Background? |
 |---|---|---|---|
 | `enhance_note` | `Note(note_id)` | `llm_commands.rs:668` | no |
-| `ask_meeting` | from its `scope`: `Note(id)` (default) → `Note`, `Meeting(id)` → `Meeting`, `Folder`/`Person`/`All` → `NoMeetingData` (the harness then excludes Keep-local meetings in its queries for an off-device model) | `llm_commands.rs` `ask_meeting` | no |
+| `ask_meeting` | from its `scope`: `Note(id)` (default) → `Note`, `Meeting(id)` → `Meeting`, `Folder`/`Person`/`All` → `Wide` (no single Keep-local switch decides; the harness excludes Keep-local meetings in its queries for an off-device model) | `llm_commands.rs` `ask_meeting` | no |
 | `run_polish` ← `polish_transcript` (no UI caller) and `scheduler::polish_after_transcribe` (AI pass) | `Meeting(meeting_id)` | `llm_commands.rs:823` | AI pass: yes |
 | `run_extraction` ← `extract_meeting_items` (no UI caller), `backfill_meeting_items` (per meeting), `extract_after_transcribe` (AI pass `scheduler.rs:219`; re-diarize/revert `asr_commands.rs:132,152`) | `Meeting(meeting_id)` | `extraction.rs:273` | AI pass and re-diarize: yes |
 | `test_llm_connection` | `NoMeetingData` | `llm_commands.rs:1208` | no |
@@ -80,9 +81,9 @@ devMock copies these strings by hand (`frontend/src/devMock.ts:931-950`).
 | `polish_transcript` | `meeting_id: String` | `Result<PolishResult, String>` | none (`api.polishTranscript` exists at `api.ts:135`, no component calls it; the AI pass calls `run_polish` directly) |
 | `edit_note_block` | `note_id: String, block_id: String, markdown: String` | `Result<Note, String>` | `ui-editor` (`EnhancedDoc.tsx:525,565`; empty markdown deletes the block), via `api.editNoteBlock` |
 | `keep_note_block` | `note_id: String, block_id: String` | `Result<Note, String>` | `ui-editor` (`EnhancedDoc.tsx:501`), via `api.keepNoteBlock` |
-| `ask_meeting` | `note_id: String, history: Vec<AskMessage{role, content, on_device?, citations?}>, scope: Option<fly_ask::AskScope>` (`{kind, id}` with kind `note`, `meeting`, `folder` or `person`, or `{kind: "all"}`; default the note), `ask_id: Option<String>` (streams `ask:event`) | `Result<AskReply, String>`: the harness answer (`status`, `text`, `sentences[{text, citations, status, flags}]`, `sources`, `proposals`, `refusals`, `trace`, `on_device`, `run_log`) + `trace_lines`. A model failure (empty, cut off, provider error, budget) is `Err(message)` as before | `ui-ask` (`AskPanel.tsx`), via `api.askMeeting` (the panel shows `text` and keeps `on_device`/`citations` per answer) |
-| `insert_ask_answer` | `note_id: String, markdown: String, segment_ids: Vec<String>` | `Result<Note, String>`: an AI block appended, links stripped, only ids of this note's transcripts kept (locators recorded by the block write) | none yet (PR 3.4: "Insert into note" and approved `insert_into_note` proposals), via `api.insertAskAnswer` |
-| `add_action_item` | `meeting_id: String, text: String, owner: Option<String>, segment_ids: Vec<String>` | `Result<MeetingItem, String>`: an open action item with `extracted_by = "user:ask"`; needs ≥ 1 source line of that meeting; owner = nobody or a speaker/attendee of it | none yet (PR 3.4: approved `add_action_item` proposals), via `api.addActionItem` |
+| `ask_meeting` | `note_id: String, history: Vec<AskMessage{role, content, on_device?, citations?}>, scope: Option<fly_ask::AskScope>` (`{kind, id}` with kind `note`, `meeting`, `folder` or `person`, or `{kind: "all"}`; default the note), `ask_id: Option<String>` (streams `ask:event`) | `Result<AskReply, String>`: the harness answer (`status`, `text`, `sentences[{text, citations, status, flags}]`, `sources`, `proposals`, `refusals`, `trace`, `on_device`, `run_log`) + `trace_lines` + `insert_id` (the id `insert_ask_answer` takes for this answer; null when no sentence is sourced). Each proposal and the answer's insert are held by id until they expire (`ask_approvals`). A model failure (empty, cut off, a cut context, provider error, budget) is `Err(message)` as before | `ui-ask` (`AskPanel.tsx`), via `api.askMeeting` (the panel shows `text` and keeps `on_device`/`citations` per answer) |
+| `insert_ask_answer` | `proposal_id: String` (an answer's `insert_id` or an `insert_into_note` proposal's `id`) | `Result<Note, String>`: the held AI block appended (validated again: links stripped, only ids of that note's transcripts kept; locators recorded by the block write). Idempotent: a second call returns the note without adding. Unknown, expired or wrong-kind ids are refused. Every call writes an audit row | none yet (PR 3.4: "Insert into note" and approved `insert_into_note` proposals), via `api.insertAskAnswer` |
+| `add_action_item` | `proposal_id: String` (an `add_action_item` proposal's `id`) | `Result<MeetingItem, String>`: the held open action item with `extracted_by = "user:ask"` (validated again: ≥ 1 source line of that meeting; owner = nobody or a speaker/attendee). Idempotent, refuses unknown/expired/wrong-kind ids, writes an audit row | none yet (PR 3.4: approved `add_action_item` proposals), via `api.addActionItem` |
 | `list_templates` | — | `Result<Vec<Template>, String>` | `ui-app-shell` (`App.tsx:266,1150`), `ui-settings` (`SettingsModal.tsx:372,806,811`), via `api.listTemplates` |
 | `save_template` | `template: Template` (empty id → new id, `built_in=false`) | `Result<(), String>` | `ui-settings` (`SettingsModal.tsx:804`), via `api.saveTemplate` |
 | `delete_template` | `id: String` | `Result<(), String>` | `ui-settings` (`SettingsModal.tsx:810`), via `api.deleteTemplate` |
@@ -108,7 +109,7 @@ devMock mirrors all of these except `polish_transcript` and `extract_meeting_ite
 | `llm.<id>.model` | read (587); write `llm.anthropic.model` in `migrate_anthropic_model` (49) | no | model override |
 | `llm.<id>.base_url` | read (588) | no | custom endpoint; re-validated at use |
 | `consent.cloud_llm.<id>` | read (602); bulk delete in `reset_unseen_cloud_consent` (102); written only by `record_cloud_consent` ([app-settings-consent](app-settings-consent.md)) | no: readable, but `set_app_setting` refuses it (`commands.rs:68-79`) | `"true"` = cloud consent recorded |
-| `ask.tool_smoke.<provider>.<model>` | read/write (`ask_tier`) | no | cached tool smoke result for a large local model (`passed` or the failure code); decides tier M vs S |
+| `ask.tool_smoke.<provider>.<hash>` | read/write (`ask_tier`) | no | cached tool smoke result for a large local model (`passed` or the failure code), keyed by a hash of the Ollama server, model name and model digest (`/api/tags`; not cached without a digest); decides tier M vs S |
 | `migration.cloud_consent_reset_v2_4` | read/write (75, 95, 104) | no | one-time v2.4 consent reset ran |
 
 Full registry: [app-settings-consent](app-settings-consent.md#settings-keys).
@@ -128,6 +129,7 @@ Full registry: [app-settings-consent](app-settings-consent.md#settings-keys).
 All through fly-storage:
 - `<data_dir>/notes/<date> <title>.md` (note mirror) and the meeting folder's `note.json` after Enhance / edit / keep (`notes.rs:329-340`).
 - `<data_dir>/logs/ask-runs.jsonl`: one Ask run log per answer (typed, allowlisted, no free text — [fly-ask](fly-ask.md#run-log)); past 2 MB it rolls once to `ask-runs.1.jsonl` (`record_ask_run`, best effort).
+- `<data_dir>/logs/ask-approvals.jsonl`: one audit row per approval attempt (`at`, `approval_id`, `kind`, `outcome` = applied / already_applied / expired / unknown / wrong_kind / rejected, `note_id` or `meeting_id`, `created_id`; no text); rolls like the run log (`record_ask_audit`).
 - `<data_dir>/recordings/<meeting folder>/transcript.cleaned.{md,json,vtt}` after polish, or `<data_dir>/transcripts/<meeting_id>.cleaned.*` when the meeting has no folder (`transcripts.rs:108-112,299-311`).
 
 ### Network egress
@@ -164,7 +166,8 @@ Background AI pass after every successful transcription (`scheduler.rs:169-173`)
 - Enhance never saves an empty or unusable block list (720-731).
 - Background polish/extraction never fail or stall the transcription job (10-minute cap `scheduler.rs:382`; `extract_after_transcribe` swallows errors `extraction.rs:313-325`).
 - Ask history (`split_ask_history`): empty turns dropped, at most 40 messages, must end on the question; an assistant turn without `on_device` is treated as on device, so it never reaches an off-device model.
-- Ask gets Keep-local visibility from `build_provider_with_reach`'s `on_device`, never `provider.is_local()` (a remote Ollama is local in kind). The harness never constructs a provider, reads a key or writes; the two Ask writes (`insert_ask_answer`, `add_action_item`) are separate user-clicked commands that validate again.
+- Ask gets Keep-local visibility from `build_provider_with_reach`'s `on_device`, never `provider.is_local()` (a remote Ollama is local in kind). The harness never constructs a provider, reads a key or writes; the two Ask writes (`insert_ask_answer`, `add_action_item`) are separate user-clicked commands that take only an id the backend handed out, validate again, are idempotent and audited.
+- Connectors: `connectors_for_ask` returns `None` until `connectors::turn_for_ask` lands (PR #113); the harness already follows the `ExternalTools` contract.
 - The MCP binary never calls an LLM; it only reads `meeting_items` (spec §2 item 5; `extraction.rs:1-8`).
 
 ## Tests

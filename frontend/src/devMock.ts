@@ -970,10 +970,13 @@ const MOCK_VENDORS: Record<string, string> = {
 };
 const MOCK_ASK_ANSWER =
   "Here's what stands out:\n\n• Acme is happy with pilot accuracy — PMs dropped manual notes.\n• The blocker is renewal pricing + data-residency wording for legal.\n• Next: you send the revised SOW today; legal review booked Monday.";
-/** `ask_meeting`'s reply shape (the harness's answer), unsourced in the mock. */
 /** Like the backend's approvals: what an answer's id may insert, once. */
 const mockApprovals = new Map<string, { noteId: string; markdown: string; applied: boolean }>();
+/** `ask_meeting`'s reply shape (the harness's answer). Sentences are
+ *  sourced; localStorage `fotwMockAskUnsourced` = "1" marks the last one unsourced and the
+ *  one before it flagged, to see the panel's answer check. */
 function mockAskReply(text: string, noteId = "n1") {
+  const unsourced = mockFlag("fotwMockAskUnsourced") === "1";
   const local = llmSettings.providers.find((p) => p.id === llmSettings.provider)?.is_local ?? true;
   const insertId = `mock-insert-${mockApprovals.size + 1}`;
   mockApprovals.set(insertId, { noteId, markdown: text, applied: false });
@@ -984,8 +987,17 @@ function mockAskReply(text: string, noteId = "n1") {
     sentences: text
       .split("\n")
       .filter((l) => l.trim())
-      // Sourced, like a typical answer (the panel lists unsourced ones).
-      .map((l) => ({ text: l, citations: ["mock-seg"], status: "sourced" })),
+      .map((l, i, all) => ({
+        text: l,
+        citations: ["mock-seg"],
+        status: !unsourced
+          ? "sourced"
+          : i === all.length - 1
+            ? "unsourced"
+            : i === all.length - 2
+              ? "flagged"
+              : "sourced",
+      })),
     sources: [],
     proposals: [],
     refusals: [],
