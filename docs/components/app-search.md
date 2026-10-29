@@ -20,16 +20,23 @@ Search-as-you-type over notes and transcripts. `search` is SQLite FTS5: a keywor
 | `doc_prompt(title, text)` → `"title: {title} \| text: {text}"`; `query_prompt(q)` → `"task: search result \| query: {q}"` | 37-46 | worker, `embed_query`, `search_eval` |
 | `embed_raw(root, &[String]) -> Result<Vec<Vec<f32>>, String>`: `POST {root}/api/embed`, 300 s timeout, count-checked | 49-77 | worker, `embed_query`, `search_eval` |
 | `embed_query(&AppState, q) -> Option<Vec<f32>>`: only if `GET {root}/api/version` answers; never spawns a server or pulls | 83-96 | `search_semantic` |
-| `spawn(AppHandle)`: the background indexer (called once, `lib.rs:177`) | 151-240 | app setup |
+| `spawn(AppHandle)`: the background indexer (called once, from `startup::finish`, `startup.rs:252`) | 322-414 | app setup |
+| `yield_reason(&AppState) -> Option<BackgroundYield>`, `rest_after(Duration)`, `settle(&Notify, quiet, max)`, `rest_between_batches(…)`, `embed_next_batch(&Mutex<Storage>, &impl Embedder, shareable_only, size)`, `embed_batch_unless(…, should_yield)`, `Embedder` trait (crate-private; tested with fake embedders) | 171-292 | the worker, tests |
 
-#### Indexer loop (`embeddings.rs:151-240`)
-1. Once at start: `Storage::backfill_embedding_chunks` (chunk rows for every note and transcript; idempotent).
-2. Loop. `root = ollama::root_url` (`llm.ollama.base_url`, else `http://localhost:11434`). If the root is **not** loopback, count only the *shareable* backlog (keep-local owners excluded); otherwise the full backlog (172-181).
-3. Backlog 0 → wait for `embed_notify` or 30 s (183).
-4. `ensure_ready` (126-142): `ollama::ensure_running` (may spawn the managed `ollama serve`), then `GET /api/tags`; if the model is missing, **pull it** (`POST /api/pull`, progress on `model:progress`). Failure → wait 60 s or a nudge.
-5. Re-derive remote/local from the URL actually used (198), take 16 pending chunks (shareable queue when remote), embed `doc_prompt(title, text)`, store vectors (`store_chunk_embeddings`). Failure → sleep 60 s.
+#### Indexer loop (`embeddings.rs:145-414`)
+1. Once at start, on a blocking thread: the chunk backfill (`Storage::chunk_owners`, **oldest first**, then `sync_owner_chunks` for 8 owners per storage-lock hold, waiting between groups while `AppState::background_should_yield()`). Oldest first because a re-chunk gives the owner's new rows the next ids and the queue takes the highest ids first, so the newest content is embedded first; the v3 upgrade re-chunks in the same order (`ORDER BY started_at`). Idempotent; a library already chunked costs one JSON parse per owner and never holds the lock for long.
+2. Loop. **Yield** first (`yield_reason` → `AppState::background_yield_reason`, the rule every background job shares): while a recording or screen recording runs (live captions), while a transcription job is running (any `pipeline_stage` other than `"waiting"`, which includes the polish), or while a model request holds `AppState::foreground_ai()` (Ask, Enhance, transcript polish, item extraction: `run_polish` and `run_extraction` take it, so every caller of those does), the worker logs `embedding index paused` once and checks back every 5 s or on a nudge. Priority: live captions > transcription > Ask / Enhance > backlog.
+3. `root = ollama::root_url` (`llm.ollama.base_url`, else `http://localhost:11434`). If the root is **not** loopback, count only the *shareable* backlog (keep-local owners excluded); otherwise the full backlog.
+4. Backlog 0 → wait for `embed_notify` or 30 s.
+5. `ensure_ready`: `ollama::ensure_running` (may spawn the managed `ollama serve`), then `GET /api/tags`; if the model is missing, **pull it** (`POST /api/pull`, progress on `model:progress`). Failure → wait 60 s or a nudge.
+6. Check the yield again (readiness can take a while), then `embed_batch_unless` → `embed_next_batch`: re-derive remote/local from the URL actually used, take the 16 **most recently written** pending chunks (shareable queue when remote) under the lock, embed `doc_prompt(title, text)` with no lock held, then `store_pending_embeddings`, which stores a vector only where the row still holds the text that was embedded (a chunk re-chunked meanwhile, possibly under the same id, stays pending). While the batch is in flight the worker re-checks the yield every 500 ms and **abandons** the batch when a recording (or transcription, or Ask) starts: no lock is held, nothing is stored, the chunks stay pending. Dropping the request doesn't stop Ollama from finishing the batch it already received, so the runtime can stay busy for that one batch (at most 16 short chunks). Failure → sleep 60 s.
+7. **Rest** after each batch for as long as it took (at least 250 ms): a large backlog (the one-time re-embed after the v3 upgrade, a model change) uses at most about half of what the embedding runtime can do. A content write (`embed_notify`) may end a rest early, but only every other rest (`rest_between_batches`): the rest after a batch a write started is served in full, so steady writes can't run batches back to back. After a write wakes it (from a rest or idle), the worker first waits for writes to pause for 2 s (at most 20 s, `settle`): autosave fires every few hundred ms while the user types, and each save re-chunks the note, so the note is embedded once per pause, not once per save. Whether anything is pending is a newest-first `LIMIT 1` probe (`has_pending_embeddings`), not a count.
 
-The storage lock is never held across HTTP. `embed_notify` is nudged by `update_note_scratchpad` (`commands.rs:256`), Enhance/block edits (`llm_commands.rs:738,756`) and each finished transcription (`scheduler.rs:171`).
+New content first: chunk ids grow with every (re)chunk, so the queue is "newest write first" and a meeting that was just transcribed is embedded ahead of any backlog, as soon as its transcription and polish are done.
+
+Polish never re-embeds: chunk boundaries come from the raw text, so polishing changes a chunk's text but not its span, and `sync_chunks` keeps the vector of a chunk whose span and title are unchanged when the change is between raw and polished text. Combined with the yield (the worker waits out the polish), a new meeting is embedded once.
+
+The storage lock is never held across HTTP. `embed_notify` is nudged by `update_note_scratchpad` (`commands.rs:256`), Enhance/block edits (`llm_commands.rs:738,756`) and each finished transcription, after its AI pass (`scheduler.rs`: nudged before the pass, the worker would start a batch the pass's marker abandons at once).
 
 #### `search_semantic` (`commands.rs:662-715`)
 `SearchFilter { limit: 30, ..Default }`, so `exclude_keep_local = false`: Keep-local notes **are** returned, which is right for the user's own UI. Runs `search_split` (FTS notes, FTS transcripts, with the AND → OR fallback), then `embed_query`. With a vector it calls `vector_search(…, EMBED_MODEL, &filter, 30)` (no floor); a failure there is logged and treated as empty. Then `hybrid::fuse`.
@@ -94,14 +101,16 @@ devMock mirrors both (`devMock.ts:1203-1208`). It returns the same two canned hi
 None.
 
 ## Dependencies
-- **Inbound:** `lib.rs:177` (`embeddings::spawn`), `lib.rs:212-213` (registration), `commands.rs:256`, `llm_commands.rs:738,756`, `scheduler.rs:171` (`embed_notify`), `tests/search_eval.rs`.
-- **Outbound:** [fly-storage](fly-storage.md) (`search_split`, `vector_search`, `hybrid::fuse`, chunk queue incl. `*_shareable`), [app-ollama](app-ollama.md) (`root_url`, `server_alive`, `ensure_running`, `pull_model`), [app-llm](app-llm.md) (`is_loopback_url`), `AppState::embed_notify`.
+- **Inbound:** `startup.rs:252` (`embeddings::spawn`), `lib.rs:212-213` (registration), `commands.rs:256`, `llm_commands.rs:738,756`, `scheduler.rs:171` (`embed_notify`), `tests/search_eval.rs`.
+- **Outbound:** [fly-storage](fly-storage.md) (`search_split`, `vector_search`, `hybrid::fuse`, chunk queue incl. `*_shareable`), [app-ollama](app-ollama.md) (`root_url`, `server_alive`, `ensure_running`, `pull_model`), [app-llm](app-llm.md) (`is_loopback_url`), `AppState::{embed_notify, foreground_ai_active, pipeline_stage}`, `scheduler::recording_active`.
 
 ## Invariants
 - Semantic search degrades to FTS and never fails a search or blocks the UI (`embeddings.rs:10-13`; `commands.rs:683-694`).
 - The query path never spawns a server or pulls a model (`embeddings.rs:79-85`).
 - Keep-local notes and transcripts are never sent to an Ollama on another machine for indexing; the decision is made from the URL actually used (THREAT_MODEL T10; `embeddings.rs:168-207`, `crates/fly-storage/src/privacy.rs:303-338`).
-- The storage lock is never held across an HTTP call (`embeddings.rs:149-150`).
+- The storage lock is never held across an HTTP call, and the startup pass holds it for 8 owners at a time (test `new_content_is_embedded_before_the_backlog_and_the_lock_is_free`).
+- The backlog yields to recording, transcription (incl. polish) and model requests (Ask, Enhance, polish, extraction; `yield_reason`), and so does the startup chunk pass; a vector is stored only on a row still holding the embedded text (`store_pending_embeddings`).
+- Ask, Enhance, `run_polish` and `run_extraction` hold `AppState::foreground_ai()` for their whole run; any new model request should too.
 - The `model` column records which model produced each vector, so a model change re-queues everything (`crates/fly-storage/src/lib.rs:531-534`).
 - `vector_search` / `vector_search_floor` honour `exclude_keep_local` inside SQL, before the limit and the floor (#92). The in-memory vector cache never decides visibility: each search asks the database which chunk ids it may see.
 - A keyword search that matches anything keeps AND semantics; the OR fallback is chosen from the query and filter only, never the page offset, so MCP `search_notes` cursors stay consistent.
@@ -109,15 +118,18 @@ None.
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| unit | `src-tauri/src/embeddings.rs`, `commands.rs` (search) | 0 | nothing in the app crate |
-| unit (crate) | `crates/fly-storage/src/embeddings.rs` | 10 | chunking, pending/store/search round trip, re-sync, filters, backfill, the floor and exact best score |
+| unit | `src-tauri/src/embeddings.rs` | 10 | newest-first batches with the lock free during embedding (fake embedder), a chunk rewritten mid-embed stays pending, an in-flight batch abandoned when a recording starts (nothing stored), the startup pass and its yield, a remote embedder getting only shareable chunks, yielding to transcription and model requests, pacing, writes settling and not cutting every rest |
+| unit | `src-tauri/src/startup.rs` | 2 | the library-status shape, a panic while opening becomes the error dialog's error |
+| integration (crate) | `crates/fly-storage/tests/migration_v3.rs` | `the_v3_re_embed_queue_starts_with_the_newest_meeting` | after the v3 re-chunk, the queue hands out meetings newest first whatever their ids |
+| unit (crate) | `crates/fly-storage/src/embeddings.rs` | 15 | chunking, pending/store/search round trip, re-sync, filters, backfill, the floor and exact best score; queue order, guarded store, polish keeps vectors, `chunk_owners` |
 | unit (crate) | `crates/fly-storage/src/{query,search,segments,cache}.rs` | 6 + 6 + 2 (search-related) + 2 | stopwords, AND / OR expressions, hostile input, the fallback and its paging, term statistics with keep-local, the vector cache's invalidation and quantization error |
 | unit (crate) | `crates/fly-storage/src/hybrid.rs:129-185` | 5 | RRF fusion, grouping, FTS-only degrade, limit |
 | unit (crate) | `crates/fly-storage/src/privacy.rs:834` | 1 | shareable queue skips keep-local owners |
 | env-gated | `src-tauri/tests/search_eval.rs` | 1 | 22 natural-language queries, FTS vs hybrid; asserts only hybrid ≥ FTS; **skips (passes) without a local Ollama + `embeddinggemma`**, which is every CI runner |
 
 **Known gaps:**
-- CI never exercises any semantic path: `search_eval` early-returns there, and the app crate has no test for `search_semantic`, `embed_query` or the worker.
+- CI never exercises a real embedding path: `search_eval` early-returns there, and the app crate has no test for `search_semantic` or `embed_query`. The worker's loop itself (Ollama readiness, remote root) is untested; its steps are.
+- `yield_reason`'s recording branch reuses `scheduler::recording_active`; no unit test builds an `ActiveRecording`. Checked in the real app instead.
 - No test pins "degrade to FTS": Ollama down, model missing, `vector_search` error.
 - No test covers the remote-root decision in the worker (`embeddings.rs:172,198`): a keep-local chunk reaching a non-loopback root would go unnoticed.
 - `vector_search`'s `exclude_keep_local` is covered in `crates/fly-storage/tests/migration_v3.rs` and the floor test; `search_eval` doesn't set it.

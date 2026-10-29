@@ -62,6 +62,15 @@ impl Chunk {
     }
 }
 
+/// Something whose content is chunked for semantic search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkOwner {
+    /// A note (scratchpad + enhanced blocks), by note id.
+    Note(String),
+    /// A meeting's transcript, by meeting id.
+    Transcript(String),
+}
+
 /// A chunk pending embedding, handed to the embedding worker.
 #[derive(Debug, Clone)]
 pub struct PendingChunk {
@@ -147,6 +156,12 @@ pub fn chunk_transcript(t: &Transcript) -> Vec<Chunk> {
 /// there is one (polished), else its own. Ids, speakers and times always
 /// come from `raw`, so a stale polished variant from an earlier run (other
 /// ids) contributes nothing.
+///
+/// Boundaries come from the RAW text (which segments are non-empty, how
+/// many words each turn has), so polishing a transcript changes chunk text
+/// but never which segments a chunk spans: the spans stay identical to the
+/// raw windows, and `sync_chunks` can keep each chunk's vector through a
+/// polish instead of re-embedding the meeting.
 pub fn chunk_transcript_variant(raw: &Transcript, cleaned: Option<&Transcript>) -> Vec<Chunk> {
     let polished: std::collections::HashMap<&str, &str> = cleaned
         .map(|c| {
@@ -169,18 +184,25 @@ pub fn chunk_transcript_variant(raw: &Transcript, cleaned: Option<&Transcript>) 
     }
     let mut turns: Vec<Turn> = Vec::new();
     for seg in &raw.segments {
-        let (text, is_polished) = match polished.get(seg.id.as_str()) {
-            Some(p) => (p.trim(), true),
-            None => (seg.text.trim(), false),
-        };
-        if text.is_empty() {
+        let raw_text = seg.text.trim();
+        if raw_text.is_empty() {
             continue;
         }
+        // A polish may empty a filler-only segment: it keeps its place in
+        // the span, it just adds no text.
+        let (text, is_polished) = match polished.get(seg.id.as_str()) {
+            Some(p) => (p.trim(), true),
+            None => (raw_text, false),
+        };
         match turns.last_mut() {
             Some(last) if last.key == seg.speaker_key => {
-                last.line.push(' ');
-                last.line.push_str(text);
-                last.words += word_count(text);
+                if !text.is_empty() {
+                    if !last.line.is_empty() {
+                        last.line.push(' ');
+                    }
+                    last.line.push_str(text);
+                }
+                last.words += word_count(raw_text);
                 last.end_ms = last.end_ms.max(seg.end_ms);
                 last.ids.push(seg.id.clone());
                 last.polished |= is_polished;
@@ -190,7 +212,7 @@ pub fn chunk_transcript_variant(raw: &Transcript, cleaned: Option<&Transcript>) 
                 line: text.to_string(),
                 start_ms: seg.start_ms,
                 end_ms: seg.end_ms,
-                words: word_count(text),
+                words: word_count(raw_text),
                 ids: vec![seg.id.clone()],
                 polished: is_polished,
             }),
@@ -199,12 +221,15 @@ pub fn chunk_transcript_variant(raw: &Transcript, cleaned: Option<&Transcript>) 
 
     // 2. turns → windows
     fn append(c: &mut Chunk, turn: &Turn) {
-        if c.text.is_empty() {
+        if c.segment_ids.is_empty() {
             c.start_ms = Some(turn.start_ms);
-        } else {
-            c.text.push('\n');
         }
-        c.text.push_str(&turn.line);
+        if !turn.line.is_empty() {
+            if !c.text.is_empty() {
+                c.text.push('\n');
+            }
+            c.text.push_str(&turn.line);
+        }
         c.end_ms = Some(c.end_ms.unwrap_or(0).max(turn.end_ms));
         c.segment_ids.extend(turn.ids.iter().cloned());
         c.polished |= turn.polished;
@@ -220,11 +245,15 @@ pub fn chunk_transcript_variant(raw: &Transcript, cleaned: Option<&Transcript>) 
             cur_words = 0;
         }
     }
-    if !cur.text.is_empty() {
+    if !cur.segment_ids.is_empty() {
         match chunks.last_mut() {
             Some(last) if cur_words < CHUNK_MIN_TAIL_WORDS => {
-                last.text.push('\n');
-                last.text.push_str(&cur.text);
+                if !cur.text.is_empty() {
+                    if !last.text.is_empty() {
+                        last.text.push('\n');
+                    }
+                    last.text.push_str(&cur.text);
+                }
                 last.end_ms = last.end_ms.max(cur.end_ms);
                 last.segment_ids.extend(cur.segment_ids);
                 last.polished |= cur.polished;
@@ -232,6 +261,8 @@ pub fn chunk_transcript_variant(raw: &Transcript, cleaned: Option<&Transcript>) 
             _ => chunks.push(cur),
         }
     }
+    // A window a polish emptied entirely has nothing to embed.
+    chunks.retain(|c| !c.text.is_empty());
     chunks
 }
 
@@ -423,8 +454,19 @@ impl Storage {
         // for one window must not re-embed the rest.
         let mut by_content: std::collections::HashMap<(String, String), (Vec<u8>, String)> =
             std::collections::HashMap::new();
+        // Span-keyed reuse through a polish: the same segments (and title)
+        // whose text changed only between raw and polished keep their
+        // vector. A raw-to-raw change on the same ids is a real edit and
+        // re-embeds.
+        let mut by_span: std::collections::HashMap<(String, String), (Vec<u8>, String, bool)> =
+            std::collections::HashMap::new();
         for row in existing {
             if let (Some(emb), Some(model)) = (row.embedding, row.model) {
+                let polished = row.span.2 == "polished";
+                by_span.insert(
+                    (row.title.clone(), row.span.0.clone()),
+                    (emb.clone(), model.clone(), polished),
+                );
                 by_content.insert((row.title, row.text), (emb, model));
             }
         }
@@ -440,7 +482,14 @@ impl Storage {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
         for (i, (c, (ids, end_ms, variant))) in chunks.iter().zip(spans).enumerate() {
-            let reuse = by_content.get(&(title.to_string(), c.text.clone()));
+            let reuse: Option<(&Vec<u8>, &String)> = by_content
+                .get(&(title.to_string(), c.text.clone()))
+                .map(|(emb, model)| (emb, model))
+                .or_else(|| {
+                    let (emb, model, was_polished) =
+                        by_span.get(&(title.to_string(), ids.clone()))?;
+                    (*was_polished || c.polished).then_some((emb, model))
+                });
             insert.execute(rusqlite::params![
                 owner_kind,
                 owner_id,
@@ -458,13 +507,16 @@ impl Storage {
         Ok(())
     }
 
-    /// Chunks with no vector yet (or a vector from another model), oldest
-    /// first — the embedding worker's work queue.
+    /// Chunks with no vector yet (or a vector from another model), most
+    /// recently written first — the embedding worker's work queue. Every
+    /// (re)chunk inserts fresh rows, so a meeting that was just transcribed
+    /// or a note that was just edited is embedded ahead of an older backlog
+    /// (such as the one-time re-embed after the v3 upgrade).
     pub fn pending_embedding_chunks(&self, model: &str, limit: usize) -> Result<Vec<PendingChunk>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, text FROM embedding_chunks
              WHERE embedding IS NULL OR model IS NOT ?1
-             ORDER BY id LIMIT ?2",
+             ORDER BY id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map((model, limit as i64), |r| {
             Ok(PendingChunk {
@@ -474,6 +526,26 @@ impl Storage {
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Whether any chunk waits for a vector from `model`: the worker's
+    /// per-batch check. It looks from the newest row down and stops at the
+    /// first pending one, where [`embedding_backlog`](Self::embedding_backlog)
+    /// counts every row (each embedded row's vector sits in overflow pages
+    /// that a scan walks).
+    pub fn has_pending_embeddings(&self, model: &str) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM embedding_chunks
+                  WHERE embedding IS NULL OR model IS NOT ?1
+                  ORDER BY id DESC LIMIT 1",
+                [model],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Number of chunks still waiting for a vector from `model`.
@@ -497,31 +569,87 @@ impl Storage {
         Ok(())
     }
 
+    /// Store vectors for chunks handed out by
+    /// [`pending_embedding_chunks`](Self::pending_embedding_chunks) (normalized
+    /// here), but only where the row still holds the text that was embedded.
+    /// Embedding runs with no storage lock held, so a chunk can be re-chunked
+    /// meanwhile, and SQLite may give the new row the old id: a vector of the
+    /// old text must not land on it. Returns how many were stored; the rest
+    /// stay pending.
+    pub fn store_pending_embeddings(
+        &self,
+        model: &str,
+        vectors: &[(PendingChunk, Vec<f32>)],
+    ) -> Result<usize> {
+        let mut stmt = self.conn.prepare(
+            "UPDATE embedding_chunks SET embedding = ?1, model = ?2
+              WHERE id = ?3 AND title = ?4 AND text = ?5",
+        )?;
+        let mut stored = 0;
+        for (chunk, v) in vectors {
+            stored += stmt.execute(rusqlite::params![
+                encode_vector(v),
+                model,
+                chunk.id,
+                &chunk.title,
+                &chunk.text
+            ])?;
+        }
+        Ok(stored)
+    }
+
+    /// Every note and transcript that should have chunk rows, oldest first
+    /// (notes by `updated_at`, meetings by `started_at`): the startup pass
+    /// walks them a few at a time ([`sync_owner_chunks`](Self::sync_owner_chunks)),
+    /// releasing the storage lock in between. Oldest first because a
+    /// re-chunk gives the owner's new rows the next ids and the embedding
+    /// queue takes the highest ids first: the newest owner is embedded first.
+    pub fn chunk_owners(&self) -> Result<Vec<ChunkOwner>> {
+        let mut owners: Vec<(String, ChunkOwner)> = Vec::new();
+        let mut stmt = self.conn.prepare("SELECT id, updated_at FROM notes")?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (id, at) = row?;
+            owners.push((at, ChunkOwner::Note(id)));
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT t.meeting_id, COALESCE(m.started_at, '')
+               FROM transcripts t LEFT JOIN meetings m ON m.id = t.meeting_id",
+        )?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (id, at) = row?;
+            owners.push((at, ChunkOwner::Transcript(id)));
+        }
+        owners.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(owners.into_iter().map(|(_, o)| o).collect())
+    }
+
+    /// Re-chunk one owner (a no-op when its content is unchanged). An owner
+    /// deleted since [`chunk_owners`](Self::chunk_owners) listed it is skipped.
+    pub fn sync_owner_chunks(&self, owner: &ChunkOwner) -> Result<()> {
+        match owner {
+            ChunkOwner::Note(id) => match self.get_note(id) {
+                Ok(note) => self.sync_note_chunks(&note),
+                Err(crate::StorageError::NotFound(_)) => Ok(()),
+                Err(e) => Err(e),
+            },
+            ChunkOwner::Transcript(id) => match self.get_transcript(id)? {
+                Some(t) => self.sync_transcript_chunks(&t),
+                None => Ok(()),
+            },
+        }
+    }
+
     /// Ensure every note and transcript has chunk rows — the startup
     /// backfill for content written before this feature existed. Idempotent
     /// and cheap when everything is already chunked (`sync_chunks` no-ops on
-    /// unchanged content).
+    /// unchanged content). The app walks [`chunk_owners`](Self::chunk_owners)
+    /// itself to release its lock between owners; this is the one-call form.
     pub fn backfill_embedding_chunks(&self) -> Result<usize> {
-        let note_ids: Vec<String> = self
-            .conn
-            .prepare("SELECT id FROM notes")?
-            .query_map([], |r| r.get(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        for id in &note_ids {
-            let note = self.get_note(id)?;
-            self.sync_note_chunks(&note)?;
+        let owners = self.chunk_owners()?;
+        for owner in &owners {
+            self.sync_owner_chunks(owner)?;
         }
-        let meeting_ids: Vec<String> = self
-            .conn
-            .prepare("SELECT meeting_id FROM transcripts")?
-            .query_map([], |r| r.get(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        for id in &meeting_ids {
-            if let Some(t) = self.get_transcript(id)? {
-                self.sync_transcript_chunks(&t)?;
-            }
-        }
-        Ok(note_ids.len() + meeting_ids.len())
+        Ok(owners.len())
     }
 
     /// Brute-force cosine scan over embedded chunks, honoring the same
@@ -886,6 +1014,142 @@ mod tests {
         assert!(p[0].text.ends_with("go lower."));
         assert!(p[0].polished);
         assert_eq!(p[0].segment_ids, chunks[0].segment_ids);
+    }
+
+    #[test]
+    fn polishing_changes_text_but_never_spans() {
+        // Long enough for several windows; the polish drops filler words,
+        // which would shift polished-word-count boundaries.
+        let mut segs = Vec::new();
+        for i in 0..40 {
+            let key = if (i / 4) % 2 == 0 { "mic" } else { "spk_0" };
+            segs.push(seg(
+                &format!("s{i}"),
+                key,
+                i as u64 * 1000,
+                "um so uh we talked about the launch budget and you know the timeline",
+            ));
+        }
+        segs.push(seg("s40", "spk_0", 40_000, "um"));
+        let t = transcript("m1", segs);
+        let mut cleaned = t.clone();
+        for s in &mut cleaned.segments {
+            s.text = "We talked about the launch budget and the timeline.".into();
+        }
+        cleaned.segments[40].text = String::new(); // a filler-only line
+        let raw = chunk_transcript(&t);
+        let polished = chunk_transcript_variant(&t, Some(&cleaned));
+        assert!(raw.len() > 2, "several windows");
+        assert_eq!(raw.len(), polished.len());
+        for (r, p) in raw.iter().zip(&polished) {
+            assert_eq!(r.segment_ids, p.segment_ids);
+            assert_eq!((r.start_ms, r.end_ms), (p.start_ms, p.end_ms));
+            assert!(p.polished && !p.text.contains("um so"));
+        }
+        assert!(
+            !polished.iter().any(|c| c.text.contains("\n\n")),
+            "no blank lines"
+        );
+    }
+
+    #[test]
+    fn a_polish_keeps_vectors_a_raw_edit_does_not() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("Launch", None).unwrap();
+        let meeting = s.create_meeting("Launch", &note.id, &[]).unwrap();
+        let t = transcript(
+            &meeting.id,
+            vec![
+                seg("s1", "mic", 0, "um so the launch budget is ten thousand"),
+                seg("s2", "spk_0", 1000, "uh and the date moves to may"),
+            ],
+        );
+        s.save_transcript(&t).unwrap();
+        let pending = s.pending_embedding_chunks("m", 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        s.store_chunk_embeddings("m", &[(pending[0].id, vec![1.0, 0.0])])
+            .unwrap();
+
+        // The polish lands: text changes, the vector stays.
+        let mut cleaned = t.clone();
+        cleaned.segments[0].text = "The launch budget is ten thousand.".into();
+        cleaned.segments[1].text = "And the date moves to May.".into();
+        s.save_cleaned_transcript(&cleaned).unwrap();
+        assert_eq!(
+            s.embedding_backlog("m").unwrap(),
+            0,
+            "polish re-embeds nothing"
+        );
+        let hits = s
+            .vector_search(&[1.0, 0.0], "m", &SearchFilter::default(), 10)
+            .unwrap();
+        assert!(hits[0].text.starts_with("The launch budget"));
+
+        // A real edit of the raw text on a raw chunk re-embeds.
+        let other = s.create_note("Other", None).unwrap();
+        let m2 = s.create_meeting("Other", &other.id, &[]).unwrap();
+        let mut t2 = transcript(&m2.id, vec![seg("x1", "mic", 0, "first words")]);
+        s.save_transcript(&t2).unwrap();
+        let p = s.pending_embedding_chunks("m", 10).unwrap();
+        s.store_chunk_embeddings("m", &[(p[0].id, vec![0.0, 1.0])])
+            .unwrap();
+        t2.segments[0].text = "corrected words".into();
+        s.save_transcript(&t2).unwrap();
+        assert_eq!(s.embedding_backlog("m").unwrap(), 1);
+    }
+
+    #[test]
+    fn the_queue_hands_out_the_newest_writes_first() {
+        let (_dir, s) = test_storage();
+        let old = s.create_note("Old", None).unwrap();
+        s.update_note_scratchpad(&old.id, "old body").unwrap();
+        let new = s.create_note("New", None).unwrap();
+        s.update_note_scratchpad(&new.id, "new body").unwrap();
+        let q = s.pending_embedding_chunks("m", 10).unwrap();
+        assert_eq!(q[0].title, "New");
+        // Editing the old note puts it back at the front.
+        s.update_note_scratchpad(&old.id, "old body, edited")
+            .unwrap();
+        let q = s.pending_embedding_chunks("m", 10).unwrap();
+        assert_eq!(q[0].title, "Old");
+    }
+
+    #[test]
+    fn a_vector_for_replaced_text_is_never_stored() {
+        let (_dir, s) = test_storage();
+        let note = s.create_note("n", None).unwrap();
+        s.update_note_scratchpad(&note.id, "first").unwrap();
+        let handed_out = s.pending_embedding_chunks("m", 10).unwrap();
+        // Re-chunked while the worker embedded it: SQLite reuses the max id
+        // for the new row.
+        s.update_note_scratchpad(&note.id, "second").unwrap();
+        let now = s.pending_embedding_chunks("m", 10).unwrap();
+        assert_eq!(now[0].id, handed_out[0].id, "same id, new text");
+        let stored = s
+            .store_pending_embeddings("m", &[(handed_out[0].clone(), vec![1.0, 0.0])])
+            .unwrap();
+        assert_eq!(stored, 0);
+        assert_eq!(s.embedding_backlog("m").unwrap(), 1);
+        let stored = s
+            .store_pending_embeddings("m", &[(now[0].clone(), vec![1.0, 0.0])])
+            .unwrap();
+        assert_eq!(stored, 1);
+        assert_eq!(s.embedding_backlog("m").unwrap(), 0);
+    }
+
+    #[test]
+    fn chunk_owners_oldest_first_and_deleted_owners_skip() {
+        let (_dir, s) = test_storage();
+        let a = s.create_note("a", None).unwrap();
+        let b = s.create_note("b", None).unwrap();
+        s.update_note_scratchpad(&a.id, "touched last").unwrap();
+        let owners = s.chunk_owners().unwrap();
+        assert_eq!(owners.last(), Some(&ChunkOwner::Note(a.id.clone())));
+        assert!(owners.contains(&ChunkOwner::Note(b.id.clone())));
+        s.delete_note(&b.id).unwrap();
+        s.sync_owner_chunks(&ChunkOwner::Note(b.id)).unwrap();
+        s.sync_owner_chunks(&ChunkOwner::Transcript("gone".into()))
+            .unwrap();
     }
 
     #[test]

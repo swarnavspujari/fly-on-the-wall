@@ -716,6 +716,8 @@ pub async fn enhance_note(
     note_id: String,
     template_id: String,
 ) -> CmdResult<Note> {
+    // The embedding backlog steps aside while this runs.
+    let _foreground = state.foreground_ai();
     ensure_provider_ready(&state).await?;
     let provider = build_provider(&state, DataScope::Note(&note_id))?;
     let profile = profile_for(provider.model());
@@ -871,6 +873,8 @@ pub async fn polish_transcript(
 /// The polish pass itself, callable outside the command layer — the
 /// transcription scheduler chains it after every successful pipeline run.
 pub async fn run_polish(state: &AppState, meeting_id: &str) -> Result<PolishResult, String> {
+    // The embedding backlog steps aside while the model works.
+    let _model = state.foreground_ai();
     ensure_provider_ready(state).await?;
     let provider = build_provider(state, DataScope::Meeting(meeting_id))?;
     let raw = {
@@ -1021,6 +1025,8 @@ pub async fn ask_meeting(
     note_id: String,
     history: Vec<AskMessage>,
 ) -> CmdResult<String> {
+    // The embedding backlog steps aside while this runs.
+    let _foreground = state.foreground_ai();
     ensure_provider_ready(&state).await?;
     let provider = build_provider(&state, DataScope::Note(&note_id))?;
     let profile = profile_for(provider.model());

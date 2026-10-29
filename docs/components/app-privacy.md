@@ -17,10 +17,10 @@ Called by other src-tauri modules:
 
 | Item | Caller |
 |---|---|
-| `startup(data_dir)` — take the per-data-dir instance lock; finish a pending wipe before logging/DB touch the folder (`privacy.rs:672`) | `src-tauri/src/lib.rs:39` |
-| `record_pending_wipe(&Storage)` — persist the startup wipe's leftovers/notes (`privacy.rs:761`) | `lib.rs:116` |
-| `spawn_disk_encryption_check(data_dir)` (`privacy.rs:1056`) | `lib.rs:118` |
-| `spawn_retention(app)` — first sweep after 60 s, then every 24 h (`privacy.rs:281`) | `lib.rs:179` |
+| `startup(data_dir)` — take the per-data-dir instance lock; finish a pending wipe before logging/DB touch the folder (`privacy.rs:672`) | `src-tauri/src/lib.rs:40` |
+| `record_pending_wipe(&Storage)` — persist the startup wipe's leftovers/notes (`privacy.rs:761`) | `startup.rs:194` |
+| `spawn_disk_encryption_check(data_dir)` (`privacy.rs:1056`) | `startup.rs:196` |
+| `spawn_retention(app)` — first sweep after 60 s, then every 24 h (`privacy.rs:281`) | `startup.rs:254` |
 | `ImportGuard::enter()` — marks an import in flight so delete-all refuses (`privacy.rs:383-401`) | `src-tauri/src/import_commands.rs:446`, `606` |
 | `sweep_retention(storage, now, busy, explicit) -> SweepReport` (`privacy.rs:175`) | internal + tests |
 | `delete_owned_secrets(stores)`, `wipe_data_dir(dir, keep_models, only)`, `classify_bitlocker`, `classify_fdesetup`, `windows_drive` | internal + tests |
@@ -44,10 +44,10 @@ Called by other src-tauri modules:
 | `dismiss_recovered_kept_local` | `meeting_id: Option<String>` (`meetingId`; none = all) | `Vec<RecoveredMeeting>` (what's left). Doesn't change Keep local | `ui-notices` (Review takes the first off and opens its note; Dismiss clears all), via `api.dismissRecoveredKeptLocal` |
 | `disk_encryption_status` | — | `Result<DiskEncryption, String>` (`state` on/off/unknown, `method`, `volume`) | `ui-settings` (`PrivacySection.tsx:55`), via `api.diskEncryptionStatus` |
 
-All 14 are registered in `src-tauri/src/lib.rs` (`recovered_kept_local` / `dismiss_recovered_kept_local` mirrored in devMock, with `fotwMockRecoveredKeptLocal = "1"` seeding one entry). The original 12 at `lib.rs:276-287` and mirrored in `frontend/src/devMock.ts:1420-1481`. Drift: the mock's `delete_all_data` rejects a wrong phrase with `"confirmation mismatch"` (backend: `"confirmation text doesn't match — nothing was deleted"`), never refuses for busy work, and always returns `last_wipe: null`; `set_note_keep_local` doesn't error on an unknown note.
+All 14 are registered in `src-tauri/src/lib.rs` (`recovered_kept_local` / `dismiss_recovered_kept_local` mirrored in devMock, with `fotwMockRecoveredKeptLocal = "1"` seeding one entry). The original 12 are at `src-tauri/src/lib.rs:188-199` and mirrored in `frontend/src/devMock.ts:1420-1481`. Drift: the mock's `delete_all_data` rejects a wrong phrase with `"confirmation mismatch"` (backend: `"confirmation text doesn't match — nothing was deleted"`), never refuses for busy work, and always returns `last_wipe: null`; `set_note_keep_local` doesn't error on an unknown note.
 
 ### Events
-One Tauri event: `privacy:recovered-kept-local` (`RECOVERED_KEPT_LOCAL_EVENT`), emitted by the startup self-heal in `lib.rs` when it kept meetings local without a recorded setting, payload the whole current `RecoveredMeeting[]`; listened to by `useRecoveredKeptLocal.ts`. Two frontend `window` events carry the rest of the feature in the UI:
+One Tauri event: `privacy:recovered-kept-local` (`RECOVERED_KEPT_LOCAL_EVENT`), emitted by the startup self-heal in `startup.rs` (`startup::finish`) when it kept meetings local without a recorded setting, payload the whole current `RecoveredMeeting[]`; listened to by `useRecoveredKeptLocal.ts`. Two frontend `window` events carry the rest of the feature in the UI:
 
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
@@ -109,14 +109,14 @@ The result (including `unknown`) is cached for the session under a mutex held ac
 
 ## Invariants
 - **T10 (cloud without the user realizing):** Keep local is enforced where providers are chosen, not here: `build_provider` refuses cloud LLMs for keep-local notes/meetings (`src-tauri/src/llm_commands.rs:605-613`), the pipeline skips Groq (`src-tauri/src/pipeline.rs:148-149`, `274`), and the embedding worker uses the shareable queue (`src-tauri/src/embeddings.rs:176`, `202`). Lookups fail closed (fly-storage `privacy.rs:209-241`). A folder flag can't be overridden per note (UI: `Editor.tsx:1045`). Spec §2 item 1.
-- Self-heal fails closed on Keep local (fly-storage), and the meetings it set that way are surfaced, not just logged: `lib.rs` stores `HealReport::kept_local_unconfirmed` in `AppState::recovered_kept_local` and emits the event; the review notice reads it.
+- Self-heal fails closed on Keep local (fly-storage), and the meetings it set that way are surfaced, not just logged: `startup.rs` stores `HealReport::kept_local_unconfirmed` in `AppState::recovered_kept_local` and emits the event; the review notice reads it.
 - **T11 (deleted data recoverable from the DB):** `erase_all_content` deletes every row, runs `VACUUM`, and reports `checkpointed: false` when a reader blocks the WAL truncate; the report is then not `clean()` and the UI won't auto-restart (`privacy.rs:854-870`, `516-523`; `RestartRequired.tsx:59-66`).
 - **T12 (consent of other participants):** the participants-notified flag and the recording notice (≤2000 chars, `privacy.rs:113-129`) are records/helpers only; nothing blocks recording.
 - **T13 (stolen laptop):** retention and delete-all limit what's on disk; the disk probe never needs elevation and says nothing when unsure (`privacy.rs:894-913`).
 - Retention can only be set to 7/30/90/365 through a validating command; `privacy.*` keys are not webview-settable (`privacy.rs:19-21`, `330-334`; `src-tauri/src/commands.rs:59-66`). Spec §2 item 2.
 - A background sweep never runs mid-recording, skips meetings a pipeline holds, refuses when the clock went back more than 1 h, and holds back when it would delete more than half the remaining audio (≥3 meetings); an explicit sweep from Settings may proceed (`privacy.rs:175-278`).
 - Delete-all refuses while recording, importing, transcribing or with queued jobs (`privacy.rs:404-425`), requires the confirmation phrase (an accident guard, not authorization, `privacy.rs:451-454`, `797-799`), and writes the marker before deleting anything (`privacy.rs:822-832`).
-- The restart wipe runs only while holding the instance lock (after the requesting instance exited), only for an unconsumed marker 0–10 minutes old, and renames the marker first so no second process acts on it (`privacy.rs:637-742`). It runs before logging and the DB open (`lib.rs:35-41`).
+- The restart wipe runs only while holding the instance lock (after the requesting instance exited), only for an unconsumed marker 0–10 minutes old, and renames the marker first so no second process acts on it (`privacy.rs:637-742`). It runs before logging and the DB open (`lib.rs:36-42`).
 
 ## Tests
 | Kind | File | Tests | Covers |

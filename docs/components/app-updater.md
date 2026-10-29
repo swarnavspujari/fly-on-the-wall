@@ -9,7 +9,7 @@ Keeps installed apps current from GitHub Releases. tauri-plugin-updater fetches 
 ## Files it owns
 - `src-tauri/tauri.conf.json:12-22` — `plugins.updater`: minisign `pubkey`, `endpoints` = `https://github.com/swarnavspujari/fly-on-the-wall/releases/latest/download/latest.json`, `windows.installMode = "passive"`.
 - `src-tauri/tauri.updater.conf.json` — `bundle.createUpdaterArtifacts: true`, layered in by release legs only.
-- `src-tauri/src/lib.rs:68-75` — registers `tauri_plugin_updater` and `tauri_plugin_process` in `setup` (desktop only).
+- `src-tauri/src/lib.rs:69-76` — registers `tauri_plugin_updater` and `tauri_plugin_process` in `setup` (desktop only).
 - `src-tauri/capabilities/default.json:6` — `updater:default`, `process:allow-restart`.
 - `src-tauri/Cargo.toml:53` (`tauri-plugin-updater = "2"`, locked 2.14.0) and tauri-plugin-process (locked 2.4.0); `frontend/package.json:20-21` (`@tauri-apps/plugin-updater ~2.14.0`, `@tauri-apps/plugin-process ~2.4.0`).
 - `frontend/src/updater.ts` — `useUpdater` hook and the `Updater` / `UpdatePhase` types.
@@ -87,7 +87,7 @@ None in the app. The minisign **public** key is in `tauri.conf.json:14`. The pri
 **Known gaps:**
 - **`useUpdater` has zero tests.** Every vitest uses a hand-made `fakeUpdater`; the hook's logic (silent vs. loud check errors, parking in `ready` when a recording starts mid-download, `restart` guard, `errorSource`, progress math) is never executed. A regression in the "never interrupt a recording" rule would pass CI. A test can mock `@tauri-apps/plugin-updater` / `plugin-process` and drive `renderHook` with a deferred `download` promise, flipping `recordingActive` before resolving.
 - **No Rust or workflow test.** The `latest.json` merge, the four-fragment rule and the pubkey/endpoint config are checked only by running a release.
-- **Windows update orphans the managed Ollama server.** The plugin exits via `std::process::exit(0)`, so `RunEvent::Exit` (which stops `ollama serve`, `lib.rs:291-296`) never runs; the app registers no `on_before_exit` hook (`lib.rs:72-73`). See [app-ollama](app-ollama.md).
+- **Windows update orphans the managed Ollama server.** The plugin exits via `std::process::exit(0)`, so `RunEvent::Exit` (which stops `ollama serve`, `lib.rs:202-211`) never runs; the app registers no `on_before_exit` hook (`lib.rs:73-74`). See [app-ollama](app-ollama.md).
 - devMock's `install` resolves to `null` without restarting, so port-1420 QA never reaches "installing".
 - Stale comment: `App.tsx:184` says "Auto-update (Windows-only)"; macOS and Linux AppImage are supported.
 
