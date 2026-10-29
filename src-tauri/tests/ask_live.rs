@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::{TimeZone, Utc};
 use fly_app_lib::llm_commands::{ask_tier, build_provider_with_reach, DataScope};
 use fly_app_lib::state::AppState;
 use fly_evals::ask_contract::{self as c, Contract, RecordingProvider, ScenarioKind};
@@ -111,26 +110,10 @@ async fn ask_live() {
 
     let contract = Contract::load(&fly_evals::evals_dir()).expect("contract");
     let db = fly_evals::corpus::Db::build(&contract.corpus, true).expect("fixture db");
-    // Database ids back to fixture ids, so a replay's request fingerprint
-    // doesn't depend on this database build.
-    let mut ids: Vec<(String, String)> = Vec::new();
-    for (k, v) in &db.meeting_ids {
-        ids.push((v.clone(), format!("{{meeting:{k}}}")));
-    }
-    for (k, v) in &db.note_ids {
-        ids.push((v.clone(), format!("{{note:{k}}}")));
-    }
-    for (k, v) in &db.folder_ids {
-        ids.push((v.clone(), format!("{{folder:{k}}}")));
-    }
-    let normalize = |s: &str| {
-        let mut s = s.to_string();
-        for (id, ph) in &ids {
-            s = s.replace(id.as_str(), ph);
-        }
-        s
-    };
-    let now = Utc.with_ymd_and_hms(2026, 10, 10, 17, 0, 0).unwrap();
+    // Database ids back to fixture ids (the evals' own mapping), so a
+    // replay's request fingerprint matches what CI computes.
+    let normalize = |s: &str| db.normalize_ids(s);
+    let now = fly_evals::ask_contract::eval_now();
     // Quality scenarios on a local provider: the reference questions.
     let scenarios: Vec<&c::Scenario> = contract
         .scenarios
