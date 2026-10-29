@@ -73,9 +73,8 @@ pub(crate) struct ChannelStats {
     pub write_errors: AtomicU64,
     /// The capture thread got real-time (MMCSS "Pro Audio") scheduling.
     pub boosted: AtomicBool,
-    /// Longest wait between two callbacks (µs): how long this capture
-    /// thread went without running.
-    pub max_callback_gap_us: AtomicU64,
+    /// Most audio ever waiting in the OS buffer for this app to read (µs).
+    pub max_backlog_us: AtomicU64,
     /// Losses that happened while the callback was running on time: audio
     /// the OS audio engine or driver dropped before this app could read it.
     pub upstream_lost_events: AtomicU64,
@@ -102,7 +101,7 @@ impl ChannelStats {
             last_loss_at_ms: last.checked_sub(1),
             write_errors: self.write_errors.load(Ordering::Relaxed),
             realtime_priority: self.boosted.load(Ordering::Relaxed),
-            max_callback_gap_ms: self.max_callback_gap_us.load(Ordering::Relaxed) / 1000,
+            max_backlog_ms: self.max_backlog_us.load(Ordering::Relaxed) / 1000,
             upstream_lost_events: self.upstream_lost_events.load(Ordering::Relaxed),
         }
     }
@@ -131,13 +130,14 @@ pub struct ChannelReport {
     pub last_loss_at_ms: Option<u64>,
     pub write_errors: u64,
     pub realtime_priority: bool,
-    /// Longest the capture thread went without running (Windows; 0 where
-    /// not measured).
+    /// Most audio ever waiting in the OS capture buffer for this app to read
+    /// (Windows; 0 where not measured). Near the buffer's size (400 ms) the
+    /// capture thread fell behind; far below it, any loss happened upstream.
     #[serde(default)]
-    pub max_callback_gap_ms: u64,
-    /// Of `lost_events`, the ones with no stall of the capture thread before
-    /// them: dropped upstream (OS audio engine or driver), which no in-app
-    /// change can prevent — only report.
+    pub max_backlog_ms: u64,
+    /// Of `lost_events`, the ones with no near-full buffer in the second
+    /// before them: dropped upstream (OS audio engine or driver), which no
+    /// in-app change can prevent — only report.
     #[serde(default)]
     pub upstream_lost_events: u64,
 }

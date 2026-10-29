@@ -87,7 +87,7 @@ Stop also calls `jobs_notify.notify_one()` in-process.
   - `recording.mixed.wav` (16 kHz),
   - `recording.playback.wav` (only when both channels exist),
   - at stop: `recording.manifest.json` and `note.json` (`recovery.rs:35,40,680-719`),
-  - at stop: `recording.capture.json` — `{schema: 1, duration_ms, mic, system}` with each channel's `fly_audio::ChannelReport` (lost / overflow / padded ms, events, xruns, last loss time, write errors, real-time priority, longest capture-thread stall, losses dropped upstream by the OS audio engine). Written for every recording, so a clean capture is on record as clean. Not media: retention and "delete audio" leave it, like the manifest.
+  - at stop: `recording.capture.json` — `{schema: 1, duration_ms, mic, system}` with each channel's `fly_audio::ChannelReport` (lost / overflow / padded ms, events, xruns, last loss time, write errors, real-time priority, the most audio ever waiting in the OS buffer, losses dropped upstream by the OS audio engine). Written for every recording, so a clean capture is on record as clean. Not media: retention and "delete audio" leave it, like the manifest.
 - Stored paths are data-dir-relative with `/` separators (`recording.rs:241-245`). A path outside `<data_dir>` silently becomes `None` (inferred edge).
 - A date edit renames the folder (only once a recording is attached) and rewrites the manifest (`meetings.rs:173-182`).
 - Live captions write `<scratch_root>/<meeting id>/live-tmp/{you|them}-<start_sample>.wav` (16 kHz chunks). Each chunk is deleted after transcription, and the folder is removed when the loop ends (`live.rs:202-206,242,295,325`). After a crash, the startup scratch sweep removes leftovers (`scratch.rs:1-16`).

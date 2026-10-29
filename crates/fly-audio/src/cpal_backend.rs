@@ -639,18 +639,17 @@ struct GapTracker {
     /// Expected capture time of the next packet's first frame.
     next_capture_ns: Option<i128>,
     last_callback_ns: i128,
-    /// When this thread last came back from a long wait (callback time).
-    /// A loss within a buffer's length of it was this thread's stall; a loss
-    /// with no recent stall happened upstream (audio engine / driver).
-    last_stall_end_ns: Option<i128>,
+    /// Device time of the last packet that waited in our buffer for most of
+    /// its length. Our buffer can only overflow after that; a loss with no
+    /// such packet in the second before it happened upstream (audio engine
+    /// or driver).
+    last_backlog_high_ns: Option<i128>,
 }
 
-/// A wait between callbacks longer than this counts as a stall of the
-/// capture thread (a WASAPI period is 10 ms).
-const STALL_NS: i128 = 100_000_000;
-/// How long after a stall a timestamp gap is still blamed on it: the deep
-/// buffer drains for up to its length after the thread wakes.
-const STALL_BLAME_NS: i128 = 1_000_000_000;
+/// How long after a near-full buffer a loss is still blamed on this app.
+const BACKLOG_BLAME_NS: i128 = 1_000_000_000;
+/// A backlog above this is implausible (a bad timestamp), not measured.
+const BACKLOG_SANE_NS: i128 = 10_000_000_000;
 
 /// Build a capture stream for one channel. On Windows it first asks for a
 /// deep WASAPI buffer; a driver that refuses it still gets a working stream
@@ -667,14 +666,32 @@ fn build_recorder(
     {
         let mut deep = base;
         deep.buffer_size = cpal::BufferSize::Fixed(base.sample_rate * WASAPI_BUFFER_MS / 1000);
-        match build_stream(device, config.sample_format(), deep, &path, &clock, kind) {
+        let high_water_ns = WASAPI_BUFFER_MS as i128 * 1_000_000 * 3 / 4;
+        match build_stream(
+            device,
+            config.sample_format(),
+            deep,
+            &path,
+            &clock,
+            kind,
+            high_water_ns,
+        ) {
             Ok(r) => return Ok(r),
             Err(e) => tracing::warn!(
                 "capture with a {WASAPI_BUFFER_MS} ms buffer failed ({e}); using the default"
             ),
         }
     }
-    build_stream(device, config.sample_format(), base, &path, &clock, kind)
+    // the default buffer is about one period: any backlog fills it
+    build_stream(
+        device,
+        config.sample_format(),
+        base,
+        &path,
+        &clock,
+        kind,
+        5_000_000,
+    )
 }
 
 /// One stream that downmixes every callback buffer to mono i16 and hands it
@@ -695,6 +712,7 @@ fn build_stream(
     path: &std::path::Path,
     clock: &Arc<Clock>,
     kind: ChannelKind,
+    high_water_ns: i128,
 ) -> Result<(ChannelRecorder, ChannelSink)> {
     let channels = stream_config.channels.max(1) as usize;
     let rate: u32 = stream_config.sample_rate;
@@ -725,7 +743,7 @@ fn build_stream(
                 epoch: clock.epoch(),
                 next_capture_ns: None,
                 last_callback_ns: 0,
-                last_stall_end_ns: None,
+                last_backlog_high_ns: None,
             };
             device.build_input_stream(
                 stream_config,
@@ -750,21 +768,24 @@ fn build_stream(
                             gaps.epoch = epoch;
                             gaps.next_capture_ns = None;
                         }
+                        // backlog: how long this packet sat in the OS buffer
+                        // (`callback` is the device position's QPC time)
+                        let backlog = cb - cap;
+                        if cb > 0 && (0..BACKLOG_SANE_NS).contains(&backlog) {
+                            producer
+                                .stats()
+                                .max_backlog_us
+                                .fetch_max((backlog / 1000) as u64, Ordering::Relaxed);
+                            if backlog >= high_water_ns {
+                                gaps.last_backlog_high_ns = Some(cb);
+                            }
+                        }
                         if let Some(next) = gaps.next_capture_ns {
                             let gap_ns = cap - next;
                             let waited_ns = cb - gaps.last_callback_ns;
-                            let idle = kind == ChannelKind::Loopback && waited_ns * 2 >= gap_ns;
-                            if !idle {
-                                // how late this thread ran (idle loopback waits
-                                // legitimately, so only when not idle)
-                                producer.stats().max_callback_gap_us.fetch_max(
-                                    (waited_ns / 1000).max(0) as u64,
-                                    Ordering::Relaxed,
-                                );
-                                if waited_ns > STALL_NS {
-                                    gaps.last_stall_end_ns = Some(cb);
-                                }
-                            }
+                            let idle = kind == ChannelKind::Loopback
+                                && gap_ns > GAP_MIN_NS
+                                && waited_ns * 2 >= gap_ns;
                             if gap_ns > GAP_MIN_NS {
                                 // Every gap becomes the same length of silence,
                                 // so the channel follows the device's timeline
@@ -777,8 +798,8 @@ fn build_stream(
                                 let lost = !idle;
                                 if lost
                                     && !gaps
-                                        .last_stall_end_ns
-                                        .is_some_and(|at| cb - at < STALL_BLAME_NS)
+                                        .last_backlog_high_ns
+                                        .is_some_and(|at| cb - at < BACKLOG_BLAME_NS)
                                 {
                                     producer
                                         .stats()
