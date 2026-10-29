@@ -77,6 +77,25 @@ pub struct Unanswerable {
     /// "shareable": only the shareable view must find nothing.
     #[serde(default)]
     pub visibility: Option<String>,
+    /// Off-corpus (the topic never comes up) or near-miss (the topic does,
+    /// the asked-for fact doesn't): reported separately.
+    pub kind: UnanswerableKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnanswerableKind {
+    OffCorpus,
+    NearMiss,
+}
+
+impl UnanswerableKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UnanswerableKind::OffCorpus => "off_corpus",
+            UnanswerableKind::NearMiss => "near_miss",
+        }
+    }
 }
 
 impl Unanswerable {
@@ -262,11 +281,12 @@ impl LeakNeedles {
     pub fn new(corpus: &Corpus, db: &Db) -> Self {
         let mut needles = corpus.canaries();
         for m in corpus.keep_local_meetings() {
+            needles.push(m.title.to_lowercase());
             needles.push(db.meeting_ids[&m.id].to_lowercase());
             needles.push(db.note_ids[&m.id].to_lowercase());
             for (id, ..) in &m.segments {
-                needles.push(format!("\"{}\"", id.to_lowercase()));
-                needles.push(format!("[seg:{}]", id.to_lowercase()));
+                // Database segment ids are UUIDs: unique anywhere in text.
+                needles.push(db.seg_ids[id].to_lowercase());
             }
         }
         Self { needles }
@@ -294,22 +314,30 @@ impl LeakNeedles {
     }
 }
 
-struct Scored {
-    recall: f64,
-    rr: f64,
-    covered: bool,
-    rank: Option<usize>,
+pub struct Scored {
+    pub recall: f64,
+    pub rr: f64,
+    pub covered: bool,
+    pub rank: Option<usize>,
 }
 
 /// Gating score: only transcript segments count (note passages, which carry
 /// no segment ids, never satisfy a must-cite requirement but still take one
 /// of the 8 slots; crowding citable passages out is a real miss).
-fn score(q: &Answerable, passages: &[fly_context::Passage]) -> Scored {
+/// Database segment id → fixture segment id.
+pub type IdMap<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// A passage's segments as fixture ids.
+pub fn passage_segments(ids: IdMap<'_>, p: &fly_context::Passage) -> BTreeSet<String> {
+    p.segments.iter().filter_map(|s| ids(&s.id)).collect()
+}
+
+pub fn score(ids: IdMap<'_>, q: &Answerable, passages: &[fly_context::Passage]) -> Scored {
     let top = &passages[..passages.len().min(K)];
     let mut all = BTreeSet::new();
     let mut rank = None;
     for (i, p) in top.iter().enumerate() {
-        let segs: BTreeSet<String> = p.segments.iter().map(|s| s.id.clone()).collect();
+        let segs = passage_segments(ids, p);
         if rank.is_none() && q.must_cite.iter().any(|r| r.met_by(&segs)) {
             rank = Some(i + 1);
         }
@@ -329,6 +357,7 @@ fn score(q: &Answerable, passages: &[fly_context::Passage]) -> Scored {
 /// notes are evidence an answer could use, though not citable lines).
 /// `req_meetings[i]`: database ids of the meetings requirement `i` lives in.
 fn score_evidence(
+    ids: IdMap<'_>,
     q: &Answerable,
     passages: &[fly_context::Passage],
     req_meetings: &[BTreeSet<String>],
@@ -337,7 +366,7 @@ fn score_evidence(
     let mut met_reqs = vec![false; q.must_cite.len()];
     let mut rank = None;
     for (i, p) in top.iter().enumerate() {
-        let segs: BTreeSet<String> = p.segments.iter().map(|s| s.id.clone()).collect();
+        let segs = passage_segments(ids, p);
         let note_meeting = (p.source == fly_context::PassageSource::Note)
             .then_some(p.meeting_id.as_ref())
             .flatten();
@@ -389,6 +418,7 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
     )?)
     .context("parse keep_local_probes.toml")?;
     let db = Db::build(&corpus, true)?;
+    let ids: IdMap<'_> = &|s| db.fixture_seg(s).map(str::to_string);
     let all = Context::new(&db.storage, Visibility::All);
     let shareable = Context::new(&db.storage, Visibility::ShareableOnly);
 
@@ -411,8 +441,8 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
         let keyword = all
             .search_passages(&args, None)
             .with_context(|| format!("{}: keyword search", q.id))?;
-        let s = score(q, &hybrid.passages);
-        let kw = score(q, &keyword.passages);
+        let s = score(ids, q, &hybrid.passages);
+        let kw = score(ids, q, &keyword.passages);
         let req_meetings: Vec<BTreeSet<String>> = q
             .must_cite
             .iter()
@@ -424,7 +454,7 @@ fn run_inner(evals_dir: &Path, embedder: &str) -> Result<SuiteResult> {
                     .collect()
             })
             .collect();
-        let ev = score_evidence(q, &hybrid.passages, &req_meetings);
+        let ev = score_evidence(ids, q, &hybrid.passages, &req_meetings);
         ev_recalls.push(ev.recall);
         ev_rrs.push(ev.rr);
         recalls.push(s.recall);
@@ -662,6 +692,7 @@ mod tests {
             "#,
         )
         .unwrap();
+        let same: IdMap<'_> = &|s| Some(s.to_string());
         let passage = |ids: &[&str]| fly_context::Passage {
             source: fly_context::PassageSource::Transcript,
             meeting_id: None,
@@ -685,14 +716,18 @@ mod tests {
             score: 0.0,
             matched_by: vec![],
         };
-        let s = score(&q, &[passage(&["z"]), passage(&["c"]), passage(&["a"])]);
+        let s = score(
+            same,
+            &q,
+            &[passage(&["z"]), passage(&["c"]), passage(&["a"])],
+        );
         assert_eq!((s.recall, s.rank, s.covered), (1.0, Some(2), true));
         assert_eq!(s.rr, 0.5);
-        let s = score(&q, &[passage(&["a"])]);
+        let s = score(same, &q, &[passage(&["a"])]);
         assert_eq!((s.recall, s.rank, s.covered), (0.5, Some(1), false));
         let mut many: Vec<_> = (0..K).map(|_| passage(&["z"])).collect();
         many.push(passage(&["a"]));
-        let s = score(&q, &many);
+        let s = score(same, &q, &many);
         assert_eq!((s.recall, s.rank), (0.0, None), "only the top 8 count");
 
         // Evidence score: a note passage of a must-cite meeting is a hit;
@@ -704,9 +739,9 @@ mod tests {
             ["M".to_string()].into_iter().collect::<BTreeSet<_>>(),
             BTreeSet::new(),
         ];
-        let gate = score(&q, &[note.clone(), passage(&["b"])]);
+        let gate = score(same, &q, &[note.clone(), passage(&["b"])]);
         assert_eq!((gate.recall, gate.rank), (0.5, Some(2)));
-        let ev = score_evidence(&q, &[note, passage(&["b"])], &reqs);
+        let ev = score_evidence(same, &q, &[note, passage(&["b"])], &reqs);
         assert_eq!((ev.recall, ev.rank, ev.covered), (1.0, Some(1), true));
     }
 }

@@ -16,8 +16,10 @@
 #               meeting (answerable under Visibility::All only)
 #
 # [[unanswerable]]
-#   id, question, why (what the corpus does and doesn't say), and optional
-#   visibility = "shareable" when only the shareable view must find nothing.
+#   id, question, why (what the corpus does and doesn't say), kind
+#   ("off_corpus": the topic never comes up; "near_miss": the topic does,
+#   the asked-for fact doesn't), and optional visibility = "shareable" when
+#   only the shareable view must find nothing.
 
 # --- launch series: numbers that change week to week ----------------------
 
@@ -421,57 +423,68 @@ keep_local = true
 
 [[unanswerable]]
 id = "u01"
+kind = "off_corpus"
 question = "What did we decide about the Berlin office lease?"
 why = "No office or lease is discussed anywhere."
 
 [[unanswerable]]
 id = "u02"
+kind = "near_miss"
 question = "What's the budget for the Q1 team offsite?"
 why = "Budgets are discussed (launch ads, salary band) but never an offsite."
 
 [[unanswerable]]
 id = "u03"
+kind = "near_miss"
 question = "What price did Routewise quote Harrowgate?"
 why = "Colm says Routewise quoted lower, but no amount is ever given."
 
 [[unanswerable]]
 id = "u04"
+kind = "near_miss"
 question = "Which contractor is doing the Spanish translation?"
 why = "Hana has no quote yet and no contractor is named."
 
 [[unanswerable]]
 id = "u05"
+kind = "near_miss"
 question = "What did the board decide at Friday's meeting?"
 why = "Only the board prep is recorded, not the board meeting."
 
 [[unanswerable]]
 id = "u06"
+kind = "near_miss"
 question = "How many technician seats does Blue Tansy have?"
 why = "Seats are only mentioned for Harrowgate (sixty)."
 
 [[unanswerable]]
 id = "u07"
+kind = "near_miss"
 question = "What were the results of Jun's load test?"
 why = "The load test is planned for Thursday; no result is ever reported."
 
 [[unanswerable]]
 id = "u08"
+kind = "near_miss"
 question = "Did we agree on a discount for the Blue Tansy pilot?"
 why = "Discounts are discussed only for Harrowgate."
 
 [[unanswerable]]
 id = "u09"
+kind = "near_miss"
 question = "What was our churn rate in Q3?"
 why = "Growth, ARR and net revenue retention are given; churn never is."
 
 [[unanswerable]]
 id = "u10"
+kind = "near_miss"
 question = "What is Project Kestrel?"
 why = "Discussed only in the keep-local 1:1, so a shareable view must find nothing."
 visibility = "shareable"
 
 [[unanswerable]]
 id = "u11"
+kind = "off_corpus"
 question = "Who replaced Ines as marketing lead?"
 why = "Nobody replaces Ines; it's never discussed."
 
@@ -513,6 +526,7 @@ category = ["names", "action_items", "near_duplicate"]
 
 [[unanswerable]]
 id = "u13"
+kind = "near_miss"
 question = "How much is the Larkspan partnership going to cost us?"
 why = "Larkspan is picked as the calendar partner, but no fees, revenue share or other commercial terms are discussed anywhere."
 
@@ -552,6 +566,7 @@ category = ["names", "action_items", "near_duplicate"]
 
 [[unanswerable]]
 id = "u14"
+kind = "near_miss"
 question = "What was our customer satisfaction score in September?"
 why = "The September support review covers volume, response times, categories, macros, escalation, staffing and the helpdesk move, but no satisfaction or CSAT score is given anywhere."
 
@@ -591,6 +606,7 @@ category = ["names", "action_items", "dates"]
 
 [[unanswerable]]
 id = "u15"
+kind = "near_miss"
 question = "How much would a dedicated single-tenant instance for Calder Water cost?"
 why = "Elena floats a dedicated instance and it is then dropped in favour of a residency addendum; no cost is ever mentioned."
 
@@ -628,5 +644,6 @@ category = ["dates", "action_items", "near_duplicate"]
 
 [[unanswerable]]
 id = "u16"
+kind = "near_miss"
 question = "How much does the licence for the new icon set cost?"
 why = "Marlpit is chosen and its licence is described as one-off and perpetual, with finance happy with the terms, but no price is ever given."
