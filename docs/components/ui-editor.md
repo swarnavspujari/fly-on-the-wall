@@ -124,7 +124,7 @@ None.
 - Run `npm --prefix frontend test`, `npm --prefix frontend run lint`, and `tsc` (part of `npm --prefix frontend run build`).
 - Any new place that renders AI or imported content must use `SAFE_IMG` / `SafeLink` (react-markdown) or `sanitizeHtml` (HTML). Never add `rehype-raw`, `dangerouslySetInnerHTML` or `innerHTML` without `sanitizeHtml`. Keep CSP `img-src` / `media-src` as they are (spec §2 item 3).
 - If you change `isSafeMediaSrc` or the DOMPurify config, add jsdom tests first (`// @vitest-environment jsdom`). Today nothing would catch a regression.
-- `BlockFlag` (types.ts) and the copy in `enhancedTrust.ts` mirror fly-core's `BlockFlagKind` and Ask's `flagCopy`; change them together. `askModel.flagCopy` (PR #120) says the same things and could replace `blockFlagCopy` once that merges.
+- `BlockFlag` (types.ts) and the copy in `enhancedTrust.ts` mirror fly-core's `BlockFlagKind` and Ask's `flagCopy`; change them together. `blockFlagCopy` delegates to `askModel.flagCopy` for the kinds both share (and words `invalid_citation` and `not_from_notes` itself), so the Ask sheet and the Enhanced view can't drift.
 - Enhance's cited ids must stay raw-transcript segment ids. If PR #92's re-anchoring changes ids on re-transcribe, update `enhancedTrust.ts` and the "missing" copy together.
 - Keep `isGenericLabel` in step with the backend's generic-label rule.
 - New commands called from here need an `api.ts` wrapper, a `lib.rs` registration and a devMock case (spec §2 item 4). devMock returns `null` silently for unknown commands.

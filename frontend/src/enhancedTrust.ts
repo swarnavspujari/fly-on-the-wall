@@ -2,6 +2,7 @@
    to the transcript, and which have no source. Pure, so the copy and the
    counting are unit-tested (enhancedTrust.test.ts). */
 
+import { flagCopy } from "./askModel";
 import type { BlockFlag, BlockOrigin, EnhanceReport, NoteBlock, Transcript } from "./types";
 
 /** The transcripts Enhance could have cited: the RAW transcripts of every
@@ -185,29 +186,17 @@ export const REVIEW_COPY: Record<"unsourced" | "missing", { label: string; why: 
   },
 };
 
-/** Why one line is flagged, in the Ask sheet's words (askModel `flagCopy`)
- *  so both views say the same thing about the same failure. */
+/** Why one line is flagged. The kinds Enhance shares with Ask say what the
+ *  Ask sheet says (askModel `flagCopy`), so both views word the same failure
+ *  the same way; the two Enhance-only reasons are worded here. */
 export function blockFlagCopy(flag: BlockFlag): string {
-  const d = flag.detail?.trim();
-  const isnt = (what: string) =>
-    d
-      ? `The ${what} “${d}” isn't in the lines it cites.`
-      : `A ${what} here isn't in the lines it cites.`;
   switch (flag.kind) {
-    case "number":
-      return isnt("number");
-    case "date":
-      return isnt("date");
-    case "name":
-      return isnt("name");
-    case "quote":
-      return "This quote isn't in the lines it cites.";
     case "invalid_citation":
       return "It pointed to a line Enhance didn't read.";
     case "not_from_notes":
       return "This isn't in your notes, so it isn't shown as yours.";
     default:
-      return "This states a fact without a source.";
+      return flagCopy({ kind: flag.kind, detail: flag.detail });
   }
 }
 
