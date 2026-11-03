@@ -9,13 +9,20 @@
 //! The queue is keyed by meeting id only; `pipeline::run_with` resolves the
 //! recording files from the meeting row at execution time.
 //!
-//! `tick` is the tauri-free core (like `pipeline::run_with`) so tests can
-//! drive scheduling decisions without a webview runtime.
+//! The AI pass after a transcription (cleanup, then item extraction) is not
+//! part of that queue's work. The worker only queues it (`ai_queue`) and
+//! starts the next job; a second worker runs the passes one at a time. A slow
+//! or runaway model therefore delays the pass behind it, never a transcription.
+//!
+//! `tick` and `handle_tick` are the tauri-free core (like
+//! `pipeline::run_with`) so tests can drive scheduling decisions without a
+//! webview runtime.
 
 use std::time::Duration;
 
 use tauri::{Emitter, Manager};
 
+use crate::ai_queue::{AiJob, AiJobKind};
 use crate::models;
 use crate::pipeline::{self, PipelineProgress, StageSink};
 use crate::state::AppState;
@@ -66,6 +73,9 @@ pub fn enqueue(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> R
         // must not stop it. (Only here: a retry of the same job keeps a
         // pending cancel, see `tick`.)
         state.cancel_requests.lock().unwrap().remove(meeting_id);
+        // The earlier run's AI pass, if it hasn't started, would work on a
+        // transcript this run replaces; this run queues its own when done.
+        state.ai_queue.remove_pending(meeting_id);
         mark_waiting(state, on_stage, meeting_id, None);
     }
     state.jobs_notify.notify_one();
@@ -122,6 +132,20 @@ pub async fn tick(
     let Some(job) = job else { return Tick::Idle };
     let meeting_id = job.meeting_id.clone();
 
+    // A pass of this very meeting (transcribed a moment ago, now queued
+    // again) is still reading and rewriting its transcript: let it end first.
+    // Passes of other meetings never hold a transcription up.
+    if state.ai_queue.is_running(&meeting_id) {
+        state
+            .ai_queue
+            .wait_for_pass_end(&meeting_id, IDLE_POLL)
+            .await;
+        // a capture may have started meanwhile; the job stays queued
+        if recording_active(state) {
+            return Tick::RecordingActive;
+        }
+    }
+
     set_job_state(state, |s| s.mark_transcription_running(&meeting_id));
     // clear the "waiting" marker so run_with's per-meeting guard can pass
     state.pipeline_stage.lock().unwrap().remove(&meeting_id);
@@ -164,10 +188,14 @@ pub async fn tick(
     }
 }
 
-/// Spawn the queue worker (called once at app setup). Recovers jobs a
-/// previous process left 'running', then loops: run a job when allowed,
-/// otherwise wait for a nudge (enqueue, recording stop) or the poll tick.
+/// Spawn the workers (called once at app setup): the transcription queue's,
+/// and the one that runs the AI passes it queues.
+///
+/// The transcription worker recovers jobs a previous process left 'running',
+/// then loops: run a job when allowed, otherwise wait for a nudge (enqueue,
+/// recording stop) or the poll tick.
 pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    spawn_ai_worker(app.clone());
     tauri::async_runtime::spawn(async move {
         let on_stage = stage_emitter(&app);
         let on_model = {
@@ -179,46 +207,128 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         recover(&app.state::<AppState>(), &on_stage);
         loop {
             let state = app.state::<AppState>();
-            match tick(&state, &on_stage, &on_model).await {
-                Tick::Completed(meeting_id) => {
-                    ai_pass(&app, &state, &on_stage, &meeting_id).await;
-                    // Fresh transcript → new chunks for the semantic index.
-                    // After the AI pass: nudged before it, the worker would
-                    // start a batch only to abandon it when the pass begins,
-                    // and polish would re-chunk the meeting anyway.
-                    state.embed_notify.notify_one();
-                    // Transcript final → its recording can be compressed.
-                    state.audio_store.nudge();
-                    // and, with the audio-only policy, an import's video copy
-                    crate::video_store::after_transcription(&app);
-                    emit_final(&on_stage, &meeting_id, None)
-                }
-                Tick::Retrying {
-                    meeting_id,
-                    attempts,
-                    error,
-                } => {
-                    tracing::warn!(meeting_id, attempts, error = %error, "transcription retry queued");
-                    mark_waiting(
-                        &state,
-                        &on_stage,
-                        &meeting_id,
-                        Some(format!("retrying (attempt {attempts} failed)")),
-                    );
-                    tokio::time::sleep(RETRY_DELAY).await;
-                }
-                Tick::Cancelled(meeting_id) => {
-                    finish_cancelled(&state, &on_stage, &meeting_id);
-                }
-                Tick::GaveUp { meeting_id, error } => {
-                    emit_final(&on_stage, &meeting_id, Some(error))
-                }
-                Tick::Idle | Tick::RecordingActive => {
-                    let _ = tokio::time::timeout(IDLE_POLL, state.jobs_notify.notified()).await;
-                }
+            let outcome = tick(&state, &on_stage, &on_model).await;
+            handle_tick(&state, &on_stage, outcome).await;
+        }
+    });
+}
+
+/// What the transcription worker does with one tick's outcome. Waits at
+/// most the retry back-off or one idle poll: a finished transcription only
+/// QUEUES its AI pass, so the next job starts at once.
+async fn handle_tick(state: &AppState, on_stage: StageSink<'_>, tick: Tick) {
+    match tick {
+        Tick::Completed(meeting_id) => {
+            queue_ai_pass(state, on_stage, &meeting_id, AiJobKind::AfterTranscription)
+        }
+        Tick::Retrying {
+            meeting_id,
+            attempts,
+            error,
+        } => {
+            tracing::warn!(meeting_id, attempts, error = %error, "transcription retry queued");
+            mark_waiting(
+                state,
+                on_stage,
+                &meeting_id,
+                Some(format!("retrying (attempt {attempts} failed)")),
+            );
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+        Tick::Cancelled(meeting_id) => {
+            finish_cancelled(state, on_stage, &meeting_id);
+        }
+        Tick::GaveUp { meeting_id, error } => emit_final(on_stage, &meeting_id, Some(error)),
+        Tick::Idle | Tick::RecordingActive => {
+            let _ = tokio::time::timeout(IDLE_POLL, state.jobs_notify.notified()).await;
+        }
+    }
+}
+
+/// Queue the AI pass for a meeting and surface it as "polishing" at once, so
+/// the note doesn't show a stale transcription stage while an earlier pass
+/// finishes. The marker also keeps the meeting busy for background work.
+/// Does nothing when the meeting is already queued or running again (it was
+/// queued afresh in the meantime: that run brings its own pass).
+fn queue_ai_pass(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str, kind: AiJobKind) {
+    {
+        let mut stages = state.pipeline_stage.lock().unwrap();
+        if stages.contains_key(meeting_id) {
+            return;
+        }
+        stages.insert(meeting_id.to_string(), "polishing".to_string());
+    }
+    state.ai_queue.push(AiJob {
+        meeting_id: meeting_id.to_string(),
+        kind,
+    });
+    on_stage(PipelineProgress {
+        meeting_id: meeting_id.to_string(),
+        stage: "polishing".into(),
+        detail: None,
+        done: false,
+        error: None,
+    });
+    state.ai_queue.wake.notify_one();
+}
+
+fn spawn_ai_worker<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        let on_stage = stage_emitter(&app);
+        let on_skips = {
+            let app = app.clone();
+            move |skipped: Vec<String>| {
+                let _ = app.emit("llm:consent-skips", skipped);
+            }
+        };
+        let on_transcript_final = {
+            let app = app.clone();
+            // with the audio-only policy, an import's video copy
+            move || crate::video_store::after_transcription(&app)
+        };
+        loop {
+            let state = app.state::<AppState>();
+            if !run_next_ai_job(&state, &on_stage, &on_skips, &on_transcript_final).await {
+                let _ = tokio::time::timeout(IDLE_POLL, state.ai_queue.wake.notified()).await;
             }
         }
     });
+}
+
+/// Run the oldest queued AI pass, if there is one, and say it's over. Returns
+/// whether one ran. `on_skips` gets the meetings still waiting on cloud
+/// consent; `on_transcript_final` is the one app-handle effect of a pass that
+/// follows a transcription.
+///
+/// Recording wins here too: passes can now queue up behind a slow one, and a
+/// model must not start eating CPU and GPU while a capture is running. They
+/// wait for it to end, like the transcription jobs do. (A pass already
+/// running carries on, as it always did.)
+async fn run_next_ai_job(
+    state: &AppState,
+    on_stage: StageSink<'_>,
+    on_skips: &(dyn Fn(Vec<String>) + Sync),
+    on_transcript_final: &(dyn Fn() + Sync),
+) -> bool {
+    if recording_active(state) {
+        return false;
+    }
+    let Some((job, _running)) = state.ai_queue.next() else {
+        return false;
+    };
+    ai_pass(state, on_stage, &job.meeting_id, on_skips).await;
+    if job.kind == AiJobKind::AfterTranscription {
+        // Fresh transcript → new chunks for the semantic index. After the
+        // pass: nudged before it, the worker would start a batch only to
+        // abandon it when the pass begins, and polish would re-chunk the
+        // meeting anyway.
+        state.embed_notify.notify_one();
+        // Transcript final → its recording can be compressed.
+        state.audio_store.nudge();
+        on_transcript_final();
+    }
+    emit_final(on_stage, &job.meeting_id, None);
+    true
 }
 
 /// The best-effort AI pass after a transcription: cleanup, then structured
@@ -226,20 +336,16 @@ pub fn spawn<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
 /// meeting either step skipped for missing cloud consent is remembered
 /// (`AppState::consent_skipped`); the current list goes out as
 /// `llm:consent-skips` so the app's notice can offer to run them.
-async fn ai_pass<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
+async fn ai_pass(
     state: &AppState,
     on_stage: StageSink<'_>,
     meeting_id: &str,
+    on_skips: &(dyn Fn(Vec<String>) + Sync),
 ) {
     // This run decides it afresh; a refusal below puts it back.
     state.consent_skipped.lock().unwrap().remove(meeting_id);
     polish_after_transcribe(state, on_stage, meeting_id).await;
-    let _ = tokio::time::timeout(
-        POLISH_TIMEOUT,
-        crate::extraction::extract_after_transcribe(state, meeting_id),
-    )
-    .await;
+    crate::extraction::extract_after_transcribe(state, meeting_id).await;
     let skipped: Vec<String> = state
         .consent_skipped
         .lock()
@@ -247,33 +353,24 @@ async fn ai_pass<R: tauri::Runtime>(
         .iter()
         .cloned()
         .collect();
-    let _ = app.emit("llm:consent-skips", skipped);
+    on_skips(skipped);
 }
 
 /// Run the AI pass again for every meeting it skipped for missing consent
-/// (the user has just allowed the provider). In the background, one meeting
-/// at a time, with the same "polishing" marker and final event as after a
-/// transcription, so an open note shows the cleaned transcript when it lands.
-/// Returns how many meetings it took on.
+/// (the user has just allowed the provider). Queued behind any pass already
+/// waiting, one meeting at a time, with the same "polishing" marker and final
+/// event as after a transcription, so an open note shows the cleaned
+/// transcript when it lands. Returns how many meetings it took on.
 pub fn retry_consent_skipped<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> usize {
-    let ids = take_consent_rerun(&app.state::<AppState>());
-    let count = ids.len();
-    if count == 0 {
-        return 0;
+    queue_consent_rerun(&app.state::<AppState>(), &stage_emitter(&app))
+}
+
+fn queue_consent_rerun(state: &AppState, on_stage: StageSink<'_>) -> usize {
+    let ids = take_consent_rerun(state);
+    for meeting_id in &ids {
+        queue_ai_pass(state, on_stage, meeting_id, AiJobKind::ConsentRerun);
     }
-    tauri::async_runtime::spawn(async move {
-        let on_stage = stage_emitter(&app);
-        let state = app.state::<AppState>();
-        for meeting_id in ids {
-            // Checked again: one may have started or failed since.
-            if !consent_rerun_allowed(&state, &meeting_id) {
-                continue;
-            }
-            ai_pass(&app, &state, &on_stage, &meeting_id).await;
-            emit_final(&on_stage, &meeting_id, None);
-        }
-    });
-    count
+    ids.len()
 }
 
 /// Empty the consent-skipped list and return the meetings the re-run should
@@ -324,7 +421,20 @@ pub fn last_failure(state: &AppState, meeting_id: &str) -> Option<String> {
 /// finishes up via [`Tick::Cancelled`]. A merely queued/waiting job is
 /// removed on the spot and the terminal "cancelled" event emitted here.
 /// Returns whether anything was in flight (so "cancelled" is out or coming).
+///
+/// A transcription that already finished and whose AI pass hasn't started is
+/// dropped from that queue the same way: nothing runs on a meeting that is
+/// being deleted or cancelled.
 pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Result<bool, String> {
+    if state.ai_queue.remove_pending(meeting_id) {
+        let mut stages = state.pipeline_stage.lock().unwrap();
+        if stages.get(meeting_id).map(String::as_str) == Some("polishing") {
+            stages.remove(meeting_id);
+        }
+        drop(stages);
+        emit_cancelled(on_stage, meeting_id);
+        return Ok(true);
+    }
     let running = {
         let stages = state.pipeline_stage.lock().unwrap();
         matches!(stages.get(meeting_id).map(String::as_str), Some(s) if s != WAITING_STAGE)
@@ -397,9 +507,11 @@ pub(crate) fn emit_cancelled(on_stage: StageSink<'_>, meeting_id: &str) {
     });
 }
 
-/// How long the chained AI-cleanup pass may run before the queue moves on.
-/// LLM providers have no client-side timeout; without a cap here a hung
-/// provider would stall every queued transcription behind it.
+/// How long the AI-cleanup step may run before the pass moves on to item
+/// extraction (which has its own limit, `extraction::EXTRACT_TIMEOUT`). LLM
+/// providers have no client-side timeout; without a cap here a hung provider
+/// would hold up every AI pass behind it (never a transcription: the passes
+/// have their own worker).
 const POLISH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Best-effort AI cleanup chained after every successful transcription, so a
@@ -426,6 +538,7 @@ async fn polish_after_transcribe(state: &AppState, on_stage: StageSink<'_>, meet
             tracing::info!(meeting_id, error = %e, "transcript cleanup skipped (raw transcript stands)")
         }
         Err(_) => {
+            crate::llm_commands::record_incomplete(state, meeting_id);
             tracing::warn!(
                 meeting_id,
                 "transcript cleanup timed out (raw transcript stands)"
@@ -702,6 +815,296 @@ mod tests {
         state.cancel_requests.lock().unwrap().insert("m1".into());
         enqueue(&state, &quiet, "m1").unwrap(); // already queued
         assert!(state.cancel_requests.lock().unwrap().contains("m1"));
+    }
+
+    /// Progress events a test collects: `(meeting_id, stage)`.
+    type Events = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+    fn collecting() -> (Events, impl Fn(pipeline::PipelineProgress) + Send + Sync) {
+        let events = Events::default();
+        let sink = {
+            let events = events.clone();
+            move |p: pipeline::PipelineProgress| {
+                events.lock().unwrap().push((p.meeting_id, p.stage));
+            }
+        };
+        (events, sink)
+    }
+
+    fn stage_of(state: &AppState, meeting_id: &str) -> Option<String> {
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .get(meeting_id)
+            .cloned()
+    }
+
+    fn real_meeting(state: &AppState) -> String {
+        let storage = state.storage.lock().unwrap();
+        let note = storage.create_note("Standup", None).unwrap();
+        storage.create_meeting("Standup", &note.id, &[]).unwrap().id
+    }
+
+    /// A provider that refuses at once (a cloud provider with no consent: no
+    /// network and no Ollama to start), so the pass ends fast.
+    fn refusing_provider(state: &AppState) {
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .set_setting("llm.provider", "anthropic")
+            .unwrap();
+    }
+
+    /// The incident: a model that ran for ten minutes held the next
+    /// transcription back, because the AI pass ran inside the worker loop. A
+    /// finished transcription now only queues its pass and returns, even
+    /// while an earlier pass is still running.
+    #[test]
+    fn a_finished_transcription_queues_its_pass_and_the_worker_moves_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let (events, sink) = collecting();
+        // an earlier meeting's pass is mid-flight (a slow model)
+        state.ai_queue.push(AiJob {
+            meeting_id: "earlier".into(),
+            kind: AiJobKind::AfterTranscription,
+        });
+        let _earlier_pass = state.ai_queue.next().unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                handle_tick(&state, &sink, Tick::Completed("m1".into())),
+            )
+            .await
+            .expect("the worker must not wait for the AI pass");
+        });
+
+        assert!(state.ai_queue.is_pending("m1"));
+        assert_eq!(
+            stage_of(&state, "m1").as_deref(),
+            Some("polishing"),
+            "the note shows the pass as pending, not a stale transcription stage"
+        );
+        // no "done" yet: that comes when the pass has run
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![("m1".to_string(), "polishing".to_string())]
+        );
+    }
+
+    /// A transcription that completes while its meeting is queued again (the
+    /// user hit re-transcribe) leaves the new run to queue its own pass.
+    #[test]
+    fn no_pass_is_queued_for_a_meeting_waiting_for_another_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let (events, sink) = collecting();
+        state
+            .pipeline_stage
+            .lock()
+            .unwrap()
+            .insert("m1".into(), WAITING_STAGE.into());
+        queue_ai_pass(&state, &sink, "m1", AiJobKind::AfterTranscription);
+        assert!(!state.ai_queue.is_pending("m1"));
+        assert_eq!(stage_of(&state, "m1").as_deref(), Some(WAITING_STAGE));
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    /// The worker that drains the queue ends a pass the way the transcription
+    /// worker used to: the semantic index and compression are nudged, the
+    /// import's video copy is told, and the meeting gets its "done" event.
+    #[test]
+    fn a_queued_pass_ends_with_the_final_event_and_the_nudges() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        refusing_provider(&state);
+        let (events, sink) = collecting();
+        let m1 = real_meeting(&state);
+        queue_ai_pass(&state, &sink, &m1, AiJobKind::AfterTranscription);
+        let skips = std::sync::Mutex::new(Vec::<Vec<String>>::new());
+        let finals = std::sync::atomic::AtomicUsize::new(0);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ran = rt.block_on(run_next_ai_job(
+            &state,
+            &sink,
+            &|ids| skips.lock().unwrap().push(ids),
+            &|| {
+                finals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        ));
+        assert!(ran);
+        assert_eq!(finals.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&(m1.clone(), "done".to_string()))
+        );
+        assert_eq!(stage_of(&state, &m1), None, "the polishing marker is gone");
+        assert!(!state.ai_queue.is_running(&m1));
+        // the refusal was a missing-consent skip, reported at the end
+        assert_eq!(skips.lock().unwrap().last().unwrap(), &vec![m1.clone()]);
+        // nothing left to run
+        assert!(!rt.block_on(run_next_ai_job(&state, &sink, &|_| {}, &|| {})));
+    }
+
+    struct FakeSession;
+
+    impl fly_audio::CaptureSession for FakeSession {
+        fn pause(&mut self) -> fly_audio::Result<()> {
+            Ok(())
+        }
+        fn resume(&mut self) -> fly_audio::Result<()> {
+            Ok(())
+        }
+        fn stop(self: Box<Self>) -> fly_audio::Result<fly_audio::CaptureOutput> {
+            Ok(fly_audio::CaptureOutput {
+                mic_path: None,
+                system_path: None,
+                mixed_path: None,
+                playback_path: None,
+                duration_ms: 0,
+                health: Default::default(),
+            })
+        }
+        fn state(&self) -> fly_audio::CaptureState {
+            fly_audio::CaptureState::Recording
+        }
+        fn elapsed_ms(&self) -> u64 {
+            0
+        }
+    }
+
+    /// Recording wins over the model as well: passes that queued up wait for
+    /// the capture to end instead of competing with it for the machine.
+    #[test]
+    fn a_queued_pass_waits_for_a_recording_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        refusing_provider(&state);
+        let (_events, sink) = collecting();
+        let m1 = real_meeting(&state);
+        queue_ai_pass(&state, &sink, &m1, AiJobKind::AfterTranscription);
+        *state.recording.lock().unwrap() = Some(crate::recording::ActiveRecording {
+            session: Box::new(FakeSession),
+            meeting_id: "live".into(),
+            note_id: "n".into(),
+            live_stop: None,
+        });
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(!rt.block_on(run_next_ai_job(&state, &sink, &|_| {}, &|| {})));
+        assert!(state.ai_queue.is_pending(&m1), "still waiting its turn");
+
+        *state.recording.lock().unwrap() = None;
+        assert!(rt.block_on(run_next_ai_job(&state, &sink, &|_| {}, &|| {})));
+        assert!(!state.ai_queue.is_pending(&m1));
+    }
+
+    /// "Review and allow" goes through the same queue and worker, so the
+    /// re-runs and the passes after transcriptions never overlap; a re-run
+    /// doesn't re-announce a transcript that was already final.
+    #[test]
+    fn consent_reruns_share_the_queue_and_skip_the_transcript_final_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        refusing_provider(&state);
+        let (events, sink) = collecting();
+        let m2 = real_meeting(&state);
+        state.consent_skipped.lock().unwrap().insert(m2.clone());
+        assert_eq!(queue_consent_rerun(&state, &sink), 1);
+        assert!(state.consent_skipped.lock().unwrap().is_empty());
+        assert!(state.ai_queue.is_pending(&m2));
+
+        let finals = std::sync::atomic::AtomicUsize::new(0);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(rt.block_on(run_next_ai_job(&state, &sink, &|_| {}, &|| {
+            finals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+        assert_eq!(finals.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&(m2.clone(), "done".to_string()))
+        );
+    }
+
+    /// Transcribing a meeting again drops its pass if it hasn't started (the
+    /// new run replaces the transcript and brings its own); deleting or
+    /// cancelling drops it too and says so.
+    #[test]
+    fn re_transcribing_or_cancelling_drops_a_pass_that_has_not_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let (events, sink) = collecting();
+
+        queue_ai_pass(&state, &sink, "m1", AiJobKind::AfterTranscription);
+        enqueue(&state, &sink, "m1").unwrap();
+        assert!(!state.ai_queue.is_pending("m1"));
+        assert_eq!(stage_of(&state, "m1").as_deref(), Some(WAITING_STAGE));
+
+        queue_ai_pass(&state, &sink, "m3", AiJobKind::AfterTranscription);
+        assert!(cancel(&state, &sink, "m3").unwrap());
+        assert!(!state.ai_queue.is_pending("m3"));
+        assert_eq!(stage_of(&state, "m3"), None);
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&("m3".to_string(), "cancelled".to_string()))
+        );
+    }
+
+    /// A pass reads and rewrites its meeting's transcript, so a transcription
+    /// of that same meeting starts after it; another meeting's pass is no
+    /// reason to wait.
+    #[test]
+    fn a_transcription_waits_only_for_its_own_meetings_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = std::sync::Arc::new(test_state(dir.path()));
+        let meeting_id = real_meeting(&state);
+        let quiet = |_: pipeline::PipelineProgress| {};
+        let model = |_: models::ModelProgress| {};
+        enqueue(&state, &quiet, &meeting_id).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // another meeting's pass is running: the job (which fails fast
+            // for want of a recording) is picked up all the same
+            state.ai_queue.push(AiJob {
+                meeting_id: "someone-else".into(),
+                kind: AiJobKind::AfterTranscription,
+            });
+            let other_pass = state.ai_queue.next().unwrap();
+            let t = tokio::time::timeout(Duration::from_secs(5), tick(&state, &quiet, &model))
+                .await
+                .expect("another meeting's pass must not hold the job back");
+            assert!(matches!(t, Tick::Retrying { .. }), "{t:?}");
+            drop(other_pass);
+
+            // its own meeting's pass is running: wait for it to end
+            state.ai_queue.push(AiJob {
+                meeting_id: meeting_id.clone(),
+                kind: AiJobKind::AfterTranscription,
+            });
+            let own_pass = state.ai_queue.next().unwrap();
+            let waiting = {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let quiet = |_: pipeline::PipelineProgress| {};
+                    let model = |_: models::ModelProgress| {};
+                    tick(&state, &quiet, &model).await
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert!(!waiting.is_finished(), "ran under its own meeting's pass");
+            drop(own_pass);
+            let t = tokio::time::timeout(Duration::from_secs(5), waiting)
+                .await
+                .expect("starts once the pass ends")
+                .unwrap();
+            assert!(matches!(t, Tick::Retrying { .. }), "{t:?}");
+        });
     }
 
     /// A quota 429 is transient by definition (the window reopens) — it must

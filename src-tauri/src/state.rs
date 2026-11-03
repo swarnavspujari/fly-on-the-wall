@@ -44,11 +44,17 @@ pub struct AppState {
     /// optimistic "Listening…" forever.
     pub live_status: Mutex<Option<crate::live::LiveStatus>>,
     /// Meetings whose post-transcription cleanup / item extraction was refused
-    /// because the cloud provider has no recorded consent or no API key yet.
+    /// because the cloud provider has no recorded consent or no API key yet,
+    /// or was stopped because the model took too long or got stuck
+    /// (`llm_commands::record_incomplete`).
     /// In memory only: the app's notice offers to run them once the user
-    /// allows the provider or adds the key
-    /// (`llm_commands::retry_consent_skipped`).
+    /// allows the provider or adds the key, or right away for a model that
+    /// was stopped (`llm_commands::retry_consent_skipped`).
     pub consent_skipped: Mutex<std::collections::BTreeSet<String>>,
+    /// Passes (transcript cleanup + item extraction) waiting to run after a
+    /// transcription, and the one running. Drained by its own worker so a
+    /// slow model never holds up the transcription queue (ai_queue.rs).
+    pub ai_queue: crate::ai_queue::AiQueue,
     /// Meetings self-heal restored this launch and set to Keep local because
     /// their manifest didn't record the setting. In memory only: the app's
     /// notice asks the user to review them
@@ -154,6 +160,7 @@ impl AppState {
             ollama: Mutex::new(None),
             live_status: Mutex::new(None),
             consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
+            ai_queue: Default::default(),
             recovered_kept_local: Mutex::new(Vec::new()),
             consent_prompt: tokio::sync::Mutex::new(Default::default()),
             embed_notify: tokio::sync::Notify::new(),

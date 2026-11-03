@@ -1,6 +1,7 @@
 //! Composition root: this is the ONLY place where platform impls are picked
 //! and wired to the UI. `fly-core` and the frontend never see an OS API.
 
+pub mod ai_queue;
 pub mod ask_approvals;
 mod asr_commands;
 pub mod audio_store;
