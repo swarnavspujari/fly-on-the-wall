@@ -23,10 +23,10 @@ use std::process::ExitCode;
 use fly_evals::config::{Status, SuiteConfig, Thresholds};
 use fly_evals::embedder::{Embedder, Unavailable};
 use fly_evals::report::{judge_with, load_baseline, Gating, Judged, SuiteResult};
-use fly_evals::{ask_contract, evals_dir, local_bench, results_dir, retrieval};
+use fly_evals::{ask_contract, enhance_contract, evals_dir, local_bench, results_dir, retrieval};
 use serde_json::json;
 
-const USAGE: &str = "usage: cargo run -p fly-evals -- --suite <retrieval|ask_contract|local_bench|ci|all> [--strict | --gate <strict|security|quality>] [--embedder <hashed-bow-v1|ollama:MODEL>] [--json]";
+const USAGE: &str = "usage: cargo run -p fly-evals -- --suite <retrieval|ask_contract|local_bench|enhance_contract|ci|all> [--strict | --gate <strict|security|quality>] [--embedder <hashed-bow-v1|ollama:MODEL>] [--json]";
 
 /// The real-embedder run's model digest differs from the committed
 /// baseline's (a re-pulled or different model under the same tag).
@@ -100,7 +100,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let mut names: Vec<&str> = match suite.as_str() {
-        "retrieval" | "ask_contract" | "local_bench" => vec![suite.as_str()],
+        "retrieval" | "ask_contract" | "local_bench" | "enhance_contract" => vec![suite.as_str()],
         "ci" => vec!["retrieval", "ask_contract"],
         "all" => vec!["retrieval", "ask_contract", "local_bench"],
         other => {
@@ -199,6 +199,7 @@ fn main() -> ExitCode {
                 thresholds.ask_contract.clone(),
                 ask_contract::run(&dir, &thresholds.ask_contract),
             ),
+            "enhance_contract" => (SuiteConfig::report_only(), enhance_contract::run(&dir)),
             _ => (
                 thresholds.local_bench.clone(),
                 local_bench::run(&dir, &thresholds.local_bench),

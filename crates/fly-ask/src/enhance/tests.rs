@@ -472,6 +472,35 @@ fn structure_words_and_list_numbers_are_not_claims() {
 }
 
 #[test]
+fn initialisms_are_not_people_and_a_source_with_brackets_still_holds_its_number() {
+    // "ARR" and "Q1" are in the block but not in the line it cites: they are
+    // not names. A real stranger still is.
+    let t = transcript(vec![
+        seg(
+            0,
+            "spk_0",
+            "Annual recurring revenue ended September at three point two million.",
+        ),
+        seg(
+            1,
+            "spk_1",
+            "We roll out in the first quarter (starting November 10), then expand.",
+        ),
+    ]);
+    let p = prep(&note(""), Some(&t), 1_000_000);
+    assert!(flags("ARR ended September at $3.2M.", &[0], &p).is_empty());
+    assert!(flags("Rollout is in Q1.", &[1], &p).is_empty());
+    assert_eq!(
+        flags("Wanda owns the ARR figure.", &[0], &p),
+        vec![(BlockFlagKind::Name, Some("wanda".into()))]
+    );
+    // "November 10)," in the source: the bracket and comma glued to the 10 must
+    // not hide the number.
+    assert!(flags("Rollout starts on November 10.", &[1], &p).is_empty());
+    assert_eq!(flags("Rollout starts on November 11.", &[1], &p).len(), 1);
+}
+
+#[test]
 fn facts_from_the_users_own_notes_are_not_flagged() {
     let t = small();
     let n = note("- budget is 9000 for the east bay\n- Wanda owns the heaters");

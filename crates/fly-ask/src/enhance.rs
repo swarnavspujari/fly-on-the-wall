@@ -671,8 +671,9 @@ fn restates_notes(markdown: &str, p: &Prepared) -> bool {
     if link_words(markdown).iter().any(|w| !theirs.contains(w)) {
         return false;
     }
+    let scratchpad = settle(&p.scratchpad);
     let mine = Source {
-        text: &p.scratchpad,
+        text: &scratchpad,
         speaker: "",
     };
     if !claims::unsupported(&claim_text(markdown, p), &[mine]).is_empty() {
@@ -725,6 +726,20 @@ fn stop_before_closer(tok: &str) -> String {
     chars.into_iter().collect()
 }
 
+/// [`stop_before_closer`] over a whole text (line breaks kept): a source
+/// that says "Nov 10)," would otherwise never hold the number 10.
+fn settle(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            l.split_whitespace()
+                .map(stop_before_closer)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn bare_word(tok: &str) -> String {
     let w = tok
         .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
@@ -746,6 +761,15 @@ fn claim_text(markdown: &str, p: &Prepared) -> String {
         let mut words = Vec::new();
         for (k, raw) in toks.iter().enumerate() {
             let mut tok = raw.to_string();
+            let core = raw.trim_matches(|c: char| !c.is_alphanumeric());
+            // ARR, Q1, API: an initialism says nothing about who was there.
+            if core.chars().count() >= 2
+                && core.chars().next().is_some_and(char::is_alphabetic)
+                && core.chars().all(|c| c.is_uppercase() || c.is_ascii_digit())
+                && !p.known_names.contains(&core.to_lowercase())
+            {
+                tok = tok.to_lowercase();
+            }
             if starts {
                 let w = bare_word(raw);
                 let acts = toks
@@ -810,8 +834,9 @@ fn resolve(cited: &[Option<usize>], shown: usize) -> (Vec<usize>, usize) {
 /// What an AI block states that nothing it can lean on supports.
 fn judge(md: &str, cited: &[&Sent], invalid: usize, p: &Prepared) -> Vec<BlockFlag> {
     let body = claim_text(md, p);
+    let notes_text = settle(&p.notes_text);
     let notes = Source {
-        text: &p.notes_text,
+        text: &notes_text,
         speaker: "",
     };
     if cited.is_empty() {
@@ -832,10 +857,12 @@ fn judge(md: &str, cited: &[&Sent], invalid: usize, p: &Prepared) -> Vec<BlockFl
             Vec::new()
         };
     }
+    let lines: Vec<String> = cited.iter().map(|s| settle(&s.text)).collect();
     let mut sources: Vec<Source<'_>> = cited
         .iter()
-        .map(|s| Source {
-            text: &s.text,
+        .zip(&lines)
+        .map(|(s, text)| Source {
+            text,
             speaker: &s.speaker,
         })
         .collect();
