@@ -33,7 +33,6 @@ import { ALL_SCOPE } from "../askScope";
 import { KEEP_LOCAL_NOTICE } from "../connectorsModel";
 import { AskConnectorCards } from "./AskConnectors";
 import { Button, CitationChip } from "./ui";
-import { SAFE_A, SAFE_IMG } from "./markdownSafe";
 import type { AskChat, AskTurn } from "./AskPanel";
 
 /* One Ask turn in the answer sheet: your question, then the trace pill and
@@ -54,15 +53,22 @@ export type OpenSource = (target: {
 /** A proposal's approval, kept in the chat (not the sheet) so closing and
  *  reopening the sheet can never approve it twice. */
 export type ProposalState =
-  { phase: "pending" } | { phase: "done" } | { phase: "failed"; message: string };
+  | { phase: "pending" }
+  | { phase: "done" }
+  /** The backend no longer holds it: Ask again for a fresh one. */
+  | { phase: "expired" }
+  | { phase: "failed"; message: string };
 
-/** Inline Markdown only (a sentence is never a block), safe links/images. */
+/* Answer text is meeting-derived and model-written, so nothing in it is
+   ever a live link or an image, whatever the backend let through: a
+   Markdown link, an autolink, a bare URL or a bare email (which GFM turns
+   into mailto:) all unwrap to their text. */
+
+/** Inline Markdown only (a sentence is never a block), no links or images. */
 const INLINE_MD = {
   p: ({ children }: { children?: ReactNode }) => <>{children}</>,
-  a: SAFE_A,
-  img: SAFE_IMG,
 };
-const INLINE_ALLOWED = ["p", "strong", "em", "code", "del", "a", "br"];
+const INLINE_ALLOWED = ["p", "strong", "em", "code", "del", "br"];
 function InlineMd({ text }: { text: string }) {
   return (
     <ReactMarkdown
@@ -76,7 +82,20 @@ function InlineMd({ text }: { text: string }) {
   );
 }
 
-const BLOCK_MD = { a: SAFE_A, img: SAFE_IMG };
+/** A proposal's Markdown preview: blocks and lists, still no links or
+ *  images. */
+const BLOCK_ALLOWED = [
+  ...INLINE_ALLOWED,
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "ul",
+  "ol",
+  "li",
+  "blockquote",
+  "pre",
+];
 
 /** Whether each cited line still says what Ask read, checked against the
  *  meeting's transcript now (see askCitations.ts). Read when the answer
@@ -396,7 +415,11 @@ function ProposalCard({
       </span>
       {insert ? (
         <div className="max-h-[160px] overflow-y-auto text-[13.5px] leading-[1.55] text-text [&_li]:ml-4 [&_li]:list-disc [&_p]:my-1">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={BLOCK_MD}>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            allowedElements={BLOCK_ALLOWED}
+            unwrapDisallowed
+          >
             {p.markdown ?? ""}
           </ReactMarkdown>
         </div>
@@ -542,6 +565,14 @@ export function AskTurnView({
   const titleOf = (meetingId: string) =>
     reply?.sources.find((s) => s.meeting_id === meetingId)?.meeting_title ?? null;
   const answered = reply && (reply.status === "answered" || reply.status === "unverified");
+  // A proposal that inserts into this note is the one way to add it: the
+  // answer-level Insert would write a second, overlapping block.
+  const insertProposed =
+    !!insertNoteId &&
+    (reply?.proposals ?? []).some(
+      (p) => p.tool === "insert_into_note" && p.note_id === insertNoteId,
+    );
+  const offerInsert = answered && !!insertNoteId && !insertProposed;
   const refusals = (reply?.refusals ?? []).map(refusalCopy).filter((s): s is string => !!s);
 
   return (
@@ -800,7 +831,7 @@ export function AskTurnView({
         </p>
       )}
 
-      {answered && insertNoteId && !reply.insert_id && (
+      {offerInsert && !reply.insert_id && (
         <p
           className="m-0 px-1 text-[12px]"
           style={{ color: "var(--text-3)" }}
@@ -810,7 +841,7 @@ export function AskTurnView({
         </p>
       )}
 
-      {answered && insertNoteId && reply.insert_id && (
+      {offerInsert && reply.insert_id && (
         <div className="flex flex-wrap items-center gap-2">
           {chat.inserted.has(turn.id) ? (
             <span

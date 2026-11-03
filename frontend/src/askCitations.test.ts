@@ -111,6 +111,33 @@ const line = (segment_id: string, start_ms: number, snippet: string, speaker = "
 });
 
 describe("locateLine", () => {
+  it("a long line the harness clipped mid-word is still fine (and still re-found)", () => {
+    // fly-ask prefetch::truncate: 220 bytes, cut mid-word, then " …"
+    const text =
+      "We walked through the renewal terms, the data residency appendix, the support tiers and the " +
+      "onboarding plan for the southern region, and everyone agreed the pilot numbers justify moving " +
+      "to the annual contract next quarter, with a follow-up review in two weeks.";
+    expect(text.length).toBeGreaterThan(220);
+    const clipped = `${text.slice(0, 220).trimEnd()} …`;
+    expect(text.slice(219, 222)).not.toMatch(/\s/); // the cut splits a word
+    const long: Transcript = { ...T, segments: [...T.segments, seg("n4", "s1", 60_000, text)] };
+    expect(locateLine(line("n4", 60_000, clipped), long)).toEqual({
+      status: "ok",
+      segmentId: "n4",
+    });
+    expect(locateLine(line("old-n4", 60_000, clipped), long)).toEqual({
+      status: "reanchored",
+      segmentId: "n4",
+    });
+    // a different last word is still a change
+    const edited: Transcript = {
+      ...T,
+      segments: [...T.segments, seg("n4", "s1", 60_000, text.replace("two weeks", "a month"))],
+    };
+    const fullSnippet = text;
+    expect(locateLine(line("n4", 60_000, fullSnippet), edited).status).toBe("changed");
+  });
+
   it("the same id saying the same thing is fine", () => {
     expect(locateLine(line("n1", 10_000, "We will ship on Friday."), T)).toEqual({
       status: "ok",

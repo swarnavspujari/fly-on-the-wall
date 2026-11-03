@@ -96,13 +96,30 @@ const words = (s: string) =>
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean);
 
+/** fly-ask clips long snippets mid-word and marks the cut with " …"
+ *  (`prefetch::truncate`, 220 bytes). */
+const CLIPPED = /\s*(…|\.\.\.)\s*$/;
+
+/** A snippet's whole words, and its last word when the cut may have split
+ *  it (to match as a prefix). */
+function snippetWords(snippet: string): { whole: string[]; partial: string | null } {
+  const clipped = CLIPPED.test(snippet);
+  const ws = words(snippet.replace(CLIPPED, ""));
+  if (!clipped || ws.length === 0) return { whole: ws, partial: null };
+  return { whole: ws.slice(0, -1), partial: ws[ws.length - 1] };
+}
+
 /** Share of the snippet's words the segment says (the snippet may be
  *  clipped, so this is containment, not equality). */
 function coverage(snippet: string, text: string): number {
-  const want = words(snippet);
-  if (want.length === 0) return 0;
-  const have = new Set(words(text));
-  return want.filter((w) => have.has(w)).length / want.length;
+  const { whole, partial } = snippetWords(snippet);
+  const total = whole.length + (partial ? 1 : 0);
+  if (total === 0) return 0;
+  const have = words(text);
+  const set = new Set(have);
+  let hit = whole.filter((w) => set.has(w)).length;
+  if (partial && have.some((w) => w.startsWith(partial))) hit += 1;
+  return hit / total;
 }
 
 /** Whether a cited line still says what Ask read, and where it is now. */
