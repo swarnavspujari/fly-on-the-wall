@@ -181,6 +181,23 @@ fn pick_even(lines: &[Line], budget: usize, chosen: &mut BTreeSet<usize>) -> usi
     spent
 }
 
+/// The meeting's closing lines, where it wraps up and says what was decided
+/// and who does what. Returns what it added.
+fn pick_tail(lines: &[Line], budget: usize, chosen: &mut BTreeSet<usize>) -> usize {
+    let mut spent = 0;
+    for (i, line) in lines.iter().enumerate().rev() {
+        if chosen.contains(&i) {
+            continue;
+        }
+        if spent + line.cost > budget {
+            break;
+        }
+        chosen.insert(i);
+        spent += line.cost;
+    }
+    spent
+}
+
 /// Which topics of the user's notes each transcript line speaks to.
 struct Topics {
     /// `hits[line][term]`.
@@ -305,7 +322,10 @@ fn select(lines: &[Line], topics: Option<&Topics>, budget: usize) -> BTreeSet<us
     } else {
         budget
     };
-    let mut spent = pick_even(lines, even_budget, &mut chosen);
+    // The close of the meeting first, then evenly spaced excerpts (which open
+    // each run, so would otherwise miss it).
+    let tail = pick_tail(lines, (even_budget / 8).min(EXCERPT_CHARS), &mut chosen);
+    let mut spent = tail + pick_even(lines, even_budget.saturating_sub(tail), &mut chosen);
     if let Some(topics) = topics {
         spent += pick_topics(lines, topics, budget.saturating_sub(spent), &mut chosen);
     }

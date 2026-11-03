@@ -235,6 +235,10 @@ fn a_long_meeting_is_preselected_to_the_budget_not_front_truncated() {
     assert!(shown.iter().any(|&i| i < 30), "the opening");
     assert!(shown.iter().any(|&i| (270..330).contains(&i)), "the middle");
     assert!(shown.iter().any(|&i| i >= 540), "the end");
+    assert!(
+        shown.contains(&599),
+        "the very last line: where it wraps up"
+    );
     for third in 0..3 {
         let count = shown.iter().filter(|&&i| i / 200 == third).count();
         assert!(count > 5, "third {third} has only {count} lines");
