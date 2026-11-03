@@ -5,6 +5,8 @@
 //! peak-normalized and handed to the engine's `decode`, and word timestamps
 //! are mapped back to the original timeline. Checkpointing, progress and
 //! cooperative cancellation live here so every engine gets them identically.
+//! Public so the accuracy harness's bench-only engines chunk audio exactly
+//! like the shipped ones.
 
 use std::future::Future;
 use std::path::Path;
@@ -20,7 +22,7 @@ use crate::{AsrError, CancelFn, RawTranscript, Result, TranscribeOptions, Transc
 /// Cap on the speech content of one sidecar invocation. Batching many short
 /// spans into one call amortizes model load; the cap keeps single
 /// invocations bounded (and inside Parakeet's ~400 s encoder context).
-pub(crate) const MAX_BATCH_SPEECH_MS: u64 = 120_000;
+pub const MAX_BATCH_SPEECH_MS: u64 = 120_000;
 
 /// Run `decode` over every speech batch of `wav_path`. `decode` gets the
 /// normalized batch samples and their rate and returns words timed relative
@@ -30,7 +32,7 @@ pub(crate) const MAX_BATCH_SPEECH_MS: u64 = 120_000;
 /// at its quietest point (engines whose decoder has a hard context limit);
 /// `None` keeps contiguous speech whole, as whisper always has.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn transcribe_batched<F, Fut>(
+pub async fn transcribe_batched<F, Fut>(
     engine_id: &str,
     model: &Path,
     wav_path: &Path,
@@ -158,7 +160,7 @@ const MIN_PIECE_MS: u64 = 1_000;
 /// each cut placed at the lowest-energy 20 ms frame in the last quarter of
 /// the allowed length — inside a breath or pause wherever the speech has
 /// one, so a cut rarely lands mid-word. Shorter spans pass through as-is.
-pub(crate) fn split_long_spans(
+pub fn split_long_spans(
     spans: &[SpeechSpan],
     samples: &[f32],
     rate: u32,

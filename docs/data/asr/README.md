@@ -68,7 +68,10 @@ same device class:
 - far-end attribution ≤ baseline (structure-only items);
 - ≥ 5× realtime on CPU.
 
-"Live first partial ≤ 2 s" and "CPU ≤ 25 % during a call" belong to the live-captions PR.
+"Live first partial ≤ 2 s" (p90) and "CPU ≤ 25 % during a call" are checked for streaming
+(live) variants only. Candidate engines that don't ship — NeMo-Speech.cpp, Nemotron streaming,
+Cohere, Granite — and the diarizer comparison are documented in [BENCH-ENGINES.md](BENCH-ENGINES.md),
+with the extra metrics they add (`speech_holes`, `call_cpu_pct`, live latency).
 
 ## Committed results (provisional)
 
