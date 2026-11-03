@@ -563,6 +563,19 @@ pub enum EnhanceError {
     NothingLeft,
 }
 
+impl EnhanceError {
+    /// A fixed word for the log: the failure's kind, never its text (a
+    /// provider's message can carry what it was sent).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Provider(_) => "provider",
+            Self::Unusable => "unusable",
+            Self::Truncated => "truncated",
+            Self::NothingLeft => "nothing_left",
+        }
+    }
+}
+
 impl std::fmt::Display for EnhanceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1088,8 +1101,9 @@ pub async fn enhance(
         if usage.context_fallback {
             // The server ran with less context than the prompt was sized
             // for: what came back was written from the end of it.
+            let chars = prepared.prompt_chars();
             tracing::warn!(
-                prompt_chars = prepared.prompt_chars(),
+                chars,
                 "enhance: the model ran with a smaller context than the prompt needs"
             );
             retried = true;

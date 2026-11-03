@@ -828,8 +828,8 @@ pub async fn enhance_with(
     )
     .await
     .map_err(|e| {
-        // Counts only: nothing of the meeting goes to the log.
-        tracing::warn!(note_id, error = ?e, "enhance produced nothing to save");
+        // The kind only: nothing of the meeting, or of a provider's reply, goes to the log.
+        tracing::warn!(note_id, kind = e.code(), "enhance produced nothing to save");
         e.to_string()
     })?;
     let r = &done.report;
@@ -2776,6 +2776,7 @@ mod enhance_tests {
     /// could be locked while it was being asked (it must be).
     struct Model {
         id: &'static str,
+        model: &'static str,
         reply: String,
         fell_back: bool,
         store: Option<Arc<Mutex<fly_storage::Storage>>>,
@@ -2787,6 +2788,7 @@ mod enhance_tests {
         fn new(id: &'static str, reply: &str) -> Self {
             Self {
                 id,
+                model: "llama3.1",
                 reply: reply.into(),
                 fell_back: false,
                 store: None,
@@ -2802,7 +2804,7 @@ mod enhance_tests {
             self.id
         }
         fn model(&self) -> &str {
-            "llama3.1"
+            self.model
         }
         fn is_local(&self) -> bool {
             true
@@ -2893,6 +2895,30 @@ mod enhance_tests {
         let sent = model.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].format, Some(enhance::enhance_blocks_schema()));
+    }
+
+    /// The per-model request shapes that made the local models reliable
+    /// (docs/BENCHMARKS.md §10): llama3.1 gets the block grammar; qwen3.5
+    /// never does (it collapses to an empty array) and runs with thinking off.
+    #[tokio::test]
+    async fn the_per_model_request_shapes_are_kept() {
+        let reply = r#"[{"type":"ai","markdown":"Glazing came up.","sources":[0]}]"#;
+        for (name, grammar, thinking) in [
+            ("llama3.1", true, fly_llm::ThinkingMode::Default),
+            ("qwen3.5:4b", false, fly_llm::ThinkingMode::Disabled),
+        ] {
+            let (_dir, store, note_id, _) = store_with(3, &[]);
+            let mut model = Model::new("ollama", reply);
+            model.model = name;
+            enhance_with(&store, &model, &note_id, "tpl-general")
+                .await
+                .unwrap();
+            let sent = model.sent.lock().unwrap();
+            assert_eq!(sent[0].format.is_some(), grammar, "{name}");
+            assert_eq!(sent[0].thinking, thinking, "{name}");
+            assert_eq!(sent[0].temperature, Some(0.2), "{name}");
+            assert_eq!(sent[0].max_tokens, Some(4096), "{name}");
+        }
     }
 
     #[tokio::test]
