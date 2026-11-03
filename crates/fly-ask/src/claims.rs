@@ -238,13 +238,33 @@ fn is_number_word(w: &str) -> bool {
         || ordinal(w).is_some()
 }
 
+/// Splits a token before a currency sign that starts an amount. ASR drops
+/// the space now and then ("now$52,000"), which would otherwise leave one
+/// word that no number reads out of.
+fn split_before_currency(raw: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let amount = chars.peek().is_some_and(|(_, d)| d.is_ascii_digit());
+        if i > start && amount && matches!(c, '$' | '€' | '£' | '¥') {
+            parts.push(&raw[start..i]);
+            start = i;
+        }
+    }
+    parts.push(&raw[start..]);
+    parts
+}
+
 /// Words with surrounding punctuation trimmed (hyphens, slashes and dashes
-/// split words; apostrophes, `$`, `%`, `.` and `,` inside a word stay),
-/// each with whether punctuation ended it.
+/// split words, and so does a currency sign glued to the word before it;
+/// apostrophes, `$`, `%`, `.` and `,` inside a word stay), each with
+/// whether punctuation ended it.
 fn clause_words(text: &str) -> Vec<(String, bool)> {
     // Keep these splitting rules in step with the eval scorer's: a looser
     // reading of the SOURCE side would accept numbers the scorer doesn't.
     text.split(|c: char| c.is_whitespace() || c == '-' || c == '/' || c == '—')
+        .flat_map(split_before_currency)
         .filter_map(|raw| {
             let tail = raw.trim_end_matches(['"', '\'', ')', ']', '*', '_']);
             let breaks = tail.ends_with(['.', ',', ':', ';', '!', '?']);
@@ -618,6 +638,45 @@ mod tests {
         assert_eq!(
             kinds(&unsupported("By Friday, $6,300.", &src)),
             vec![(ClaimKind::Date, "friday")]
+        );
+    }
+
+    #[test]
+    fn a_currency_sign_glued_to_the_previous_word_still_reads() {
+        // ASR drops the space before the sign: "now$52,000", "approved$48,000".
+        let line = "It is now$52,000, because Northwind adds a support plan.";
+        assert_eq!(n(line), vec![52_000.0]);
+        assert_eq!(n("The board approved$48,000 for it."), vec![48_000.0]);
+        assert_eq!(n("about€40k"), vec![40_000.0]);
+        assert_eq!(n("it was set,$52,000 flat"), vec![52_000.0]);
+        assert_eq!(n("a cap ($52,000)"), vec![52_000.0]);
+        assert_eq!(n("$52,000"), vec![52_000.0]);
+
+        let src = [Source {
+            text: line,
+            speaker: "Dana Whitlock",
+        }];
+        assert!(unsupported("The budget is now $52,000.", &src).is_empty());
+        // The glued word is no more a number than the spaced one: a different
+        // figure is still caught.
+        assert_eq!(
+            kinds(&unsupported("The budget is now $25,000.", &src)),
+            vec![(ClaimKind::Number, "25000")]
+        );
+    }
+
+    #[test]
+    fn a_name_only_the_question_supplied_is_still_flagged() {
+        // Open design question (see the PR), pinned so it isn't loosened
+        // by accident: the check can't see the user's question, so a project
+        // name the model echoes from it isn't "in the lines it cites".
+        let src = [Source {
+            text: "It is now$52,000, because Northwind adds a support plan.",
+            speaker: "Dana Whitlock",
+        }];
+        assert_eq!(
+            kinds(&unsupported("The Bluebird budget is now $52,000.", &src)),
+            vec![(ClaimKind::Name, "bluebird")]
         );
     }
 

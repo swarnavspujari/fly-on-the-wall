@@ -231,11 +231,31 @@ fn words(text: &str) -> Vec<String> {
     clause_words(text).into_iter().map(|(w, _)| w).collect()
 }
 
+/// Splits a token before a currency sign that starts an amount. ASR drops
+/// the space now and then ("now$52,000"), which would otherwise leave one
+/// word that no number reads out of. (The product's claim check splits the
+/// same way: `fly_ask::claims`.)
+fn split_before_currency(raw: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let amount = chars.peek().is_some_and(|(_, d)| d.is_ascii_digit());
+        if i > start && amount && matches!(c, '$' | '€' | '£' | '¥') {
+            parts.push(&raw[start..i]);
+            start = i;
+        }
+    }
+    parts.push(&raw[start..]);
+    parts
+}
+
 /// [`words`], each with whether punctuation ended it (`Six:`, `two,`): a
 /// spoken number never runs across a clause break ("Six: four" is 6 and 4,
 /// not 10 or 64).
 fn clause_words(text: &str) -> Vec<(String, bool)> {
     text.split(|c: char| c.is_whitespace() || c == '-' || c == '/' || c == '—')
+        .flat_map(split_before_currency)
         .filter_map(|raw| {
             let tail = raw.trim_end_matches(['"', '\'', ')', ']', '*', '_']);
             let breaks = tail.ends_with(['.', ',', ':', ';', '!', '?']);
@@ -620,6 +640,27 @@ mod tests {
         assert_eq!(n("108% and 15%"), vec![15.0, 108.0]);
         assert_eq!(n("October 27th."), vec![27.0]);
         assert_eq!(n("$3.2 million"), vec![3.2, 3_200_000.0]);
+    }
+
+    #[test]
+    fn a_currency_sign_glued_to_the_previous_word_still_reads() {
+        // ASR drops the space before the sign: "now$52,000".
+        let line = "It is now$52,000, because Northwind adds a support plan.";
+        assert_eq!(n(line), vec![52_000.0]);
+        assert_eq!(n("The board approved$48,000 for it."), vec![48_000.0]);
+        assert_eq!(n("about€40k"), vec![40_000.0]);
+        assert_eq!(n("it was set,$52,000 flat"), vec![52_000.0]);
+        assert_eq!(n("a cap ($52,000)"), vec![52_000.0]);
+        assert_eq!(n("$52,000"), vec![52_000.0]);
+        let src = [Source {
+            text: line,
+            speaker: "Dana Whitlock",
+        }];
+        assert!(unsupported("The budget is now $52,000.", &src).is_empty());
+        assert_eq!(
+            unsupported("The budget is now $25,000.", &src),
+            vec!["number 25000"]
+        );
     }
 
     #[test]
