@@ -6,7 +6,8 @@
 //! million" = 3.2M; "twenty-seventh" = 27; "forty four seventy one" can
 //! also mean 4471. Dates are month and weekday names. Names are
 //! capitalized words outside a list of common words; a name matches the
-//! cited text or the cited segment's speaker label (attribution).
+//! cited text or the cited segment's speaker label (attribution). "Speaker
+//! 2", the app's label for an unnamed voice, is a name too, not the number 2.
 
 use std::collections::BTreeSet;
 
@@ -315,6 +316,11 @@ pub fn numbers(text: &str) -> BTreeSet<u64> {
     while i < ws.len() {
         let w = ws[i].as_str();
         if let Some(v) = digit_value(w) {
+            // "Speaker 2" is a label (checked by `speaker_labels`), not a count.
+            if i > 0 && ws[i - 1] == "speaker" && w.bytes().all(|b| b.is_ascii_digit()) {
+                i += 1;
+                continue;
+            }
             push(v);
             // "$3.2 million": the scale word belongs to the digits.
             match ws.get(i + 1).map(String::as_str) {
@@ -415,6 +421,19 @@ pub fn numbers(text: &str) -> BTreeSet<u64> {
     out
 }
 
+/// The app's labels for unnamed voices that a text mentions ("Speaker 2",
+/// lowercase). Like a name, a label must belong to a cited line.
+fn speaker_labels(text: &str) -> BTreeSet<String> {
+    words(text)
+        .windows(2)
+        .filter(|p| p[0].eq_ignore_ascii_case("speaker"))
+        .filter_map(|p| {
+            let n = p[1].strip_suffix("'s").unwrap_or(&p[1]);
+            (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then(|| format!("speaker {n}"))
+        })
+        .collect()
+}
+
 /// Month and weekday names in a text (lowercase).
 pub fn dates(text: &str) -> BTreeSet<String> {
     words(text)
@@ -455,8 +474,11 @@ pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<String> {
     let text = strip_markers(sentence);
     let mut src_numbers = BTreeSet::new();
     let mut src_words: BTreeSet<String> = BTreeSet::new();
+    let mut src_labels = BTreeSet::new();
     for s in sources {
         src_numbers.extend(numbers(s.text));
+        src_labels.extend(speaker_labels(s.speaker));
+        src_labels.extend(speaker_labels(s.text));
         for w in words(s.text).into_iter().chain(words(s.speaker)) {
             let l = w.to_lowercase();
             src_words.insert(l.strip_suffix("'s").map(str::to_string).unwrap_or(l));
@@ -476,6 +498,11 @@ pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<String> {
     for n in names(&text) {
         if !src_words.contains(&n) {
             missing.push(format!("name {n}"));
+        }
+    }
+    for l in speaker_labels(&text) {
+        if !src_labels.contains(&l) {
+            missing.push(format!("name {l}"));
         }
     }
     missing
@@ -661,6 +688,33 @@ mod tests {
             unsupported("The budget is now $25,000.", &src),
             vec!["number 25000"]
         );
+    }
+
+    #[test]
+    fn a_speaker_label_is_a_name_not_a_number() {
+        let src = [Source {
+            text: "I can take the export this week.",
+            speaker: "Speaker 2",
+        }];
+        assert!(unsupported("Speaker 2 will handle the export.", &src).is_empty());
+        assert!(unsupported("Speaker 2's export lands this week.", &src).is_empty());
+        assert!(numbers("Speaker 2 will handle the export.").is_empty());
+        // The same digit as a quantity still counts.
+        assert_eq!(n("Speaker 2 listed 2 risks."), vec![2.0]);
+        // Attribution is kept: the label must belong to a cited line.
+        let other = [Source {
+            text: "I can take the export this week.",
+            speaker: "Speaker 1",
+        }];
+        assert_eq!(
+            unsupported("Speaker 2 will handle the export.", &other),
+            vec!["name speaker 2"]
+        );
+        let said = [Source {
+            text: "Speaker 2 should take the export.",
+            speaker: "Dana Whitlock",
+        }];
+        assert!(unsupported("Speaker 2 will handle the export.", &said).is_empty());
     }
 
     #[test]

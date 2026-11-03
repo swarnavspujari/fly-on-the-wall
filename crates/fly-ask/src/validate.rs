@@ -278,6 +278,36 @@ mod tests {
     }
 
     #[test]
+    fn asr_glued_currency_and_speaker_labels_do_not_flag_a_correct_answer() {
+        let mut e = Evidence::default();
+        e.insert(SegmentInfo {
+            id: "x02-03".into(),
+            meeting_id: "m2".into(),
+            meeting_title: "Budget sync".into(),
+            started_at: None,
+            speaker: "Speaker 2".into(),
+            speaker_key: "spk_1".into(),
+            start_ms: 0,
+            end_ms: 1,
+            text: "It is now$52,000, because Northwind adds a support plan.".into(),
+        });
+        let v = validate(
+            "The budget is now $52,000 [seg:x02-03]. Speaker 2 explains the support plan [seg:x02-03].",
+            &e,
+        );
+        assert!(
+            v.sentences
+                .iter()
+                .all(|s| s.status == SentenceStatus::Sourced),
+            "{:?}",
+            v.sentences
+        );
+        let v = validate("Speaker 1 explains the support plan [seg:x02-03].", &e);
+        assert_eq!(v.sentences[0].status, SentenceStatus::Flagged);
+        assert_eq!(v.sentences[0].flags[0].kind, FlagKind::Name);
+    }
+
+    #[test]
     fn refusals_and_empty_replies_differ() {
         let v = validate("I couldn't find that in your meetings.", &ev());
         assert!(v.refusal && !v.empty);
