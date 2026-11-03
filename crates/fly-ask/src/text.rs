@@ -252,6 +252,11 @@ fn renders(word: &str) -> bool {
     if l.contains("]:") {
         return true;
     }
+    // A bare email address: GFM and mail clients turn it into `mailto:`,
+    // and it is somewhere to send meeting content.
+    if has_email(&l) {
+        return true;
+    }
     // Protocol-relative `//host.tld/...`.
     l.match_indices("//").any(|(i, _)| {
         let rest = &l[i + 2..];
@@ -262,6 +267,31 @@ fn renders(word: &str) -> bool {
                 .split(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\''))
                 .next()
                 .is_some_and(|host| host.contains('.'))
+    })
+}
+
+/// Whether a word holds a bare email address: some local part, `@`, then a
+/// dotted host whose last label is letters (`dana@example.com`, also glued
+/// to punctuation: `(dana@example.com),`). `@dana`, `a@b` and `5@3.5` are
+/// not addresses.
+fn has_email(word: &str) -> bool {
+    word.match_indices('@').any(|(i, _)| {
+        let local = word[..i]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-'))
+            .count();
+        let host: String = word[i + 1..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || matches!(c, '.' | '-'))
+            .collect();
+        let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
+        local > 0
+            && labels.len() >= 2
+            && labels.iter().all(|l| !l.is_empty())
+            && labels
+                .last()
+                .is_some_and(|tld| tld.chars().count() >= 2 && tld.chars().all(char::is_alphabetic))
     })
 }
 
@@ -284,7 +314,7 @@ fn replace_ci(s: &str, pat: &str, with: &str) -> String {
 
 /// Leading list/heading syntax of a line: `- `, `* `, `• `, `1. `, `2) `,
 /// `#… `. Returns (display prefix, rest).
-fn split_prefix(line: &str) -> (String, &str) {
+pub(crate) fn split_prefix(line: &str) -> (String, &str) {
     let t = line.trim_start();
     for b in ["- ", "* ", "• ", "+ "] {
         if let Some(rest) = t.strip_prefix(b) {
@@ -687,6 +717,34 @@ mod tests {
             (s.as_str(), n),
             ("Ratio 3/4 and dates 10/27, a [note] and e.g. 1.5, 3<5.", 0)
         );
+    }
+
+    #[test]
+    fn bare_emails_are_stripped_and_lookalikes_stay() {
+        for t in [
+            "Send it to dana@example.com.",
+            "Send it to (dana.k+notes@mail.example.org), please",
+            "Reach DANA@Example.COM today",
+            "Line one\ndana@example.com\nline three",
+            "two: a@b.example and c@d.example",
+        ] {
+            let (s, n) = strip_links(t);
+            assert!(!s.contains('@'), "left an address in {s:?} (from {t:?})");
+            assert!(n > 0, "{t}");
+        }
+        let (s, n) = strip_links("Send it to dana@example.com.");
+        assert_eq!((s.as_str(), n), ("Send it to", 1));
+        // Not addresses: a mention, no host dot, a number, a lone at-sign.
+        for t in [
+            "Ask @dana about it",
+            "Mail me at dana@localhost",
+            "5@3.5 each",
+            "Meet @ noon",
+            "a@b",
+        ] {
+            let (s, n) = strip_links(t);
+            assert_eq!((s.as_str(), n), (t, 0), "{t}");
+        }
     }
 
     #[test]
