@@ -710,6 +710,38 @@ const AGENT_VERBS: &[&str] = &[
     "would",
 ];
 
+/// Business initialisms a summary uses for what a speaker spelled out
+/// ("annual recurring revenue" → ARR). They are not people, so a block that
+/// says one the cited lines don't isn't claiming a name.
+const INITIALISMS: &[&str] = &[
+    "api", "arr", "aws", "b2b", "b2c", "ceo", "cfo", "cmo", "coo", "cpu", "crm", "cto", "dpa",
+    "erp", "eta", "faq", "gpu", "gtm", "hr", "ios", "kpi", "mrr", "mvp", "nda", "okr", "pdf",
+    "poc", "qa", "qbr", "rfp", "roi", "saas", "sdk", "sla", "sql", "sso", "ui", "ux", "vp",
+];
+
+/// An all-capitals token that names no person: a listed business initialism,
+/// a quarter, half or fiscal year (Q1, H2, FY26), or a word this meeting's
+/// own words, notes or template already use. Anything else in capitals
+/// ("EVE") stays a name for the name check to find.
+fn is_benign_initialism(core: &str, p: &Prepared) -> bool {
+    let mut chars = core.chars();
+    let letters_and_digits = core.chars().count() >= 2
+        && chars.next().is_some_and(char::is_alphabetic)
+        && core.chars().all(|c| c.is_uppercase() || c.is_ascii_digit());
+    if !letters_and_digits || p.known_names.contains(&core.to_lowercase()) {
+        return false;
+    }
+    let lower = core.to_lowercase();
+    let period = {
+        let digits = lower.trim_start_matches(|c: char| c.is_alphabetic());
+        let tag = &lower[..lower.len() - digits.len()];
+        !digits.is_empty()
+            && ((matches!(tag, "q" | "h") && digits.len() == 1)
+                || (tag == "fy" && matches!(digits.len(), 2 | 4)))
+    };
+    period || INITIALISMS.contains(&lower.as_str()) || p.vocabulary.contains(&stem4(&lower))
+}
+
 /// `Friday".` and `(Tomas).` as `Friday."` and `(Tomas.)`: the claim check
 /// reads a word up to a closing mark that a full stop follows as part of
 /// the word (`friday"`), a name that is in no line.
@@ -762,12 +794,7 @@ fn claim_text(markdown: &str, p: &Prepared) -> String {
         for (k, raw) in toks.iter().enumerate() {
             let mut tok = raw.to_string();
             let core = raw.trim_matches(|c: char| !c.is_alphanumeric());
-            // ARR, Q1, API: an initialism says nothing about who was there.
-            if core.chars().count() >= 2
-                && core.chars().next().is_some_and(char::is_alphabetic)
-                && core.chars().all(|c| c.is_uppercase() || c.is_ascii_digit())
-                && !p.known_names.contains(&core.to_lowercase())
-            {
+            if is_benign_initialism(core, p) {
                 tok = tok.to_lowercase();
             }
             if starts {

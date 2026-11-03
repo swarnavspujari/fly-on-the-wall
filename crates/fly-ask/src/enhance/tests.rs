@@ -494,6 +494,18 @@ fn initialisms_are_not_people_and_a_source_with_brackets_still_holds_its_number(
         flags("Wanda owns the ARR figure.", &[0], &p),
         vec![(BlockFlagKind::Name, Some("wanda".into()))]
     );
+    // Capitals don't make a stranger an initialism.
+    assert_eq!(
+        flags("EVE owns the ARR figure.", &[0], &p),
+        vec![(BlockFlagKind::Name, Some("eve".into()))]
+    );
+    assert_eq!(
+        flags("Roll out to ACME in FY26 and H2.", &[1], &p)
+            .iter()
+            .map(|f| f.1.clone())
+            .collect::<Vec<_>>(),
+        vec![Some("acme".to_string())]
+    );
     // "November 10)," in the source: the bracket and comma glued to the 10 must
     // not hide the number.
     assert!(flags("Rollout starts on November 10.", &[1], &p).is_empty());

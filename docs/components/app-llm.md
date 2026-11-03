@@ -49,7 +49,7 @@ No network call happens inside `build_provider`. But each caller runs `ensure_pr
 #### Callers of `build_provider`
 | Caller | Scope | Line | Background? |
 |---|---|---|---|
-| `enhance_note` | `Note(note_id)` | `llm_commands.rs:668` | no |
+| `enhance_note` | `Note(note_id)` | `llm_commands.rs` (`enhance_note`; the work is `enhance_with`) | no |
 | `ask_meeting` | from its `scope`: `Note(id)` (default) → `Note`, `Meeting(id)` → `Meeting`, `Folder`/`Person`/`All` → `Wide` (no single Keep-local switch decides; the harness excludes Keep-local meetings in its queries for an off-device model) | `llm_commands.rs` `ask_meeting` | no |
 | `run_polish` ← `polish_transcript` (no UI caller) and `scheduler::polish_after_transcribe` (AI pass) | `Meeting(meeting_id)` | `llm_commands.rs:823` | AI pass: yes |
 | `run_extraction` ← `extract_meeting_items` (no UI caller), `backfill_meeting_items` (per meeting), `extract_after_transcribe` (AI pass `scheduler.rs:219`; re-diarize/revert `asr_commands.rs:132,152`) | `Meeting(meeting_id)` | `extraction.rs:273` | AI pass and re-diarize: yes |
@@ -77,7 +77,7 @@ devMock copies these strings by hand (`frontend/src/devMock.ts:931-950`).
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
 |---|---|---|---|
-| `enhance_note` | `note_id: String, template_id: String` | `Result<Note, String>` | `ui-editor` (`Editor.tsx:1142`), via `api.enhanceNote` |
+| `enhance_note` | `note_id: String, template_id: String` | `Result<EnhanceReply { note, report }, String>` | `ui-editor` (`Editor.tsx` `enhance`), via `api.enhanceNote`. `report` is fly-ask's `EnhanceReport`: how much of a long meeting was read, what was left out, flagged and unsourced counts |
 | `polish_transcript` | `meeting_id: String` | `Result<PolishResult, String>` | none (`api.polishTranscript` exists at `api.ts:135`, no component calls it; the AI pass calls `run_polish` directly) |
 | `edit_note_block` | `note_id: String, block_id: String, markdown: String` | `Result<Note, String>` | `ui-editor` (`EnhancedDoc.tsx:525,565`; empty markdown deletes the block), via `api.editNoteBlock` |
 | `keep_note_block` | `note_id: String, block_id: String` | `Result<Note, String>` | `ui-editor` (`EnhancedDoc.tsx:501`), via `api.keepNoteBlock` |
@@ -94,7 +94,7 @@ devMock copies these strings by hand (`frontend/src/devMock.ts:931-950`).
 | `backfill_meeting_items` | — | `Result<BackfillResult{processed, extracted, failed, first_error}, String>` | `ui-settings` (`SettingsModal.tsx:566`), via `api.backfillMeetingItems` |
 | `pending_backfill_count` | — | `Result<usize, String>` | `ui-settings` (`SettingsModal.tsx:384,585`), via `api.pendingBackfillCount` |
 
-devMock mirrors all of these except `polish_transcript` and `extract_meeting_items`, which fall to `default: return null` (`devMock.ts:1507`). Drift: mock `enhance_note` checks consent and the key, not keep-local (`devMock.ts:1120-1124`). Mock `backfill_meeting_items` ignores keep-local (`devMock.ts:1413-1419`). Mock Ask applies keep-local only to cloud providers, never to a remote Ollama (`devMock.ts:966-970`).
+devMock mirrors all of these except `polish_transcript` and `extract_meeting_items`, which fall to `default: return null` (`devMock.ts:1507`). Drift: mock `enhance_note` checks consent and the key, not keep-local (`devMock.ts:1120-1124`); it returns `{ note, report }` with a flagged fixture block (`b6`) and, with `fotwMockEnhanceLong=1`, a long-meeting report with a line left out. Mock `backfill_meeting_items` ignores keep-local (`devMock.ts:1413-1419`). Mock Ask applies keep-local only to cloud providers, never to a remote Ollama (`devMock.ts:966-970`).
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
@@ -165,7 +165,8 @@ Background AI pass after every successful transcription (`scheduler.rs:169-173`)
 - A stored key never goes to a plain-HTTP non-loopback host: checked on save (`llm_commands.rs:1170`) and again on use (592-594). Anthropic's host is fixed (645-648). T4.
 - Meeting content is fenced and declared "not instructions" in every prompt. T1. Ask: `build_ask_system` (955-963). Extraction: 59-61. Enhance/polish in fly-core.
 - Polish never overwrites the raw transcript, and refuses to save a variant whose ids/speakers/timestamps drifted (`llm_commands.rs:889-898`; DECISIONS.md M4 provenance contract).
-- Enhance never saves an empty or unusable block list (720-731).
+- Enhance never saves an empty or unusable block list, nor one whose every block was dropped as speech aimed at an AI; the note's enhanced document is left as it was (tested over the real `Mutex<Storage>`).
+- Enhance (`enhance_note`): `foreground_ai()` is held for the whole run; the provider comes from `build_provider(Note(id))` only (consent and Keep local); the store is locked to read and to save, never across the model call (`enhance_with`, tested by locking the store from inside the model). The prompt is sized to the context the provider will actually send (`prompt_budget`: Ollama `max_prompt_chars(max_tokens)` with one retry at a 16,384-token context when Ollama fell back to a smaller one; hosted 300,000 characters), so a long meeting is read in excerpts instead of being trimmed from the front by the server. Per-model format schemas and thinking settings are unchanged (llama3.1 gets the block grammar; qwen3.5 never does).
 - Background polish/extraction never fail or stall the transcription job (10-minute cap `scheduler.rs:382`; `extract_after_transcribe` swallows errors `extraction.rs:313-325`).
 - Ask history (`split_ask_history`): empty turns dropped, at most 40 messages, must end on the question; an assistant turn without `on_device` is treated as on device, so it never reaches an off-device model.
 - Ask gets Keep-local visibility from `build_provider_with_reach`'s `on_device`, never `provider.is_local()` (a remote Ollama is local in kind). The harness never constructs a provider, reads a key or writes; the two Ask writes (`insert_ask_answer`, `add_action_item`) are separate user-clicked commands that take only an id the backend handed out, validate again, are idempotent and audited.
@@ -177,6 +178,7 @@ Background AI pass after every successful transcription (`scheduler.rs:169-173`)
 |---|---|---|---|
 | unit | `src-tauri/src/llm_commands.rs:1217-1646` | 16 | pure `check_cloud_policy` matrix, consent refusal wording, consent-skip classifier, one-time consent reset (real storage), reset flag not webview-settable, the consent dialog's parts (see [app-settings-consent](app-settings-consent.md#tests)), `build_provider` refuses a cloud provider without consent on a real `AppState` (a decline changes nothing, an allow lets it build), loopback detection, base-URL validation |
 | unit | `src-tauri/src/extraction.rs:387-525` | 4 | prompt carries ids/keys, parse tolerance, validation drops, `extract_items` with `MockLLMProvider` |
+| unit | `src-tauri/src/llm_commands.rs` (`enhance_tests`) | 8 | `enhance_with` over `Mutex<Storage>` with scripted models: checked blocks saved and flags surviving a reload; the store free during the model call; a 2,500-line meeting read in excerpts that fit `max_prompt_chars` (opening, end and the notes' topic read; the citation is the first line shown); a context fallback retried once then failing with the note untouched; a hosted model given the whole meeting; injected speech dropped and a note not emptied; nothing-to-enhance refused before the model; the prompt budgets |
 | integration (runs in CI) | `src-tauri/tests/enhance_flow.rs` | 1 | prompt → mock → `parse_enhanced_blocks` → storage provenance, FTS, mirror, reclaim (hand-copied command glue) |
 | integration (runs in CI) | `src-tauri/tests/polish_flow.rs` | 2 | cleanup prompt → mock → id-keyed merge, drop-content guard, raw kept |
 | integration (runs in CI) | `src-tauri/tests/llm_bench.rs` (`bench_fixtures_parse`) | 1 | bench fixtures parse |
@@ -188,7 +190,7 @@ Background AI pass after every successful transcription (`scheduler.rs:169-173`)
 - One test calls `build_provider` itself (`build_provider_refuses_cloud_without_consent`), for the consent gate with `NoMeetingData`. None picks a `Note` or `Meeting` scope, and none asserts that each caller passes the right scope. A wrong scope would pass every test (risk: T10).
 - No test proves a refused call makes **zero** network requests; tests only check the returned `Err` of the pure policy function (spec §4.2a item 14 asks for "zero keep-local text in a cloud request").
 - Keep-local is untested on every real caller path: Ask, Enhance, polish, extraction, background AI pass, backfill, re-diarize re-extraction.
-- `migrate_anthropic_model`, `run_extraction` persistence (including the stale-items-on-empty behavior), the Enhance empty-blocks guard, Ask history trimming, `record_consent_skip` → `llm:consent-skips` are all untested.
+- `migrate_anthropic_model`, `run_extraction` persistence (including the stale-items-on-empty behavior), Ask history trimming, `record_consent_skip` → `llm:consent-skips` are all untested.
 - The refusal-string contract with `askModel.ts` and `devMock.ts` is kept by hand-copied literals on both sides; a wording change in Rust breaks Ask's "Review and allow" with all tests green.
 
 ## Changing it safely

@@ -12,7 +12,7 @@ This crate holds the types every other crate shares: notes, blocks with provenan
 - `crates/fly-core/src/model.rs` — domain types; provenance (`BlockOrigin`, `NoteBlock::apply_edit`/`reclaim`); `Attendee` legacy-compatible serde; `Meeting.attendees_confirmed`; `Transcript::to_markdown`/`to_vtt`; `ItemKind`/`MeetingItem`.
 - `crates/fly-core/src/align.rs` — word↔speaker aligner (word-level and sentence-vote variants), single-speaker segmenting, channel merge.
 - `crates/fly-core/src/crosstalk.rs` — mic/system echo de-dup for two-channel recordings.
-- `crates/fly-core/src/enhance.rs` — Enhance prompt and block parser (with truncation salvage), `fence_safe`, Polish prompt, batching, the retention guard and the provenance check.
+- `crates/fly-core/src/enhance.rs` — Enhance prompt (whole, or `build_enhance_prompt_with` over `Shown::{Segment, Gap}` for a long meeting) and block parser (`parse_enhance_output`, lenient about `sources`, with truncation salvage; `parse_enhanced_blocks` maps it to note blocks), `fence_safe`, Polish prompt, batching, the retention guard and the provenance check.
 - `crates/fly-core/src/prompt_profile.rs` — per-model `PromptProfile` registry (`profile_for`).
 - `crates/fly-core/src/rediarize.rs` — reassigns speaker keys onto an existing transcript and rebuilds the speaker list, keeping labels that stay stable.
 - `crates/fly-core/src/repeat.rs` — n-gram repetition (ASR loop) detection and collapse.
@@ -23,7 +23,7 @@ This crate holds the types every other crate shares: notes, blocks with provenan
 | Group | Items | Used by |
 |---|---|---|
 | Ids | `new_id()` (`lib.rs:20-22`) | every crate that creates rows |
-| Notes + provenance | `Folder`, `Note` (`to_markdown(include_sources)`), `NoteBlock` (`user`, `ai`, `apply_edit`, `reclaim`), `BlockOrigin::{User, Ai{source_segment_ids}}`, `Attachment` (`model.rs:10-133`) | fly-storage (`notes.rs:227` `apply_edit`, `notes.rs:244` `reclaim`, behind app-llm's `edit_note_block` / `keep_note_block`), fly-mcp, fly-context |
+| Notes + provenance | `Folder`, `Note` (`to_markdown(include_sources)`), `NoteBlock` (`user`, `ai`, `ai_flagged`, `apply_edit`, `reclaim`; optional `flags: Vec<BlockFlag>`, absent on disk when empty and cleared by `reclaim`; `Note::to_markdown(true)` labels a flagged block's citations "check: not backed by its sources"), `BlockFlag`/`BlockFlagKind`, `BlockOrigin::{User, Ai{source_segment_ids}}`, `Attachment` (`model.rs:10-133`) | fly-storage (`notes.rs:227` `apply_edit`, `notes.rs:244` `reclaim`, behind app-llm's `edit_note_block` / `keep_note_block`), fly-mcp, fly-context |
 | Meetings | `Meeting` (`attendees_confirmed`, `attendee_names()`), `Attendee` (`from_legacy`, `display_name`, `match_key`), `RecordingRef` (`model.rs:139-251`) | fly-storage, app-recording, app-pipeline, fly-context, fly-mcp |
 | Transcript | `Word`, `TranscriptSegment`, `Speaker`, `Transcript` (`label_for`, `to_markdown`, `to_vtt`), `SpeakerTurn` (`model.rs:257-373`) | fly-asr, fly-diarize, fly-storage, app-pipeline, fly-mcp |
 | Items + templates | `ItemKind` (`ALL`, `as_str`, `parse`), `MeetingItem`, `Template` (`model.rs:380-451`) | fly-storage, extraction (`src-tauri/src/extraction.rs`), fly-mcp |
@@ -31,7 +31,7 @@ This crate holds the types every other crate shares: notes, blocks with provenan
 | Cross-talk | `CrosstalkOptions` (defaults: 1500 ms window, `min_run` 2, keep the system copy, `min_echo_ratio` 0.15), `ChannelSplit`, `split_crosstalk` (`crosstalk.rs:35-195`) | `pipeline.rs:587-591` |
 | Loops | `MAX_PERIOD`, `LoopRun`, `loop_token`, `max_consecutive_run`, `collapse_loops` (`repeat.rs:9-115`) | `pipeline.rs:18,1354` (`guard_loops`); `crosstalk.rs:32` |
 | Re-diarize | `UNKNOWN_KEY`, `Reassignment`, `reassign_segment_speakers`, `is_generic_label`, `rebuild_speakers`, `apply_turns` (`rediarize.rs:16-216`) | `pipeline.rs:861` |
-| Enhance | `EnhancePrompt`, `build_enhance_prompt`, `enhance_blocks_schema`, `parse_enhanced_blocks`, `fence_safe` (`enhance.rs:17-206`) | `llm_commands.rs` (Enhance, and `fence_safe` for Ask at ~`620-640`), `extraction.rs:93-107` |
+| Enhance | `EnhancePrompt`, `build_enhance_prompt`, `build_enhance_prompt_with`, `Shown`, `enhance_blocks_schema`, `parse_enhance_output`, `ParsedEnhance`, `RawEnhanceBlock`, `parse_enhanced_blocks`, `fence_safe` (`enhance.rs:17-206`) | `llm_commands.rs` (Enhance, and `fence_safe` for Ask at ~`620-640`), `extraction.rs:93-107` |
 | Polish | `CLEANUP_SYSTEM_PROMPT`, `CleanupPrompt`, `build_cleanup_prompt`, `plan_cleanup_batches`, `cleanup_response_schema`, `parse_cleanup_response`, `apply_cleanup`, `PolishFlag`, `PolishOutcome`, `preserves_provenance` (`enhance.rs:306-612`) | `llm_commands.rs` (`polish_transcript`), fly-storage `transcripts.rs` (doc reference) |
 | Profiles | `PromptProfile`, `TaskMaxTokens`, `TaskEffort`, `DEFAULT_PROFILE`, `profile_for` (`prompt_profile.rs:46-249`) | `llm_commands.rs:7`, `extraction.rs:10` |
 | Seams | `seams::{SharingProvider, Integration}` (`seams.rs:8-16`) | none (checked with grep) |
@@ -67,6 +67,7 @@ None.
 ## Invariants
 - **No OS, UI or network code** (ARCHITECTURE.md "The golden rule"; `lib.rs:1-5`). Holds at code level: `Cargo.toml:7-12` lists only serde/serde_json/thiserror/uuid/chrono. The only platform-touching dependencies are transitive: `uuid` v4 uses the OS RNG through `getrandom`, and chrono's default `clock` feature pulls in `iana-time-zone` (inferred from `Cargo.lock`). Nothing enforces the rule: `deny.toml` has no ban for this crate.
 - **Provenance: user and AI text never share a block, and editing an AI block reclaims it as the user's** (ARCHITECTURE.md "Provenance"; `model.rs:19-31,59-72`). An identical edit doesn't reclaim (`model.rs:61`).
+- **The checks on an Enhance reply are not here:** `fly_ask::enhance` judges the parsed blocks (citations, claims, injection). This crate only reads and maps them.
 - **Enhance sources map to real segment ids; out-of-range indices are dropped** (DECISIONS.md M4 "Enhance output contract"; `enhance.rs:222-226`).
 - **JSON-shaped LLM output is never pasted raw into a note.** A truncated array salvages its complete blocks; anything unsalvageable returns empty so the caller fails visibly (`enhance.rs:181-206,240-286`; field failure 2026-07-16).
 - **Untrusted meeting data is fenced.** `fence_safe` neutralizes the crate's own XML fence tags, and the contract tells the model never to follow embedded instructions (THREAT_MODEL T1; `enhance.rs:33-35,49-96`).
