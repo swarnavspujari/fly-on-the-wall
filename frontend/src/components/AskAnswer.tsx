@@ -100,15 +100,20 @@ const BLOCK_ALLOWED = [
 /** Whether each cited line still says what Ask read, checked against the
  *  meeting's transcript now (see askCitations.ts). Read when the answer
  *  arrives and again on every chip click. */
-function useLineStatus(reply: AskReply | null) {
+function useLineStatus(
+  reply: AskReply | null,
+  read: (meetingId: string, fresh?: boolean) => Promise<Transcript | null>,
+) {
   const [located, setLocated] = useState<ReadonlyMap<string, LocatedLine>>(new Map());
   const check = useCallback(
-    async (meetingId: string): Promise<ReadonlyMap<string, LocatedLine>> => {
+    async (meetingId: string, fresh = false): Promise<ReadonlyMap<string, LocatedLine>> => {
       const src = reply?.sources.find((s) => s.meeting_id === meetingId);
       if (!src) return new Map();
       let transcript: Transcript | null;
       try {
-        transcript = await api.getTranscript(meetingId);
+        // Cached per meeting (a sheet reopening reads nothing); a chip
+        // click reads that one meeting again, to see a line that moved.
+        transcript = await read(meetingId, fresh);
       } catch {
         return new Map(); // can't check: claim nothing either way
       }
@@ -126,7 +131,7 @@ function useLineStatus(reply: AskReply | null) {
       });
       return out;
     },
-    [reply],
+    [reply, read],
   );
   useEffect(() => {
     for (const s of reply?.sources ?? []) void check(s.meeting_id);
@@ -496,14 +501,14 @@ export function AskTurnView({
   focusComposer: () => void;
 }) {
   const reply = turn.phase === "done" ? turn.reply : null;
-  const { located, check } = useLineStatus(reply);
+  const { located, check } = useLineStatus(reply, chat.readTranscript);
   const [inserting, setInserting] = useState(false);
   const [insertError, setInsertError] = useState<string | null>(null);
   const approving = useRef(new Set<string>());
 
   const openGroup = onOpenSource
     ? async (g: CiteGroup) => {
-        const now = await check(g.meetingId);
+        const now = await check(g.meetingId, true);
         const ids = g.lines.map((l) => now.get(l.segment_id)?.segmentId ?? l.segment_id);
         const noteId = reply?.sources.find((s) => s.meeting_id === g.meetingId)?.note_id;
         onOpenSource({

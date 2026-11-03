@@ -54,6 +54,7 @@ import LivePane from "./LivePane";
 import EnhancedDoc from "./EnhancedDoc";
 import { AskComposer, AskSheet, OPEN_ASK_EVENT, useAskChat, useWideWindow } from "./AskPanel";
 import type { OpenAskDetail } from "./AskPanel";
+import type { AskChatStore } from "../askStore";
 import { ALL_SCOPE, namedSpeakers } from "../askScope";
 
 /** The title a new note starts with (App.tsx `newNote`). */
@@ -61,6 +62,8 @@ const UNTITLED = "Untitled";
 
 interface Props {
   note: Note;
+  /** App's Ask chats, kept per note until the app closes. */
+  askStore?: AskChatStore;
   meeting: Meeting | null;
   /** ALL meetings attached to this note, newest first (a note re-recorded
    *  into has several). The transcript view offers a picker when there is
@@ -1010,6 +1013,7 @@ function ViewSwitcher({
 
 export default function Editor({
   note,
+  askStore,
   meeting,
   meetings,
   onSelectMeeting,
@@ -1130,7 +1134,7 @@ export default function Editor({
   const isRecordingThisNote = recStatus.active && recStatus.note_id === note.id;
   const hasMeeting = meeting != null || (isRecordingThisNote && recStatus.meeting_id != null);
   // Ask chat for this note (ephemeral; resets on note switch).
-  const ask = useAskChat(note.id, { hasMeeting });
+  const ask = useAskChat(note.id, { hasMeeting, store: askStore });
   // Names @ suggests: this meeting's attendees and named speakers.
   const askPeople = useMemo(
     () =>

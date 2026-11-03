@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { AskReply, AskStreamEvent, LlmSettings, Note, Transcript } from "../types";
 import { AskComposer, AskSheet, useAskChat } from "./AskPanel";
+import { AskChatStore } from "../askStore";
 import type { OpenSource } from "./AskAnswer";
 import { useInlineAskTurns } from "./AskConnectors";
 import { ConnectorCallStack } from "./ConnectorCallCard";
@@ -145,6 +146,7 @@ function Harness({
   onOpenSource,
   keptLocal = false,
   people,
+  store,
 }: {
   /** null = Ask over every meeting (Home). */
   noteId: string | null;
@@ -153,8 +155,9 @@ function Harness({
   onOpenSource?: OpenSource;
   keptLocal?: boolean;
   people?: string[];
+  store?: AskChatStore;
 }) {
-  const chat = useAskChat(noteId);
+  const chat = useAskChat(noteId, { store });
   const ref = useRef<HTMLTextAreaElement>(null);
   const [open, setOpen] = useState(false);
   return (
@@ -506,20 +509,56 @@ describe("Ask composer and sheet", () => {
     expect(sheet()!.textContent).toContain("Answer after consent.");
   });
 
-  it("drops a reply that lands after you switch notes", async () => {
+  it("keeps each note's chat: an answer still being written lands in its own note", async () => {
     let resolve!: (r: AskReply) => void;
-    vi.spyOn(api, "askMeeting").mockReturnValue(new Promise((r) => (resolve = r)));
-    const { rerender } = render(<Harness noteId="n1" />);
+    const ask = vi.spyOn(api, "askMeeting").mockReturnValue(new Promise((r) => (resolve = r)));
+    const store = new AskChatStore();
+    const { rerender } = render(<Harness noteId="n1" store={store} />);
     await openSheet();
     type("Summary?");
     key(input(), "Enter");
-    rerender(<Harness noteId="n2" />);
-    // the answer still being written for n1 is stopped
-    expect(api.cancelAsk).toHaveBeenCalledTimes(1);
+    await flush();
+    // another note: its own (empty) chat; n1's answer keeps going
+    rerender(<Harness noteId="n2" store={store} />);
+    await flush();
+    expect(api.cancelAsk).not.toHaveBeenCalled();
+    expect(sheet()!.textContent).not.toContain("Summary?");
+    expect(input().value).toBe("");
+    type("half-typed for n2");
     await act(async () => resolve(reply("Answer for n1")));
     await flush();
     expect(host!.textContent).not.toContain("Answer for n1");
+    // n2 can ask while n1's question was out
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.disabled).toBe(
+      false,
+    );
+    // back on n1: the question and its answer are there
+    rerender(<Harness noteId="n1" store={store} />);
+    await flush();
+    expect(sheet()!.textContent).toContain("Summary?");
+    expect(sheet()!.textContent).toContain("Answer for n1");
     expect(input().value).toBe("");
+    // and n2 kept its draft
+    rerender(<Harness noteId="n2" store={store} />);
+    await flush();
+    expect(input().value).toBe("half-typed for n2");
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it("each note's chat survives the view unmounting (App keeps the store)", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue(reply("Kept answer."));
+    const store = new AskChatStore();
+    const first = render(<Harness noteId="n1" store={store} />);
+    await openSheet();
+    type("Keep this?");
+    key(input(), "Enter");
+    await flush();
+    act(() => root!.unmount());
+    host!.remove();
+    void first;
+    render(<Harness noteId="n1" store={store} />);
+    await openSheet();
+    expect(sheet()!.textContent).toContain("Kept answer.");
   });
 
   it("Esc closes the sheet", async () => {
@@ -1040,6 +1079,36 @@ describe("Ask harness answers", () => {
       noteId: "n1",
       segmentIds: ["a1"],
     });
+  });
+
+  it("reads a meeting's transcript once for the citation checks; a chip click reads it again", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue(
+      reply("…", true, {
+        sentences: [sourced("The price came up.", ["a1"]), sourced("SOW today.", ["a2"])],
+        sources: [SOURCE_M1],
+      }),
+    );
+    const read = vi.mocked(api.getTranscript);
+    const store = new AskChatStore();
+    const { rerender } = render(<Harness noteId="n1" store={store} onOpenSource={() => {}} />);
+    await openSheet();
+    type("Status?");
+    key(input(), "Enter");
+    await flush();
+    type("And then?");
+    key(input(), "Enter");
+    await flush();
+    // two answers citing the same meeting: one read
+    expect(read).toHaveBeenCalledTimes(1);
+    // closing and reopening the sheet reads nothing
+    key(input(), "Escape");
+    rerender(<Harness noteId="n1" store={store} onOpenSource={() => {}} />);
+    await openSheet();
+    expect(read).toHaveBeenCalledTimes(1);
+    // a chip re-reads its meeting (a line may have moved since)
+    act(() => chips()[0].click());
+    await flush();
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it("the trace pill starts collapsed, lists the steps, and holds no meeting text", async () => {

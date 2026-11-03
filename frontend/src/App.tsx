@@ -48,6 +48,7 @@ import Home from "./components/Home";
 import GlobalAsk from "./components/GlobalAsk";
 import { openAsk, useAskChat } from "./components/AskPanel";
 import { useInlineAskTurns } from "./components/AskConnectors";
+import { AskChatStore } from "./askStore";
 import UndoToast from "./components/UndoToast";
 import { useUpdater } from "./updater";
 
@@ -522,7 +523,10 @@ export default function App() {
 
   // Ask over every meeting (Home). Lives here so its thread survives
   // opening one of its sources and coming back; never saved.
-  const globalAsk = useAskChat(null);
+  // Every Ask chat (each note's and Home's), kept until the app closes, so
+  // opening a source in another note never loses a conversation.
+  const [askStore] = useState(() => new AskChatStore());
+  const globalAsk = useAskChat(null, { store: askStore });
   // Ask turns showing their connector cards in the answer sheet.
   const inlineAskTurns = useInlineAskTurns();
 
@@ -1078,6 +1082,7 @@ export default function App() {
         {openNote ? (
           <Editor
             note={openNote}
+            askStore={askStore}
             meeting={openMeeting}
             meetings={noteMeetings}
             onSelectMeeting={(m) => void selectMeeting(m)}

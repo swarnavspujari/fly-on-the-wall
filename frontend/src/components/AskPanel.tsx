@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { ReactNode, RefObject } from "react";
-import { listen } from "@tauri-apps/api/event";
 import {
   ArrowUp,
   CheckCheck,
@@ -15,17 +23,8 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import type {
-  AskEventPayload,
-  AskMessage,
-  AskReply,
-  AskSource,
-  AskStage,
-  AskStreamEvent,
-  LlmSettings,
-  Note,
-} from "../types";
-import { api, ASK_EVENT, LLM_SETTINGS_CHANGED_EVENT } from "../api";
+import type { LlmSettings, Note, Transcript } from "../types";
+import { api, LLM_SETTINGS_CHANGED_EVENT } from "../api";
 import {
   CLAUDE_MODELS,
   QUICK_PROMPTS,
@@ -36,7 +35,8 @@ import {
   runsOnPlace,
   runsOnSwitched,
 } from "../askModel";
-import { citedIds } from "../askCitations";
+import { AskChatStore, HOME_KEY, askHistory } from "../askStore";
+import type { AskTurn, ChatData, ChatError } from "../askStore";
 import {
   ALL_SCOPE,
   mentionAt,
@@ -111,68 +111,8 @@ export function useWideWindow(): boolean {
   return wide;
 }
 
-/** One question and what came back. `id` is the ask id: the stream
- *  (`ask:event`), Stop and connector cards key on it. */
-export interface AskTurn {
-  id: string;
-  question: string;
-  scope: ScopeChoice;
-  /** running: streaming; done: `reply` is set; stopped: you pressed Stop. */
-  phase: "running" | "done" | "stopped";
-  stage: AskStage | null;
-  /** The reply so far (sanitized, no citations yet). */
-  frame: string;
-  frameTurn: number | null;
-  /** What the prefetch found, the moment it finished. */
-  found: { sources: AskSource[]; keptLocalNotSearched: boolean } | null;
-  reply: AskReply | null;
-  /** The saved provider and model when it was sent (the run log names no
-   *  model). */
-  provider: string;
-  model: string | null;
-}
-
-/** Apply one streamed event to its turn. Frames are whole texts, not
- *  deltas; a new model turn supersedes the last one's frames, and turn 0 is
- *  the final, validated answer. */
-export function applyAskEvent(turn: AskTurn, ev: AskStreamEvent): AskTurn {
-  switch (ev.type) {
-    case "stage":
-      return { ...turn, stage: ev.stage };
-    case "sources":
-      return {
-        ...turn,
-        found: { sources: ev.sources, keptLocalNotSearched: ev.kept_local_not_searched > 0 },
-      };
-    case "turn_start":
-      return { ...turn, frameTurn: ev.turn, frame: "" };
-    case "frame":
-      if (ev.turn === 0 || turn.frameTurn === null || ev.turn >= turn.frameTurn) {
-        return { ...turn, frame: ev.text, frameTurn: ev.turn === 0 ? turn.frameTurn : ev.turn };
-      }
-      return turn;
-    default:
-      return turn;
-  }
-}
-
-/** The chat as `ask_meeting` takes it: earlier answered turns (with where
- *  each ran and what it cited), then the question. */
-export function askHistory(turns: AskTurn[], question: string): AskMessage[] {
-  const out: AskMessage[] = [];
-  for (const t of turns) {
-    if (t.phase !== "done" || !t.reply) continue;
-    out.push({ role: "user", content: t.question });
-    out.push({
-      role: "assistant",
-      content: t.reply.text,
-      on_device: t.reply.on_device,
-      citations: citedIds(t.reply.sentences),
-    });
-  }
-  out.push({ role: "user", content: question });
-  return out;
-}
+export { applyAskEvent, askHistory } from "../askStore";
+export type { AskTurn } from "../askStore";
 
 let askSeq = 0;
 const newAskId = () =>
@@ -189,7 +129,7 @@ export interface AskChat {
   busy: boolean;
   /** The last failure, the question and scope it was for (to retry) and the
    *  provider it went to (read when it was asked). */
-  error: { raw: string; question: string; scope: ScopeChoice; provider: string } | null;
+  error: ChatError | null;
   /** Turns (by id) whose answer was already inserted into the note. */
   inserted: ReadonlySet<string>;
   /** Proposal approvals (by proposal id), kept while the sheet is closed so
@@ -208,6 +148,9 @@ export interface AskChat {
   retry: () => void;
   dismissError: () => void;
   markInserted: (turnId: string) => void;
+  /** A meeting's transcript for the citation checks, cached per chat store
+   *  (`fresh` re-reads it). */
+  readTranscript: (meetingId: string, fresh?: boolean) => Promise<Transcript | null>;
   /** The SAVED LLM settings. Re-read when the sheet opens, before each
    *  question and before Runs on writes, so a change made in Settings is
    *  never undone from a stale copy. */
@@ -225,70 +168,53 @@ export interface AskChat {
 /** The composer's input, shared so the sheet can hand focus back to it. */
 export type AskInputRef = RefObject<HTMLTextAreaElement | null>;
 
-/** One ephemeral chat per open note (or one for Home, `noteId` null):
- *  switching notes starts a fresh one, stops any answer still being written
- *  for the old note and drops its reply. */
-export function useAskChat(noteId: string | null, { hasMeeting = true } = {}): AskChat {
-  const [turns, setTurns] = useState<AskTurn[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<AskChat["error"]>(null);
-  const [inserted, setInserted] = useState<ReadonlySet<string>>(new Set());
-  const [proposals, setProposals] = useState<ReadonlyMap<string, ProposalState>>(new Map());
-  const [scopePick, setScopePick] = useState<ScopeChoice | null>(null);
-  const [llm, setLlm] = useState<LlmSettings | null>(null);
+/** The Ask chat for a note (or Home's, `noteId` null), a view over a chat
+ *  store keyed by note. With App's store, each note keeps its own chat until
+ *  the app closes: switching notes shows that note's chat, and an answer
+ *  still being written for another note keeps going and lands there.
+ *  Without one (tests), the hook keeps its own store. */
+export function useAskChat(
+  noteId: string | null,
+  { hasMeeting = true, store }: { hasMeeting?: boolean; store?: AskChatStore } = {},
+): AskChat {
+  // (an empty store is cheap; it's only used when none is given)
+  const [ownStore] = useState(() => new AskChatStore());
+  const st = store ?? ownStore;
+  const key = noteId ?? HOME_KEY;
+  // Only this chat's changes re-render (the snapshot is its own object).
+  const data = useSyncExternalStore(st.subscribe, () => st.get(key));
+  useEffect(() => st.retain(), [st]);
+
+  // The key on screen now (replies for another chat don't announce here).
+  const keyRef = useRef(key);
+  useEffect(() => {
+    keyRef.current = key;
+  });
+
+  // The composer text: local, so typing re-renders only this view; each
+  // chat's draft is kept in the store across note switches.
+  const [input, setInputState] = useState(() => st.draft(key));
   const [announcement, setAnnouncement] = useState("");
-  const sheetId = useId();
-  const seq = useRef(0);
-  // A question is on its way: guards double sends inside one render (two
-  // Enters, Enter + a quick prompt) that the `busy` state can't see yet.
-  const inFlight = useRef(false);
-  // The ask id being written, so a note switch or Stop can cancel it.
-  const running = useRef<string | null>(null);
-
-  const cancelRunning = useCallback(() => {
-    const id = running.current;
-    running.current = null;
-    if (id) void api.cancelAsk(id).catch(() => {});
-  }, []);
-
   useEffect(() => {
-    seq.current += 1;
-    inFlight.current = false;
-    setTurns([]);
-    setInput("");
-    setBusy(false);
-    setError(null);
-    setInserted(new Set());
-    setProposals(new Map());
-    setScopePick(null);
+    setInputState(st.draft(key));
     setAnnouncement("");
-    return cancelRunning;
-  }, [noteId, cancelRunning]);
+  }, [st, key]);
+  const setInput = useCallback(
+    (value: string) => {
+      st.setDraft(key, value);
+      setInputState(value);
+    },
+    [st, key],
+  );
+  /** Change a chat's draft (the composer's too, when it's the one shown). */
+  const editDraft = (k: string, fn: (cur: string) => string) => {
+    const next = fn(st.draft(k));
+    st.setDraft(k, next);
+    if (keyRef.current === k) setInputState(next);
+  };
 
-  // The stream: route each event to the turn it belongs to.
-  useEffect(() => {
-    let live = true;
-    let unlisten: (() => void) | null = null;
-    listen<AskEventPayload>(ASK_EVENT, (e) => {
-      if (!live) return;
-      const { ask_id, event } = e.payload;
-      setTurns((ts) =>
-        ts.some((t) => t.id === ask_id && t.phase === "running")
-          ? ts.map((t) => (t.id === ask_id ? applyAskEvent(t, event) : t))
-          : ts,
-      );
-    })
-      .then((un) => {
-        if (live) unlisten = un;
-        else un();
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-      unlisten?.();
-    };
-  }, []);
+  const [llm, setLlm] = useState<LlmSettings | null>(null);
+  const sheetId = useId();
 
   // Bumped by every Runs on write: a re-read that started before the last
   // write is older than what we already show, so it isn't applied.
@@ -312,120 +238,150 @@ export function useAskChat(noteId: string | null, { hasMeeting = true } = {}): A
     () => (noteId ? thisScope(noteId, hasMeeting) : ALL_SCOPE),
     [noteId, hasMeeting],
   );
-  const scope = scopePick ?? defaultScope;
+  const scope = data.scopePick ?? defaultScope;
+  const setScope = useCallback(
+    (pick: ScopeChoice | null) => st.update(key, (d) => ({ ...d, scopePick: pick })),
+    [st, key],
+  );
+
+  // Stable, so the citation checks don't re-run on every render.
+  const readTranscript = useCallback(
+    (meetingId: string, fresh?: boolean) => st.transcript(meetingId, fresh),
+    [st],
+  );
 
   const send = (text: string, scopeArg?: ScopeChoice) => {
     const content = text.trim();
-    if (!content || inFlight.current) return;
-    inFlight.current = true;
+    const k = key;
+    // The store updates at once, so two Enters in one render send once.
+    const before = st.get(k);
+    if (!content || before.running) return;
     const asked = scopeArg ?? scope;
-    const history = askHistory(turns, content);
-    const mine = ++seq.current;
+    const history = askHistory(before.turns, content);
     const id = newAskId();
-    running.current = id;
     const current = llm?.providers.find((p) => p.id === llm.provider);
     const providerAtSend = llm?.provider ?? "ollama";
     // Re-read the saved provider alongside the question: Runs on stays
     // current, and an error names the provider the question went to.
     const settings = refreshLlm();
-    setTurns((ts) => [
-      ...ts,
-      {
-        id,
-        question: content,
-        scope: asked,
-        phase: "running",
-        stage: null,
-        frame: "",
-        frameTurn: null,
-        found: null,
-        reply: null,
-        provider: providerAtSend,
-        model: current ? current.model || current.default_model : null,
-      },
-    ]);
-    setBusy(true);
-    setError(null);
+    st.update(k, (d) => ({
+      ...d,
+      running: id,
+      error: null,
+      turns: [
+        ...d.turns,
+        {
+          id,
+          question: content,
+          scope: asked,
+          phase: "running",
+          stage: null,
+          frame: "",
+          frameTurn: null,
+          found: null,
+          reply: null,
+          provider: providerAtSend,
+          model: current ? current.model || current.default_model : null,
+        },
+      ],
+    }));
     setAnnouncement("");
     // Clear the composer only if it holds this question (not something
     // typed meanwhile, or when a quick prompt was clicked).
-    setInput((cur) => (cur.trim() === content ? "" : cur));
-    api
-      .askMeeting(noteId, history, asked.scope, id)
-      .then(
-        (reply) => {
-          if (mine !== seq.current) return;
-          // Keep where the answer ran and what it cited: the backend never
-          // sends an on-device answer to an off-device model next turn.
-          setTurns((ts) => ts.map((t) => (t.id === id ? { ...t, phase: "done", reply } : t)));
-          const n = turns.filter((t) => t.phase === "done").length + 1;
+    editDraft(k, (cur) => (cur.trim() === content ? "" : cur));
+    /** Still waiting for this answer (not stopped, not cleared). */
+    const waiting = () => st.get(k).turns.some((t) => t.id === id && t.phase === "running");
+    const release = (d: ChatData): ChatData => (d.running === id ? { ...d, running: null } : d);
+    api.askMeeting(noteId, history, asked.scope, id).then(
+      (reply) => {
+        if (!waiting()) {
+          st.update(k, release);
+          return;
+        }
+        // Keep where the answer ran and what it cited: the backend never
+        // sends an on-device answer to an off-device model next turn.
+        st.update(k, (d) => ({
+          ...release(d),
+          turns: d.turns.map((t) => (t.id === id ? { ...t, phase: "done", reply } : t)),
+        }));
+        if (keyRef.current === k) {
+          const n = st.get(k).turns.filter((t) => t.phase === "done").length;
           setAnnouncement(`Answer ${n} is ready.`);
-        },
-        async (e) => {
-          const s = await settings;
-          if (mine !== seq.current) return;
-          if (isCancelled(e)) {
-            setTurns((ts) => ts.map((t) => (t.id === id ? { ...t, phase: "stopped" } : t)));
-            return;
-          }
-          // Drop the question (the backend needs the chat to end on a user
-          // turn) and hand it back to the composer.
-          setTurns((ts) => ts.filter((t) => t.id !== id));
-          setInput((cur) => (cur.trim() ? cur : content));
-          setError({
+        }
+      },
+      async (e) => {
+        const s = await settings;
+        if (!waiting()) {
+          st.update(k, release);
+          return;
+        }
+        if (isCancelled(e)) {
+          st.update(k, (d) => ({
+            ...release(d),
+            turns: d.turns.map((t) => (t.id === id ? { ...t, phase: "stopped" } : t)),
+          }));
+          return;
+        }
+        // Drop the question (the backend needs the chat to end on a user
+        // turn) and hand it back to the composer.
+        st.update(k, (d) => ({
+          ...release(d),
+          turns: d.turns.filter((t) => t.id !== id),
+          error: {
             raw: String(e),
             question: content,
             scope: asked,
             provider: s?.provider ?? providerAtSend,
-          });
+          },
+        }));
+        editDraft(k, (cur) => (cur.trim() ? cur : content));
+        if (keyRef.current === k) {
           setAnnouncement("Ask couldn't answer. The reason is in the answer sheet.");
-        },
-      )
-      .finally(() => {
-        if (mine !== seq.current) return;
-        if (running.current === id) running.current = null;
-        inFlight.current = false;
-        setBusy(false);
-      });
+        }
+      },
+    );
   };
 
   const stop = () => {
-    const id = running.current;
+    const id = st.get(key).running;
     if (!id) return;
     // The reply (or the backend's "cancelled") is dropped when it lands.
-    seq.current += 1;
-    cancelRunning();
-    inFlight.current = false;
-    setBusy(false);
-    setTurns((ts) => ts.map((t) => (t.id === id ? { ...t, phase: "stopped" } : t)));
+    st.update(key, (d) => ({
+      ...d,
+      running: null,
+      turns: d.turns.map((t) => (t.id === id ? { ...t, phase: "stopped" } : t)),
+    }));
+    void api.cancelAsk(id).catch(() => {});
     setAnnouncement("Stopped. Nothing from that answer was kept.");
   };
 
   return {
     noteId,
-    turns,
+    turns: data.turns,
     input,
     setInput,
-    busy,
-    error,
-    inserted,
-    proposals,
+    busy: data.running !== null,
+    error: data.error,
+    inserted: data.inserted,
+    proposals: data.proposals,
     setProposal: (pid, state) =>
-      setProposals((m) => {
-        const next = new Map(m);
+      st.update(key, (d) => {
+        const next = new Map(d.proposals);
         next.set(pid, state);
-        return next;
+        return { ...d, proposals: next };
       }),
     scope,
     defaultScope,
-    setScope: setScopePick,
+    setScope,
     send,
     stop,
     retry: () => {
-      if (error) send(error.question, error.scope);
+      if (data.error) send(data.error.question, data.error.scope);
     },
-    dismissError: () => setError(null),
-    markInserted: (tid) => setInserted((s) => new Set(s).add(tid)),
+    dismissError: () => st.update(key, (d) => ({ ...d, error: null })),
+    markInserted: (tid) =>
+      st.update(key, (d) => ({ ...d, inserted: new Set(d.inserted).add(tid) })),
+    readTranscript,
     llm,
     setLlm: setLlmAfterWrite,
     refreshLlm,
@@ -1200,9 +1156,8 @@ export function AskSheet({
             {what}
           </span>
           <span className="font-sans text-[11.5px] font-normal" style={{ color: "var(--text-3)" }}>
-            {global
-              ? "Not saved · clears when you close the app"
-              : "Not saved · clears when you leave this note"}
+            {/* each chat is kept (per note) until the app closes */}
+            Not saved · clears when you close the app
           </span>
         </span>
       }
