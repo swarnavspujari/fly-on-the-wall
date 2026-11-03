@@ -452,8 +452,18 @@ fn estimate_num_ctx_for(req: &ConverseRequest) -> u32 {
         .sum::<usize>();
     let prompt_tokens = (prompt_chars / 3) as u32;
     let response = req.max_tokens.unwrap_or(4096);
-    (prompt_tokens + response + 512).clamp(4096, 32768)
+    // Rounded up to a coarse grid: Ollama reloads the model whenever a
+    // request's `num_ctx` differs from the loaded runner's, even by a few
+    // tokens (measured on Ollama 0.40.13: llama3.1 on a 4 GB GPU spent
+    // 12–22 s loading again for 7530 → 7587), so two Asks of nearly the
+    // same size must ask for the same window.
+    (prompt_tokens + response + 512)
+        .clamp(4096, 32768)
+        .next_multiple_of(NUM_CTX_STEP)
 }
+
+/// `num_ctx` is always a multiple of this (see [`estimate_num_ctx_for`]).
+const NUM_CTX_STEP: u32 = 4096;
 
 /// Request body for the OpenAI-compatible `/chat/completions` endpoint
 /// (OpenAI, NIM). `thinking` has no representation here and is ignored.
@@ -1146,10 +1156,37 @@ mod tests {
         let mut r = req(ThinkingMode::Default);
         r.messages = vec![ChatMessage::system("x".repeat(30_000))];
         let est = estimate_num_ctx(&r);
-        assert!(est > 14_000 && est < 16_000, "est was {est}");
+        assert!(est >= 14_000 && est <= 16_384, "est was {est}");
         // Enormous prompt → cap.
         r.messages = vec![ChatMessage::system("x".repeat(400_000))];
         assert_eq!(estimate_num_ctx(&r), 32_768);
+    }
+
+    /// Ollama reloads the model when `num_ctx` changes, so requests of
+    /// nearly the same size must get the same window (the Ask prefetch
+    /// varies by a few hundred characters from question to question).
+    #[test]
+    fn num_ctx_snaps_to_a_grid_so_similar_asks_share_a_runner() {
+        let mut sizes = Vec::new();
+        for chars in [17_982, 18_153, 18_188, 18_900, 19_900] {
+            let mut r = req(ThinkingMode::Disabled);
+            r.max_tokens = Some(1024);
+            r.messages = vec![ChatMessage::system("x".repeat(chars))];
+            sizes.push(estimate_num_ctx(&r));
+        }
+        assert_eq!(sizes, vec![8192; 5]);
+        // Every value is a multiple of the step, whatever the prompt.
+        for chars in (0..120_000).step_by(997) {
+            let mut r = req(ThinkingMode::Default);
+            r.messages = vec![ChatMessage::user("x".repeat(chars))];
+            let n = estimate_num_ctx(&r);
+            assert_eq!(n % NUM_CTX_STEP, 0, "{chars} chars → {n}");
+            // Never less than the unrounded need (clamped to the cap).
+            assert!(
+                n >= ((chars as u32 / 3 + 4096 + 512).min(32_768)),
+                "{chars} chars → {n}"
+            );
+        }
     }
 
     #[test]
