@@ -747,6 +747,40 @@ fn a_user_block_cannot_carry_a_link_an_address_or_a_name_the_notes_lack() {
 }
 
 #[test]
+fn a_link_must_be_the_users_own_whole_word_not_a_title_or_a_lookalike() {
+    let t = small();
+    // An invite sets the title: its link is not the user's.
+    let mut n = note("- agenda\n- see https://good.example.com/x");
+    n.title = "Sync https://invite.example.test/join".into();
+    let p = prep(&n, Some(&t), 1_000_000);
+    let c = check(
+        &reply(&[
+            ("user", "- agenda https://invite.example.test/join", &[]),
+            // A prefix of their link is another address (.co, not .com).
+            ("user", "- see https://good.example.co", &[]),
+            ("user", "- see https://good.example", &[]),
+            ("user", "- see https://good.example.com/x", &[]),
+            // The same address in another case is another resource.
+            ("user", "- see https://good.example.com/X", &[]),
+        ]),
+        &p,
+    )
+    .unwrap();
+    let theirs: Vec<_> = c
+        .blocks
+        .iter()
+        .map(|b| b.origin == BlockOrigin::User)
+        .collect();
+    assert_eq!(
+        theirs,
+        vec![false, false, false, true, false],
+        "{:?}",
+        c.blocks
+    );
+    assert!(c.blocks[0].markdown.contains("agenda") && !c.blocks[0].markdown.contains("invite"));
+}
+
+#[test]
 fn nothing_is_the_users_when_there_are_no_notes() {
     let t = small();
     let p = prep(&note(""), Some(&t), 1_000_000);

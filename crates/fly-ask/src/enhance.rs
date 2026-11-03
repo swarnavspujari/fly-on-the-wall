@@ -91,6 +91,9 @@ pub struct Prepared {
     has_transcript: bool,
     /// The note's title and notes: what a block may state without a cite.
     notes_text: String,
+    /// The user's own notes, which are not the title (a calendar invite can
+    /// set that): what a `user` block may restate.
+    scratchpad: String,
     /// Lowercase words that are people or places in this meeting (speaker
     /// labels and capitalized words mid-sentence), for the name check.
     known_names: BTreeSet<String>,
@@ -425,6 +428,7 @@ pub fn prepare(
     let base = |prompt: EnhancePrompt, sent: Vec<Sent>, total: usize, injected: usize| Prepared {
         has_transcript: transcript.is_some(),
         notes_text: notes_text.clone(),
+        scratchpad: note.scratchpad.clone(),
         known_names: known_names(note, transcript),
         vocabulary: vocabulary(note, transcript, template),
         segments_total: total,
@@ -604,8 +608,9 @@ fn plain(markdown: &str) -> String {
         .join("\n")
 }
 
-/// Words that would render as a link, image, embed, HTML or address.
-fn link_words(markdown: &str) -> Vec<String> {
+/// The words of a text that would render as a link, image, embed, HTML or
+/// address, trimmed of the marks around them, as written.
+fn link_words(markdown: &str) -> BTreeSet<String> {
     markdown
         .split_whitespace()
         .filter(|w| text::strip_links(w).1 > 0)
@@ -613,27 +618,41 @@ fn link_words(markdown: &str) -> Vec<String> {
             w.trim_matches(|c: char| {
                 matches!(
                     c,
-                    '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '*' | '_'
+                    '.' | ','
+                        | ';'
+                        | ':'
+                        | '!'
+                        | '?'
+                        | '"'
+                        | '\''
+                        | '*'
+                        | '_'
+                        | '('
+                        | ')'
+                        | '<'
+                        | '>'
+                        | '['
+                        | ']'
                 )
             })
-            .to_lowercase()
+            .to_string()
         })
         .collect()
 }
 
 /// Whether a `user` block restates the user's own notes, which is what lets
-/// it show as their words. Everything it states must be in the notes (or
-/// the title): every link, address and piece of HTML, as written, and every
-/// number, date, quote and name. And at least half its content words must be
-/// theirs, so a block that borrows a few of their words around something
-/// new is not.
+/// it show as their words. Everything it states must be in the notes (not
+/// the title, which an invite can set): every link, address and piece of
+/// HTML, as a whole word as written, and every number, date, quote and name.
+/// And at least half its content words must be theirs, so a block that
+/// borrows a few of their words around something new is not.
 fn restates_notes(markdown: &str, p: &Prepared) -> bool {
-    let notes = p.notes_text.to_lowercase();
-    if link_words(markdown).iter().any(|w| !notes.contains(w)) {
+    let theirs = link_words(&p.scratchpad);
+    if link_words(markdown).iter().any(|w| !theirs.contains(w)) {
         return false;
     }
     let mine = Source {
-        text: &p.notes_text,
+        text: &p.scratchpad,
         speaker: "",
     };
     if !claims::unsupported(&claim_text(markdown, p), &[mine]).is_empty() {
@@ -643,7 +662,7 @@ fn restates_notes(markdown: &str, p: &Prepared) -> bool {
     if words.is_empty() {
         return true;
     }
-    let theirs = content_words(&p.notes_text);
+    let theirs = content_words(&p.scratchpad);
     let found = words
         .iter()
         .filter(|w| theirs.iter().any(|n| same_word(w, n)))
