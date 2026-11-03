@@ -335,6 +335,60 @@ export interface ModelStatus {
   installed: boolean;
 }
 
+/** One downloadable model or tool on Settings › Models on this computer
+ *  (model_cleanup.rs ArtifactUsage). */
+export interface ArtifactUsage {
+  id: string;
+  display: string;
+  installed: boolean;
+  /** Bytes on disk now (0 when not installed). */
+  size_on_disk: number;
+  /** Pinned download size, for rows that aren't installed. */
+  download_bytes: number;
+  /** "Used for …" when the current settings use it. */
+  in_use: string | null;
+  /** What it's for, when installed and not in use. */
+  note: string | null;
+  can_delete: boolean;
+  /** Why Delete is disabled on an installed row (linked, in use, busy). */
+  blocked: string | null;
+  /** In (or is) a linked folder: not managed by the app, no size, no Delete. */
+  linked: boolean;
+}
+
+export type DiskEntryKind =
+  "unfinished_download" | "old_version" | "unused_model_file" | "partly_deleted" | "not_recognised";
+
+/** A leftover or unrecognised file under the models folders. */
+export interface DiskEntry {
+  /** Data-dir-relative, "/"-separated. Sent back to delete_model_files,
+   *  which only accepts paths its own fresh scan lists as leftovers. */
+  path: string;
+  bytes: number;
+  kind: DiskEntryKind;
+  label: string;
+}
+
+export interface ModelStorageReport {
+  artifacts: ArtifactUsage[];
+  leftovers: DiskEntry[];
+  /** Shown with their size and left alone. */
+  unrecognised: DiskEntry[];
+  /** What Free up removes: deletable models + leftovers. */
+  reclaimable_bytes: number;
+  /** Set while nothing can be deleted (recording, transcribing, installing). */
+  busy: string | null;
+}
+
+export interface DeleteOutcome {
+  freed_bytes: number;
+  removed: string[];
+  /** Asked for but in use now, or already gone. */
+  skipped: string[];
+  failed: string[];
+  report: ModelStorageReport;
+}
+
 export interface GpuBench {
   verdict: string; // "gpu" | "cpu"
   reason: string;
@@ -410,6 +464,9 @@ export interface OllamaModel {
   name: string;
   /** On-disk size in bytes. */
   size: number;
+  /** "Used for …" when the app uses it (saved Ask/Enhance model, the search
+   *  embedding model). Deleting those is refused. */
+  used_for?: string | null;
 }
 
 export interface OllamaStatus {
@@ -450,7 +507,14 @@ export interface AskSentence {
   /** sourced = every claim checked; unsourced = no valid citation;
    *  flagged = a claim isn't in the cited lines (or an uncited claim). */
   status: "sourced" | "unsourced" | "flagged";
-  flags?: { kind: string; detail?: string }[];
+  flags?: AskFlag[];
+}
+
+/** Why a sentence isn't sourced (fly-ask `FlagKind`). `detail` is the
+ *  answer's own word or number that failed the check ("84000"). */
+export interface AskFlag {
+  kind: "uncited_claim" | "invalid_citation" | "number" | "date" | "name" | "quote";
+  detail?: string;
 }
 
 export interface AskSourceLine {
@@ -495,13 +559,95 @@ export interface AskReply {
   sentences: AskSentence[];
   sources: AskSource[];
   proposals: AskProposal[];
-  refusals: { tool: string | null; reason: string }[];
+  refusals: AskRefusal[];
   trace_lines: string[];
   /** Where the answering model ran (store it on the assistant turn). */
   on_device: boolean;
-  /** The id `insert_ask_answer` takes to insert this answer; null when no
-   *  sentence is sourced. */
+  /** What the user's trace shows (counts and codes only, never meeting
+   *  text). Optional so a reply from an older build still renders. */
+  trace?: AskTrace;
+  timing?: { first_token_ms: number | null; total_ms: number };
+  /** The typed run log (ids, counts and enum codes like "reach_cloud").
+   *  The UI reads only `reach`, `provider` and `prefetch`. */
+  run_log?: AskRunLog;
+  /** The id `insert_ask_answer` takes to insert this answer: its sourced
+   *  sentences that cite only the asked-about note's own lines. null when
+   *  there are none (or no note was asked about). */
   insert_id: string | null;
+}
+
+/** A proposal the harness refused (fly-ask `ProposalRefusal`). */
+export interface AskRefusal {
+  /** `null` = a tool that isn't a proposal tool. */
+  tool: "insert_into_note" | "add_action_item" | null;
+  reason:
+    | "bad_arguments"
+    | "no_sources"
+    | "source_not_shown"
+    | "mixed_meetings"
+    | "outside_scope"
+    | "unsupported_claim"
+    | "unknown_owner"
+    | "too_long"
+    | "duplicate"
+    | "blocked"
+    | "injected_instruction"
+    | "sealed"
+    | "not_requested";
+}
+
+/** fly-ask `Tier`: S answers from what the prefetch found; M and C may
+ *  look further with tools. */
+export type AskTier = "S" | "M" | "C";
+
+export interface AskTrace {
+  tier: AskTier | null;
+  scope: "all" | "meeting" | "note" | "folder" | "person" | null;
+  /** Kept-local meetings an off-device model didn't search. The UI never
+   *  shows the number, only that some weren't searched. */
+  kept_local_not_searched: number;
+  meetings_in_scope: number;
+  passages: number;
+  items: number;
+  /** One per model tool call: `tool` is a code like "tool_search_passages". */
+  tool_calls: { tool: string; ok: boolean }[];
+  retried: boolean;
+  context_truncated: boolean;
+  floor_not_found: boolean;
+  budget_forced: boolean;
+  /** Connectors were available but off for this question: its explicit
+   *  scope holds a Keep-local meeting. (Optional for older replies.) */
+  connectors_off_keep_local?: boolean;
+}
+
+/** The part of fly-ask's `RunLog` the UI reads. */
+export interface AskRunLog {
+  /** "reach_on_device" | "reach_local_remote" | "reach_cloud" */
+  reach?: string;
+  /** "provider_ollama" | "provider_anthropic" | … */
+  provider?: string;
+  prefetch?: { searches?: number; memory_facts?: number; semantic?: boolean };
+}
+
+/** What Ask is asked over: `ask_meeting`'s `scope` (fly-ask `AskScope`). */
+export type AskScope =
+  { kind: "all" } | { kind: "note" | "meeting" | "folder" | "person"; id: string };
+
+/** fly-ask `Stage`. */
+export type AskStage = "scoping" | "searching" | "answering" | "reading" | "checking" | "retrying";
+
+/** One `ask:event` (fly-ask `AskEvent`), for the `ask_id` it names. */
+export type AskStreamEvent =
+  | { type: "stage"; stage: AskStage }
+  | { type: "sources"; sources: AskSource[]; kept_local_not_searched: number }
+  | { type: "turn_start"; turn: number }
+  /** The reply so far (whole text, not a delta). Turn 0 is the final,
+   *  validated answer. */
+  | { type: "frame"; turn: number; text: string };
+
+export interface AskEventPayload {
+  ask_id: string;
+  event: AskStreamEvent;
 }
 
 export interface CalendarAttendee {

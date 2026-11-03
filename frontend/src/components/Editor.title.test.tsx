@@ -149,6 +149,9 @@ describe("Editor › title", () => {
 
   it('typing that passes through "Untitled" stays on screen', async () => {
     vi.spyOn(api, "updateNoteTitle").mockImplementation(async (_id, t) => note(t));
+    // Fake timers: the debounced save this typing schedules is dropped at
+    // teardown instead of firing into a later test's spy.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await mount(note("Untitled"));
     for (const step of ["U", "Untitle", "Untitled", "Untitled ", "Untitled 2"]) {
       typeInto(titleInput(), step);

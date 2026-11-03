@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, Plus } from "lucide-react";
 import { api } from "../api";
 import { RESTART_REQUIRED_EVENT } from "../privacy";
-import { WHISPER_ENGINE_ID } from "../types";
 import type {
   AppInfo,
   AsrSettings,
@@ -36,6 +35,7 @@ import { briefError } from "../pipelineNotice";
 import { useCloudConsent } from "./CloudConsent";
 import { useConfirm } from "./confirm";
 import ConnectorsSection from "./ConnectorsSection";
+import ModelsOnComputer from "./ModelsOnComputer";
 import PrivacySection from "./PrivacySection";
 import StorageRows from "./StorageRows";
 import RemindNoticeRow from "./RemindNoticeRow";
@@ -703,7 +703,11 @@ export default function SettingsModal({
         base_url: info?.base_url ?? null,
         api_key: null,
       })
-      .then(() => setLlm((s) => (s ? { ...s, provider: id } : s)))
+      .then(() => {
+        setLlm((s) => (s ? { ...s, provider: id } : s));
+        // Which local model Ask and Enhance use changed with the provider.
+        loadOllama().catch(console.error);
+      })
       .catch((e) => {
         // Revert the fields too, so a later Save/Test can't write this
         // provider's model or URL into the previous one.
@@ -764,6 +768,8 @@ export default function SettingsModal({
       setLlmTest(String(e));
     } finally {
       setLlmBusy(false);
+      // In-use labels on the local models follow the saved model.
+      loadOllama().catch(console.error);
     }
   };
 
@@ -917,18 +923,6 @@ export default function SettingsModal({
   /* ---------------------------------------------------------- derived */
 
   const asrModels = settings?.models.filter((m) => m.id.startsWith("ggml-")) ?? [];
-  // The whisper.cpp engine gets a dedicated, friendlier "Transcription
-  // engine" row instead of a cryptic binary entry. Exact-id match: a prefix
-  // filter would also hide whisper-bin-vulkan, the Windows GPU build the
-  // benchmark manages, which must stay visible in this list.
-  const otherModels =
-    settings?.models.filter((m) => !m.id.startsWith("ggml-") && m.id !== WHISPER_ENGINE_ID) ?? [];
-  const engineInstalling = downloading === WHISPER_ENGINE_ID;
-  const engineProg =
-    engineInstalling && modelProgress?.id === WHISPER_ENGINE_ID && modelProgress.total > 0
-      ? modelProgress
-      : null;
-  const enginePct = engineProg ? Math.round((engineProg.downloaded / engineProg.total) * 100) : 0;
 
   const tiles = dataTiles(settings, llm);
   const provider = llm?.providers.find((x) => x.id === llmProvider) ?? null;
@@ -964,112 +958,14 @@ export default function SettingsModal({
   );
 
   const modelsList = settings && (
-    <div>
-      {/* Transcription engine — the whisper.cpp binary that runs the weights
-          below. Weights alone can't transcribe, so its state is explicit. */}
-      <div className={LIST_ROW}>
-        <div className="min-w-0">
-          <div
-            className="truncate text-text"
-            style={{ fontFamily: "var(--font-mono)", fontSize: "12.5px" }}
-          >
-            Transcription engine (whisper.cpp)
-          </div>
-          <div className="text-text-3" style={{ fontSize: 11, lineHeight: 1.5 }}>
-            {settings.engine_installed
-              ? "Installed. Runs the models below on this computer."
-              : settings.engine_managed
-                ? "Required to transcribe. Downloaded models can't run without it."
-                : "Required to transcribe. Install whisper.cpp yourself: on macOS, brew install whisper-cpp; on Linux, your package manager or build from source."}
-          </div>
-          {downloadErrors[WHISPER_ENGINE_ID] && (
-            <div style={{ fontSize: 11, color: "var(--error-text)" }}>
-              {downloadErrors[WHISPER_ENGINE_ID]}
-            </div>
-          )}
-        </div>
-        <span className="flex shrink-0 items-center gap-2">
-          {settings.engine_installed ? (
-            <Badge tone="success" dot>
-              ready
-            </Badge>
-          ) : engineInstalling ? (
-            engineProg ? (
-              <span className="flex items-center gap-2">
-                <ProgressBar value={enginePct} style={{ width: 96 }} />
-                <span className="text-text-3" style={MONO_SMALL}>
-                  {enginePct}%
-                </span>
-              </span>
-            ) : (
-              <span className="text-text-3" style={MONO_SMALL}>
-                downloading…
-              </span>
-            )
-          ) : settings.engine_managed ? (
-            <Button variant="outline" size="sm" onClick={() => void download(WHISPER_ENGINE_ID)}>
-              Install
-            </Button>
-          ) : (
-            <Badge tone="warning">missing</Badge>
-          )}
-        </span>
-      </div>
-      {[...asrModels, ...otherModels].map((m) => {
-        const prog =
-          downloading === m.id &&
-          modelProgress &&
-          modelProgress.id === m.id &&
-          modelProgress.total > 0
-            ? modelProgress
-            : null;
-        const pct = prog ? Math.round((prog.downloaded / prog.total) * 100) : 0;
-        return (
-          <div key={m.id} className={LIST_ROW}>
-            <div className="min-w-0">
-              <div
-                className="truncate text-text"
-                style={{ fontFamily: "var(--font-mono)", fontSize: "12.5px" }}
-              >
-                {m.display}
-              </div>
-              <div className="text-text-3" style={{ fontSize: 11 }}>
-                {gb(m.bytes)}
-              </div>
-              {downloadErrors[m.id] && (
-                <div style={{ fontSize: 11, color: "var(--error-text)" }}>
-                  {downloadErrors[m.id]}
-                </div>
-              )}
-            </div>
-            <span className="flex shrink-0 items-center gap-2">
-              {m.installed ? (
-                <Badge tone="success" dot>
-                  installed
-                </Badge>
-              ) : downloading === m.id ? (
-                prog ? (
-                  <span className="flex items-center gap-2">
-                    <ProgressBar value={pct} style={{ width: 96 }} />
-                    <span className="text-text-3" style={MONO_SMALL}>
-                      {pct}%
-                    </span>
-                  </span>
-                ) : (
-                  <span className="text-text-3" style={MONO_SMALL}>
-                    downloading…
-                  </span>
-                )
-              ) : (
-                <Button variant="outline" size="sm" onClick={() => void download(m.id)}>
-                  Install
-                </Button>
-              )}
-            </span>
-          </div>
-        );
-      })}
-    </div>
+    <ModelsOnComputer
+      settings={settings}
+      downloading={downloading}
+      downloadErrors={downloadErrors}
+      modelProgress={modelProgress}
+      onDownload={(id) => void download(id)}
+      onDeleted={() => void refreshSaved().catch(console.error)}
+    />
   );
 
   const gpuHelper = (() => {
@@ -1655,27 +1551,42 @@ export default function SettingsModal({
                               {ollama && ollama.running && ollama.models.length > 0 && (
                                 <div>
                                   {ollama.models.map((m) => {
-                                    const inUse =
+                                    // The backend names what uses it (saved
+                                    // Ask/Enhance model, search embeddings);
+                                    // the typed, unsaved model counts too.
+                                    const picked =
                                       m.name === effOllamaModel ||
                                       m.name.split(":")[0] === effOllamaModel.split(":")[0];
+                                    const usedFor =
+                                      m.used_for ?? (picked ? "Used for Ask and Enhance." : null);
                                     return (
                                       <div key={m.name} className={LIST_ROW}>
-                                        <span className="flex min-w-0 items-center gap-2">
-                                          <span
-                                            className="truncate text-text"
-                                            style={{
-                                              fontFamily: "var(--font-mono)",
-                                              fontSize: 12.5,
-                                            }}
-                                          >
-                                            {m.name}
+                                        <span className="min-w-0">
+                                          <span className="flex min-w-0 items-center gap-2">
+                                            <span
+                                              className="truncate text-text"
+                                              style={{
+                                                fontFamily: "var(--font-mono)",
+                                                fontSize: 12.5,
+                                              }}
+                                            >
+                                              {m.name}
+                                            </span>
+                                            <span className="text-text-3" style={{ fontSize: 11 }}>
+                                              {gb(m.size)}
+                                            </span>
                                           </span>
-                                          <span className="text-text-3" style={{ fontSize: 11 }}>
-                                            {gb(m.size)}
-                                          </span>
+                                          {usedFor && (
+                                            <span
+                                              className="block text-text-3"
+                                              style={{ fontSize: 11, lineHeight: 1.5 }}
+                                            >
+                                              {usedFor}
+                                            </span>
+                                          )}
                                         </span>
-                                        {inUse ? (
-                                          <Badge tone="neutral" size="sm">
+                                        {usedFor ? (
+                                          <Badge tone="success" dot>
                                             in use
                                           </Badge>
                                         ) : (
