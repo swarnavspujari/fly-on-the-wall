@@ -30,11 +30,43 @@ pub enum BlockOrigin {
     },
 }
 
+/// Why an AI block that cites transcript lines is not shown as sourced:
+/// something it states isn't in the lines it cites (the Enhance checker,
+/// fly-ask `enhance`). The first six mirror fly-ask's answer flags, so the
+/// Enhanced view and the Ask sheet say the same thing about the same failure.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockFlagKind {
+    /// States a number, date or quote and cites nothing it could be read in.
+    UncitedClaim,
+    /// Cited a line the model was never shown.
+    InvalidCitation,
+    Number,
+    Date,
+    Name,
+    Quote,
+    /// Claimed to restate the user's own notes but isn't in them.
+    NotFromNotes,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlockFlag {
+    pub kind: BlockFlagKind,
+    /// The number, date, name or quote that failed. Answer text for the UI;
+    /// never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NoteBlock {
     pub id: String,
     pub origin: BlockOrigin,
     pub markdown: String,
+    /// Checks this AI block failed (empty = none, and always empty for the
+    /// user's own text). Absent in notes saved before the check existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<BlockFlag>,
 }
 
 impl NoteBlock {
@@ -43,6 +75,7 @@ impl NoteBlock {
             id: crate::new_id(),
             origin: BlockOrigin::User,
             markdown: markdown.into(),
+            flags: Vec::new(),
         }
     }
 
@@ -51,6 +84,19 @@ impl NoteBlock {
             id: crate::new_id(),
             origin: BlockOrigin::Ai { source_segment_ids },
             markdown: markdown.into(),
+            flags: Vec::new(),
+        }
+    }
+
+    /// An AI block that failed a check (see [`BlockFlag`]).
+    pub fn ai_flagged(
+        markdown: impl Into<String>,
+        source_segment_ids: Vec<String>,
+        flags: Vec<BlockFlag>,
+    ) -> Self {
+        Self {
+            flags,
+            ..Self::ai(markdown, source_segment_ids)
         }
     }
 
@@ -69,6 +115,8 @@ impl NoteBlock {
     /// does, so its transcript sourcing is dropped and the text is untouched.
     pub fn reclaim(&mut self) {
         self.origin = BlockOrigin::User;
+        // Flags describe AI text; once it is the user's they have nothing to say.
+        self.flags.clear();
     }
 }
 
@@ -120,8 +168,15 @@ impl Note {
             if include_sources {
                 if let BlockOrigin::Ai { source_segment_ids } = &block.origin {
                     if !source_segment_ids.is_empty() {
+                        // A flagged block's sources don't back what it says:
+                        // an export must not present them as if they did.
+                        let label = if block.flags.is_empty() {
+                            "sources"
+                        } else {
+                            "check: not backed by its sources"
+                        };
                         out.push_str(&format!(
-                            "<!-- sources: {} -->\n",
+                            "<!-- {label}: {} -->\n",
                             source_segment_ids.join(", ")
                         ));
                     }
@@ -636,5 +691,72 @@ mod tests {
         let md = note.to_markdown(false);
         assert!(md.contains("# Quick thoughts"));
         assert!(md.contains("- talk to sam"));
+    }
+
+    fn flag(kind: BlockFlagKind, detail: &str) -> BlockFlag {
+        BlockFlag {
+            kind,
+            detail: Some(detail.into()),
+        }
+    }
+
+    /// Notes saved before the Enhance check have no `flags`; they must still
+    /// load, and an unflagged block must still serialize exactly as before
+    /// (older builds, note.json mirrors and exports see no new field).
+    #[test]
+    fn flags_are_optional_on_disk() {
+        let old =
+            r#"{"id":"b1","origin":{"kind":"ai","source_segment_ids":["s1"]},"markdown":"x"}"#;
+        let b: NoteBlock = serde_json::from_str(old).unwrap();
+        assert!(b.flags.is_empty());
+        assert_eq!(serde_json::to_string(&b).unwrap(), old);
+
+        let flagged = NoteBlock::ai_flagged(
+            "Priya asked for $63k.",
+            vec!["s1".into()],
+            vec![flag(BlockFlagKind::Number, "63000")],
+        );
+        let json = serde_json::to_string(&flagged).unwrap();
+        assert!(
+            json.contains(r#""flags":[{"kind":"number","detail":"63000"}]"#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<NoteBlock>(&json).unwrap(), flagged);
+        // A flag without a detail round-trips without one.
+        let bare = NoteBlock::ai_flagged(
+            "x",
+            vec![],
+            vec![BlockFlag {
+                kind: BlockFlagKind::UncitedClaim,
+                detail: None,
+            }],
+        );
+        assert!(serde_json::to_string(&bare)
+            .unwrap()
+            .contains(r#""flags":[{"kind":"uncited_claim"}]"#));
+    }
+
+    /// Keeping or editing a flagged AI line makes it the user's text, and
+    /// the flags (which describe AI text) go with the AI origin.
+    #[test]
+    fn keeping_or_editing_a_flagged_block_clears_its_flags() {
+        let mk = || {
+            NoteBlock::ai_flagged(
+                "Priya asked for $63k.",
+                vec!["s1".into()],
+                vec![flag(BlockFlagKind::Number, "63000")],
+            )
+        };
+        let mut kept = mk();
+        kept.reclaim();
+        assert_eq!(kept.origin, BlockOrigin::User);
+        assert!(kept.flags.is_empty());
+        let mut edited = mk();
+        edited.apply_edit("Priya asked for $6,300.");
+        assert!(edited.flags.is_empty() && edited.origin == BlockOrigin::User);
+        // An edit that changes nothing leaves the AI block (and its flags).
+        let mut same = mk();
+        same.apply_edit("Priya asked for $63k.");
+        assert_eq!(same.flags.len(), 1);
     }
 }
