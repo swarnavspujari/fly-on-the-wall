@@ -63,8 +63,8 @@ pub struct Usage {
     pub screen_recording: bool,
     /// A staged media import hasn't transcribed yet.
     pub imports_waiting: bool,
-    /// The video storage job (#119) is running, or set to keep only the
-    /// audio of videos: both re-encode with ffmpeg. Wired in `read_usage`.
+    /// `video_store::needs_ffmpeg`: the video storage job runs or estimates,
+    /// or imported videos keep only their audio. Both re-encode with ffmpeg.
     pub video_job: bool,
 }
 
@@ -904,12 +904,10 @@ fn read_usage(state: &AppState) -> (Usage, Option<Busy>) {
         u
     };
     usage.screen_recording = state.screen.lock().unwrap().is_some();
-    // CHECK POINT (#119, video storage): ffmpeg is also in use while the
-    // video job runs or is set to keep only the audio of videos. Whichever
-    // of #121 / #119 merges second sets `usage.video_job` here from the
-    // job's "needs ffmpeg" signal; the rule (`use_phrases`) and its test are
-    // already in place.
-    // TODO(#119): usage.video_job = <video job active || audio-only policy on>;
+    // The video storage job (#119): it runs or estimates, or imported videos
+    // keep only their audio (converted after each import transcribes). It
+    // takes the storage lock itself, so it's asked after ours is released.
+    usage.video_job = crate::video_store::needs_ffmpeg(state);
     let busy = if crate::scheduler::recording_active(state) {
         Some(Busy::Recording)
     } else if state
@@ -1585,6 +1583,47 @@ mod tests {
         assert!(leftovers.is_empty(), "{leftovers:?}");
         assert_eq!(unrecognised.len(), 1, "unknown folders stay");
         assert!(d.join("models/diarize/campplus.onnx").is_file());
+    }
+
+    /// Through the real app state: while the video job needs ffmpeg (here,
+    /// imported videos set to keep only their audio), ffmpeg is in use.
+    #[test]
+    fn ffmpeg_is_in_use_while_the_video_job_needs_it() {
+        if models::artifact("ffmpeg").is_none() {
+            return; // no managed ffmpeg on this OS (macOS)
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fly_secrets::MemorySecretStore::default()),
+        )
+        .unwrap();
+        install(dir.path(), "ffmpeg", 10);
+
+        let (usage, busy) = read_usage(&state);
+        assert!(!usage.video_job && busy.is_none());
+        let r = build_report(dir.path(), &usage, busy, 1);
+        assert!(row(&r, "ffmpeg").can_delete, "idle: deletable");
+
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .set_setting(crate::video_store::IMPORT_VIDEO_POLICY_KEY, "audio_only")
+            .unwrap();
+        assert!(crate::video_store::needs_ffmpeg(&state));
+        let (usage, busy) = read_usage(&state);
+        assert!(usage.video_job);
+        let r = build_report(dir.path(), &usage, busy, 1);
+        let ffmpeg = row(&r, "ffmpeg");
+        assert_eq!(ffmpeg.in_use.as_deref(), Some("Used for storing videos."));
+        assert!(!ffmpeg.can_delete);
+        let out = delete_requested(dir.path(), &usage, &["ffmpeg".into()], &[], 1);
+        assert!(out.removed.is_empty(), "{out:?}");
+        assert!(dir
+            .path()
+            .join(install_root(models::artifact("ffmpeg").unwrap()))
+            .is_dir());
     }
 
     #[test]
