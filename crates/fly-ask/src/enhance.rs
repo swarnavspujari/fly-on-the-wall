@@ -91,7 +91,6 @@ pub struct Prepared {
     has_transcript: bool,
     /// The note's title and notes: what a block may state without a cite.
     notes_text: String,
-    scratchpad: String,
     /// Lowercase words that are people or places in this meeting (speaker
     /// labels and capitalized words mid-sentence), for the name check.
     known_names: BTreeSet<String>,
@@ -426,7 +425,6 @@ pub fn prepare(
     let base = |prompt: EnhancePrompt, sent: Vec<Sent>, total: usize, injected: usize| Prepared {
         has_transcript: transcript.is_some(),
         notes_text: notes_text.clone(),
-        scratchpad: note.scratchpad.clone(),
         known_names: known_names(note, transcript),
         vocabulary: vocabulary(note, transcript, template),
         segments_total: total,
@@ -606,33 +604,49 @@ fn plain(markdown: &str) -> String {
         .join("\n")
 }
 
-/// Whether a `user` block restates the user's own notes: no number, date or
-/// quote the notes don't hold, and at least half its content words in them.
-fn restates_notes(markdown: &str, scratchpad: &str) -> bool {
-    let body = plain(markdown);
-    let facts = claims::unsupported(
-        &body,
-        &[Source {
-            text: scratchpad,
-            speaker: "",
-        }],
-    );
-    if facts.iter().any(|f| {
-        matches!(
-            f.kind,
-            ClaimKind::Number | ClaimKind::Date | ClaimKind::Quote
-        )
-    }) {
+/// Words that would render as a link, image, embed, HTML or address.
+fn link_words(markdown: &str) -> Vec<String> {
+    markdown
+        .split_whitespace()
+        .filter(|w| text::strip_links(w).1 > 0)
+        .map(|w| {
+            w.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '*' | '_'
+                )
+            })
+            .to_lowercase()
+        })
+        .collect()
+}
+
+/// Whether a `user` block restates the user's own notes, which is what lets
+/// it show as their words. Everything it states must be in the notes (or
+/// the title): every link, address and piece of HTML, as written, and every
+/// number, date, quote and name. And at least half its content words must be
+/// theirs, so a block that borrows a few of their words around something
+/// new is not.
+fn restates_notes(markdown: &str, p: &Prepared) -> bool {
+    let notes = p.notes_text.to_lowercase();
+    if link_words(markdown).iter().any(|w| !notes.contains(w)) {
         return false;
     }
-    let words = content_words(&body);
+    let mine = Source {
+        text: &p.notes_text,
+        speaker: "",
+    };
+    if !claims::unsupported(&claim_text(markdown, p), &[mine]).is_empty() {
+        return false;
+    }
+    let words = content_words(&plain(markdown));
     if words.is_empty() {
         return true;
     }
-    let notes = content_words(scratchpad);
+    let theirs = content_words(&p.notes_text);
     let found = words
         .iter()
-        .filter(|w| notes.iter().any(|n| same_word(w, n)))
+        .filter(|w| theirs.iter().any(|n| same_word(w, n)))
         .count();
     found as f64 >= words.len() as f64 * NOTES_OVERLAP
 }
@@ -843,7 +857,7 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
     };
     let mut blocks = Vec::new();
     for b in raw {
-        if b.user && restates_notes(&b.markdown, &p.scratchpad) {
+        if b.user && restates_notes(&b.markdown, p) {
             // Their own words, as they wrote them: nothing to strip.
             report.user += 1;
             blocks.push(NoteBlock::user(b.markdown));
