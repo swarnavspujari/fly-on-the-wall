@@ -336,6 +336,9 @@ export default function App() {
         setShowSettings(true);
       }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "j") {
+        // Not under Settings or another modal dialog: Ask would take focus
+        // behind it.
+        if (document.querySelector('[aria-modal="true"]')) return;
         e.preventDefault();
         openAsk();
       }
@@ -1018,7 +1021,7 @@ export default function App() {
         setDrawerOpen(false);
         openAsk({ scope: "all" });
       }}
-      askShortcut={info?.os === "macos" ? "⌘J" : "Ctrl J"}
+      askShortcut={info?.os === "macos" ? "⌘J" : "Ctrl+J"}
       theme={resolved}
       onMoveNote={(id, fid) => void moveNoteToFolder(id, fid)}
     />

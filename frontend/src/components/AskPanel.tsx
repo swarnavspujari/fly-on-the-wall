@@ -1098,8 +1098,18 @@ export function AskSheet({
   const last = turns[turns.length - 1];
   useEffect(() => {
     const body = endRef.current?.closest(".fly-sheet-body");
-    if (body) body.scrollTop = body.scrollHeight;
-  }, [turns.length, busy, error, last?.phase]);
+    if (!body) return;
+    // A finished answer opens at its start (with the question above it), so
+    // a long one isn't read from the bottom up.
+    const turn =
+      last?.phase === "done" ? body.querySelector<HTMLElement>(`[data-turn="${last.id}"]`) : null;
+    if (turn) {
+      const top = turn.getBoundingClientRect().top - body.getBoundingClientRect().top;
+      body.scrollTop += top - 8;
+    } else {
+      body.scrollTop = body.scrollHeight;
+    }
+  }, [turns.length, busy, error, last?.phase, last?.id]);
   const frameLen = last?.frame.length ?? 0;
   useEffect(() => {
     const body = endRef.current?.closest(".fly-sheet-body");
@@ -1117,7 +1127,9 @@ export function AskSheet({
     action();
   };
   const lastAnswered = turns.map((t) => t.phase === "done").lastIndexOf(true);
-  const errorView = error ? describeAskError(error.raw, error.provider) : null;
+  const errorView = error
+    ? describeAskError(error.raw, error.provider, error.scope.origin === "mention")
+    : null;
   const prompts: readonly string[] =
     chat.scope.scope.kind === "all" && global ? GLOBAL_PROMPTS : QUICK_PROMPTS;
 

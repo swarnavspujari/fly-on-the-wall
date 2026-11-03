@@ -47,7 +47,12 @@ export interface AskErrorView {
  *  falls back to a plain "couldn't answer" with the details below it.
  *  `providerId` is the provider the question went to (read when it was
  *  asked), not whatever Runs on shows by the time the error is read. */
-export function describeAskError(error: unknown, providerId: string): AskErrorView {
+export function describeAskError(
+  error: unknown,
+  providerId: string,
+  /** The question searched a meeting picked with @, not the open note. */
+  pickedMeeting = false,
+): AskErrorView {
   const raw = String(error ?? "").trim() || "Unknown error";
   const t = raw.toLowerCase();
   const who = providerName(providerId);
@@ -55,10 +60,15 @@ export function describeAskError(error: unknown, providerId: string): AskErrorVi
     action ? { title, fix, raw, action } : { title, fix, raw };
 
   if (t.includes("keep local")) {
-    return view(
-      "This note is kept local",
-      `Ask won't send it to ${who}. Pick This computer under Runs on, or turn off Keep local for this note.`,
-    );
+    return pickedMeeting
+      ? view(
+          "That meeting is kept local",
+          `Ask won't send it to ${who}. Pick This computer under Runs on, or turn off Keep local for that meeting.`,
+        )
+      : view(
+          "This note is kept local",
+          `Ask won't send it to ${who}. Pick This computer under Runs on, or turn off Keep local for this note.`,
+        );
   }
   if (t.includes("isn't allowed to receive your meeting content")) {
     return view(

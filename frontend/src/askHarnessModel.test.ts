@@ -88,6 +88,15 @@ describe("the harness's model failures", () => {
     expect(v.raw).toBe(raw);
   });
 
+  it("a Keep-local refusal names the meeting picked with @, not this note", () => {
+    const raw =
+      'this note is set to "Keep local", so it isn\'t sent to anthropic. Switch the AI provider to Ollama (runs on this device) in Settings, or turn off Keep local for this note';
+    expect(describeAskError(raw, "anthropic").title).toBe("This note is kept local");
+    const picked = describeAskError(raw, "anthropic", true);
+    expect(picked.title).toBe("That meeting is kept local");
+    expect(picked.fix).toContain("turn off Keep local for that meeting");
+  });
+
   it("knows the backend's cancel", () => {
     expect(isCancelled("Ask was cancelled.")).toBe(true);
     expect(isCancelled("The model returned an empty answer.")).toBe(false);

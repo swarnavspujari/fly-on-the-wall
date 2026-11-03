@@ -1195,7 +1195,8 @@ export default function Editor({
     if (view === "enhanced" && !enhanced) setView("notes");
   }, [note.id, hasMeeting, enhanced, view]);
 
-  // External scratchpad changes (e.g. "insert into note" from Ask).
+  // External scratchpad changes (the note re-read with new notes text).
+  // (Ask's Insert adds AI blocks, not scratchpad text.)
   useEffect(() => {
     if (noteIdRef.current === note.id && note.scratchpad !== scratchpad && saveState === "saved") {
       setScratchpad(note.scratchpad);

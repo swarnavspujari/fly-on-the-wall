@@ -1111,6 +1111,158 @@ describe("Ask harness answers", () => {
     expect(read).toHaveBeenCalledTimes(2);
   });
 
+  it("never renders a link from answer text, however it's written", async () => {
+    const hostile =
+      "See [the doc](https://evil.example/x) or https://evil.example/y, " +
+      "<https://evil.example/z>, or write dana@example.com.";
+    vi.spyOn(api, "askMeeting").mockResolvedValue(
+      reply(hostile, true, {
+        sentences: [sourced(hostile, ["a1"])],
+        sources: [SOURCE_M1],
+        proposals: [
+          {
+            id: "p9",
+            tool: "insert_into_note",
+            gate: "review",
+            meeting_id: "m1",
+            note_id: "n1",
+            markdown: "- [click](https://evil.example/p) and dana@example.com",
+            segment_ids: ["a1"],
+            expires_at: new Date(Date.now() + 600_000).toISOString(),
+            executed: false,
+          },
+        ],
+      }),
+    );
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("Links?");
+    key(input(), "Enter");
+    await flush();
+    expect(sheet()!.querySelectorAll("a")).toHaveLength(0);
+    expect(sheet()!.querySelectorAll("img")).toHaveLength(0);
+    const text = sheet()!.textContent!;
+    expect(text).toContain("the doc");
+    expect(text).toContain("dana@example.com");
+    expect(text).toContain("click");
+  });
+
+  it("one Insert: a proposal that inserts into this note hides the answer's own", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue(
+      reply("Send the SOW today.", true, {
+        sentences: [sourced("Send the SOW today.", ["a2"])],
+        sources: [SOURCE_M1],
+        insert_id: "ins-1",
+        proposals: [
+          {
+            id: "p1",
+            tool: "insert_into_note",
+            gate: "review",
+            meeting_id: "m1",
+            note_id: "n1",
+            markdown: "## Next\n- Send the SOW",
+            segment_ids: ["a2"],
+            expires_at: new Date(Date.now() + 600_000).toISOString(),
+            executed: false,
+          },
+        ],
+      }),
+    );
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("Add this to my note");
+    key(input(), "Enter");
+    await flush();
+    const inserts = [...sheet()!.querySelectorAll("button")].filter(
+      (b) => b.textContent === "Insert into note",
+    );
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].closest('[data-testid="ask-proposal"]')).not.toBeNull();
+    expect(sheet()!.querySelector('[data-testid="ask-no-insert"]')).toBeNull();
+  });
+
+  it("a suggestion the backend let go of says it expired, with no endless Try again", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue(
+      reply("…", true, {
+        sentences: [sourced("x", ["a2"])],
+        sources: [SOURCE_M1],
+        proposals: [
+          {
+            id: "p1",
+            tool: "add_action_item",
+            gate: "review",
+            meeting_id: "m1",
+            note_id: "n1",
+            text: "Send the SOW",
+            segment_ids: ["a2"],
+            expires_at: new Date(Date.now() + 600_000).toISOString(),
+            executed: false,
+          },
+        ],
+      }),
+    );
+    vi.spyOn(api, "addActionItem").mockRejectedValueOnce(
+      "This suggestion has expired. Ask again to get a fresh one.",
+    );
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("Add it as an action item");
+    key(input(), "Enter");
+    await flush();
+    act(() => button("Add action item")!.click());
+    await flush();
+    const card = sheet()!.querySelector('[data-testid="ask-proposal"]')!;
+    expect(card.textContent).toContain("This suggestion expired. Ask again for a fresh one.");
+    expect(button("Try again")).toBeUndefined();
+    expect(card.querySelector("button")!.disabled).toBe(true);
+  });
+
+  it("an added action item says where it went", async () => {
+    vi.spyOn(api, "askMeeting").mockResolvedValue(
+      reply("…", true, {
+        sentences: [sourced("x", ["a2"])],
+        sources: [SOURCE_M1],
+        proposals: [
+          {
+            id: "p1",
+            tool: "add_action_item",
+            gate: "review",
+            meeting_id: "m1",
+            note_id: "n1",
+            text: "Send the SOW",
+            segment_ids: ["a2"],
+            expires_at: new Date(Date.now() + 600_000).toISOString(),
+            executed: false,
+          },
+        ],
+      }),
+    );
+    vi.spyOn(api, "addActionItem").mockResolvedValue({} as never);
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    type("Add it as an action item");
+    key(input(), "Enter");
+    await flush();
+    act(() => button("Add action item")!.click());
+    await flush();
+    expect(sheet()!.querySelector('[data-testid="ask-proposal"]')!.textContent).toContain(
+      "Added to the action items of Renewal review. Ask “What's still open?” to see them.",
+    );
+  });
+
+  it("the Stop beside the answer hands focus back to the composer", async () => {
+    render(<Harness noteId="n1" />);
+    await openSheet();
+    const { id } = await askHeld("Summary?");
+    stream(id, { type: "stage", stage: "answering" });
+    const inline = sheet()!.querySelector<HTMLButtonElement>('[data-testid="ask-stop-inline"]')!;
+    act(() => inline.focus());
+    act(() => inline.click());
+    await flush();
+    expect(api.cancelAsk).toHaveBeenCalledWith(id);
+    expect(document.activeElement).toBe(input());
+  });
+
   it("the trace pill starts collapsed, lists the steps, and holds no meeting text", async () => {
     saved.provider = "ollama";
     vi.spyOn(api, "askMeeting").mockResolvedValue(
@@ -1280,7 +1432,7 @@ describe("Ask harness answers", () => {
     expect(cards()[0].querySelector("button")!.disabled).toBe(true);
     await act(async () => done());
     await flush();
-    expect(cards()[0].textContent).toContain("Added to action items");
+    expect(cards()[0].textContent).toContain("Added to the action items of Renewal review");
     // the note insert
     act(() => cardButton(1, "Insert into note").click());
     await flush();
@@ -1297,7 +1449,7 @@ describe("Ask harness answers", () => {
     key(input(), "Escape");
     rerender(<Harness noteId="n1" onNoteChanged={onNoteChanged} />);
     await openSheet();
-    expect(cards()[0].textContent).toContain("Added to action items");
+    expect(cards()[0].textContent).toContain("Added to the action items of Renewal review");
     expect(add).toHaveBeenCalledTimes(1);
   });
 

@@ -399,7 +399,7 @@ function ProposalCard({
   onApprove: () => void;
 }) {
   const insert = p.tool === "insert_into_note";
-  const expired = proposalExpired(p.expires_at);
+  const expired = proposalExpired(p.expires_at) || state?.phase === "expired";
   const blocked = p.gate === "blocked";
   const pending = state?.phase === "pending";
   const done = state?.phase === "done";
@@ -445,7 +445,9 @@ function ProposalCard({
             role="status"
           >
             <Check size={13} strokeWidth={2} aria-hidden="true" />
-            {insert ? "Added to the note" : "Added to action items"}
+            {insert
+              ? "Added to the note"
+              : `Added to the action items of ${meetingTitle ?? "that meeting"}. Ask “What's still open?” to see them.`}
           </span>
         ) : (
           <Button
@@ -561,7 +563,12 @@ export function AskTurnView({
       chat.setProposal(p.id, { phase: "done" });
       focusComposer();
     } catch (e) {
-      chat.setProposal(p.id, { phase: "failed", message: String(e) });
+      // The backend lets go of a suggestion after a while: say so, rather
+      // than offering Try again forever.
+      chat.setProposal(
+        p.id,
+        /expired/i.test(String(e)) ? { phase: "expired" } : { phase: "failed", message: String(e) },
+      );
     } finally {
       approving.current.delete(p.id);
     }
@@ -596,7 +603,16 @@ export function AskTurnView({
         )}
       </div>
 
-      {turn.phase === "running" && <Streaming turn={turn} onStop={chat.stop} />}
+      {turn.phase === "running" && (
+        <Streaming
+          turn={turn}
+          onStop={() => {
+            // the Stop button goes away: keep focus in the composer
+            focusComposer();
+            chat.stop();
+          }}
+        />
+      )}
 
       {turn.phase === "stopped" && (
         <div className="flex flex-wrap items-center gap-2 px-1" data-testid="ask-stopped">

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AskComposer, AskSheet, OPEN_ASK_EVENT } from "./AskPanel";
-import type { AskChat } from "./AskPanel";
+import type { AskChat, OpenAskDetail } from "./AskPanel";
 import type { OpenSource } from "./AskAnswer";
 
 /* Ask over every meeting, from Home: the same composer and answer sheet as
@@ -22,8 +22,10 @@ export default function GlobalAsk({
   // The sidebar entry and Ctrl/Cmd+J open it, ready to type.
   const { setScope } = chat;
   useEffect(() => {
-    const onOpenAsk = () => {
-      setScope(null); // every meeting is this Ask's default
+    const onOpenAsk = (e: Event) => {
+      // The sidebar's "Ask your meetings" starts on every meeting (this
+      // Ask's default); the shortcut keeps a scope picked with @.
+      if ((e as CustomEvent<OpenAskDetail>).detail?.scope === "all") setScope(null);
       setOpen(true);
       inputRef.current?.focus();
     };
