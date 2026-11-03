@@ -835,6 +835,9 @@ fn observe(
                     .map(|seg| claims::Source {
                         text: &seg.text,
                         speaker: &seg.speaker,
+                        title: corpus
+                            .meeting(&seg.meeting)
+                            .map_or("", |m| m.title.as_str()),
                     })
                     .collect();
                 row.claims_checked += 1;

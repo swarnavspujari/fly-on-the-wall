@@ -10,10 +10,13 @@
 //!   English, not a claim.
 //! * **Dates** are month and weekday names.
 //! * **Names** are capitalized words outside a short list of common words;
-//!   a name matches the cited text or the cited segment's speaker label
-//!   (attribution: "Dana said …" needs a Dana). "Speaker 2", the app's
-//!   label for an unnamed voice, is a name too, not the number 2: the same
-//!   label must be a cited line's speaker (or be in its text).
+//!   a name matches the cited text, the cited segment's speaker label
+//!   (attribution: "Dana said …" needs a Dana) or the title of the meeting
+//!   the segment is from (the Sources panel shows it beside the line, and a
+//!   project the question named is usually in it). A title vouches for names
+//!   only, never for numbers, dates or quotes. "Speaker 2", the app's label
+//!   for an unnamed voice, is a name too, not the number 2: the same label
+//!   must be a cited line's speaker (or be in its text).
 //! * **Quotes** of three or more words inside quotation marks must appear in
 //!   one cited segment (case, spacing and punctuation ignored).
 //!
@@ -505,6 +508,9 @@ fn contains_run(hay: &[String], needle: &[String]) -> bool {
 pub struct Source<'a> {
     pub text: &'a str,
     pub speaker: &'a str,
+    /// Title of the meeting the segment is from. It vouches for names (a
+    /// project the question named), never for numbers, dates or quotes.
+    pub title: &'a str,
 }
 
 /// Why a claim failed.
@@ -529,6 +535,8 @@ pub struct ClaimFailure {
 pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<ClaimFailure> {
     let mut src_numbers = BTreeSet::new();
     let mut src_words: BTreeSet<String> = BTreeSet::new();
+    // Words of the cited meetings' titles: support for a name, and only a name.
+    let mut title_words: BTreeSet<String> = BTreeSet::new();
     let mut src_labels = BTreeSet::new();
     for s in sources {
         src_numbers.extend(numbers(s.text));
@@ -537,6 +545,10 @@ pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<ClaimFailure> 
         for w in words(s.text).into_iter().chain(words(s.speaker)) {
             let l = w.to_lowercase();
             src_words.insert(l.strip_suffix("'s").map(str::to_string).unwrap_or(l));
+        }
+        for w in words(s.title) {
+            let l = w.to_lowercase();
+            title_words.insert(l.strip_suffix("'s").map(str::to_string).unwrap_or(l));
         }
     }
     let mut missing = Vec::new();
@@ -562,7 +574,7 @@ pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<ClaimFailure> 
         }
     }
     for n in names(sentence) {
-        if !src_words.contains(&n) {
+        if !src_words.contains(&n) && !title_words.contains(&n) {
             missing.push(ClaimFailure {
                 kind: ClaimKind::Name,
                 value: n,
@@ -655,6 +667,7 @@ mod tests {
         let src = [Source {
             text: "All told, I'd like sixty three hundred dollars for studio rental.",
             speaker: "Priya Anand",
+            title: "",
         }];
         assert!(unsupported("Priya asked for $6,300.", &src).is_empty());
         assert!(unsupported("Priya asked for sixty three hundred dollars.", &src).is_empty());
@@ -686,6 +699,7 @@ mod tests {
         let src = [Source {
             text: line,
             speaker: "Dana Whitlock",
+            title: "",
         }];
         assert!(unsupported("The budget is now $52,000.", &src).is_empty());
         // The glued word is no more a number than the spaced one: a different
@@ -701,6 +715,7 @@ mod tests {
         let src = [Source {
             text: "I can take the export this week.",
             speaker: "Speaker 2",
+            title: "",
         }];
         assert!(unsupported("Speaker 2 will handle the export.", &src).is_empty());
         assert!(unsupported("Speaker 2's export lands this week.", &src).is_empty());
@@ -712,6 +727,7 @@ mod tests {
         let other = [Source {
             text: "I can take the export this week.",
             speaker: "Speaker 1",
+            title: "",
         }];
         assert_eq!(
             kinds(&unsupported("Speaker 2 will handle the export.", &other)),
@@ -721,21 +737,68 @@ mod tests {
         let said = [Source {
             text: "Speaker 2 should take the export.",
             speaker: "Dana Whitlock",
+            title: "",
         }];
         assert!(unsupported("Speaker 2 will handle the export.", &said).is_empty());
     }
 
     #[test]
-    fn a_name_only_the_question_supplied_is_still_flagged() {
-        // Open design question (see the PR), pinned so it isn't loosened
-        // by accident: the check can't see the user's question, so a project
-        // name the model echoes from it isn't "in the lines it cites".
+    fn a_name_in_the_cited_meetings_title_is_supported() {
+        // A project name the model restates from the question is vouched
+        // for by the title of the meeting the cited line is from (the
+        // Sources panel shows it beside the line).
+        let line = "It is now$52,000, because Northwind adds a support plan.";
         let src = [Source {
-            text: "It is now$52,000, because Northwind adds a support plan.",
+            text: line,
             speaker: "Dana Whitlock",
+            title: "Bluebird budget sync",
+        }];
+        assert!(unsupported("The Bluebird budget is now $52,000.", &src).is_empty());
+        assert!(unsupported("Bluebird's budget is now $52,000.", &src).is_empty());
+
+        // A name in neither the line, its speaker nor the title is still
+        // flagged: the title doesn't make every name safe.
+        assert_eq!(
+            kinds(&unsupported("The Marlow budget is now $52,000.", &src)),
+            vec![(ClaimKind::Name, "marlow")]
+        );
+        // The title of a meeting that isn't cited vouches for nothing: the
+        // wrong project's line, under its own title, is still caught.
+        let other = [Source {
+            text: line,
+            speaker: "Dana Whitlock",
+            title: "Harbor renewal call",
         }];
         assert_eq!(
-            kinds(&unsupported("The Bluebird budget is now $52,000.", &src)),
+            kinds(&unsupported("The Bluebird budget is now $52,000.", &other)),
+            vec![(ClaimKind::Name, "bluebird")]
+        );
+    }
+
+    #[test]
+    fn a_title_vouches_for_names_only() {
+        let src = [Source {
+            text: "We said forty thousand, and Priya agreed.",
+            speaker: "Dana Whitlock",
+            title: "Friday 25 budget sync: \"cut the spend\"",
+        }];
+        // A weekday, a figure and a quote in the title are not support.
+        assert_eq!(
+            kinds(&unsupported("By Friday, $25.", &src)),
+            vec![(ClaimKind::Number, "25"), (ClaimKind::Date, "friday")]
+        );
+        assert_eq!(
+            kinds(&unsupported("Priya said \"cut the spend\".", &src)),
+            vec![(ClaimKind::Quote, "cut the spend")]
+        );
+        // No title, no vouching.
+        let bare = [Source {
+            text: "We said forty thousand, and Priya agreed.",
+            speaker: "Dana Whitlock",
+            title: "",
+        }];
+        assert_eq!(
+            kinds(&unsupported("The Bluebird plan is $40,000.", &bare)),
             vec![(ClaimKind::Name, "bluebird")]
         );
     }
@@ -745,6 +808,7 @@ mod tests {
         let src = [Source {
             text: "Honestly, we will ship the planner on the twenty-sixth.",
             speaker: "Ilka",
+            title: "",
         }];
         assert!(unsupported("Ilka said \"we will ship the planner\".", &src).is_empty());
         assert_eq!(

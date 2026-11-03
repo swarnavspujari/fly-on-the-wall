@@ -6,8 +6,10 @@
 //! million" = 3.2M; "twenty-seventh" = 27; "forty four seventy one" can
 //! also mean 4471. Dates are month and weekday names. Names are
 //! capitalized words outside a list of common words; a name matches the
-//! cited text or the cited segment's speaker label (attribution). "Speaker
-//! 2", the app's label for an unnamed voice, is a name too, not the number 2.
+//! cited text, the cited segment's speaker label (attribution) or the title
+//! of the meeting the segment is from (never for numbers, dates or quotes).
+//! "Speaker 2", the app's label for an unnamed voice, is a name too, not the
+//! number 2.
 
 use std::collections::BTreeSet;
 
@@ -467,6 +469,9 @@ pub fn names(text: &str) -> BTreeSet<String> {
 pub struct Source<'a> {
     pub text: &'a str,
     pub speaker: &'a str,
+    /// Title of the meeting the segment is from. It vouches for names (a
+    /// project the question named), never for numbers, dates or quotes.
+    pub title: &'a str,
 }
 
 /// Claims in `sentence` that its sources don't support (empty = passes).
@@ -474,6 +479,8 @@ pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<String> {
     let text = strip_markers(sentence);
     let mut src_numbers = BTreeSet::new();
     let mut src_words: BTreeSet<String> = BTreeSet::new();
+    // Words of the cited meetings' titles: support for a name, and only a name.
+    let mut title_words: BTreeSet<String> = BTreeSet::new();
     let mut src_labels = BTreeSet::new();
     for s in sources {
         src_numbers.extend(numbers(s.text));
@@ -482,6 +489,10 @@ pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<String> {
         for w in words(s.text).into_iter().chain(words(s.speaker)) {
             let l = w.to_lowercase();
             src_words.insert(l.strip_suffix("'s").map(str::to_string).unwrap_or(l));
+        }
+        for w in words(s.title) {
+            let l = w.to_lowercase();
+            title_words.insert(l.strip_suffix("'s").map(str::to_string).unwrap_or(l));
         }
     }
     let mut missing = Vec::new();
@@ -496,7 +507,7 @@ pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<String> {
         }
     }
     for n in names(&text) {
-        if !src_words.contains(&n) {
+        if !src_words.contains(&n) && !title_words.contains(&n) {
             missing.push(format!("name {n}"));
         }
     }
@@ -682,6 +693,7 @@ mod tests {
         let src = [Source {
             text: line,
             speaker: "Dana Whitlock",
+            title: "",
         }];
         assert!(unsupported("The budget is now $52,000.", &src).is_empty());
         assert_eq!(
@@ -695,6 +707,7 @@ mod tests {
         let src = [Source {
             text: "I can take the export this week.",
             speaker: "Speaker 2",
+            title: "",
         }];
         assert!(unsupported("Speaker 2 will handle the export.", &src).is_empty());
         assert!(unsupported("Speaker 2's export lands this week.", &src).is_empty());
@@ -705,6 +718,7 @@ mod tests {
         let other = [Source {
             text: "I can take the export this week.",
             speaker: "Speaker 1",
+            title: "",
         }];
         assert_eq!(
             unsupported("Speaker 2 will handle the export.", &other),
@@ -713,8 +727,61 @@ mod tests {
         let said = [Source {
             text: "Speaker 2 should take the export.",
             speaker: "Dana Whitlock",
+            title: "",
         }];
         assert!(unsupported("Speaker 2 will handle the export.", &said).is_empty());
+    }
+
+    #[test]
+    fn a_name_in_the_cited_meetings_title_is_supported() {
+        // A project name restated from the question is vouched for by the
+        // title of the meeting the cited line is from.
+        let line = "It is now$52,000, because Northwind adds a support plan.";
+        let src = [Source {
+            text: line,
+            speaker: "Dana Whitlock",
+            title: "Bluebird budget sync",
+        }];
+        assert!(unsupported("The Bluebird budget is now $52,000.", &src).is_empty());
+        assert!(unsupported("Bluebird's budget is now $52,000.", &src).is_empty());
+        // A name in neither the line, its speaker nor the title is flagged.
+        assert_eq!(
+            unsupported("The Marlow budget is now $52,000.", &src),
+            vec!["name marlow"]
+        );
+        // The title of a meeting that isn't cited vouches for nothing.
+        let other = [Source {
+            text: line,
+            speaker: "Dana Whitlock",
+            title: "Harbor renewal call",
+        }];
+        assert_eq!(
+            unsupported("The Bluebird budget is now $52,000.", &other),
+            vec!["name bluebird"]
+        );
+    }
+
+    #[test]
+    fn a_title_vouches_for_names_only() {
+        let src = [Source {
+            text: "We said forty thousand, and Priya agreed.",
+            speaker: "Dana Whitlock",
+            title: "Friday 25 budget sync",
+        }];
+        // A weekday or a figure in the title is not support.
+        assert_eq!(
+            unsupported("By Friday, $25.", &src),
+            vec!["number 25", "date friday"]
+        );
+        let bare = [Source {
+            text: "We said forty thousand, and Priya agreed.",
+            speaker: "Dana Whitlock",
+            title: "",
+        }];
+        assert_eq!(
+            unsupported("The Bluebird plan is $40,000.", &bare),
+            vec!["name bluebird"]
+        );
     }
 
     #[test]
@@ -722,6 +789,7 @@ mod tests {
         let src = [Source {
             text: "All in, I'm asking for eighty four hundred dollars for the first month.",
             speaker: "Ines Carvalho",
+            title: "",
         }];
         assert!(unsupported("Ines asked for $8,400 [seg:m01-05].", &src).is_empty());
         assert!(unsupported("Ines asked for eighty four hundred dollars.", &src).is_empty());
