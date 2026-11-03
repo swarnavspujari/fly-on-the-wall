@@ -71,7 +71,7 @@ Three layers:
 | [ui-app-shell](ui-app-shell.md) | `main.tsx`, `LibraryGate.tsx`, `App.tsx`, `api.ts`, `devMock.ts`, `ui.tsx`, `types.ts` | Orchestration, the IPC wrapper, the fake backend, design primitives. |
 | [ui-home](ui-home.md) | `Home.tsx`, `NoteList.tsx`, `Sidebar.tsx`, `homeModel.ts`, `noteDeletion.ts` | Home, the notes list, folders, status chips, undoable delete. |
 | [ui-editor](ui-editor.md) | `Editor.tsx`, `NotesEditor.tsx`, `EnhancedDoc.tsx`, `TranscriptPanel.tsx`, `safeContent.ts` | A note: your notes, the Enhanced doc with sources, and the transcript. |
-| [ui-ask](ui-ask.md) | `AskPanel.tsx`, `askModel.ts` | The Ask sheet. |
+| [ui-ask](ui-ask.md) | `AskPanel.tsx`, `AskAnswer.tsx`, `AskConnectors.tsx`, `GlobalAsk.tsx`, `askModel.ts`, `askScope.ts`, `askCitations.ts` | Ask: the streaming answer sheet (checked sentences with citation chips, trace and runs-on pills, proposals, connector cards in the turn), scope chip and `@`, and Ask over every meeting on Home. |
 | [ui-settings](ui-settings.md) | `SettingsModal.tsx`, `settingsModel.ts`, `PrivacySection.tsx` | Full-window Settings. |
 | [ui-import](ui-import.md) | `ImportQueue.tsx`, `importProgress.ts` | The import panel. |
 | [ui-notices](ui-notices.md) | `AppNotices.tsx`, `notices.ts`, `pipelineNotice.ts`, `pipelineFailures.ts` | The single notice stack and its notice kinds. |

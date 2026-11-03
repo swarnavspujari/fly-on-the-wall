@@ -6,6 +6,7 @@ import {
   LockOpen,
   Plus,
   Settings as SettingsIcon,
+  Sparkles,
   TriangleAlert,
   Upload,
   X,
@@ -45,6 +46,10 @@ interface Props {
   /** Multi-select audio/video picker — everything picked becomes ONE new note. */
   onImportMedia: () => void;
   onOpenSettings: () => void;
+  /** Ask from anywhere: the open note's Ask, or Ask over every meeting. */
+  onAsk?: () => void;
+  /** The shortcut shown beside it ("Ctrl J" / "⌘J"). */
+  askShortcut?: string;
   /** Resolved theme — picks the wordmark variant (dark logo on the ink shell). */
   theme?: "light" | "dark";
   /** File a dragged note into a folder (or null for All notes / Unfiled). */
@@ -168,6 +173,8 @@ export default function Sidebar({
   onStartFromEvent,
   onImportMedia,
   onOpenSettings,
+  onAsk,
+  askShortcut,
   theme = "light",
   onMoveNote,
 }: Props) {
@@ -439,6 +446,32 @@ export default function Sidebar({
           <List size={15} strokeWidth={1.75} className="flex-none text-text-3" />
           All notes
         </div>
+        {onAsk && (
+          <button
+            type="button"
+            onClick={onAsk}
+            className={`${ROW} mt-0.5 w-full border-0 bg-transparent text-left hover:bg-surface-3`}
+            style={{ fontFamily: "var(--font-sans)" }}
+            aria-keyshortcuts={askShortcut === "⌘J" ? "Meta+J" : "Control+J"}
+            title="Ask a question about your meetings"
+          >
+            <Sparkles
+              size={15}
+              strokeWidth={1.75}
+              className="flex-none"
+              style={{ color: "var(--primary-text)" }}
+            />
+            <span className="flex-1">Ask your meetings</span>
+            {askShortcut && (
+              <kbd
+                className="font-mono text-[10.5px] font-normal"
+                style={{ color: "var(--text-3)" }}
+              >
+                {askShortcut}
+              </kbd>
+            )}
+          </button>
+        )}
         {/* marginTop via style: SectionLabel inlines `margin: 0`, which beats
             any mt-* class — spacing must come through the style prop. */}
         <SectionLabel className="px-2.5 pb-1.5" style={{ marginTop: 26 }}>
