@@ -2,7 +2,7 @@
    to the transcript, and which have no source. Pure, so the copy and the
    counting are unit-tested (enhancedTrust.test.ts). */
 
-import type { BlockOrigin, NoteBlock, Transcript } from "./types";
+import type { BlockFlag, BlockOrigin, EnhanceReport, NoteBlock, Transcript } from "./types";
 
 /** The transcripts Enhance could have cited: the RAW transcripts of every
  *  meeting recorded into the note (enhance_note reads the newest one when it
@@ -58,24 +58,41 @@ export function enhancedBeforeTranscript(blocks: NoteBlock[], cited: CitedTransc
  * - "notes": AI text written from your notes, with no transcript to cite
  *   (or enhanced before the transcript was ready; see enhancedBeforeTranscript).
  * - "pending": AI text with no link while the transcript is still loading.
+ * - "flagged": AI text the Enhance check found something in that the lines it
+ *   cites don't hold (a number, date, name or quote), or that states a fact
+ *   without citing anything. It never shows as sourced, whatever it cites.
  */
-export type BlockTrust = "user" | "sourced" | "unsourced" | "missing" | "notes" | "pending";
+export type BlockTrust =
+  "user" | "sourced" | "unsourced" | "missing" | "notes" | "pending" | "flagged";
 
-/** `early`: enhancedBeforeTranscript for the whole document. */
-export function blockTrust(origin: BlockOrigin, cited: CitedTranscript, early = false): BlockTrust {
+/** `early`: enhancedBeforeTranscript for the whole document. `flags`: the
+ *  block's own (the backend's verdict, so it holds even while a transcript is
+ *  still loading). */
+export function blockTrust(
+  origin: BlockOrigin,
+  cited: CitedTranscript,
+  early = false,
+  flags: BlockFlag[] = [],
+): BlockTrust {
   if (origin.kind === "user") return "user";
   const ids = origin.source_segment_ids;
+  const flagged = flags.length > 0;
   if (cited.state === "ready") {
-    if (ids.length === 0) return early ? "notes" : "unsourced";
-    if (ids.some((id) => cited.transcripts.some((t) => idsOf(t).has(id)))) return "sourced";
-    return cited.complete ? "missing" : "sourced";
+    if (ids.length === 0) return flagged ? "flagged" : early ? "notes" : "unsourced";
+    if (ids.some((id) => cited.transcripts.some((t) => idsOf(t).has(id)))) {
+      return flagged ? "flagged" : "sourced";
+    }
+    if (cited.complete) return "missing";
+    return flagged ? "flagged" : "sourced";
   }
+  if (flagged) return "flagged";
   if (ids.length > 0) return "sourced"; // can't check: never downgrade
   return cited.state === "none" ? "notes" : "pending";
 }
 
 /** Lines you should check before keeping: Keep / Remove apply to these. */
-export const needsReview = (t: BlockTrust) => t === "unsourced" || t === "missing";
+export const needsReview = (t: BlockTrust) =>
+  t === "unsourced" || t === "missing" || t === "flagged";
 
 export interface TrustSummary {
   /** AI blocks still in the document. */
@@ -83,6 +100,8 @@ export interface TrustSummary {
   sourced: number;
   unsourced: number;
   missing: number;
+  /** The Enhance check found a claim its cited lines don't back up. */
+  flagged: number;
   notes: number;
   /** enhancedBeforeTranscript: its AI lines count as notes. */
   early: boolean;
@@ -90,14 +109,23 @@ export interface TrustSummary {
 
 export function trustSummary(blocks: NoteBlock[], cited: CitedTranscript): TrustSummary {
   const early = enhancedBeforeTranscript(blocks, cited);
-  const s: TrustSummary = { ai: 0, sourced: 0, unsourced: 0, missing: 0, notes: 0, early };
+  const s: TrustSummary = {
+    ai: 0,
+    sourced: 0,
+    unsourced: 0,
+    missing: 0,
+    flagged: 0,
+    notes: 0,
+    early,
+  };
   for (const b of blocks) {
-    const t = blockTrust(b.origin, cited, early);
+    const t = blockTrust(b.origin, cited, early, b.flags);
     if (t === "user") continue;
     s.ai += 1;
     if (t === "sourced") s.sourced += 1;
     else if (t === "unsourced") s.unsourced += 1;
     else if (t === "missing") s.missing += 1;
+    else if (t === "flagged") s.flagged += 1;
     else if (t === "notes") s.notes += 1;
   }
   return s;
@@ -120,6 +148,9 @@ export function trustLine(s: TrustSummary, cited: CitedTranscript): string {
   const parts = [lines];
   if (s.unsourced > 0) parts.push(`${s.unsourced} without a source`);
   if (s.missing > 0) parts.push(`${s.missing} with a source not found`);
+  if (s.flagged > 0) {
+    parts.push(`${s.flagged} not backed by ${s.flagged === 1 ? "its source" : "their sources"}`);
+  }
   if (parts.length === 1) parts.push("all sourced");
   return parts.join(" · ");
 }
@@ -153,6 +184,68 @@ export const REVIEW_COPY: Record<"unsourced" | "missing", { label: string; why: 
       "Check it before you keep it.",
   },
 };
+
+/** Why one line is flagged, in the Ask sheet's words (askModel `flagCopy`)
+ *  so both views say the same thing about the same failure. */
+export function blockFlagCopy(flag: BlockFlag): string {
+  const d = flag.detail?.trim();
+  const isnt = (what: string) =>
+    d
+      ? `The ${what} “${d}” isn't in the lines it cites.`
+      : `A ${what} here isn't in the lines it cites.`;
+  switch (flag.kind) {
+    case "number":
+      return isnt("number");
+    case "date":
+      return isnt("date");
+    case "name":
+      return isnt("name");
+    case "quote":
+      return "This quote isn't in the lines it cites.";
+    case "invalid_citation":
+      return "It pointed to a line Enhance didn't read.";
+    case "not_from_notes":
+      return "This isn't in your notes, so it isn't shown as yours.";
+    default:
+      return "This states a fact without a source.";
+  }
+}
+
+/** The visible explanation under a flagged line. A line that cites nothing
+ *  says so; one that cites lines says what they don't hold. */
+export function flaggedCopy(flags: BlockFlag[]): { label: string; why: string } {
+  const reasons = [...new Set(flags.map(blockFlagCopy))];
+  return {
+    label: "Not backed by its source",
+    why: `${reasons.join(" ")} Check it before you keep it.`,
+  };
+}
+
+/** What a finished Enhance tells you beyond the note itself: that it read
+ *  part of a long meeting, left something out, or didn't show a line as
+ *  yours. Nothing when it read everything and kept everything. */
+export function enhanceNotices(r: EnhanceReport): string[] {
+  const out: string[] = [];
+  if (r.segments_total > 0 && r.segments_shown < r.segments_total) {
+    out.push(
+      `This meeting is longer than your model can read at once, so Enhance read ${r.segments_shown} of ${r.segments_total} lines: evenly across the meeting, plus the parts your notes mention. The whole transcript is in the Transcript tab.` +
+        (r.retried_smaller
+          ? " Your model ran out of memory at the larger size, so it read less."
+          : ""),
+    );
+  }
+  if (r.dropped > 0) {
+    out.push(
+      `Left out ${r.dropped} ${r.dropped === 1 ? "line" : "lines"} that came only from speech aimed at an AI assistant, not from the meeting. Nothing in ${r.dropped === 1 ? "it was" : "them was"} acted on.`,
+    );
+  }
+  if (r.demoted_user > 0) {
+    out.push(
+      `${r.demoted_user} ${r.demoted_user === 1 ? "line" : "lines"} that looked like yours ${r.demoted_user === 1 ? "isn't" : "aren't"} in your notes, so ${r.demoted_user === 1 ? "it shows" : "they show"} as AI text to check.`,
+    );
+  }
+  return out;
+}
 
 /** The `##` sections of a template's structure hint, the headings Enhance
  *  will add: "## Action items (owner — due)" → "Action items". Deeper

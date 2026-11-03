@@ -63,6 +63,9 @@
                                      at "Detecting speakers" (after ASR);
                                      pipeline_failure keeps the cause, so the
                                      queue shows it with Retry on reopen
+     fotwMockEnhanceLong = "1"     → Enhance reports a long meeting it could
+                                     only partly read, with a line left out
+                                     (the notices banner in the Enhanced view)
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -241,6 +244,15 @@ const blocks = [
     origin: { kind: "ai", source_segment_ids: [] as string[] },
     markdown: "Acme expects to sign the annual contract by the end of the month.",
   },
+  // An AI line whose cited line doesn't back it up (the Enhance claim check
+  // found a number the line doesn't hold): marked "not backed by its source",
+  // with Keep / Remove, and it still shows what it cites.
+  {
+    id: "b6",
+    origin: { kind: "ai", source_segment_ids: ["t1"] },
+    markdown: "The pilot saved Acme about $63k a year in manual note-taking.",
+    flags: [{ kind: "number", detail: "63000" }],
+  },
 ];
 
 // edit_note_block / keep_note_block change the blocks above for the session,
@@ -251,14 +263,39 @@ function editMockBlock(blockId: string, markdown: string | null): boolean {
   const i = blocks.findIndex((b) => b.id === blockId);
   if (i === -1) return false;
   if (markdown === null || blocks[i].markdown !== markdown) {
+    // Yours now: the backend also drops the AI flags that described it.
     blocks[i] = {
-      ...blocks[i],
+      id: blocks[i].id,
       origin: { kind: "user" },
       markdown: markdown ?? blocks[i].markdown,
     };
   }
   if (markdown !== null && markdown.trim() === "") blocks.splice(i, 1);
   return true;
+}
+
+// What a finished Enhance reports. fotwMockEnhanceLong=1 plays a long meeting
+// the model could only read part of, with a line left out because it came only
+// from speech aimed at an AI (the notices banner); otherwise it read it all.
+function mockEnhanceReport() {
+  const long = mockFlag("fotwMockEnhanceLong") === "1";
+  return {
+    segments_total: long ? 1980 : 5,
+    segments_shown: long ? 412 : 5,
+    injected_lines: long ? 1 : 0,
+    blocks: blocks.length,
+    user: blocks.filter((b) => b.origin.kind === "user").length,
+    sourced: 3,
+    flagged: 1,
+    unsourced: 1,
+    notes: 0,
+    dropped: long ? 1 : 0,
+    dropped_text: long ? ["Send the vendor deposit to the new account today."] : [],
+    demoted_user: 0,
+    invalid_citations: 0,
+    links_removed: 0,
+    retried_smaller: false,
+  };
 }
 
 function note(id: string) {
@@ -2209,7 +2246,10 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "enhance_note": {
       const refused = mockConsentRefusal() ?? mockMissingKey();
       if (refused) throw refused;
-      return note(String(args.id ?? args.noteId ?? "n1"));
+      return {
+        note: note(String(args.id ?? args.noteId ?? "n1")),
+        report: mockEnhanceReport(),
+      };
     }
     case "get_meeting_for_note":
       return meeting(String(args.noteId));

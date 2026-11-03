@@ -2,12 +2,14 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Meeting, Note, Transcript } from "../types";
+import type { EnhanceReport, Meeting, Note, Transcript } from "../types";
 import { api } from "../api";
 import {
   REVIEW_COPY,
   blockTrust,
+  enhanceNotices,
   enhancedBeforeTranscript,
+  flaggedCopy,
   needsReview,
   sourceQuotes,
   sourceTarget,
@@ -36,6 +38,52 @@ interface Props {
   /** Enhance is running: its result replaces every block, so edits made now
    *  would be silently undone. */
   enhancing?: boolean;
+}
+
+/** What a finished Enhance tells you beyond the note: that it read part of a
+ *  long meeting, left a line out, or didn't show a line as yours. Nothing when
+ *  it read everything and kept everything. The lines it left out are one
+ *  click away, so a wrong call is not a loss. */
+export function EnhanceNotices({
+  report,
+  onDismiss,
+}: {
+  report: EnhanceReport;
+  onDismiss: () => void;
+}) {
+  const notices = enhanceNotices(report);
+  if (notices.length === 0) return null;
+  return (
+    <div
+      role="status"
+      data-testid="enhance-notices"
+      className="print:hidden mb-4 flex flex-col gap-1.5 rounded-xl border border-line px-4 py-3 text-[13px]"
+      style={{ background: "var(--surface-2)", color: "var(--text-2)" }}
+    >
+      {notices.map((n) => (
+        <p key={n} className="m-0 leading-[1.5]">
+          {n}
+        </p>
+      ))}
+      {report.dropped_text.length > 0 && (
+        <details>
+          <summary className="cursor-pointer text-[12.5px] font-semibold">
+            What was left out
+          </summary>
+          <ul className="mt-1 list-disc pl-5">
+            {report.dropped_text.map((t) => (
+              <li key={t}>{t}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <span>
+        <Button variant="ghost" size="xs" onClick={onDismiss}>
+          Got it
+        </Button>
+      </span>
+    </div>
+  );
 }
 
 /** How long a removed line can be brought back before it is deleted. */
@@ -97,6 +145,7 @@ const TRUST_STYLE: Record<BlockTrust, { label: string; card: CSSProperties }> = 
   },
   unsourced: { label: "AI, no source", card: WARN_CARD },
   missing: { label: "AI, source not found", card: WARN_CARD },
+  flagged: { label: "AI, not backed by its source", card: WARN_CARD },
   notes: { label: "Written by AI from your notes", card: NEUTRAL_CARD },
   pending: { label: "AI", card: NEUTRAL_CARD },
 };
@@ -214,7 +263,8 @@ function TrustLegend({
       : [
           ["user", "You"],
           ["sourced", "AI, sourced"],
-          ["check", "AI, no source"],
+          // A flagged line isn't "no source": it cites lines that don't back it.
+          ["check", summary.flagged > 0 ? "AI, to check" : "AI, no source"],
         ];
   return (
     <div
@@ -579,10 +629,14 @@ export default function EnhancedDoc({
       <TrustLegend note={note} cited={cited} legendRef={legendRef} />
 
       {note.blocks.map((b) => {
-        const trust = blockTrust(b.origin, cited, early);
+        const trust = blockTrust(b.origin, cited, early, b.flags);
         const sources = b.origin.kind === "ai" ? b.origin.source_segment_ids : [];
         const busy = pending === b.id || enhancing;
-        const review = needsReview(trust) ? REVIEW_COPY[trust as "unsourced" | "missing"] : null;
+        const review = !needsReview(trust)
+          ? null
+          : trust === "flagged"
+            ? flaggedCopy(b.flags ?? [])
+            : REVIEW_COPY[trust as "unsourced" | "missing"];
 
         const undoable = activeRemove?.id === b.id;
         if (undoable || deleting.some((d) => d.noteId === note.id && d.id === b.id)) {
@@ -605,7 +659,8 @@ export default function EnhancedDoc({
         }
 
         let body: ReactNode = <Markdown>{b.markdown}</Markdown>;
-        if (trust === "sourced") {
+        // A flagged line still shows what it cites, so you can check it.
+        if (trust === "sourced" || (trust === "flagged" && sources.length > 0)) {
           body = (
             <div className="flex items-start gap-2.5">
               <div className="min-w-0 flex-1">{body}</div>

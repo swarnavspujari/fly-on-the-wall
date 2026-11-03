@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   EARLY_COPY,
+  blockFlagCopy,
   blockTrust,
+  enhanceNotices,
   enhancedBeforeTranscript,
+  flaggedCopy,
+  needsReview,
   sourceQuotes,
   sourceTarget,
   templateSections,
@@ -11,7 +15,7 @@ import {
   trustSummary,
   type CitedTranscript,
 } from "./enhancedTrust";
-import type { NoteBlock, Transcript } from "./types";
+import type { BlockFlag, EnhanceReport, NoteBlock, Transcript } from "./types";
 
 const user = (id: string): NoteBlock => ({ id, origin: { kind: "user" }, markdown: id });
 const ai = (id: string, src: string[]): NoteBlock => ({
@@ -72,6 +76,7 @@ describe("block trust", () => {
       sourced: 1,
       unsourced: 1,
       missing: 1,
+      flagged: 0,
       notes: 0,
       early: false,
     });
@@ -209,5 +214,138 @@ describe("enhanced before the transcript was ready", () => {
     expect(EARLY_COPY).toBe(
       "Enhanced before the transcript was ready. Enhance again to link sources.",
     );
+  });
+});
+
+const flag = (kind: BlockFlag["kind"], detail?: string): BlockFlag => ({ kind, detail });
+const flagged = (id: string, src: string[], flags: BlockFlag[]): NoteBlock => ({
+  ...ai(id, src),
+  flags,
+});
+
+describe("a line the Enhance check flagged", () => {
+  const number = [flag("number", "63000")];
+
+  it("never shows as sourced, whatever it cites", () => {
+    expect(blockTrust(flagged("a", ["t1"], number).origin, ready, false, number)).toBe("flagged");
+    // citing nothing and stating a fact: flagged, not just "no source"
+    const uncited = [flag("uncited_claim")];
+    expect(blockTrust(ai("b", []).origin, ready, false, uncited)).toBe("flagged");
+    // the backend's verdict holds while the transcript is loading or absent
+    expect(blockTrust(ai("c", ["t1"]).origin, checking, false, number)).toBe("flagged");
+    expect(blockTrust(ai("d", ["t1"]).origin, none, false, number)).toBe("flagged");
+    // no flags: as before
+    expect(blockTrust(ai("e", ["t1"]).origin, ready, false, [])).toBe("sourced");
+  });
+
+  it("is 'source not found' when what it cites is gone, the stronger claim", () => {
+    expect(blockTrust(ai("a", ["old"]).origin, ready, false, number)).toBe("missing");
+  });
+
+  it("is never the user's: your text carries no flags", () => {
+    expect(blockTrust(user("a").origin, ready, false, number)).toBe("user");
+  });
+
+  it("needs review (Keep / Remove) like a line with no source", () => {
+    expect(needsReview("flagged")).toBe(true);
+    expect(needsReview("sourced")).toBe(false);
+  });
+
+  it("is counted, and the legend line says how many", () => {
+    const blocks = [user("a"), ai("b", ["t1"]), flagged("c", ["t1"], number), ai("d", [])];
+    const s = trustSummary(blocks, ready);
+    expect(s).toMatchObject({ ai: 3, sourced: 1, flagged: 1, unsourced: 1 });
+    expect(trustLine(s, ready)).toBe(
+      "3 AI lines · 1 without a source · 1 not backed by its source",
+    );
+    const two = trustSummary([flagged("a", ["t1"], number), flagged("b", ["t2"], number)], ready);
+    expect(trustLine(two, ready)).toBe("2 AI lines · 2 not backed by their sources");
+  });
+
+  it("says why in the Ask sheet's words, and never that a line was made up", () => {
+    expect(blockFlagCopy(flag("number", "63000"))).toBe(
+      "The number “63000” isn't in the lines it cites.",
+    );
+    expect(blockFlagCopy(flag("date", "april"))).toBe(
+      "The date “april” isn't in the lines it cites.",
+    );
+    expect(blockFlagCopy(flag("name", "wanda"))).toBe(
+      "The name “wanda” isn't in the lines it cites.",
+    );
+    expect(blockFlagCopy(flag("number"))).toBe("A number here isn't in the lines it cites.");
+    expect(blockFlagCopy(flag("quote", "we will not ship"))).toBe(
+      "This quote isn't in the lines it cites.",
+    );
+    expect(blockFlagCopy(flag("invalid_citation"))).toBe(
+      "It pointed to a line Enhance didn't read.",
+    );
+    expect(blockFlagCopy(flag("uncited_claim"))).toBe("This states a fact without a source.");
+    expect(blockFlagCopy(flag("not_from_notes"))).toContain("isn't in your notes");
+    const c = flaggedCopy([
+      flag("number", "63000"),
+      flag("number", "63000"),
+      flag("date", "april"),
+    ]);
+    expect(c.label).toBe("Not backed by its source");
+    // a reason once, then the next step
+    expect(c.why).toBe(
+      "The number “63000” isn't in the lines it cites. The date “april” isn't in the lines it cites. Check it before you keep it.",
+    );
+    expect(`${c.label} ${c.why}`).not.toMatch(/made up|fake|false|wrong/i);
+  });
+});
+
+describe("what a finished Enhance tells you", () => {
+  const report = (over: Partial<EnhanceReport> = {}): EnhanceReport => ({
+    segments_total: 5,
+    segments_shown: 5,
+    injected_lines: 0,
+    blocks: 4,
+    user: 1,
+    sourced: 2,
+    flagged: 0,
+    unsourced: 1,
+    notes: 0,
+    dropped: 0,
+    dropped_text: [],
+    demoted_user: 0,
+    invalid_citations: 0,
+    links_removed: 0,
+    retried_smaller: false,
+    ...over,
+  });
+
+  it("says nothing when it read and kept everything", () => {
+    expect(enhanceNotices(report())).toEqual([]);
+    // links removed or a bad citation are counted, but nothing the user can act on
+    expect(enhanceNotices(report({ links_removed: 2, invalid_citations: 3 }))).toEqual([]);
+  });
+
+  it("says it read part of a long meeting, and where the rest is", () => {
+    const [n] = enhanceNotices(report({ segments_total: 1980, segments_shown: 412 }));
+    expect(n).toContain("read 412 of 1980 lines");
+    expect(n).toContain("evenly across the meeting");
+    expect(n).toContain("the parts your notes mention");
+    expect(n).toContain("Transcript tab");
+    expect(n).not.toContain("ran out of memory");
+    const [again] = enhanceNotices(
+      report({ segments_total: 1980, segments_shown: 150, retried_smaller: true }),
+    );
+    expect(again).toContain("ran out of memory");
+  });
+
+  it("says what it left out, one or several", () => {
+    expect(enhanceNotices(report({ dropped: 1 }))).toEqual([
+      "Left out 1 line that came only from speech aimed at an AI assistant, not from the meeting. Nothing in it was acted on.",
+    ]);
+    expect(enhanceNotices(report({ dropped: 3 }))[0]).toContain("Left out 3 lines");
+    expect(enhanceNotices(report({ dropped: 3 }))[0]).toContain("Nothing in them was acted on");
+  });
+
+  it("says when a line that looked like yours isn't", () => {
+    expect(enhanceNotices(report({ demoted_user: 1 }))[0]).toBe(
+      "1 line that looked like yours isn't in your notes, so it shows as AI text to check.",
+    );
+    expect(enhanceNotices(report({ demoted_user: 2 }))[0]).toContain("2 lines");
   });
 });
