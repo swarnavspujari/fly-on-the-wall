@@ -26,6 +26,7 @@ pub mod scheduler;
 mod screen_commands;
 mod startup;
 pub mod state;
+pub mod video_store;
 
 use tauri::Manager;
 
@@ -141,6 +142,10 @@ pub fn run() {
             audio_store::prepare_playback,
             audio_store::storage_report,
             audio_store::dismiss_compress_notice,
+            video_store::start_video_job,
+            video_store::cancel_video_job,
+            video_store::set_import_video_policy,
+            video_store::estimate_screen_shrink,
             asr_commands::transcribe_meeting,
             asr_commands::get_transcript,
             asr_commands::get_cleaned_transcript,

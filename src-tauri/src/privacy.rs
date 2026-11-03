@@ -342,6 +342,7 @@ fn sweep_now(state: &AppState, explicit: bool) -> SweepReport {
         .keys()
         .cloned()
         .chain(state.audio_store.current())
+        .chain(state.video_store.current_meeting())
         .collect();
     let storage = state.storage.lock().unwrap();
     // The lease is taken under this same lock, so a meeting the job picked
@@ -881,12 +882,17 @@ pub async fn delete_all_data(
         if let Some(why) = busy_reason(&state) {
             return Err(format!("{why} — nothing was deleted"));
         }
-        // Background compression works inside meeting folders: stop it (the
-        // wipe restarts the app). Refused or failed → it picks up again.
-        if !crate::audio_store::halt(&state, Duration::from_secs(20)) {
+        // Background compression and the video job work inside meeting
+        // folders: stop both (the wipe restarts the app). Refused or failed →
+        // compression picks up again (the video job only runs when asked).
+        if !crate::audio_store::halt(&state, Duration::from_secs(20))
+            || !crate::video_store::halt(&state, Duration::from_secs(20))
+        {
             crate::audio_store::resume(&state);
+            crate::video_store::resume(&state);
             return Err(
-                "recording compression didn't stop in time — nothing was deleted; try again".into(),
+                "background storage work didn't stop in time — nothing was deleted; try again"
+                    .into(),
             );
         }
         let result = perform_delete_all(
@@ -896,6 +902,7 @@ pub async fn delete_all_data(
         );
         if result.is_err() {
             crate::audio_store::resume(&state);
+            crate::video_store::resume(&state);
         }
         result
     })
