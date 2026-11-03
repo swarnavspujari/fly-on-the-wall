@@ -327,6 +327,12 @@ pub fn engine_artifact(id: &str) -> Option<&'static Artifact> {
     ENGINE_MODELS.iter().find(|a| a.id == id)
 }
 
+/// Every internal-flag engine weight (today: Parakeet). For disk accounting
+/// only (model_cleanup.rs); resolution still goes through [`engine_artifact`].
+pub fn engine_models() -> impl Iterator<Item = &'static Artifact> {
+    ENGINE_MODELS.iter()
+}
+
 /// Artifact id for the whisper.cpp engine and the executable name(s) to look
 /// for on PATH. Kept here so readiness checks and the transcription pipeline
 /// resolve the exact same binary.
@@ -846,6 +852,13 @@ async fn ensure_artifact(
 /// blocks anyone. Installs are seconds long, so one global lock is enough.
 static INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The install lock, if no archive install is running right now. Model
+/// cleanup holds it while deleting, so an install can't start in the
+/// middle (and a running one blocks the delete).
+pub(crate) fn try_install_lock() -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    INSTALL_LOCK.try_lock().ok()
+}
+
 /// Install a downloaded, SHA-verified archive for `a`, all or nothing:
 /// extract into `<dest>.partial` (a stale one from a crash is removed
 /// first), then move its top-level entries into `dest` — the entry holding
@@ -899,7 +912,7 @@ async fn install_archive(
 }
 
 /// `<dest>.partial`, next to `dest`.
-fn staging_dir(dest: &Path) -> PathBuf {
+pub(crate) fn staging_dir(dest: &Path) -> PathBuf {
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
     name.push(".partial");
     dest.with_file_name(name)
@@ -907,7 +920,7 @@ fn staging_dir(dest: &Path) -> PathBuf {
 
 /// Remove a file, directory tree or link at `p` without following links
 /// (`remove_dir_all` doesn't traverse symlinks/junctions). Missing is fine.
-fn remove_path(p: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_path(p: &Path) -> std::io::Result<()> {
     let meta = match std::fs::symlink_metadata(p) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -949,7 +962,8 @@ fn promote_staging(
 /// (the whisper engines' `v1.9.5`, ffmpeg's / sherpa's archive root dir), so
 /// every other entry there is a superseded or legacy install. Ollama is
 /// absent on purpose: its archive root IS `bin/ollama`.
-const PRUNABLE_TOOLS: &[&str] = &["whisper-bin", "whisper-bin-vulkan", "ffmpeg", "sherpa-bin"];
+pub(crate) const PRUNABLE_TOOLS: &[&str] =
+    &["whisper-bin", "whisper-bin-vulkan", "ffmpeg", "sherpa-bin"];
 
 /// `(bin/<tool>, <current entry>)` for a prunable artifact, from its probe
 /// path `bin/<tool>/<current entry>/...`.

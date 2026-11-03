@@ -152,6 +152,9 @@ pub struct OllamaModel {
     pub name: String,
     /// On-disk size in bytes.
     pub size: u64,
+    /// "Used for …" when the app uses this model (saved Ask/Enhance model,
+    /// the search embedding model); `ollama_delete` refuses those.
+    pub used_for: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -172,11 +175,15 @@ pub struct OllamaStatus {
 pub async fn ollama_status(state: State<'_, AppState>) -> CmdResult<OllamaStatus> {
     let root = root_url(&state);
     let running = server_alive(&root).await;
-    let models = if running {
+    let mut models = if running {
         list_models(&root).await.unwrap_or_default()
     } else {
         Vec::new()
     };
+    let selected = selected_model(&state);
+    for m in &mut models {
+        m.used_for = used_for(&m.name, selected.as_deref());
+    }
     Ok(OllamaStatus {
         installed: installed_exe(&state.data_dir).is_some(),
         can_install: models::artifact(ARTIFACT_ID).is_some(),
@@ -219,8 +226,44 @@ async fn list_models(root: &str) -> Result<Vec<OllamaModel>, String> {
         .map(|m| OllamaModel {
             name: m.name,
             size: m.size,
+            used_for: None,
         })
         .collect())
+}
+
+/// The Ollama model Ask and Enhance use when Ollama is the saved provider
+/// (`llm.ollama.model`, else the provider default); None for a cloud one.
+fn selected_model(state: &AppState) -> Option<String> {
+    let storage = state.storage.lock().unwrap();
+    let get = |k: &str| {
+        storage
+            .get_setting(k)
+            .ok()
+            .flatten()
+            .filter(|v| !v.is_empty())
+    };
+    if get("llm.provider").as_deref().unwrap_or("ollama") != "ollama" {
+        return None;
+    }
+    get("llm.ollama.model").or_else(|| {
+        crate::llm_commands::PROVIDERS
+            .iter()
+            .find(|(id, _, _)| *id == "ollama")
+            .map(|(_, m, _)| m.to_string())
+    })
+}
+
+/// "Used for …" for an installed model: the saved Ask/Enhance model
+/// (`selected`, when Ollama is the provider) and the search embedding model.
+fn used_for(name: &str, selected: Option<&str>) -> Option<String> {
+    let chat = selected.is_some_and(|s| same_model(name, s));
+    let search = same_model(name, crate::embeddings::EMBED_MODEL);
+    match (chat, search) {
+        (true, true) => Some("Used for Ask, Enhance and search.".into()),
+        (true, false) => Some("Used for Ask and Enhance.".into()),
+        (false, true) => Some("Used for search.".into()),
+        (false, false) => None,
+    }
 }
 
 /// Tag-insensitive model-name match: `llama3.1` names the same model as
@@ -243,26 +286,12 @@ fn same_model(a: &str, b: &str) -> bool {
 /// needed; a custom (user-run) base URL is never touched when unreachable.
 #[tauri::command]
 pub async fn ollama_delete(state: State<'_, AppState>, model: String) -> CmdResult<()> {
-    let (provider, selected) = {
-        let storage = state.storage.lock().unwrap();
-        let get = |k: &str| {
-            storage
-                .get_setting(k)
-                .ok()
-                .flatten()
-                .filter(|v| !v.is_empty())
-        };
-        let default_model = crate::llm_commands::PROVIDERS
-            .iter()
-            .find(|(id, _, _)| *id == "ollama")
-            .map(|(_, m, _)| m.to_string())
-            .unwrap_or_default();
-        (
-            get("llm.provider").unwrap_or_else(|| "ollama".to_string()),
-            get("llm.ollama.model").unwrap_or(default_model),
-        )
-    };
-    if provider == "ollama" && same_model(&model, &selected) {
+    if same_model(&model, crate::embeddings::EMBED_MODEL) {
+        return Err(format!(
+            "{model} is what search uses to find things in your notes, so it can't be deleted."
+        ));
+    }
+    if selected_model(&state).is_some_and(|selected| same_model(&model, &selected)) {
         return Err(format!(
             "{model} is the model the app is currently using — switch to another model in Settings first, then delete it."
         ));
@@ -395,7 +424,24 @@ pub async fn pull_model(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_root, same_model};
+    use super::{normalize_root, same_model, used_for};
+
+    #[test]
+    fn in_use_labels_cover_the_chat_and_embedding_models() {
+        assert_eq!(
+            used_for("llama3.1:latest", Some("llama3.1")).as_deref(),
+            Some("Used for Ask and Enhance.")
+        );
+        assert_eq!(
+            used_for(crate::embeddings::EMBED_MODEL, Some("llama3.1")).as_deref(),
+            Some("Used for search.")
+        );
+        // A cloud provider is saved: only search still uses Ollama.
+        assert_eq!(used_for("llama3.1:latest", None), None);
+        assert_eq!(used_for("qwen3.5:9b", Some("qwen3.5:4b")), None);
+        // Another tag of the embedding family isn't the one search uses.
+        assert_eq!(used_for("embeddinggemma:latest", None), None);
+    }
 
     #[test]
     fn same_model_is_tag_insensitive_for_bare_names() {

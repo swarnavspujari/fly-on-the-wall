@@ -933,7 +933,11 @@ fn tool_output_carries_no_keep_local_metadata() {
             }
         }
     }
-    // A window with only kept-local meetings == a window with none.
+    // A window with only kept-local meetings == a window with none. The
+    // empty one starts far in the future: the fixtures' notes are created
+    // "now", so a date near the calendar (this was 2026-11-01) stops being
+    // empty the day it arrives.
+    const EMPTY_WINDOW_SINCE: &str = "2099-01-01";
     let a = call(
         &shared,
         "list_meetings",
@@ -944,7 +948,7 @@ fn tool_output_carries_no_keep_local_metadata() {
     let b = call(
         &shared,
         "list_meetings",
-        &json!({"since": "2026-11-01"}),
+        &json!({"since": EMPTY_WINDOW_SINCE}),
         None,
     )
     .unwrap();
@@ -959,7 +963,7 @@ fn tool_output_carries_no_keep_local_metadata() {
     let b = call(
         &shared,
         "search_passages",
-        &json!({"query": "budget", "since": "2026-11-01"}),
+        &json!({"query": "budget", "since": EMPTY_WINDOW_SINCE}),
         None,
     )
     .unwrap();
