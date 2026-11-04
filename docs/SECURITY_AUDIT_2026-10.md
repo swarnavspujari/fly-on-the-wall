@@ -90,6 +90,7 @@ The second pass followed staff-engineer and SOC 2 (Security, Confidentiality and
   - A disk-encryption check with a warning banner.
 - **Dependencies:**
   - zip 9.0.5 for the app's own extraction, hardened against path, symlink, permission and size tricks.
+  - Follow-up (2026-11): tauri-plugin-updater 2.14.1 moved to zip 9, so its own zip 4 copy (RUSTSEC-2026-0367/0368/0369/0429) is gone and zip 9.3.0 is the only zip in the tree.
   - whisper.cpp v1.9.5 (CVE-2026-110810), CI-built on all platforms and published as prereleases.
   - ffmpeg n8.1.3, with every pin re-hashed and download-tested.
 - **Live tests:** `src-tauri/tests/anthropic_live.rs` checks every Claude 5.5 request shape with the fallback switched off. Run it with your own key.
@@ -102,7 +103,7 @@ The second pass followed staff-engineer and SOC 2 (Security, Confidentiality and
 | Rulesets for `main` and `v*` tags; secret scanning + push protection; private vulnerability reporting | GitHub settings | Repo owner |
 | Windows Authenticode signing | The owner chose to skip it for now (it costs about $10/month on Azure; SignPath Foundation is free for OSS). Updates stay minisign-verified. | Repo owner (later) |
 | Run the live Claude 5.5 test once with a real key | Needs the owner's API key | Repo owner |
-| quick-xml (build-time only) | Waiting on upstream. (The updater's own zip 4 copy, RUSTSEC-2026-0367/8/9, is gone since tauri-plugin-updater 2.14.1 moved to zip 9.) | Upstream |
+| quick-xml (build-time only) | Waiting on upstream | Upstream |
 | Screen-recording videos aren't covered by audio retention; the WebView2 profile isn't wiped by delete-all; the FileVault check hasn't run on a real Mac | Small follow-ups | Code |
 
 ## Verified good practices
