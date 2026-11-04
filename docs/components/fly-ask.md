@@ -1,6 +1,6 @@
 # The Ask harness (`fly-ask`)
 
-> Layer: crate. Added by spec v2.5 PR 3.3 (up to date with main `0c7842a`). The streaming Ask UI that renders its sentences, sources, frames and proposals is PR 3.4. Spec v2.5 row 3.7 added the `enhance` module: the same checkers applied to Enhance (see "Enhance, checked" below).
+> Layer: crate. Added by spec v2.5 PR 3.3 (up to date with main `efcad4b9`). The streaming Ask UI that renders its sentences, sources, frames and proposals is PR 3.4. Spec v2.5 row 3.7 added the `enhance` module: the same checkers applied to Enhance (see "Enhance, checked" below).
 
 ## Purpose
 Turns a question into an answer the user can trust because code, not the model, checks it (spec §4.2, §4.2a). One `ask()` call:
