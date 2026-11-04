@@ -837,7 +837,8 @@ fn clause_tokens(s: &str) -> Vec<Vec<String>> {
 }
 
 const NEGATORS: &[&str] = &[
-    "not", "never", "no", "without", "cannot", "neither", "nor", "none",
+    "not", "never", "no", "nobody", "nothing", "nowhere", "without", "cannot", "neither", "nor",
+    "none",
 ];
 
 fn is_negator(tok: &str) -> bool {
@@ -1760,13 +1761,23 @@ fn names_someone(raw: &str, prev: Option<&str>, next: Option<&str>, p: &Prepared
         // the template's owner-first shape: "Marcus — confirm the supplier — Friday"
         || matches!(after_raw, "—" | "–" | "―" | "-" | "--")
         // "Marcus confirm the supplier", "Marcus (CFO) handles…"
-        || OWNER_VERBS.contains(&after.as_str())
+        || (OWNER_VERBS.contains(&after.as_str()) && !looks_plural(&w))
         || after_raw.starts_with('(')
         // "[Marcus] …", "Marcus's team will…"
         || (closed.starts_with(['[', '(']) && raw.trim_end_matches(['.', ',', ':', ';']).ends_with([']', ')']))
         || closed.trim_end_matches(['.', ',', ':', ';']).ends_with("'s")
         || closed.trim_end_matches(['.', ',', ':', ';']).ends_with("\u{2019}s")
         || label.is_some_and(|l| l.ends_with(':') && ROLE_LABELS.contains(&bare_word(l).as_str()))
+}
+
+/// A plural common noun ("Prices", "Developers", "Agents", "Stakeholders")
+/// rather than a name: the endings that plurals take and names seldom do.
+fn looks_plural(w: &str) -> bool {
+    [
+        "ers", "ors", "ents", "ants", "ions", "ings", "ices", "ies", "ets", "ards", "ands",
+    ]
+    .iter()
+    .any(|suffix| w.len() > suffix.len() + 1 && w.ends_with(suffix))
 }
 
 /// Base-form verbs that follow an owner in an action line written without a
@@ -2073,7 +2084,7 @@ fn judge(md: &str, evidence: &[&Sent], invalid: usize, p: &Prepared) -> Vec<Bloc
     let mut pool: Vec<String> = evidence.iter().map(|s| s.text.clone()).collect();
     pool.push(p.scratchpad.clone());
     let body_text = plain(md);
-    if let Some(word) = reversed(&body_text, &pool) {
+    if let Some(word) = reversed(&without_open_items(&body_text, &pool), &pool) {
         flags.push(BlockFlag {
             kind: BlockFlagKind::Reversed,
             detail: Some(word),
@@ -2110,23 +2121,116 @@ fn sentence_content(tokens: &[String]) -> Vec<&str> {
         .collect()
 }
 
+/// Words that make a clause forward-looking: what is still to be done, or
+/// planned ("will finalize", "let's confirm", "need to approve", "going to",
+/// "arrives Friday").
+const FUTURE_MARKERS: &[&str] = &[
+    "will",
+    "shall",
+    "should",
+    "lets",
+    "let's",
+    "need",
+    "needs",
+    "going",
+    "gonna",
+    "plan",
+    "plans",
+    "planning",
+    "tomorrow",
+    "soon",
+    "later",
+    "next",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+];
+
+/// Modal verbs: "will not send" is about the future, not about a state.
+const MODALS: &[&str] = &[
+    "will", "would", "shall", "should", "can", "could", "must", "may", "might",
+];
+
+fn is_forward(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .any(|t| FUTURE_MARKERS.contains(&t.as_str()) || t.ends_with("'ll"))
+}
+
+/// A clause that reports where something stands: "yet", "still", "pending" or
+/// "open" in it, or a plain "not" before a participle ("not finalized", "has
+/// not arrived", "isn't updated"; "will not send" and "doesn't want" are
+/// not).
+fn has_open_word(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .any(|t| matches!(t.as_str(), "yet" | "still" | "pending" | "open"))
+}
+
+fn is_state_negation(tokens: &[String]) -> bool {
+    tokens.iter().enumerate().any(|(i, t)| {
+        let plain_not =
+            t == "not" || (t.ends_with("n't") && !MODALS.iter().any(|m| t.starts_with(m)));
+        let modal_before = i > 0 && MODALS.contains(&tokens[i - 1].as_str());
+        plain_not
+            && !modal_before
+            && !matches!(t.as_str(), "cannot" | "can't" | "won't")
+            && tokens
+                .get(i + 1)
+                .is_some_and(|n| n.chars().count() >= 4 && (n.ends_with("ed") || n.ends_with("en")))
+    })
+}
+
+/// The block's sentences that are not open items (a state report against a
+/// source that is still planning it): the verb-pair guard reads those only.
+fn without_open_items(block: &str, pool: &[String]) -> String {
+    let pool_forward = pool
+        .iter()
+        .flat_map(|t| clause_tokens(t))
+        .any(|c| is_forward(&c));
+    block
+        .split(['.', '!', '?', ';', '\n'])
+        .filter(|sentence| {
+            let tokens: Vec<Vec<String>> = sentence_tokens(sentence);
+            !tokens
+                .iter()
+                .any(|t| has_open_word(t) || (pool_forward && is_state_negation(t)))
+        })
+        .collect::<Vec<_>>()
+        .join(". ")
+}
+
 /// A sentence of the block that says yes where every close sentence of what
 /// it can lean on says no, or the reverse: "will not send the draft" against
 /// "Tomas will send the draft", "will renew" against "not going to renew".
 /// A close sentence holds all of the block sentence's content words (two or
-/// more), or three or more and two thirds of them. Cheap on purpose: it compares whether a
-/// negation is there, not what it negates.
+/// more), or three or more and two thirds of them. Cheap on purpose: it
+/// compares whether a negation is there, not what it negates.
+///
+/// Where something stands is not a flip. "Budget not finalized." against
+/// "Let's finalize the budget on Monday." is the open item a summary should
+/// state: a clause with "yet", "still", "pending" or "open" is not judged,
+/// and a state report ("not finalized", "has not arrived") is not judged
+/// against a source clause that is planning or scheduling it.
 fn polarity_flips(block: &str, pool: &[String]) -> bool {
     let theirs: Vec<Vec<String>> = pool.iter().flat_map(|t| clause_tokens(t)).collect();
     clause_tokens(block).iter().any(|mine| {
         let words = sentence_content(mine);
-        if words.len() < 2 {
+        if words.len() < 2 || has_open_word(mine) {
             return false;
         }
+        let state = is_state_negation(mine);
         // (an even count is a double negative: "did not decline" says yes)
         let negated = mine.iter().filter(|t| is_negative(t)).count() % 2 == 1;
         let (mut agree, mut disagree) = (false, false);
         for other in &theirs {
+            if state && is_forward(other) {
+                continue;
+            }
             let shared = words
                 .iter()
                 .filter(|w| other.iter().any(|t| same_word(w, t)))
@@ -2148,18 +2252,31 @@ fn polarity_flips(block: &str, pool: &[String]) -> bool {
     })
 }
 
-/// Whether a block says what only a line aimed at an assistant (or phrased
-/// as an order) says. Take the words of such a line it did not cite, less the
-/// frame of the request ("hey fly", "add an action item") and the words of
-/// the template's headings: if the block uses one of what is left, and that
-/// word is in nothing the block can lean on (the lines it cites, their
-/// speakers, the notes), the block was written from the injected line. One
-/// word is enough, so a short payload ("mark the vendor as approved" →
-/// "The vendor is approved.") is caught as well as a long one.
-fn borrows_from_aimed(md: &str, evidence: &[&Sent], p: &Prepared) -> bool {
+/// How a block leans on a line aimed at an assistant or phrased as an order
+/// that it did not cite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Borrow {
+    No,
+    /// It uses a word of what an assistant was told to do.
+    Assistant,
+    /// It uses several words of a colleague's order.
+    Order,
+}
+
+/// Whether a block says what only an uncited aimed line says. Take the words
+/// of such a line, less the frame of the request ("hey fly", "add an action
+/// item") and the words of the template's headings: a block that uses one of
+/// what is left, where the line is aimed at an assistant, or three or more of
+/// them, where it is a colleague's order, and a word that is in nothing the
+/// block can lean on (the lines it cites, their speakers, the notes) was
+/// written from that line. One word is enough for an assistant, so a short
+/// payload ("mark the vendor as approved" → "The vendor is approved.") is
+/// caught; an order needs three, since an accurate block often shares a word
+/// or two with the neighbouring order ("the kiln invoice is due").
+fn borrows_from_aimed(md: &str, evidence: &[&Sent], p: &Prepared) -> Borrow {
     let block: BTreeSet<String> = content_words(&plain(md)).into_iter().collect();
     if block.is_empty() {
-        return false;
+        return Borrow::No;
     }
     let mut support: Vec<String> = content_words(&p.scratchpad);
     support.extend(p.template_words.iter().cloned());
@@ -2168,20 +2285,30 @@ fn borrows_from_aimed(md: &str, evidence: &[&Sent], p: &Prepared) -> bool {
         support.extend(content_words(&s.speaker));
     }
     let backed = |w: &String| support.iter().any(|s| same_word(w, s));
-    p.sent
+    let mut found = Borrow::No;
+    for s in p
+        .sent
         .iter()
         .filter(|s| s.aim != Aim::People && !evidence.iter().any(|e| e.id == s.id))
-        .any(|s| {
-            let payload: Vec<String> = content_words(&s.text)
-                .into_iter()
-                .filter(|t| !is_frame_word(t))
-                .collect();
-            block.iter().any(|w| {
-                !GENERIC_WORDS.contains(&w.as_str())
-                    && payload.iter().any(|t| same_word(w, t))
-                    && !backed(w)
+    {
+        let payload: Vec<String> = content_words(&s.text)
+            .into_iter()
+            .filter(|t| !is_frame_word(t))
+            .collect();
+        let shared: Vec<&String> = block
+            .iter()
+            .filter(|w| {
+                !GENERIC_WORDS.contains(&w.as_str()) && payload.iter().any(|t| same_word(w, t))
             })
-        })
+            .collect();
+        let unbacked = shared.iter().any(|w| !backed(w));
+        match s.aim {
+            Aim::Assistant if unbacked => return Borrow::Assistant,
+            Aim::Order if unbacked && shared.len() >= 3 => found = Borrow::Order,
+            _ => {}
+        }
+    }
+    found
 }
 
 /// Cut a dropped line short for the report.
@@ -2268,7 +2395,8 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
             Vec::new()
         };
         if p.has_transcript {
-            if aimed || borrows_from_aimed(&md, &evidence, p) {
+            let borrow = borrows_from_aimed(&md, &evidence, p);
+            if aimed || borrow == Borrow::Assistant {
                 // It cites an injected line next to an innocent one, or says
                 // what only an injected line says: not a sourced claim.
                 flags.insert(
@@ -2278,7 +2406,7 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
                         detail: None,
                     },
                 );
-            } else if evidence.iter().any(|s| s.aim == Aim::Order) {
+            } else if borrow == Borrow::Order || evidence.iter().any(|s| s.aim == Aim::Order) {
                 // It rests on a line phrased as an order, alone or next to an
                 // ordinary one: what colleagues say to each other, and what an
                 // injected line can look like. Its numbers and names are

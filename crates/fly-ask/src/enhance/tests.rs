@@ -1804,3 +1804,156 @@ fn a_generic_word_is_not_a_borrowing_but_padding_cannot_exempt_a_payload_word() 
         .iter()
         .all(|(k, _)| *k != BlockFlagKind::AimedAtAi));
 }
+
+// ---- review round 3: false warnings on ordinary summaries --------------------
+
+/// Whether `block` is flagged as the opposite of the one line `source`.
+fn flipped_against(source: &str, block: &str) -> bool {
+    let t = transcript(vec![seg(0, "spk_0", source)]);
+    let p = prep(&note(""), Some(&t), 1_000_000);
+    kinds(&flags(block, &[0], &p)).contains(&BlockFlagKind::Reversed)
+}
+
+#[test]
+fn nobody_nothing_and_no_one_are_negations_too() {
+    // The same thing said two ways is not a flip.
+    for (source, block) in [
+        (
+            "The launch is not blocked.",
+            "Nothing is blocking the launch.",
+        ),
+        (
+            "The invoice is not signed.",
+            "Nobody has signed the invoice.",
+        ),
+        (
+            "No one confirmed the supplier.",
+            "Nobody confirmed the supplier.",
+        ),
+        (
+            "Nobody confirmed the supplier.",
+            "No one confirmed the supplier.",
+        ),
+        (
+            "Nobody objected to the plan.",
+            "No one objected to the plan.",
+        ),
+        (
+            "Nobody is available on Monday.",
+            "Nobody is available on Monday.",
+        ),
+    ] {
+        assert!(!flipped_against(source, block), "{source} / {block}");
+    }
+    // And a real one still is.
+    assert!(flipped_against(
+        "Nobody confirmed the supplier.",
+        "Tomas confirmed the supplier."
+    ));
+    assert!(flipped_against(
+        "Tomas confirmed the supplier.",
+        "Nobody confirmed the supplier."
+    ));
+}
+
+#[test]
+fn an_open_item_against_a_plan_is_not_a_flip() {
+    // A summary should say what is still open, whatever the source plans.
+    for (source, block) in [
+        (
+            "Let's finalize the budget on Monday.",
+            "Budget not finalized.",
+        ),
+        (
+            "We will confirm the supplier on Friday.",
+            "The supplier is not confirmed yet.",
+        ),
+        (
+            "We still need to approve the quote.",
+            "The quote is not approved yet.",
+        ),
+        (
+            "I will update the schedule tomorrow.",
+            "The schedule is not updated.",
+        ),
+        ("The glass arrives Friday.", "The glass has not arrived."),
+        (
+            "We are going to renew the contract.",
+            "The contract is not renewed.",
+        ),
+        (
+            "Pending the board, we plan to sign.",
+            "The lease is pending.",
+        ),
+    ] {
+        assert!(!flipped_against(source, block), "{source} / {block}");
+    }
+    // A state against a state, and a modal against a modal, still are.
+    assert!(flipped_against(
+        "The supplier is confirmed.",
+        "The supplier is not confirmed."
+    ));
+    assert!(flipped_against(
+        "Tomas will send the draft by Friday.",
+        "Tomas will not send the draft by Friday."
+    ));
+}
+
+#[test]
+fn an_accurate_block_is_not_aimed_at_an_ai_because_a_colleague_gave_an_order() {
+    let t = transcript(vec![
+        seg(0, "spk_1", "Pay the kiln invoice by Friday."),
+        seg(
+            1,
+            "spk_0",
+            "The kiln needs a thermocouple before the next firing.",
+        ),
+        seg(2, "spk_0", "The glass order is late."),
+    ]);
+    let p = prep(&note(""), Some(&t), 1_000_000);
+    assert_eq!(p.sent[0].aim, Aim::Order);
+    // The review's block, citing one of two neighbouring lines: it shares a
+    // word or two with the order, which is not a borrowing.
+    let f = flags(
+        "The kiln needs a thermocouple; the kiln invoice is due.",
+        &[1],
+        &p,
+    );
+    assert!(f.is_empty(), "{f:?}");
+    // Three of the order's words, none of them in what it cites, is one: and
+    // it is an instruction to check, not "aimed at an AI assistant".
+    let f = flags("The kiln invoice is due Friday.", &[2], &p);
+    let k = kinds(&f);
+    assert!(k.contains(&BlockFlagKind::Instruction), "{f:?}");
+    assert!(!k.contains(&BlockFlagKind::AimedAtAi), "{f:?}");
+}
+
+#[test]
+fn a_plural_common_noun_that_opens_a_line_is_not_an_owner() {
+    let (n, t) = (note(""), small());
+    let p = prep(&n, Some(&t), 1_000_000);
+    for md in [
+        "Prices update monthly.",
+        "Developers review the supplier by Friday.",
+        "Agents handle the supplier.",
+        "Stakeholders approve the supplier.",
+        "Vendors confirm the supplier.",
+    ] {
+        let f = flags(md, &[2], &p);
+        assert!(
+            f.iter().all(|(k, _)| *k != BlockFlagKind::Name),
+            "{md}: {f:?}"
+        );
+    }
+    // A name that ends in -s is still one.
+    for md in [
+        "- Marcus confirm the supplier",
+        "- Thomas review the supplier",
+    ] {
+        let f = flags(md, &[2], &p);
+        assert!(
+            f.iter().any(|(k, _)| *k == BlockFlagKind::Name),
+            "{md}: {f:?}"
+        );
+    }
+}
