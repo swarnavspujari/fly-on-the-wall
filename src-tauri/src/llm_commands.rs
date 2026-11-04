@@ -666,11 +666,16 @@ pub fn build_provider_with_reach(
             .filter(|v| !v.is_empty())
     };
     let provider = get("llm.provider").unwrap_or_else(|| "ollama".to_string());
-    let default_model = PROVIDERS
-        .iter()
-        .find(|(id, _, _)| *id == provider)
-        .map(|(_, m, _)| m.to_string())
-        .unwrap_or_default();
+    let default_model = if provider == "ollama" {
+        // Pinned per install (local_models.rs), not a constant.
+        crate::local_models::effective_default(&storage)
+    } else {
+        PROVIDERS
+            .iter()
+            .find(|(id, _, _)| *id == provider)
+            .map(|(_, m, _)| m.to_string())
+            .unwrap_or_default()
+    };
     let model = get(&format!("llm.{provider}.model")).unwrap_or(default_model);
     let base_url = get(&format!("llm.{provider}.base_url"));
     // Re-check at use: a value stored before validation existed (or written
@@ -1697,7 +1702,12 @@ pub fn get_llm_settings(state: State<'_, AppState>) -> CmdResult<LlmSettings> {
         .iter()
         .map(|(id, default_model, is_local)| LlmProviderInfo {
             id: id.to_string(),
-            default_model: default_model.to_string(),
+            // The local default is pinned per install (local_models.rs).
+            default_model: if *id == "ollama" {
+                crate::local_models::effective_default(&storage)
+            } else {
+                default_model.to_string()
+            },
             is_local: *is_local,
             has_key: secret_key_for(id)
                 .and_then(|k| state.secrets.get(k).ok().flatten())

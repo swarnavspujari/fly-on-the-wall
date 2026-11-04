@@ -57,6 +57,30 @@ fn installed_exe(data_dir: &Path) -> Option<PathBuf> {
         .or_else(|| models::find_on_path(&["ollama"]))
 }
 
+/// The running server's version (`/api/version`), None when nothing answers
+/// or the reply isn't readable. Same 1.5 s patience as [`server_alive`].
+pub(crate) async fn server_version(root: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Version {
+        version: String,
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+        .ok()?;
+    let v: Version = client
+        .get(format!("{root}/api/version"))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    Some(v.version)
+}
+
 pub(crate) async fn server_alive(root: &str) -> bool {
     let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_millis(1500))
@@ -233,7 +257,7 @@ async fn list_models(root: &str) -> Result<Vec<OllamaModel>, String> {
 
 /// The Ollama model Ask and Enhance use when Ollama is the saved provider
 /// (`llm.ollama.model`, else the provider default); None for a cloud one.
-fn selected_model(state: &AppState) -> Option<String> {
+pub(crate) fn selected_model(state: &AppState) -> Option<String> {
     let storage = state.storage.lock().unwrap();
     let get = |k: &str| {
         storage
@@ -245,12 +269,8 @@ fn selected_model(state: &AppState) -> Option<String> {
     if get("llm.provider").as_deref().unwrap_or("ollama") != "ollama" {
         return None;
     }
-    get("llm.ollama.model").or_else(|| {
-        crate::llm_commands::PROVIDERS
-            .iter()
-            .find(|(id, _, _)| *id == "ollama")
-            .map(|(_, m, _)| m.to_string())
-    })
+    // The user's pick, else the default pinned for this install.
+    get("llm.ollama.model").or_else(|| Some(crate::local_models::effective_default(&storage)))
 }
 
 /// "Used for …" for an installed model: the saved Ask/Enhance model
@@ -270,7 +290,7 @@ fn used_for(name: &str, selected: Option<&str>) -> Option<String> {
 /// `llama3.1:latest` (Ollama reports the tagged form; settings usually store
 /// the bare form). Distinct tags of the same family (`qwen3.5:4b` vs
 /// `qwen3.5:9b`) do NOT match unless one side is bare.
-fn same_model(a: &str, b: &str) -> bool {
+pub(crate) fn same_model(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
