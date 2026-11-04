@@ -101,16 +101,20 @@ const TOOLS: &[Artifact] = &[
         probe_rel: "bin/ffmpeg/ffmpeg-n8.1.3-9-g29e619e767-win64-gpl-shared-8.1/bin/ffmpeg.exe",
     },
     // Local LLM runtime for the "ollama" provider (Enhance / Ask / polish).
-    // Strictly opt-in from Settings — 1.5 GB (bundles CUDA runners); the app
+    // Strictly opt-in from Settings — 1.6 GB (bundles CUDA runners); the app
     // manages `ollama serve` itself (see ollama.rs). The zip's root holds
     // ollama.exe + lib/ollama/ (verified against the release's central
-    // directory), digest from the GitHub asset like the pins above.
+    // directory, v0.31.2 and v0.40.13 alike), digest from the GitHub asset
+    // like the pins above. v0.40.13 since 2026-11-02 (was v0.31.2): the Ask
+    // bench measured every model on it (docs/ASK-MODEL-BENCH.md). The
+    // layout isn't versioned, so only NEW installs get it; an existing
+    // managed install keeps the binary it has.
     Artifact {
         id: "ollama-bin",
-        display: "Ollama (local AI runtime, v0.31.2)",
-        url: "https://github.com/ollama/ollama/releases/download/v0.31.2/ollama-windows-amd64.zip",
-        sha256: "6988b58d2223ae3f9d5766b46b0be614dec36524b80317159718b5adf3006f3b",
-        bytes: 1_502_730_186,
+        display: "Ollama (local AI runtime, v0.40.13)",
+        url: "https://github.com/ollama/ollama/releases/download/v0.40.13/ollama-windows-amd64.zip",
+        sha256: "7afa38624fa62ee5d8293422d0ab084c1bb4603134c7f4dafce11a033b57cc19",
+        bytes: 1_601_969_847,
         kind: ArtifactKind::Archive,
         dest_rel: "bin/ollama",
         probe_rel: "bin/ollama/ollama.exe",
@@ -188,7 +192,10 @@ const TOOLS: &[Artifact] = &[
     // Apple Silicon smoke machine — `ollama serve` reports inference
     // compute library=Metal (Apple M3 Pro), so pulled models run on the
     // GPU. Digest matches the GitHub asset digest (re-hashed locally
-    // 2026-07-21). Tarball root holds `ollama` + its dylibs.
+    // 2026-07-21). Tarball root holds `ollama` + its dylibs. Still v0.31.2
+    // while Windows is on v0.40.13: from v0.40.0 Apple Silicon runs models
+    // on MLX by default, which nobody has smoke-tested here yet (release
+    // asset: 186,689,993 bytes, sha256 bae29252232b9e1358cf5801a7d65a07442af18fb5467cb68c7fc3711f59c511).
     Artifact {
         id: "ollama-bin",
         display: "Ollama (local AI runtime, v0.31.2)",

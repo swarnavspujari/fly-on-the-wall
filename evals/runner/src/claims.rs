@@ -318,8 +318,13 @@ pub fn numbers(text: &str) -> BTreeSet<u64> {
     while i < ws.len() {
         let w = ws[i].as_str();
         if let Some(v) = digit_value(w) {
-            // "Speaker 2" is a label (checked by `speaker_labels`), not a count.
-            if i > 0 && ws[i - 1] == "speaker" && w.bytes().all(|b| b.is_ascii_digit()) {
+            // "Speaker 2" is a label (checked by `speaker_labels`), not a count;
+            // but not across a clause break ("the speaker. 2 risks").
+            if i > 0
+                && ws[i - 1] == "speaker"
+                && !ends[i - 1]
+                && w.bytes().all(|b| b.is_ascii_digit())
+            {
                 i += 1;
                 continue;
             }
@@ -426,11 +431,11 @@ pub fn numbers(text: &str) -> BTreeSet<u64> {
 /// The app's labels for unnamed voices that a text mentions ("Speaker 2",
 /// lowercase). Like a name, a label must belong to a cited line.
 fn speaker_labels(text: &str) -> BTreeSet<String> {
-    words(text)
+    clause_words(text)
         .windows(2)
-        .filter(|p| p[0].eq_ignore_ascii_case("speaker"))
+        .filter(|p| p[0].0.eq_ignore_ascii_case("speaker") && !p[0].1)
         .filter_map(|p| {
-            let n = p[1].strip_suffix("'s").unwrap_or(&p[1]);
+            let n = p[1].0.strip_suffix("'s").unwrap_or(&p[1].0);
             (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then(|| format!("speaker {n}"))
         })
         .collect()
@@ -730,6 +735,50 @@ mod tests {
             title: "",
         }];
         assert!(unsupported("Speaker 2 will handle the export.", &said).is_empty());
+    }
+
+    #[test]
+    fn a_clause_break_ends_a_speaker_label() {
+        // "2" after a full stop is a count, not the label of the word before.
+        assert_eq!(n("See the speaker. 2 risks stood out."), vec![2.0]);
+        assert_eq!(n("See the speaker, 2 risks stood out."), vec![2.0]);
+        assert!(numbers("See Speaker 2 on risks.").is_empty());
+        // Cited to a Speaker 2 line that says nothing about 2, the count is
+        // checked (and found missing), not skipped as that line's label.
+        let from_two = [Source {
+            text: "A few things stood out.",
+            speaker: "Speaker 2",
+            title: "",
+        }];
+        assert_eq!(
+            unsupported("See the speaker. 2 risks stood out.", &from_two),
+            vec!["number 2"]
+        );
+        // And it is no mention of the label either: cited to a Speaker 1
+        // line that does say 2, nothing is flagged.
+        let from_one = [Source {
+            text: "There were 2 risks, and they stood out.",
+            speaker: "Speaker 1",
+            title: "",
+        }];
+        assert!(unsupported("See the speaker. 2 risks stood out.", &from_one).is_empty());
+    }
+
+    #[test]
+    fn a_person_named_in_the_title_is_supported() {
+        // The name rule can't tell a person from a project, so a title like
+        // this vouches for Priya although Dana spoke the line. Approved
+        // behaviour (see the README), pinned here.
+        let src = [Source {
+            text: "I'll get the draft out on Friday.",
+            speaker: "Dana",
+            title: "Dana / Priya 1:1",
+        }];
+        assert!(unsupported("Priya will ship the report.", &src).is_empty());
+        assert_eq!(
+            unsupported("Marlow will ship the report.", &src),
+            vec!["name marlow"]
+        );
     }
 
     #[test]

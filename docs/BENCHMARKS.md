@@ -320,6 +320,8 @@ and `crates/fly-llm/src/openai_compat.rs` against docs.ollama.com:
 4. **Pinned runtime `v0.31.2` (Windows artifact) is current enough**: native `think`
    (≥0.9) and `format` structured outputs (≥0.5) both predate it. The user-run server
    probed here is 0.32.0. No action.
+   *(Superseded 2026-11-03: the Windows pin is now `v0.40.13`; see
+   [ASK-MODEL-BENCH.md](ASK-MODEL-BENCH.md) §6.)*
 5. **Endpoints match the docs**: `/api/tags` (+`size` now read), `/api/pull` streaming
    shape, `/api/delete` (DELETE + `{"model"}` — verified live, 200/404 handling correct),
    `/api/version` liveness. `normalize_root`'s `/v1`-stripping matches what the native
@@ -432,7 +434,16 @@ binary was recovered with a distinct `-C metadata` fingerprint), clippy `-D warn
 clean, rustfmt clean, `tsc` clean, live num_ctx marker test green through the shipped
 provider. No UI, settings, or provider-selection changes in this release.
 
-## 12. Reproducing
+## 12. Ask on the new harness (2026-11)
+
+§§10–11 measured the *old* Ask (whole transcript, no tools). The retrieval harness
+(`crates/fly-ask`) was benchmarked on real local models in
+[ASK-MODEL-BENCH.md](ASK-MODEL-BENCH.md): quality against the `ask_contract` tier floors,
+latency with the model's own prefill / decode counters, and the Ollama issues re-tested.
+It also found that every retrieval Ask reloaded the model (a per-request `num_ctx`),
+which the §10 numbers don't include.
+
+## 13. Reproducing
 
 ```
 # 1) reference outputs (needs the Anthropic key in env or the app keychain)
@@ -524,7 +535,7 @@ numbers; these tables preserve the starting point the phases below measured agai
 | `teams-3spk-contracts` | **4 / 3** | 11.5 % | 2.0 % | 3.6 % | 6.0 % | 1.4 % |
 
 Both mixed-path fixtures over-split: one phantom cluster each survives the dust filter
-(66 s of Swarnav split off in legislation; a 36 s phantom in contracts), and the contracts
+(66 s of the maintainer split off in legislation; a 36 s phantom in contracts), and the contracts
 cluster keys (`spk_0/2/6/8` surviving) show the raw clustering produced ≥ 9 clusters before
 the dust filter discarded six. Over-splitting is the dominant structural failure; the dust
 filter is load-bearing.

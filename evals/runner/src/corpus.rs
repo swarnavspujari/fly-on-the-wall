@@ -665,17 +665,21 @@ impl Db {
         let mut i = 0;
         let mut last = 0;
         while i + 36 <= b.len() {
-            let cand = &text[i..i + 36];
-            if is_uuid(cand)
-                && (i == 0 || !b[i - 1].is_ascii_alphanumeric())
-                && b.get(i + 36).is_none_or(|c| !c.is_ascii_alphanumeric())
-            {
-                if let Some(r) = self.reverse.get(cand) {
-                    out.push_str(&text[last..i]);
-                    out.push_str(r);
-                    i += 36;
-                    last = i;
-                    continue;
+            // `get`: a 36-byte window can end inside a multibyte character
+            // (an em dash in a model's reply); an id is ASCII, so a window
+            // that isn't on character boundaries holds none.
+            if let Some(cand) = text.get(i..i + 36) {
+                if is_uuid(cand)
+                    && (i == 0 || !b[i - 1].is_ascii_alphanumeric())
+                    && b.get(i + 36).is_none_or(|c| !c.is_ascii_alphanumeric())
+                {
+                    if let Some(r) = self.reverse.get(cand) {
+                        out.push_str(&text[last..i]);
+                        out.push_str(r);
+                        i += 36;
+                        last = i;
+                        continue;
+                    }
                 }
             }
             i += 1;
@@ -972,6 +976,18 @@ mod tests {
             db.normalize_ids(&format!("{sub} {}", db.meeting_ids["m05"])),
             "[seg:m05-01] m05-02 xm05-01 m05-999 {meeting:m05}"
         );
+        // Multibyte text (a model's em dash or curly quote) doesn't panic,
+        // before or after an id, and ids in it still map back.
+        let wide = format!(
+            "— “quoted” [seg:{}] — ünïcode — {} …",
+            db.seg_ids["m05-01"], db.meeting_ids["m05"]
+        );
+        assert_eq!(
+            db.normalize_ids(&wide),
+            "— “quoted” [seg:m05-01] — ünïcode — {meeting:m05} …"
+        );
+        let dashes = "—".repeat(40);
+        assert_eq!(db.normalize_ids(&dashes), dashes);
         // A settings write shows up in the snapshot and moves the mark;
         // reads don't move it.
         let before = db.snapshot().unwrap();
