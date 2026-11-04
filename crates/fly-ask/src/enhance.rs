@@ -32,13 +32,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fly_core::enhance::{self, EnhancePrompt, ParsedEnhance, RawEnhanceBlock, Shown};
 use fly_core::prompt_profile::PromptProfile;
-use fly_core::{BlockFlag, BlockFlagKind, Note, NoteBlock, Template, Transcript};
+use fly_core::{BlockFlag, BlockFlagKind, Note, NoteBlock, PartialRead, Template, Transcript};
 use fly_llm::{ChatMessage, ChatRequest, LLMProvider, ThinkingMode};
 use serde::{Deserialize, Serialize};
 
 use crate::claims::{self, ClaimKind, Source};
 use crate::prefetch::salient_terms;
-use crate::proposals::addressed_to_assistant;
+use crate::proposals::{aim_of, Aim};
 use crate::text;
 
 /// Share of the transcript budget kept for evenly spaced excerpts when the
@@ -59,16 +59,10 @@ const MAX_TOPIC_TERMS: usize = 120;
 /// to the user), and how much of each.
 const DROPPED_KEPT: usize = 5;
 const DROPPED_CHARS: usize = 200;
-/// A `user` block needs this share of its content words in the user's notes.
-const NOTES_OVERLAP: f64 = 0.5;
-
-// ---------------------------------------------------------------------------
-// What the model reads
-// ---------------------------------------------------------------------------
-
 /// What one transcript line costs the prompt, and what the checks need.
 struct Line {
     cost: usize,
+    /// Read as addressed to an AI assistant: never picked as a topic line.
     injected: bool,
 }
 
@@ -78,9 +72,14 @@ struct Sent {
     id: String,
     speaker: String,
     text: String,
-    /// Read as addressed to an AI: never evidence.
-    injected: bool,
+    /// How the line reads. [`Aim::Assistant`] is never evidence; an
+    /// [`Aim::Order`] is evidence a reader should check.
+    aim: Aim,
 }
+
+// ---------------------------------------------------------------------------
+// What the model reads
+// ---------------------------------------------------------------------------
 
 /// The prompt and everything [`check`] needs to judge the reply to it.
 #[derive(Debug, Clone)]
@@ -101,6 +100,9 @@ pub struct Prepared {
     /// notes and the template: a capitalized word outside it is not a word
     /// of this meeting.
     vocabulary: BTreeSet<String>,
+    /// Every word of the same data, whole (lowercase), for the closer match
+    /// a name needs: "Marcus" is not "March".
+    words: BTreeSet<String>,
     segments_total: usize,
     injected_shown: usize,
 }
@@ -136,7 +138,7 @@ fn lines_of(t: &Transcript) -> Vec<Line> {
         .iter()
         .map(|s| Line {
             cost: render_cost(&t.label_for(&s.speaker_key), &s.text),
-            injected: addressed_to_assistant(&s.text),
+            injected: aim_of(&s.text) == Aim::Assistant,
         })
         .collect()
 }
@@ -335,7 +337,8 @@ fn select(lines: &[Line], topics: Option<&Topics>, budget: usize) -> BTreeSet<us
     }
     if chosen.is_empty() {
         // Nothing fit (a line bigger than the budget): the shortest line, so
-        // the model reads something and the size check can say it is too big.
+        // the prompt is as small as it can be; `enhance` refuses to send it
+        // if it is still over the budget.
         if let Some((i, _)) = lines.iter().enumerate().min_by_key(|(_, l)| l.cost) {
             chosen.insert(i);
         }
@@ -414,6 +417,26 @@ fn vocabulary(note: &Note, t: Option<&Transcript>, template: &Template) -> BTree
     out
 }
 
+/// Every word of the meeting data, the notes and the template, whole.
+fn meeting_words(note: &Note, t: Option<&Transcript>, template: &Template) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut add = |text: &str| {
+        for w in text.split(|c: char| !c.is_alphabetic()) {
+            if w.chars().count() >= 2 {
+                out.insert(w.to_lowercase());
+            }
+        }
+    };
+    add(&note.title);
+    add(&note.scratchpad);
+    add(&template.name);
+    add(&template.structure_hint);
+    for s in t.map(|t| t.segments.as_slice()).unwrap_or_default() {
+        add(&s.text);
+    }
+    out
+}
+
 /// Words that start with a capital but don't start a sentence.
 fn mid_sentence_capitals(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -451,6 +474,7 @@ pub fn prepare(
         scratchpad: note.scratchpad.clone(),
         known_names: known_names(note, transcript),
         vocabulary: vocabulary(note, transcript, template),
+        words: meeting_words(note, transcript, template),
         segments_total: total,
         injected_shown: injected,
         prompt,
@@ -497,7 +521,7 @@ pub fn prepare(
                 id: s.id.clone(),
                 speaker: t.label_for(&s.speaker_key),
                 text: s.text.clone(),
-                injected: lines[pos].injected,
+                aim: aim_of(&s.text),
             }
         })
         .collect();
@@ -509,7 +533,7 @@ pub fn prepare(
             .map(String::as_str)
             .collect::<Vec<_>>()
     );
-    let injected = sent.iter().filter(|s| s.injected).count();
+    let injected = sent.iter().filter(|s| s.aim == Aim::Assistant).count();
     base(prompt, sent, t.segments.len(), injected)
 }
 
@@ -559,6 +583,9 @@ pub enum EnhanceError {
     Unusable,
     /// The model read less of the prompt than was sent.
     Truncated,
+    /// The notes and template alone are more than the model can read, so
+    /// there is no room left for the meeting: nothing was sent.
+    TooLong,
     /// Everything it wrote came from speech aimed at an AI.
     NothingLeft,
 }
@@ -571,8 +598,16 @@ impl EnhanceError {
             Self::Provider(_) => "provider",
             Self::Unusable => "unusable",
             Self::Truncated => "truncated",
+            Self::TooLong => "too_long",
             Self::NothingLeft => "nothing_left",
         }
+    }
+
+    /// The failures where a model that reads more at once would have
+    /// worked, so a hint to pick one is worth giving (unless the note is
+    /// Keep local, which only a local model may read).
+    pub fn wants_a_longer_context(&self) -> bool {
+        matches!(self, Self::Truncated | Self::TooLong)
     }
 }
 
@@ -587,8 +622,13 @@ impl std::fmt::Display for EnhanceError {
             Self::Truncated => f.write_str(
                 "your model couldn't take in this much of the meeting at once (it ran out of \
                  memory on a long prompt, so it would only have read the end), so nothing was \
-                 saved. Try a cloud model in Settings › Ask and Enhance, or close other apps \
-                 and try again.",
+                 saved. Close other apps and try again, or pick a model that reads more at once \
+                 in Settings › Ask and Enhance.",
+            ),
+            Self::TooLong => f.write_str(
+                "your notes are too long for this model to read along with the meeting, so \
+                 nothing was saved. Shorten the notes, or pick a model that reads more at once \
+                 in Settings › Ask and Enhance.",
             ),
             Self::NothingLeft => f.write_str(
                 "everything the AI wrote came from speech aimed at an assistant rather than at \
@@ -646,7 +686,7 @@ fn plain(markdown: &str) -> String {
 fn link_words(markdown: &str) -> BTreeSet<String> {
     markdown
         .split_whitespace()
-        .filter(|w| text::strip_links(w).1 > 0)
+        .filter(|w| text::strip_links_and_emails(w).1 > 0)
         .map(|w| {
             w.trim_matches(|c: char| {
                 matches!(
@@ -673,12 +713,142 @@ fn link_words(markdown: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// Words of a text, lowercase, letters and digits only ("Don't" is two).
+fn norm_words(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Words with their apostrophes kept ("didn't"), lowercase, one sentence
+/// at a time (a negation does not reach into the next sentence).
+fn sentence_tokens(s: &str) -> Vec<Vec<String>> {
+    s.split(['.', '!', '?', ';', '\n'])
+        .map(|sentence| {
+            sentence
+                .to_lowercase()
+                .replace(['\u{2019}', '\u{2018}'], "'")
+                .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+                .map(|w| w.trim_matches('\'').to_string())
+                .filter(|w| !w.is_empty())
+                .collect()
+        })
+        .filter(|t: &Vec<String>| !t.is_empty())
+        .collect()
+}
+
+const NEGATORS: &[&str] = &[
+    "not", "never", "no", "without", "cannot", "neither", "nor", "none",
+];
+
+fn is_negator(tok: &str) -> bool {
+    NEGATORS.contains(&tok) || tok.ends_with("n't")
+}
+
+/// Whether a text negates anything ("don't", "not", "never", "without").
+fn has_negation(s: &str) -> bool {
+    sentence_tokens(s).iter().flatten().any(|t| is_negator(t))
+}
+
+/// Same word, or one typo apart (a cleanup fixes "suplier"): five letters or
+/// more, one letter changed, added or dropped.
+fn close_word(a: &str, b: &str) -> bool {
+    if same_word(a, b) {
+        return true;
+    }
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len() < 5 || b.len() < 5 || a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    let skip = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let (ra, rb) = (&a[skip..], &b[skip..]);
+    match ra.len().cmp(&rb.len()) {
+        std::cmp::Ordering::Equal => ra[1..] == rb[1..],
+        std::cmp::Ordering::Greater => ra[1..] == rb[..],
+        std::cmp::Ordering::Less => ra[..] == rb[1..],
+    }
+}
+
+/// One line of the user's notes, ready to compare a restatement with.
+struct NoteLine {
+    /// Every word, lowercase.
+    words: Vec<String>,
+    /// The words that say what it is about.
+    content: Vec<String>,
+    negated: bool,
+}
+
+fn note_lines(scratchpad: &str) -> Vec<NoteLine> {
+    scratchpad
+        .lines()
+        .filter_map(|l| {
+            let plain = text::split_prefix(l).1;
+            let words = norm_words(plain);
+            (!words.is_empty()).then(|| NoteLine {
+                content: content_words(plain),
+                negated: has_negation(plain),
+                words,
+            })
+        })
+        .collect()
+}
+
+/// `needle` appears in `hay` as a run of consecutive words.
+fn contains_run(hay: &[String], needle: &[String]) -> bool {
+    !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Whether one line of a `user` block is the user's own: their words from
+/// one line of their notes (most of that line, so a fragment can't flip
+/// it: "do not delete the backups" is not "delete the backups"), or those
+/// words lightly reworded: nearly all its content words in one note line
+/// (a fifth may be new, none in a short line), covering most of that line,
+/// and not an order to an assistant. A line with no words (a rule, a bare bullet)
+/// says nothing.
+fn line_is_theirs(line: &str, notes: &[NoteLine]) -> bool {
+    let plain = text::split_prefix(line).1;
+    let words = norm_words(plain);
+    if words.is_empty() {
+        return true;
+    }
+    if notes
+        .iter()
+        .any(|n| words.len() * 10 >= n.words.len() * 7 && contains_run(&n.words, &words))
+    {
+        return true;
+    }
+    let mine = content_words(plain);
+    if mine.is_empty() || aim_of(plain) != Aim::People {
+        return false;
+    }
+    let negated = has_negation(plain);
+    notes.iter().any(|n| {
+        if n.content.is_empty() || n.negated != negated {
+            return false;
+        }
+        let found = mine
+            .iter()
+            .filter(|w| n.content.iter().any(|c| close_word(w, c)))
+            .count();
+        let covered = n
+            .content
+            .iter()
+            .filter(|c| mine.iter().any(|w| close_word(w, c)))
+            .count();
+        // New words: none in a short line, one in six to ten, and so on.
+        let new_words = mine.len() - found;
+        new_words <= (mine.len() - 1) / 5 && covered * 5 >= n.content.len() * 3
+    })
+}
+
 /// Whether a `user` block restates the user's own notes, which is what lets
 /// it show as their words. Everything it states must be in the notes (not
 /// the title, which an invite can set): every link, address and piece of
 /// HTML, as a whole word as written, and every number, date, quote and name.
-/// And at least half its content words must be theirs, so a block that
-/// borrows a few of their words around something new is not.
+/// And every line of it must be theirs ([`line_is_theirs`]) on its own: a
+/// block that repeats two of their lines and adds a third is not theirs.
 fn restates_notes(markdown: &str, p: &Prepared) -> bool {
     let theirs = link_words(&p.scratchpad);
     if link_words(markdown).iter().any(|w| !theirs.contains(w)) {
@@ -692,16 +862,590 @@ fn restates_notes(markdown: &str, p: &Prepared) -> bool {
     if !claims::unsupported(&claim_text(markdown, p), &[mine]).is_empty() {
         return false;
     }
-    let words = content_words(&plain(markdown));
-    if words.is_empty() {
+    let notes = note_lines(&p.scratchpad);
+    markdown.lines().all(|l| line_is_theirs(l, &notes))
+}
+
+/// Words that open a sentence, a bullet or a label in meeting notes without
+/// naming anyone: structure words, connectives, and the verbs and nouns a
+/// summary is made of. A capitalized word at the start of a line that is in
+/// none of the meeting's words and not here is taken for a person's name
+/// ("Marcus approved…", "Owner: Marcus."), so a name that no line holds
+/// cannot pass as sourced.
+const COMMON: &[&str] = &[
+    // structure and labels
+    "summary",
+    "overview",
+    "decision",
+    "decisions",
+    "action",
+    "actions",
+    "item",
+    "items",
+    "note",
+    "notes",
+    "next",
+    "step",
+    "steps",
+    "follow",
+    "followup",
+    "follow-up",
+    "followups",
+    "risk",
+    "risks",
+    "question",
+    "questions",
+    "open",
+    "topic",
+    "topics",
+    "discussion",
+    "background",
+    "context",
+    "attendee",
+    "attendees",
+    "agenda",
+    "key",
+    "takeaway",
+    "takeaways",
+    "highlights",
+    "status",
+    "update",
+    "updates",
+    "timeline",
+    "budget",
+    "owner",
+    "owners",
+    "assignee",
+    "due",
+    "deadline",
+    "date",
+    "dates",
+    "priority",
+    "blocker",
+    "blockers",
+    "issue",
+    "issues",
+    "outcome",
+    "outcomes",
+    "recap",
+    "details",
+    "detail",
+    "other",
+    "misc",
+    "miscellaneous",
+    "todo",
+    "tbd",
+    "meeting",
+    "call",
+    "team",
+    "project",
+    "plan",
+    "plans",
+    "goal",
+    "goals",
+    "result",
+    "results",
+    "problem",
+    "problems",
+    "solution",
+    "proposal",
+    "approach",
+    "requirement",
+    "requirements",
+    "impact",
+    "performance",
+    "rationale",
+    "reasoning",
+    "concern",
+    "concerns",
+    "benefit",
+    "benefits",
+    "challenge",
+    "challenges",
+    "implication",
+    "implications",
+    "recommendation",
+    "recommendations",
+    "observation",
+    "observations",
+    "insight",
+    "insights",
+    "learning",
+    "learnings",
+    "progress",
+    "dependency",
+    "dependencies",
+    "assumption",
+    "assumptions",
+    "metric",
+    "metrics",
+    "objective",
+    "objectives",
+    "deliverable",
+    "deliverables",
+    "milestone",
+    "milestones",
+    "analysis",
+    "evaluation",
+    "assessment",
+    "strategy",
+    "opportunity",
+    "opportunities",
+    "mitigation",
+    "resolution",
+    "rollout",
+    "purpose",
+    "scope",
+    "constraint",
+    "constraints",
+    "highlight",
+    "win",
+    "wins",
+    "comment",
+    "comments",
+    "remarks",
+    "up",
+    "ideas",
+    "idea",
+    "reminder",
+    "reminders",
+    "agreement",
+    "agreements",
+    "delete",
+    "email",
+    "contact",
+    "book",
+    "fix",
+    "build",
+    "test",
+    "write",
+    "read",
+    "find",
+    "pay",
+    "buy",
+    "sign",
+    "wire",
+    "transfer",
+    "refund",
+    "hire",
+    "hiring",
+    "feedback",
+    "number",
+    "numbers",
+    "total",
+    "cost",
+    "costs",
+    "price",
+    "pricing",
+    "schedule",
+    "review",
+    "reviews",
+    "release",
+    "launch",
+    "demo",
+    "contract",
+    "invoice",
+    "payment",
+    "order",
+    "customer",
+    "customers",
+    "client",
+    "clients",
+    "vendor",
+    "vendors",
+    "supplier",
+    "suppliers",
+    "product",
+    "products",
+    "feature",
+    "features",
+    "version",
+    "report",
+    "reports",
+    "task",
+    "tasks",
+    "everyone",
+    "everybody",
+    "someone",
+    "anyone",
+    "nobody",
+    "somebody",
+    "people",
+    "group",
+    "company",
+    "management",
+    "leadership",
+    "board",
+    "staff",
+    "owner's",
+    // articles, pronouns, determiners, numbers
+    "the",
+    "a",
+    "an",
+    "this",
+    "that",
+    "these",
+    "those",
+    "it",
+    "its",
+    "it's",
+    "we",
+    "we'll",
+    "we're",
+    "we've",
+    "they",
+    "they'll",
+    "they're",
+    "he",
+    "she",
+    "i",
+    "i'll",
+    "i'm",
+    "i've",
+    "you",
+    "you'll",
+    "your",
+    "our",
+    "their",
+    "his",
+    "her",
+    "my",
+    "there",
+    "there's",
+    "here",
+    "that's",
+    "let's",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "both",
+    "all",
+    "some",
+    "most",
+    "several",
+    "each",
+    "every",
+    "any",
+    "many",
+    "few",
+    "no",
+    "none",
+    "not",
+    "only",
+    "such",
+    "same",
+    "another",
+    "more",
+    "less",
+    "much",
+    "other",
+    "others",
+    // prepositions, conjunctions, adverbs
+    "in",
+    "on",
+    "at",
+    "by",
+    "for",
+    "with",
+    "from",
+    "to",
+    "of",
+    "about",
+    "after",
+    "before",
+    "during",
+    "until",
+    "while",
+    "if",
+    "when",
+    "as",
+    "since",
+    "because",
+    "so",
+    "but",
+    "and",
+    "or",
+    "yet",
+    "though",
+    "although",
+    "however",
+    "also",
+    "then",
+    "overall",
+    "finally",
+    "first",
+    "second",
+    "third",
+    "lastly",
+    "meanwhile",
+    "additionally",
+    "further",
+    "furthermore",
+    "still",
+    "now",
+    "today",
+    "tomorrow",
+    "yesterday",
+    "later",
+    "soon",
+    "currently",
+    "recently",
+    "already",
+    "per",
+    "via",
+    "within",
+    "without",
+    "across",
+    "between",
+    "regarding",
+    "re",
+    "ok",
+    "okay",
+    "yes",
+    "please",
+    "thanks",
+    "thank",
+    "what",
+    "who",
+    "why",
+    "how",
+    "where",
+    "which",
+    "whether",
+    "should",
+    "could",
+    "would",
+    "will",
+    "can",
+    "may",
+    "might",
+    "must",
+    "need",
+    "needs",
+    "needed",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "do",
+    "does",
+    "did",
+    "has",
+    "have",
+    "had",
+    "get",
+    "got",
+    "make",
+    "made",
+    "take",
+    "took",
+    "give",
+    "gave",
+    "keep",
+    "kept",
+    "let",
+    "see",
+    "look",
+    "want",
+    "wants",
+    "wanted",
+    "like",
+    "think",
+    "know",
+    "say",
+    "said",
+    "ask",
+    "asked",
+    "tell",
+    "told",
+    "go",
+    "going",
+    "come",
+    "put",
+    "run",
+    "use",
+    "used",
+    "try",
+    "tried",
+    "work",
+    "working",
+    "worked",
+    // what a summary says was done
+    "approve",
+    "approved",
+    "approves",
+    "reject",
+    "rejected",
+    "confirm",
+    "confirmed",
+    "confirms",
+    "decide",
+    "decided",
+    "decides",
+    "agree",
+    "agreed",
+    "agrees",
+    "discuss",
+    "discussed",
+    "discusses",
+    "review",
+    "reviewed",
+    "send",
+    "sent",
+    "share",
+    "shared",
+    "schedule",
+    "scheduled",
+    "check",
+    "checked",
+    "draft",
+    "drafted",
+    "finalize",
+    "finalized",
+    "finalise",
+    "finalised",
+    "finish",
+    "finished",
+    "complete",
+    "completed",
+    "start",
+    "started",
+    "stop",
+    "stopped",
+    "ship",
+    "shipped",
+    "deliver",
+    "delivered",
+    "prepare",
+    "prepared",
+    "create",
+    "created",
+    "add",
+    "added",
+    "remove",
+    "removed",
+    "move",
+    "moved",
+    "reach",
+    "reached",
+    "raise",
+    "raised",
+    "propose",
+    "proposed",
+    "suggest",
+    "suggested",
+    "request",
+    "requested",
+    "report",
+    "reported",
+    "mention",
+    "mentioned",
+    "explain",
+    "explained",
+    "note",
+    "noted",
+    "plan",
+    "planned",
+    "delay",
+    "delayed",
+    "postpone",
+    "postponed",
+    "cancel",
+    "cancelled",
+    "canceled",
+    "defer",
+    "deferred",
+    "assign",
+    "assigned",
+    "owns",
+    "handle",
+    "handles",
+    "handled",
+    "provide",
+    "provided",
+    "coordinate",
+    "coordinated",
+    "arrange",
+    "arranged",
+    "organize",
+    "organized",
+    "update",
+    "updated",
+    "follow",
+    "followed",
+    "pending",
+    "blocked",
+    "waiting",
+    "waits",
+    "wait",
+    "ready",
+    "done",
+    "good",
+    "great",
+    "new",
+    "old",
+    "big",
+    "small",
+    "long",
+    "short",
+    "high",
+    "low",
+    "early",
+    "late",
+    "important",
+    "urgent",
+    "possible",
+    "likely",
+    "unclear",
+    "unknown",
+    "total",
+    "final",
+    "initial",
+    "current",
+    "previous",
+    "last",
+    "upcoming",
+    "weekly",
+    "monthly",
+    "daily",
+    "annual",
+    "quarterly",
+];
+
+/// Whether a word, or an inflection of it ("budgets", "replacing"), is in
+/// the meeting's data. Five letters in common and all but two of the
+/// shorter word's: enough for an ending, not for "Marcus" and "March".
+fn in_the_meeting(w: &str, p: &Prepared) -> bool {
+    if p.words.contains(w) {
         return true;
     }
-    let theirs = content_words(&p.scratchpad);
-    let found = words
-        .iter()
-        .filter(|w| theirs.iter().any(|n| same_word(w, n)))
-        .count();
-    found as f64 >= words.len() as f64 * NOTES_OVERLAP
+    let head: String = w.chars().take(5).collect();
+    head.chars().count() == 5
+        && p.words
+            .range(head.clone()..)
+            .take_while(|other| other.starts_with(&head))
+            .any(|other| {
+                let common = w
+                    .chars()
+                    .zip(other.chars())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                common
+                    >= w.chars()
+                        .count()
+                        .min(other.chars().count())
+                        .saturating_sub(2)
+            })
 }
 
 /// Verbs that follow who is doing something: "Wanda will…", "Eve agreed…".
@@ -722,6 +1466,66 @@ const AGENT_VERBS: &[&str] = &[
     "wants",
     "would",
 ];
+
+/// Labels that are followed by a person: "Owner: Marcus."
+const ROLE_LABELS: &[&str] = &[
+    "owner",
+    "owners",
+    "assignee",
+    "assigned",
+    "lead",
+    "dri",
+    "responsible",
+    "contact",
+    "who",
+    "speaker",
+    "attendees",
+    "participants",
+    "presenter",
+    "facilitator",
+    "approver",
+    "requester",
+    "from",
+    "by",
+    "cc",
+];
+
+/// Words after a comma that make the word before it a person: "Marcus, the
+/// CFO".
+const APPOSITIVE: &[&str] = &[
+    "the", "a", "an", "our", "my", "who", "from", "of", "your", "their",
+];
+
+/// Whether a capitalized word that starts a sentence or label is taken to
+/// name someone: it is a name in this meeting, or it is in none of the
+/// meeting's words, is no ordinary word of a summary, and is placed like a
+/// person: before a colon, a verb that someone does ("Marcus approved",
+/// "Marcus will", "Marcus to confirm"), a comma and an appositive ("Marcus,
+/// the CFO"), or after a label such as "Owner:". A topic noun that opens a
+/// line ("Rollout is in Q1") is not.
+fn names_someone(raw: &str, prev: Option<&str>, next: Option<&str>, p: &Prepared) -> bool {
+    let w = bare_word(raw);
+    if p.known_names.contains(&w) {
+        return true;
+    }
+    if !w.starts_with(|c: char| c.is_alphabetic())
+        || in_the_meeting(&w, p)
+        || COMMON.contains(&w.as_str())
+        || w.split('-')
+            .all(|part| part.is_empty() || COMMON.contains(&part))
+    {
+        return false;
+    }
+    let closed = raw.trim_end_matches(['"', '\'', ')', ']', '*', '_']);
+    let after = next.map(bare_word).unwrap_or_default();
+    // (a bold label, "**Impact:**", is a heading, not a speaker)
+    raw.trim_end_matches(['"', '\'', ')', ']']).ends_with(':')
+        || (closed.ends_with(',') && APPOSITIVE.contains(&after.as_str()))
+        || AGENT_VERBS.contains(&after.as_str())
+        || after == "to"
+        || (after.chars().count() >= 5 && after.ends_with("ed"))
+        || prev.is_some_and(|l| l.ends_with(':') && ROLE_LABELS.contains(&bare_word(l).as_str()))
+}
 
 /// Business initialisms a summary uses for what a speaker spelled out
 /// ("annual recurring revenue" → ARR). They are not people, so a block that
@@ -796,8 +1600,10 @@ fn bare_word(tok: &str) -> String {
 /// word that only starts a sentence ("Approved the budget") lowercased
 /// unless it is a name here. The check's name rule reads a capital as a
 /// name; at the start of a sentence a capital says nothing. A word at the
-/// start is a name when it is one of this meeting's people, or when it does
-/// something ("Wanda will…") and no word of the meeting starts like it.
+/// start (of a line, a sentence or after a label's colon) is a name when it
+/// is one of this meeting's people, or when no word of the meeting starts
+/// like it and it is no ordinary word of a summary ([`names_someone`]):
+/// "Marcus approved…", "Owner: Marcus." and "- Marcus: …" all claim him.
 fn claim_text(markdown: &str, p: &Prepared) -> String {
     let mut out = Vec::new();
     for line in markdown.lines() {
@@ -811,12 +1617,9 @@ fn claim_text(markdown: &str, p: &Prepared) -> String {
                 tok = tok.to_lowercase();
             }
             if starts {
-                let w = bare_word(raw);
-                let acts = toks
-                    .get(k + 1)
-                    .is_some_and(|next| AGENT_VERBS.contains(&bare_word(next).as_str()));
-                let name =
-                    p.known_names.contains(&w) || (acts && !p.vocabulary.contains(&stem4(&w)));
+                let prev = k.checked_sub(1).map(|i| toks[i]);
+                let next = toks.get(k + 1).copied();
+                let name = names_someone(raw, prev, next, p);
                 if !name {
                     if let Some((i, c)) = tok.char_indices().find(|(_, c)| c.is_alphabetic()) {
                         if c.is_uppercase() {
@@ -871,15 +1674,74 @@ fn resolve(cited: &[Option<usize>], shown: usize) -> (Vec<usize>, usize) {
     (valid, invalid)
 }
 
-/// What an AI block states that nothing it can lean on supports.
-fn judge(md: &str, cited: &[&Sent], invalid: usize, p: &Prepared) -> Vec<BlockFlag> {
+/// Pairs of opposite verbs, by the start of the word: the first side says a
+/// thing happened, the second that it did not or the reverse.
+const OPPOSITES: &[(&[&str], &[&str])] = &[
+    (&["approv"], &["reject", "veto", "denied", "denies", "deny"]),
+    (&["accept"], &["declin", "refus"]),
+    (&["agre"], &["disagre"]),
+    (&["confirm"], &["cancel"]),
+    (&["increas"], &["decreas", "reduc"]),
+    (&["includ"], &["exclud"]),
+    (&["support"], &["oppos"]),
+];
+
+/// What a text says about one pair: the word that says yes and the word that
+/// says no, if any. A negation within three words before a verb turns it
+/// round ("not approving" says no; "not rejected" says yes).
+fn stance(text: &str, pair: &(&[&str], &[&str])) -> (Option<String>, Option<String>) {
+    let (mut yes, mut no) = (None, None);
+    for sentence in sentence_tokens(text) {
+        for (i, w) in sentence.iter().enumerate() {
+            let affirming = pair.0.iter().any(|s| w.starts_with(s));
+            let reversing = pair.1.iter().any(|s| w.starts_with(s));
+            if !(affirming || reversing) {
+                continue;
+            }
+            let negated = sentence[i.saturating_sub(3)..i]
+                .iter()
+                .any(|t| is_negator(t));
+            let slot = if affirming != negated {
+                &mut yes
+            } else {
+                &mut no
+            };
+            slot.get_or_insert_with(|| w.clone());
+        }
+    }
+    (yes, no)
+}
+
+/// The word a block uses to say the opposite of what every line it can lean
+/// on says ("approved" against "not approving"). Cheap on purpose: a pair
+/// of verbs and a negation, not a reading of the sentence.
+fn reversed(block: &str, pool: &[String]) -> Option<String> {
+    OPPOSITES.iter().find_map(|pair| {
+        let (yes, no) = stance(block, pair);
+        let (mut said_yes, mut said_no) = (false, false);
+        for t in pool {
+            let (y, n) = stance(t, pair);
+            said_yes |= y.is_some();
+            said_no |= n.is_some();
+        }
+        match (yes, no) {
+            (Some(w), None) if said_no && !said_yes => Some(w),
+            (None, Some(w)) if said_yes && !said_no => Some(w),
+            _ => None,
+        }
+    })
+}
+
+/// What an AI block states that nothing it can lean on supports. `evidence`
+/// are the cited lines that may back it (never a line aimed at an assistant).
+fn judge(md: &str, evidence: &[&Sent], invalid: usize, p: &Prepared) -> Vec<BlockFlag> {
     let body = claim_text(md, p);
     let notes_text = settle(&p.notes_text);
     let notes = Source {
         text: &notes_text,
         speaker: "",
     };
-    if cited.is_empty() {
+    if evidence.is_empty() {
         // Nothing cited: only a number, date or quote makes that a problem
         // (the notes may be where it came from).
         let uncited = claims::unsupported(&body, &[notes]).iter().any(|f| {
@@ -897,8 +1759,8 @@ fn judge(md: &str, cited: &[&Sent], invalid: usize, p: &Prepared) -> Vec<BlockFl
             Vec::new()
         };
     }
-    let lines: Vec<String> = cited.iter().map(|s| settle(&s.text)).collect();
-    let mut sources: Vec<Source<'_>> = cited
+    let lines: Vec<String> = evidence.iter().map(|s| settle(&s.text)).collect();
+    let mut sources: Vec<Source<'_>> = evidence
         .iter()
         .zip(&lines)
         .map(|(s, text)| Source {
@@ -925,7 +1787,44 @@ fn judge(md: &str, cited: &[&Sent], invalid: usize, p: &Prepared) -> Vec<BlockFl
             detail: None,
         });
     }
+    let mut pool: Vec<String> = evidence.iter().map(|s| s.text.clone()).collect();
+    pool.push(p.notes_text.clone());
+    if let Some(word) = reversed(&plain(md), &pool) {
+        flags.push(BlockFlag {
+            kind: BlockFlagKind::Reversed,
+            detail: Some(word),
+        });
+    }
     dedup_flags(flags)
+}
+
+/// Whether a block says what only a line aimed at an assistant (or phrased
+/// as an order) says: it shares at least three content words with such a
+/// line it did not cite, and some of them are in nothing it can lean on (the
+/// lines it cites, their speakers, the notes). A model that obeyed an
+/// injected line and cited an innocent one is caught here.
+fn borrows_from_aimed(md: &str, evidence: &[&Sent], p: &Prepared) -> bool {
+    let block: BTreeSet<String> = content_words(&plain(md)).into_iter().collect();
+    if block.len() < 3 {
+        return false;
+    }
+    let mut support: Vec<String> = content_words(&p.notes_text);
+    for s in evidence {
+        support.extend(content_words(&s.text));
+        support.extend(content_words(&s.speaker));
+    }
+    let backed = |w: &String| support.iter().any(|s| same_word(w, s));
+    p.sent
+        .iter()
+        .filter(|s| s.aim != Aim::People && !evidence.iter().any(|e| e.id == s.id))
+        .any(|s| {
+            let theirs = content_words(&s.text);
+            let shared: Vec<&String> = block
+                .iter()
+                .filter(|w| theirs.iter().any(|t| same_word(w, t)))
+                .collect();
+            shared.len() >= 3 && shared.iter().any(|w| !backed(w))
+        })
 }
 
 /// Cut a dropped line short for the report.
@@ -970,7 +1869,7 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
             continue;
         }
         let demoted = b.user;
-        let (stripped, removed) = text::strip_links(&b.markdown);
+        let (stripped, removed) = text::strip_links_and_emails(&b.markdown);
         let md = if removed > 0 {
             report.links_removed += removed as u32;
             stripped.trim().to_string()
@@ -985,12 +1884,15 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
         }
         let (valid, invalid) = resolve(&b.sources, p.sent.len());
         report.invalid_citations += invalid as u32;
-        let trusted: Vec<&Sent> = valid
+        let cited: Vec<&Sent> = valid.iter().map(|&i| &p.sent[i]).collect();
+        // A line aimed at an assistant is never evidence.
+        let aimed = cited.iter().any(|s| s.aim == Aim::Assistant);
+        let evidence: Vec<&Sent> = cited
             .iter()
-            .map(|&i| &p.sent[i])
-            .filter(|s| !s.injected)
+            .copied()
+            .filter(|s| s.aim != Aim::Assistant)
             .collect();
-        if !valid.is_empty() && trusted.is_empty() {
+        if !valid.is_empty() && evidence.is_empty() {
             // Built only from speech aimed at an AI.
             report.dropped += 1;
             if report.dropped_text.len() < DROPPED_KEPT {
@@ -999,10 +1901,33 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
             continue;
         }
         let mut flags = if p.has_transcript {
-            judge(&md, &trusted, invalid, p)
+            judge(&md, &evidence, invalid, p)
         } else {
             Vec::new()
         };
+        if p.has_transcript {
+            if aimed || borrows_from_aimed(&md, &evidence, p) {
+                // It cites an injected line next to an innocent one, or says
+                // what only an injected line says: not a sourced claim.
+                flags.insert(
+                    0,
+                    BlockFlag {
+                        kind: BlockFlagKind::AimedAtAi,
+                        detail: None,
+                    },
+                );
+            } else if !evidence.is_empty() && evidence.iter().all(|s| s.aim == Aim::Order) {
+                // Everything under it is phrased as an order: what colleagues
+                // say, and what an injected line can look like.
+                flags.insert(
+                    0,
+                    BlockFlag {
+                        kind: BlockFlagKind::Instruction,
+                        detail: None,
+                    },
+                );
+            }
+        }
         if demoted {
             flags.insert(
                 0,
@@ -1012,7 +1937,7 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
                 },
             );
         }
-        let ids: Vec<String> = trusted.iter().map(|s| s.id.clone()).collect();
+        let ids: Vec<String> = evidence.iter().map(|s| s.id.clone()).collect();
         if !flags.is_empty() {
             report.flagged += 1;
         } else if !p.has_transcript {
@@ -1032,6 +1957,18 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
         });
     }
     report.blocks = blocks.len() as u32;
+    if !p.is_whole() {
+        // Saved with the note, so a partial read never looks complete.
+        let read = PartialRead {
+            shown: p.sent.len() as u32,
+            total: p.segments_total as u32,
+        };
+        for b in &mut blocks {
+            if matches!(b.origin, fly_core::BlockOrigin::Ai { .. }) {
+                b.partial = Some(read);
+            }
+        }
+    }
     Ok(Checked { blocks, report })
 }
 
@@ -1066,9 +2003,16 @@ pub async fn enhance(
     let profile = req.profile;
     let sizes = std::iter::once(req.prompt_chars).chain(req.retry_prompt_chars);
     let mut retried = false;
+    let mut over = false;
     let mut last = None;
     for size in sizes {
         let prepared = prepare(req.note, req.transcript, req.template, profile, size);
+        if prepared.prompt_chars() > size {
+            // Selection can't cut the notes, the template or one huge line:
+            // a prompt over what the model can read is one it would trim.
+            over = true;
+            continue;
+        }
         if last.is_some_and(|before: usize| prepared.prompt_chars() >= before) {
             break; // a smaller size didn't make the prompt smaller
         }
@@ -1113,7 +2057,13 @@ pub async fn enhance(
         done.report.retried_smaller = retried && size != req.prompt_chars;
         return Ok(done);
     }
-    Err(EnhanceError::Truncated)
+    // Nothing was sent when every size was over budget; otherwise the model
+    // ran with less than it was sent.
+    Err(if over && !retried {
+        EnhanceError::TooLong
+    } else {
+        EnhanceError::Truncated
+    })
 }
 
 /// Counts by trust, for tests and the evals: sourced / flagged / unsourced.

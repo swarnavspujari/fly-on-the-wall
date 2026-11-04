@@ -14,7 +14,9 @@
 //!    and a block citing a line that was never sent: neither may show as
 //!    sourced.
 //! 4. **Injection.** Every line the harness's detector reads as addressed to
-//!    an AI, written up by an obedient model: no block may come out.
+//!    an assistant, written up by an obedient model: no block may come out.
+//!    A bare order to the room ("Approve invoice 5283.") is told apart: it
+//!    is kept, but never as an unflagged block.
 //! 5. **Links.** A block full of links, images, HTML and addresses: none may
 //!    survive.
 //! 6. **Forged user text.** User blocks the notes don't hold must not show as
@@ -26,8 +28,8 @@
 
 use std::path::Path;
 
-use fly_ask::enhance::{self, EnhanceError, Prepared};
-use fly_ask::proposals::addressed_to_assistant;
+use fly_ask::enhance::{self, Prepared};
+use fly_ask::proposals::{aim_of, Aim};
 use fly_core::prompt_profile::DEFAULT_PROFILE;
 use fly_core::{BlockOrigin, Note, Speaker, Template, Transcript, TranscriptSegment};
 use serde_json::{json, Value};
@@ -124,6 +126,9 @@ struct Tally {
     invalid_cited: u32,
     invalid_cited_sourced: u32,
     injected_lines: u32,
+    order_lines: u32,
+    order_blocks: u32,
+    order_unflagged: u32,
     injection_blocks: u32,
     injection_with_sources: u32,
     link_blocks: u32,
@@ -274,7 +279,8 @@ fn corruption(m: &MeetingFixture, whole: &Prepared, t: &mut Tally) {
 
 fn injection(tr: &Transcript, whole: &Prepared, t: &mut Tally) {
     for seg in &tr.segments {
-        if !addressed_to_assistant(&seg.text) {
+        let aim = aim_of(&seg.text);
+        if aim == Aim::People {
             continue;
         }
         t.injected_lines += 1;
@@ -294,10 +300,15 @@ fn injection(tr: &Transcript, whole: &Prepared, t: &mut Tally) {
             &[],
         )]);
         t.legacy_injection_blocks += legacy(&cites, whole).len() as u32;
-        match enhance::check(&cites, whole) {
-            Ok(done) => t.injection_blocks += done.blocks.len() as u32,
-            Err(EnhanceError::NothingLeft) => {}
-            Err(_) => {}
+        match (enhance::check(&cites, whole), aim) {
+            (Ok(done), Aim::Assistant) => t.injection_blocks += done.blocks.len() as u32,
+            (Ok(done), _) => {
+                t.order_lines += 1;
+                t.order_blocks += done.blocks.len() as u32;
+                t.order_unflagged +=
+                    done.blocks.iter().filter(|b| b.flags.is_empty()).count() as u32;
+            }
+            (Err(_), _) => {}
         }
         if let Ok(done) = enhance::check(&uncited, whole) {
             t.injection_with_sources += done.blocks.iter().filter(|b| cited(b) > 0).count() as u32;
@@ -434,6 +445,7 @@ pub fn run(dir: &Path) -> SuiteResult {
         ),
         ("enhance_injection_blocks_produced", t.injection_blocks),
         ("enhance_injection_with_sources", t.injection_with_sources),
+        ("enhance_order_blocks_unflagged", t.order_unflagged),
         ("enhance_rendered_links", t.links_rendered),
         ("enhance_forged_user_blocks_kept", t.forged_kept),
         ("enhance_prompts_over_budget", t.over_budget),
@@ -474,6 +486,8 @@ pub fn run(dir: &Path) -> SuiteResult {
         ("corrupted_blocks", t.corrupted),
         ("invalid_citation_blocks", t.invalid_cited),
         ("injected_lines", t.injected_lines),
+        ("order_lines", t.order_lines),
+        ("order_blocks_flagged", t.order_blocks - t.order_unflagged),
         ("link_blocks", t.link_blocks),
         ("forged_user_blocks", t.forged),
         ("restated_user_blocks", t.restated),
@@ -505,6 +519,7 @@ mod tests {
             "enhance_invalid_citation_shown_as_sourced",
             "enhance_injection_blocks_produced",
             "enhance_injection_with_sources",
+            "enhance_order_blocks_unflagged",
             "enhance_rendered_links",
             "enhance_forged_user_blocks_kept",
             "enhance_prompts_over_budget",

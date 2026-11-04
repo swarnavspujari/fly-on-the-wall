@@ -47,6 +47,26 @@ pub enum BlockFlagKind {
     Quote,
     /// Claimed to restate the user's own notes but isn't in them.
     NotFromNotes,
+    /// Cites a line that reads as aimed at an AI assistant (the injected
+    /// line is never a source), or states what only such a line says.
+    AimedAtAi,
+    /// Rests only on a line phrased as an order ("Pay the invoice by
+    /// Friday"): what colleagues say to each other, and what an injected
+    /// line can look like. Kept with its source, to check.
+    Instruction,
+    /// Says the opposite of the lines it cites (approved / not approving).
+    /// The detail is the word the block uses.
+    Reversed,
+}
+
+/// How much of the meeting an Enhance run read, saved on the blocks it
+/// wrote when it was less than all of it (a long meeting that didn't fit
+/// the model's context), so a partial note never looks complete.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PartialRead {
+    /// Transcript lines the model was given, and lines in the meeting.
+    pub shown: u32,
+    pub total: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,6 +87,11 @@ pub struct NoteBlock {
     /// user's own text). Absent in notes saved before the check existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<BlockFlag>,
+    /// Set on the AI blocks of an Enhance run that read only part of the
+    /// meeting. Absent for a whole read, for the user's own text, and in
+    /// notes saved before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<PartialRead>,
 }
 
 impl NoteBlock {
@@ -76,6 +101,7 @@ impl NoteBlock {
             origin: BlockOrigin::User,
             markdown: markdown.into(),
             flags: Vec::new(),
+            partial: None,
         }
     }
 
@@ -85,6 +111,7 @@ impl NoteBlock {
             origin: BlockOrigin::Ai { source_segment_ids },
             markdown: markdown.into(),
             flags: Vec::new(),
+            partial: None,
         }
     }
 
@@ -115,8 +142,10 @@ impl NoteBlock {
     /// does, so its transcript sourcing is dropped and the text is untouched.
     pub fn reclaim(&mut self) {
         self.origin = BlockOrigin::User;
-        // Flags describe AI text; once it is the user's they have nothing to say.
+        // Flags and a partial read describe AI text; once it is the user's
+        // they have nothing to say.
         self.flags.clear();
+        self.partial = None;
     }
 }
 

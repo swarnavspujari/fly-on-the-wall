@@ -149,7 +149,20 @@ pub fn strip_reasoning(text: &str) -> String {
 
 /// Markdown links → their label; images, HTML anchors/images, autolinks
 /// and bare URLs removed. Returns the text and how many were removed.
+/// A bare email address in an answer is left (someone may ask for it);
+/// [`strip_links_and_emails`] is for text that is saved as the user's notes.
 pub fn strip_links(text: &str) -> (String, usize) {
+    strip(text, false)
+}
+
+/// [`strip_links`], and bare email addresses too: Enhance's text is saved
+/// into the user's notes and exported, where a model-written address is
+/// somewhere to send meeting content.
+pub fn strip_links_and_emails(text: &str) -> (String, usize) {
+    strip(text, true)
+}
+
+fn strip(text: &str, emails: bool) -> (String, usize) {
     let mut removed = 0;
     let mut s = text.to_string();
     // [label](target) and ![alt](target)
@@ -173,7 +186,7 @@ pub fn strip_links(text: &str) -> (String, usize) {
     for line in s.split('\n') {
         let mut words = Vec::new();
         for w in line.split(' ') {
-            if renders(w) {
+            if renders(w, emails) {
                 removed += 1;
                 continue;
             }
@@ -232,7 +245,7 @@ const RENDERS: &[&str] = &[
 ];
 
 /// One word that would render as (part of) a link, image or embed.
-fn renders(word: &str) -> bool {
+fn renders(word: &str, emails: bool) -> bool {
     let l = word.to_lowercase();
     if RENDERS.iter().any(|p| l.contains(p)) {
         return true;
@@ -254,7 +267,7 @@ fn renders(word: &str) -> bool {
     }
     // A bare email address: GFM and mail clients turn it into `mailto:`,
     // and it is somewhere to send meeting content.
-    if has_email(&l) {
+    if emails && has_email(&l) {
         return true;
     }
     // Protocol-relative `//host.tld/...`.
@@ -720,19 +733,23 @@ mod tests {
     }
 
     #[test]
-    fn bare_emails_are_stripped_and_lookalikes_stay() {
+    fn bare_emails_are_stripped_for_saved_text_and_lookalikes_stay() {
         for t in [
             "Send it to dana@example.com.",
             "Send it to (dana.k+notes@mail.example.org), please",
             "Reach DANA@Example.COM today",
-            "Line one\ndana@example.com\nline three",
+            "Line one
+dana@example.com
+line three",
             "two: a@b.example and c@d.example",
         ] {
-            let (s, n) = strip_links(t);
+            let (s, n) = strip_links_and_emails(t);
             assert!(!s.contains('@'), "left an address in {s:?} (from {t:?})");
             assert!(n > 0, "{t}");
+            // Ask's answers keep an address someone asked for.
+            assert_eq!(strip_links(t), (t.to_string(), 0), "{t}");
         }
-        let (s, n) = strip_links("Send it to dana@example.com.");
+        let (s, n) = strip_links_and_emails("Send it to dana@example.com.");
         assert_eq!((s.as_str(), n), ("Send it to", 1));
         // Not addresses: a mention, no host dot, a number, a lone at-sign.
         for t in [
@@ -742,7 +759,7 @@ mod tests {
             "Meet @ noon",
             "a@b",
         ] {
-            let (s, n) = strip_links(t);
+            let (s, n) = strip_links_and_emails(t);
             assert_eq!((s.as_str(), n), (t, 0), "{t}");
         }
     }
