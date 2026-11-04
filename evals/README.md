@@ -336,6 +336,8 @@ recorded replay). The runner never trusts the harness's own accounting:
 | `red_team_scenarios` / `robustness_scenarios` / `scenarios_errored` | ≥ 10 / ≥ 10 / 0 |
 | `stale_replays`: replays whose requests no longer match their recording (re-record them; they aren't scored) | 0 |
 
+**What a meeting title vouches for.** In `claim_check_pass_rate` a proper name also passes if it is a word of the title of a cited segment's meeting (titles pooled across the segments the sentence cites). Names include people: with the title "Dana / Priya 1:1" and a line spoken by Dana, "Priya will ship the report" passes. This is deliberate (the user approved it, PR #133), so a sentence that passes this way is not a scorer bug. A title never vouches for a number, a date or a quote; the same line cited under another meeting's title still flags the name; it doesn't show who said the line; and the product's proposal gate doesn't use titles. The gold-answer label check in `retrieval` passes no title, so a gold answer must still be backed by its cited lines alone.
+
 #### Tiers: budgets and quality floors
 
 | Tier | Budget | `unsourced_sentence_rate` | `grounded_answer_rate` | `correct_refusal_rate` | `false_refusal_rate` |
