@@ -289,6 +289,9 @@ pub fn check(
         .map(|s| Source {
             text: &s.text,
             speaker: &s.speaker,
+            // What goes into the user's notes stays checked against the
+            // lines alone: a title doesn't vouch for a name there.
+            title: "",
         })
         .collect();
     let body_key = |s: &str| crate::text::strip_links(s).0;
@@ -348,6 +351,7 @@ pub fn check(
                 src_and_owner.push(Source {
                     text: "",
                     speaker: &owner_src,
+                    title: "",
                 });
             }
             if !claims::unsupported(&tx, &src_and_owner).is_empty() {

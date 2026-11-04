@@ -671,6 +671,7 @@ impl AskHarness for StrictProbe {
                 .map(|id| claims::Source {
                     text: &segs[id].0,
                     speaker: &segs[id].1,
+                    title: titles.get(id).map_or("", |t| t.1.as_str()),
                 })
                 .collect();
             let status = if valid.is_empty() {
