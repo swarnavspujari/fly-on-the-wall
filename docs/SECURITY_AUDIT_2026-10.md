@@ -102,7 +102,7 @@ The second pass followed staff-engineer and SOC 2 (Security, Confidentiality and
 | Rulesets for `main` and `v*` tags; secret scanning + push protection; private vulnerability reporting | GitHub settings | Repo owner |
 | Windows Authenticode signing | The owner chose to skip it for now (it costs about $10/month on Azure; SignPath Foundation is free for OSS). Updates stay minisign-verified. | Repo owner (later) |
 | Run the live Claude 5.5 test once with a real key | Needs the owner's API key | Repo owner |
-| tauri-plugin-updater's own zip 4 copy (RUSTSEC-2026-0367/8/9) and quick-xml (build-time only) | Waiting on upstream; the updater only unpacks signature-verified updates | Upstream |
+| quick-xml (build-time only) | Waiting on upstream. (The updater's own zip 4 copy, RUSTSEC-2026-0367/8/9, is gone since tauri-plugin-updater 2.14.1 moved to zip 9.) | Upstream |
 | Screen-recording videos aren't covered by audio retention; the WebView2 profile isn't wiped by delete-all; the FileVault check hasn't run on a real Mac | Small follow-ups | Code |
 
 ## Verified good practices
