@@ -161,6 +161,7 @@ pub fn validate(reply: &str, ev: &Evidence) -> Validated {
                 .map(|s| Source {
                     text: &s.text,
                     speaker: &s.speaker,
+                    title: &s.meeting_title,
                 })
                 .collect();
             let failures = claims::unsupported(&display, &sources);
@@ -275,6 +276,64 @@ mod tests {
             .iter()
             .all(|s| crate::text::strip_links(&s.text).1 == 0));
         assert_eq!(v.stats.links_removed, 1);
+    }
+
+    #[test]
+    fn asr_glued_currency_and_speaker_labels_do_not_flag_a_correct_answer() {
+        let mut e = Evidence::default();
+        e.insert(SegmentInfo {
+            id: "x02-03".into(),
+            meeting_id: "m2".into(),
+            meeting_title: "Budget sync".into(),
+            started_at: None,
+            speaker: "Speaker 2".into(),
+            speaker_key: "spk_1".into(),
+            start_ms: 0,
+            end_ms: 1,
+            text: "It is now$52,000, because Northwind adds a support plan.".into(),
+        });
+        let v = validate(
+            "The budget is now $52,000 [seg:x02-03]. Speaker 2 explains the support plan [seg:x02-03].",
+            &e,
+        );
+        assert!(
+            v.sentences
+                .iter()
+                .all(|s| s.status == SentenceStatus::Sourced),
+            "{:?}",
+            v.sentences
+        );
+        let v = validate("Speaker 1 explains the support plan [seg:x02-03].", &e);
+        assert_eq!(v.sentences[0].status, SentenceStatus::Flagged);
+        assert_eq!(v.sentences[0].flags[0].kind, FlagKind::Name);
+    }
+
+    #[test]
+    fn a_project_named_in_the_cited_meetings_title_does_not_flag_the_answer() {
+        let line = "It is now$52,000, because Northwind adds a support plan.";
+        let evidence = |title: &str| {
+            let mut e = Evidence::default();
+            e.insert(SegmentInfo {
+                id: "x02-03".into(),
+                meeting_id: "m2".into(),
+                meeting_title: title.into(),
+                started_at: None,
+                speaker: "Dana Whitlock".into(),
+                speaker_key: "spk_1".into(),
+                start_ms: 0,
+                end_ms: 1,
+                text: line.into(),
+            });
+            e
+        };
+        let reply = "The Bluebird budget is now $52,000 [seg:x02-03].";
+        let v = validate(reply, &evidence("Bluebird budget sync"));
+        assert_eq!(v.sentences[0].status, SentenceStatus::Sourced);
+        // The same line under a meeting that doesn't name the project.
+        let v = validate(reply, &evidence("Harbor renewal call"));
+        assert_eq!(v.sentences[0].status, SentenceStatus::Flagged);
+        assert_eq!(v.sentences[0].flags[0].kind, FlagKind::Name);
+        assert_eq!(v.sentences[0].flags[0].detail.as_deref(), Some("bluebird"));
     }
 
     #[test]
