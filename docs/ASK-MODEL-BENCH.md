@@ -81,7 +81,11 @@ runner's.
   Asks: load 14.7 s (cold) then 40 / 36 / 28 ms; total 37.8 / 24.7 / 38.4 /
   23.1 s on the same contended machine.
 * The window only grows (at most 4095 tokens), so the front-truncation
-  protection is unchanged. The legacy-body golden changes in `num_ctx` values
+  protection is unchanged. Memory: one 4096 step is about 512 MiB of KV cache
+  for `llama3.1` 8B at f16 (32 layers × 8 KV heads × 128 × 2 × 2 bytes ×
+  4096 tokens). On a 4–8 GB GPU that is a few more layers on the CPU, not an
+  out-of-memory error. A need just over a step (4097–4608, say) jumps to the
+  next one (8192). The legacy-body golden changes in `num_ctx` values
   only (4622/4623 → 8192, 8719 → 12288, 16910 → 20480).
 * Residual: 2 of the 75 warm `llama3.1` Asks (and 2 of `granite4.1:3b`'s) had a
   short prompt that fit the 4096 window; the only warm reloads (2 and 3) sit next
@@ -293,7 +297,7 @@ Why bump: the numbers here were measured on 0.40.13, and a managed install on
 0.31.2 would run these models on a runtime nobody measured (the release notes
 between them include Gemma 4 tool-continuation fixes in 0.32.1, structured
 output changes in 0.34.4, and `/api/show` thinking controls in 0.34.3). The
-0.31.2 zip itself was not run: downloading it wasn't covered by the brief.
+0.31.2 zip itself was not run: downloading it was outside this bench's scope.
 
 Two limits to know:
 
@@ -337,11 +341,10 @@ See §1 for the table. In order:
 Nothing under `evals/` changed except the runner bug fix (§3.3: no metric moves).
 No replay is committed. Proposals:
 
-1. **Committing replays.** The replays are in
-   `C:\Users\swarn\Claude Code Projects\fotw-design-2026-10\replays\<model>\`
-   (76 quality Asks per model, plus the security ones in `replays-security\`
-   and `replays-security-C\`, and `replays-9b-at-S\`; model output on synthetic
-   data only). Committing a model's replays turns its group
+1. **Committing replays.** The replays are in a folder outside the repo (the
+   `FOTW_ASK_LIVE_OUT` of each run), one subfolder per model: 76 quality Asks per
+   model, plus separate runs for the red-team and guard scenarios and for
+   `qwen3.5:9b` at tier S (model output on synthetic data only). Committing a model's replays turns its group
    (`replay:<model>@<tier>`) into a gate: every group of ≥ 30 answerable and ≥ 8
    unanswerable scenarios is gated. Groups that pass today on main:
    `qwen3.5:9b` @M and @S and `gemma4:12b-it-qat` @M. **`llama3.1` @S, the shipped

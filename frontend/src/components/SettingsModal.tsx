@@ -1756,7 +1756,7 @@ export default function SettingsModal({
                                 >
                                   {ollamaBusy === "install"
                                     ? "Installing…"
-                                    : "Install Ollama (1.5 GB download)"}
+                                    : "Install Ollama (1.6 GB download)"}
                                 </Button>
                               )}
                               {ollama && ollama.installed && !ollamaModelReady && (

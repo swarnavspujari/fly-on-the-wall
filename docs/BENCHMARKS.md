@@ -535,7 +535,7 @@ numbers; these tables preserve the starting point the phases below measured agai
 | `teams-3spk-contracts` | **4 / 3** | 11.5 % | 2.0 % | 3.6 % | 6.0 % | 1.4 % |
 
 Both mixed-path fixtures over-split: one phantom cluster each survives the dust filter
-(66 s of Swarnav split off in legislation; a 36 s phantom in contracts), and the contracts
+(66 s of the maintainer split off in legislation; a 36 s phantom in contracts), and the contracts
 cluster keys (`spk_0/2/6/8` surviving) show the raw clustering produced ≥ 9 clusters before
 the dust filter discarded six. Over-splitting is the dominant structural failure; the dust
 filter is load-bearing.

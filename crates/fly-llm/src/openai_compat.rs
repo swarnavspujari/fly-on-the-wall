@@ -456,7 +456,10 @@ fn estimate_num_ctx_for(req: &ConverseRequest) -> u32 {
     // request's `num_ctx` differs from the loaded runner's, even by a few
     // tokens (measured on Ollama 0.40.13: llama3.1 on a 4 GB GPU spent
     // 12–22 s loading again for 7530 → 7587), so two Asks of nearly the
-    // same size must ask for the same window.
+    // same size must ask for the same window. The cost is memory: one step
+    // is ~512 MiB of KV cache for llama3.1 8B at f16, so on a 4–8 GB GPU a few
+    // more layers run on the CPU (slower decode), not an out-of-memory error;
+    // a need just over a step (4097–4608, say) takes the next one (8192).
     (prompt_tokens + response + 512)
         .clamp(4096, 32768)
         .next_multiple_of(NUM_CTX_STEP)

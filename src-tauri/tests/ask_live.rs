@@ -87,12 +87,34 @@ async fn installed(model: &str) -> Option<bool> {
     )
 }
 
+/// `p` made absolute and canonical even when it doesn't exist yet: the
+/// nearest existing ancestor is canonicalized and the rest appended, so both
+/// sides of the "outside the repository" comparison use the same form
+/// (Windows' `\\?\` prefix) and an uncreated folder inside the repo can't pass.
+fn canonical_lenient(p: &Path) -> PathBuf {
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut rest = Vec::new();
+    let mut base = abs.as_path();
+    loop {
+        if let Ok(c) = std::fs::canonicalize(base) {
+            return rest.iter().rev().fold(c, |acc, part| acc.join(part));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                base = parent;
+            }
+            _ => return abs,
+        }
+    }
+}
+
 fn out_dir(repo: &Path) -> PathBuf {
     let out = std::env::var_os("FOTW_ASK_LIVE_OUT")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("fotw-ask-live"));
-    let abs = std::fs::canonicalize(&out).unwrap_or_else(|_| out.clone());
-    let repo = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let abs = canonical_lenient(&out);
+    let repo = canonical_lenient(repo);
     assert!(
         !abs.starts_with(&repo),
         "FOTW_ASK_LIVE_OUT must be outside the repository (replays are reviewed before they're committed)"
@@ -129,25 +151,48 @@ fn stats(mut v: Vec<u64>) -> Value {
     json!({"n": v.len(), "p50": percentile(&v, 0.5), "p95": percentile(&v, 0.95), "max": v.last()})
 }
 
-/// Unload whatever Ollama holds, so the next request pays the load.
-async fn unload_all(client: &reqwest::Client) {
+/// Whether Ollama's `/api/ps` name `loaded` is the bench model `model`
+/// (`llama3.1` is loaded as `llama3.1:latest`; two explicit tags must agree).
+fn same_model(loaded: &str, model: &str) -> bool {
+    if loaded == model {
+        return true;
+    }
+    let base = |s: &str| s.split(':').next().unwrap_or(s).to_string();
+    (!model.contains(':') && base(loaded) == model && loaded.ends_with(":latest"))
+        || (!loaded.contains(':') && base(model) == loaded)
+}
+
+/// Models Ollama has loaded right now.
+async fn loaded_models(client: &reqwest::Client) -> Option<Vec<String>> {
+    let ps: Value = client
+        .get(format!("{OLLAMA}/api/ps"))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    Some(
+        ps["models"]
+            .as_array()?
+            .iter()
+            .filter_map(|x| x["name"].as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// Unload the bench model (and only that one: the rest of what a user's
+/// Ollama holds isn't ours to evict), so the next request pays the load.
+async fn unload_model(client: &reqwest::Client, model: &str) {
     for _ in 0..20 {
-        let ps: Value = match client.get(format!("{OLLAMA}/api/ps")).send().await {
-            Ok(r) => r.json().await.unwrap_or(Value::Null),
-            Err(_) => return,
+        let Some(loaded) = loaded_models(client).await else {
+            return;
         };
-        let names: Vec<String> = ps["models"]
-            .as_array()
-            .map(|m| {
-                m.iter()
-                    .filter_map(|x| x["name"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if names.is_empty() {
+        let ours: Vec<&String> = loaded.iter().filter(|n| same_model(n, model)).collect();
+        if ours.is_empty() {
             return;
         }
-        for n in names {
+        for n in ours {
             let _ = client
                 .post(format!("{OLLAMA}/api/generate"))
                 .json(&json!({"model": n, "keep_alive": 0}))
@@ -407,7 +452,11 @@ async fn ask_live() {
             }
             Some(true) => {}
         }
-        unload_all(&http).await;
+        unload_model(&http, model).await;
+        // Models that aren't the bench's stay as they are, and can slow it.
+        if let Some(others) = loaded_models(&http).await.filter(|l| !l.is_empty()) {
+            eprintln!("ask_live: note: Ollama also has {others:?} loaded; numbers may be affected");
+        }
         // A throwaway data dir: the app's provider path, never the user's data.
         let dir = tempfile::tempdir().expect("tempdir");
         let secrets = Arc::new(fly_secrets::MemorySecretStore::default());
@@ -508,7 +557,7 @@ async fn ask_live() {
 
         let inner: Arc<dyn fly_llm::LLMProvider> = Arc::from(built.provider);
         if cold_start {
-            unload_all(&http).await;
+            unload_model(&http, model).await;
         }
         let samples = sampler::Sampler::start(OLLAMA);
         let t_all = Instant::now();
@@ -545,7 +594,7 @@ async fn ask_live() {
                 wait_quiet(quiet_max, quiet_below).await
             };
             if cold_every {
-                unload_all(&http).await;
+                unload_model(&http, model).await;
             }
             let t0 = Instant::now();
             let asked = tokio::time::timeout(
@@ -638,6 +687,8 @@ async fn ask_live() {
             rows.push(row);
         }
         let resources = samples.finish().await;
+        // Leave nothing of ours loaded for the next model's run.
+        unload_model(&http, model).await;
         let mut entry = json!({
             "model": model,
             "tier": format!("{tier:?}"),
