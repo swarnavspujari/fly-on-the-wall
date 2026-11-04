@@ -3,7 +3,14 @@
    counting are unit-tested (enhancedTrust.test.ts). */
 
 import { flagCopy } from "./askModel";
-import type { BlockFlag, BlockOrigin, EnhanceReport, NoteBlock, Transcript } from "./types";
+import type {
+  BlockFlag,
+  BlockOrigin,
+  EnhanceReport,
+  NoteBlock,
+  PartialRead,
+  Transcript,
+} from "./types";
 
 /** The transcripts Enhance could have cited: the RAW transcripts of every
  *  meeting recorded into the note (enhance_note reads the newest one when it
@@ -106,6 +113,9 @@ export interface TrustSummary {
   notes: number;
   /** enhancedBeforeTranscript: its AI lines count as notes. */
   early: boolean;
+  /** Enhance read only part of the meeting these lines come from (saved with
+   *  them, so it still shows after you navigate away). */
+  partial: PartialRead | null;
 }
 
 export function trustSummary(blocks: NoteBlock[], cited: CitedTranscript): TrustSummary {
@@ -118,11 +128,13 @@ export function trustSummary(blocks: NoteBlock[], cited: CitedTranscript): Trust
     flagged: 0,
     notes: 0,
     early,
+    partial: null,
   };
   for (const b of blocks) {
     const t = blockTrust(b.origin, cited, early, b.flags);
     if (t === "user") continue;
     s.ai += 1;
+    if (b.partial && !s.partial) s.partial = b.partial;
     if (t === "sourced") s.sourced += 1;
     else if (t === "unsourced") s.unsourced += 1;
     else if (t === "missing") s.missing += 1;
@@ -136,6 +148,16 @@ export function trustSummary(blocks: NoteBlock[], cited: CitedTranscript): Trust
  *  drops a source it can't match to a transcript line, so a line without one
  *  may still be right. Never say it was made up. */
 export function trustLine(s: TrustSummary, cited: CitedTranscript): string {
+  const line = baseTrustLine(s, cited);
+  return s.partial && s.ai > 0 ? `${line} · ${partialCopy(s.partial)}` : line;
+}
+
+/** "written from 412 of 1,980 lines": a partial read must never look whole. */
+export function partialCopy(p: PartialRead): string {
+  return `written from ${p.shown.toLocaleString("en-US")} of ${p.total.toLocaleString("en-US")} lines`;
+}
+
+function baseTrustLine(s: TrustSummary, cited: CitedTranscript): string {
   if (s.ai === 0) return "Everything here is yours";
   const lines = `${s.ai} AI line${s.ai === 1 ? "" : "s"}`;
   if (s.early) return `${lines} · no sources yet`;
@@ -161,6 +183,13 @@ export const EARLY_COPY =
 
 /** The legend's second line. */
 export function trustSubline(s: TrustSummary, cited: CitedTranscript): string {
+  const line = baseTrustSubline(s, cited);
+  return s.partial
+    ? `The meeting was longer than your model can read at once, so these come from excerpts of it. ${line}`
+    : line;
+}
+
+function baseTrustSubline(s: TrustSummary, cited: CitedTranscript): string {
   if (s.early) return EARLY_COPY;
   if (cited.state === "none") {
     return s.sourced === 0
@@ -195,6 +224,14 @@ export function blockFlagCopy(flag: BlockFlag): string {
       return "It pointed to a line Enhance didn't read.";
     case "not_from_notes":
       return "This isn't in your notes, so it isn't shown as yours.";
+    case "aimed_at_ai":
+      return "It leans on a line that reads as aimed at an AI assistant, or says what only that line says.";
+    case "instruction":
+      return "It rests on a line phrased as an order, which may not be a decision of the meeting.";
+    case "reversed":
+      return flag.detail
+        ? `It says “${flag.detail}” where its source says the opposite.`
+        : "It says the opposite of its source.";
     default:
       return flagCopy({ kind: flag.kind, detail: flag.detail });
   }
@@ -204,8 +241,9 @@ export function blockFlagCopy(flag: BlockFlag): string {
  *  says so; one that cites lines says what they don't hold. */
 export function flaggedCopy(flags: BlockFlag[]): { label: string; why: string } {
   const reasons = [...new Set(flags.map(blockFlagCopy))];
+  const noSource = flags.length > 0 && flags.every((f) => f.kind === "uncited_claim");
   return {
-    label: "Not backed by its source",
+    label: noSource ? "No source given" : "Not backed by its source",
     why: `${reasons.join(" ")} Check it before you keep it.`,
   };
 }
@@ -225,7 +263,7 @@ export function enhanceNotices(r: EnhanceReport): string[] {
   }
   if (r.dropped > 0) {
     out.push(
-      `Left out ${r.dropped} ${r.dropped === 1 ? "line" : "lines"} that came only from speech aimed at an AI assistant, not from the meeting. Nothing in ${r.dropped === 1 ? "it was" : "them was"} acted on.`,
+      `Left out ${r.dropped} ${r.dropped === 1 ? "line" : "lines"} that rested only on ${r.dropped === 1 ? "a transcript line" : "transcript lines"} reading as aimed at an AI assistant. Nothing in ${r.dropped === 1 ? "it was" : "them was"} acted on. The text is below, in case ${r.dropped === 1 ? "it was" : "they were"} meant for the meeting.`,
     );
   }
   if (r.demoted_user > 0) {

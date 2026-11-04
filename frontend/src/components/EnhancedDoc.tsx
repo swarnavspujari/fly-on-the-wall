@@ -60,8 +60,8 @@ export function EnhanceNotices({
       className="print:hidden mb-4 flex flex-col gap-1.5 rounded-xl border border-line px-4 py-3 text-[13px]"
       style={{ background: "var(--surface-2)", color: "var(--text-2)" }}
     >
-      {notices.map((n) => (
-        <p key={n} className="m-0 leading-[1.5]">
+      {notices.map((n, i) => (
+        <p key={i} className="m-0 leading-[1.5]">
           {n}
         </p>
       ))}
@@ -71,8 +71,8 @@ export function EnhanceNotices({
             What was left out
           </summary>
           <ul className="mt-1 list-disc pl-5">
-            {report.dropped_text.map((t) => (
-              <li key={t}>{t}</li>
+            {report.dropped_text.map((t, i) => (
+              <li key={i}>{t}</li>
             ))}
           </ul>
         </details>

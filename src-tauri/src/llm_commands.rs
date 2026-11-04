@@ -830,7 +830,13 @@ pub async fn enhance_with(
     .map_err(|e| {
         // The kind only: nothing of the meeting, or of a provider's reply, goes to the log.
         tracing::warn!(note_id, kind = e.code(), "enhance produced nothing to save");
-        e.to_string()
+        let mut message = e.to_string();
+        // A model that reads more at once is worth a mention, unless the note
+        // is Keep local: only a model on this device may read it.
+        if e.wants_a_longer_context() && !storage.lock().unwrap().note_keep_local(note_id) {
+            message.push_str(" A cloud model reads far more at once.");
+        }
+        message
     })?;
     let r = &done.report;
     tracing::info!(
@@ -2974,6 +2980,15 @@ mod enhance_tests {
         assert_eq!(done.report.segments_total, 2_500);
         // The citation is the first line SHOWN.
         assert_eq!(ai_ids(&done.note.blocks[0]), vec![ends[0].clone()]);
+        // A partial read is saved with the block: reopening the note later
+        // still says it was written from part of the meeting.
+        let read = fly_core::PartialRead {
+            shown: done.report.segments_shown,
+            total: 2_500,
+        };
+        assert_eq!(done.note.blocks[0].partial, Some(read));
+        let again = store.lock().unwrap().get_note(&note_id).unwrap();
+        assert_eq!(again.blocks[0].partial, Some(read));
     }
 
     #[tokio::test]
@@ -2993,14 +3008,51 @@ mod enhance_tests {
             .await
             .unwrap_err();
         assert!(e.contains("nothing was saved"), "{e}");
+        // Another model is worth a mention: a cloud one reads more at once.
+        assert!(e.contains("cloud model"), "{e}");
         // The first try at the full context, then once smaller.
-        let sent = model.sent.lock().unwrap();
-        assert_eq!(sent.len(), 2);
-        assert!(size(&sent[1]) < size(&sent[0]));
+        {
+            let sent = model.sent.lock().unwrap();
+            assert_eq!(sent.len(), 2);
+            assert!(size(&sent[1]) < size(&sent[0]));
+        }
         // The note's enhanced document is untouched.
         let kept = store.lock().unwrap().get_note(&note_id).unwrap();
         assert_eq!(kept.blocks.len(), 1);
         assert_eq!(kept.blocks[0].markdown, "My earlier enhanced note");
+
+        // A Keep local note may only be read by a model on this device: it is
+        // not told to try a cloud one.
+        store
+            .lock()
+            .unwrap()
+            .set_note_keep_local(&note_id, true)
+            .unwrap();
+        let e = enhance_with(&store, &model, &note_id, "tpl-general")
+            .await
+            .unwrap_err();
+        assert!(e.contains("nothing was saved"), "{e}");
+        assert!(!e.to_lowercase().contains("cloud"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn notes_too_long_for_the_context_are_refused_before_the_model_is_asked() {
+        let (_dir, store, note_id, _) = store_with(40, &[]);
+        // 300k characters of notes against the 84,480 an Ollama context holds.
+        store
+            .lock()
+            .unwrap()
+            .update_note_scratchpad(&note_id, &"- glazing heater supplier\n".repeat(11_500))
+            .unwrap();
+        let model = Model::new(
+            "ollama",
+            r#"[{"type":"ai","markdown":"Glazing.","sources":[0]}]"#,
+        );
+        let e = enhance_with(&store, &model, &note_id, "tpl-general")
+            .await
+            .unwrap_err();
+        assert!(e.contains("notes are too long"), "{e}");
+        assert!(model.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3016,6 +3068,8 @@ mod enhance_tests {
         assert_eq!(done.report.segments_shown, 2_500);
         assert_eq!(model.sent.lock().unwrap().len(), 1);
         assert_eq!(ai_ids(&done.note.blocks[0]), vec!["seg-02499"]);
+        // Read whole: nothing to say about a partial read.
+        assert_eq!(done.note.blocks[0].partial, None);
     }
 
     #[tokio::test]

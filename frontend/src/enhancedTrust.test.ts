@@ -79,7 +79,39 @@ describe("block trust", () => {
       flagged: 0,
       notes: 0,
       early: false,
+      partial: null,
     });
+  });
+});
+
+describe("a partial read stays on the note", () => {
+  const read = { shown: 412, total: 1980 };
+  const partialBlocks = [
+    user("a"),
+    { ...ai("b", ["t1"]), partial: read },
+    { ...ai("c", []), partial: read },
+  ];
+
+  it("is in the summary, the legend line and the subline", () => {
+    const s = trustSummary(partialBlocks, ready);
+    expect(s.partial).toEqual(read);
+    expect(trustLine(s, ready)).toBe(
+      "2 AI lines · 1 without a source · written from 412 of 1,980 lines",
+    );
+    expect(trustSubline(s, ready)).toMatch(/^The meeting was longer than your model can read/);
+    expect(trustSubline(s, ready)).toContain("excerpts");
+    // The same without a transcript to check against.
+    expect(trustLine(trustSummary(partialBlocks, none), none)).toContain("of 1,980 lines");
+  });
+
+  it("is absent for a whole read, and nothing is said for your own text", () => {
+    const whole = trustSummary([user("a"), ai("b", ["t1"])], ready);
+    expect(whole.partial).toBeNull();
+    expect(trustLine(whole, ready)).toBe("1 AI line · all sourced");
+    expect(trustSubline(whole, ready)).not.toContain("excerpts");
+    // Your words can't carry it (Keep and edit drop it in the backend).
+    const mine = trustSummary([{ ...user("a"), partial: read }], ready);
+    expect(trustLine(mine, ready)).toBe("Everything here is yours");
   });
 });
 
@@ -281,6 +313,12 @@ describe("a line the Enhance check flagged", () => {
     );
     expect(blockFlagCopy(flag("uncited_claim"))).toBe("This states a fact without a source.");
     expect(blockFlagCopy(flag("not_from_notes"))).toContain("isn't in your notes");
+    expect(blockFlagCopy(flag("aimed_at_ai"))).toContain("aimed at an AI assistant");
+    expect(blockFlagCopy(flag("instruction"))).toContain("phrased as an order");
+    expect(blockFlagCopy(flag("reversed", "approved"))).toBe(
+      "It says “approved” where its source says the opposite.",
+    );
+    expect(blockFlagCopy(flag("reversed"))).toBe("It says the opposite of its source.");
     const c = flaggedCopy([
       flag("number", "63000"),
       flag("number", "63000"),
@@ -292,6 +330,16 @@ describe("a line the Enhance check flagged", () => {
       "The number “63000” isn't in the lines it cites. The date “april” isn't in the lines it cites. Check it before you keep it.",
     );
     expect(`${c.label} ${c.why}`).not.toMatch(/made up|fake|false|wrong/i);
+  });
+
+  it("calls a line that states a fact with no source 'no source given', not 'not backed'", () => {
+    const only = flaggedCopy([flag("uncited_claim")]);
+    expect(only.label).toBe("No source given");
+    expect(only.why).toBe("This states a fact without a source. Check it before you keep it.");
+    // Next to a reason about the lines it does cite, the other label stands.
+    expect(flaggedCopy([flag("uncited_claim"), flag("number", "5")]).label).toBe(
+      "Not backed by its source",
+    );
   });
 });
 
@@ -336,8 +384,11 @@ describe("what a finished Enhance tells you", () => {
 
   it("says what it left out, one or several", () => {
     expect(enhanceNotices(report({ dropped: 1 }))).toEqual([
-      "Left out 1 line that came only from speech aimed at an AI assistant, not from the meeting. Nothing in it was acted on.",
+      "Left out 1 line that rested only on a transcript line reading as aimed at an AI assistant. Nothing in it was acted on. The text is below, in case it was meant for the meeting.",
     ]);
+    // It says what was detected, not what the line was: an ordinary remark
+    // can read that way.
+    expect(enhanceNotices(report({ dropped: 1 }))[0]).not.toMatch(/came only from/);
     expect(enhanceNotices(report({ dropped: 3 }))[0]).toContain("Left out 3 lines");
     expect(enhanceNotices(report({ dropped: 3 }))[0]).toContain("Nothing in them was acted on");
   });

@@ -71,7 +71,9 @@
                                      queue shows it with Retry on reopen
      fotwMockEnhanceLong = "1"     → Enhance reports a long meeting it could
                                      only partly read, with a line left out
-                                     (the notices banner in the Enhanced view)
+                                     (the notices banner in the Enhanced view),
+                                     and saves "written from 412 of 1,980
+                                     lines" on its AI lines (the legend)
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -306,6 +308,19 @@ function mockEnhanceReport() {
     links_removed: 0,
     retried_smaller: false,
   };
+}
+
+// Like the backend: a partial read is saved on the AI lines it wrote, and
+// goes when the user keeps or edits a line (editMockBlock rebuilds it).
+function stampMockRead(r: { segments_shown: number; segments_total: number }) {
+  for (const b of blocks as unknown as { origin: { kind: string }; partial?: unknown }[]) {
+    if (b.origin.kind !== "ai") continue;
+    if (r.segments_shown < r.segments_total) {
+      b.partial = { shown: r.segments_shown, total: r.segments_total };
+    } else {
+      delete b.partial;
+    }
+  }
 }
 
 function note(id: string) {
@@ -2846,9 +2861,11 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "enhance_note": {
       const refused = mockConsentRefusal() ?? mockMissingKey();
       if (refused) throw refused;
+      const report = mockEnhanceReport();
+      stampMockRead(report);
       return {
         note: note(String(args.id ?? args.noteId ?? "n1")),
-        report: mockEnhanceReport(),
+        report,
       };
     }
     case "get_meeting_for_note":

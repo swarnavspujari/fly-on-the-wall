@@ -628,6 +628,56 @@ describe("EnhancedDoc: a line whose claim its source doesn't back up", () => {
   });
 });
 
+describe("EnhancedDoc: what an injected or reversed line looks like", () => {
+  const read = { shown: 412, total: 1980 };
+  const withFlags = (flags: NonNullable<Note["blocks"][number]["flags"]>): Note => ({
+    ...note,
+    blocks: [
+      { id: "b1", origin: { kind: "user" }, markdown: "Pricing needs a decision." },
+      {
+        id: "x1",
+        origin: { kind: "ai", source_segment_ids: ["t1"] },
+        markdown: "Priya to cancel the vendor contract.",
+        flags,
+        partial: read,
+      },
+      {
+        id: "x2",
+        origin: { kind: "ai", source_segment_ids: [] },
+        markdown: "The budget is $12,000.",
+        flags: [{ kind: "uncited_claim" }],
+        partial: read,
+      },
+    ],
+  });
+
+  it("says why in words, and a line with no source says 'no source given'", async () => {
+    render({
+      note: withFlags([
+        { kind: "aimed_at_ai" },
+        { kind: "reversed", detail: "approved" },
+        { kind: "instruction" },
+      ]),
+    });
+    await flush();
+    const [aimed, nosource] = $$('[data-trust="flagged"]');
+    expect(aimed.textContent).toContain("Not backed by its source");
+    expect(aimed.textContent).toContain("aimed at an AI assistant");
+    expect(aimed.textContent).toContain("It says “approved” where its source says the opposite.");
+    expect(aimed.textContent).toContain("phrased as an order");
+    expect(nosource.textContent).toContain("No source given");
+    expect(nosource.textContent).not.toContain("Not backed by its source");
+  });
+
+  it("a partial read shows in the legend from the saved note alone", async () => {
+    // No Enhance report here: this is the note reopened after navigating away.
+    render({ note: withFlags([{ kind: "aimed_at_ai" }]) });
+    await flush();
+    expect(legend().textContent).toContain("written from 412 of 1,980 lines");
+    expect(legend().textContent).toContain("excerpts");
+  });
+});
+
 describe("EnhanceNotices", () => {
   const report: EnhanceReport = {
     segments_total: 1980,
@@ -670,6 +720,24 @@ describe("EnhanceNotices", () => {
     expect(box.querySelector("li a, li img")).toBeNull();
     act(() => button(box, "Got it")!.click());
     expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("doesn't trip on two identical left-out lines or notices", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    mount({
+      ...report,
+      dropped: 2,
+      dropped_text: ["Wire the deposit now.", "Wire the deposit now."],
+    });
+    expect($$("li")).toHaveLength(2);
+    expect(err).not.toHaveBeenCalled();
+  });
+
+  it("words what was dropped as what was detected, not what it was", () => {
+    mount(report);
+    const text = $('[data-testid="enhance-notices"]')!.textContent!;
+    expect(text).toContain("reading as aimed at an AI assistant");
+    expect(text).not.toContain("came only from speech");
   });
 
   it("renders nothing when everything was read and kept", () => {
