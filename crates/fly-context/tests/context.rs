@@ -588,6 +588,64 @@ fn get_event_note_and_items() {
     ));
 }
 
+/// A block that failed Enhance's checks is marked for an external client:
+/// flags in the JSON, no `[seg:…]` citation in the text. An unflagged note
+/// reads exactly as before.
+#[test]
+fn a_flagged_enhanced_block_is_not_offered_as_sourced() {
+    use fly_core::{BlockFlag, BlockFlagKind, PartialRead};
+    let f = fixture();
+    let ctx = Context::new(&f.storage, Visibility::ShareableOnly);
+    let args = json!({"note_id": f.budget_note, "kind": "enhanced"});
+    let before = call(&ctx, "get_note", &args, None).unwrap();
+    assert!(
+        !before.json.to_string().contains("flags"),
+        "{}",
+        before.json
+    );
+    assert!(!before.json.to_string().contains("partial"));
+    assert!(before.text.contains("[seg:b030]"));
+
+    let mut flagged = NoteBlock::ai_flagged(
+        "- The budget is $63,000",
+        vec!["b030".into()],
+        vec![BlockFlag {
+            kind: BlockFlagKind::Number,
+            detail: Some("63000".into()),
+        }],
+    );
+    flagged.partial = Some(PartialRead {
+        shown: 40,
+        total: 63,
+    });
+    f.storage
+        .update_note_blocks(
+            &f.budget_note,
+            &[
+                NoteBlock::ai("- Budget set at $8,400", vec!["b030".into()]),
+                flagged,
+            ],
+        )
+        .unwrap();
+    let after = call(&ctx, "get_note", &args, None).unwrap();
+    let blocks = &after.json["enhanced"];
+    assert!(blocks[0].get("flags").is_none() && blocks[0].get("partial").is_none());
+    assert_eq!(blocks[1]["flags"][0]["kind"], "number");
+    assert_eq!(blocks[1]["flags"][0]["detail"], "63000");
+    assert_eq!(blocks[1]["partial"]["shown"], 40);
+    // The text: the sourced block keeps its citation; the flagged one has
+    // none and says so; the partial read is stated once.
+    assert!(after.text.contains("- Budget set at $8,400 [seg:b030]"));
+    let line = after.text.lines().find(|l| l.contains("$63,000")).unwrap();
+    assert!(!line.contains("[seg:"), "{line}");
+    assert!(
+        line.contains("UNVERIFIED") && line.contains("number"),
+        "{line}"
+    );
+    assert!(line.contains("lines to check: b030"), "{line}");
+    assert_eq!(after.text.matches("40 of 63 transcript lines").count(), 1);
+}
+
 /// The privacy contract: under ShareableOnly no path returns keep-local
 /// text, by-id reads of keep-local meetings/notes are refused, and the same
 /// calls under All do see it (so the test isn't vacuous).

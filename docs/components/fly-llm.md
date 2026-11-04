@@ -24,13 +24,14 @@ The `LLMProvider` trait and its two HTTP implementations: `AnthropicProvider` (`
 ### Public API
 | Group | Items |
 |---|---|
-| Trait | `LLMProvider { id, model, is_local, chat, test_connection, capabilities, probe_capabilities, converse, chat_stream }` (`lib.rs:181-225`). The default `converse()` refuses tools or non-text blocks with `InvalidRequest` (`lib.rs:208-217`), and the default `chat_stream()` replays `converse()`. |
+| Trait | `LLMProvider { id, model, is_local, chat, chat_with_usage, test_connection, capabilities, probe_capabilities, converse, chat_stream }` (`lib.rs:181-235`). `chat_with_usage` is `chat()` over the same transport that also returns `Usage` (default: `Usage::default()`); the Ollama implementation sets `context_fallback` and the evaluated token count. Enhance uses it to see a context fallback without moving to the bounded `converse()` client. The default `converse()` refuses tools or non-text blocks with `InvalidRequest` (`lib.rs:208-217`), and the default `chat_stream()` replays `converse()`. |
 | Legacy request | `ChatRequest { messages, temperature, max_tokens, thinking, format, effort }`, `ChatMessage`, `Role`, `ThinkingMode::{Default, Disabled, Enabled}` (`lib.rs:86-159`) |
 | Block request | `ConverseRequest`, `Message`, `ContentBlock::{Text, ToolUse, ToolResult, Opaque}`, `ToolSpec`, `ToolChoice::{Auto, None, Required}` (`conversation.rs:18-194`) |
 | Response | `ChatResponse`, `StopReason::{EndTurn, ToolUse, MaxTokens}`, `Usage`, `StreamEvent`, `Capabilities`, `ChatStream` |
 | Errors | `LlmError::{NotConfigured, Auth, Provider, Network, Unavailable, InvalidRequest, ToolProtocol}`, `transport_error()` (`lib.rs:31-82`) |
 | Anthropic | `AnthropicProvider { api_key, model, base_url, relax_on_400 }` + `new()` (`anthropic.rs:116-134`), `ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-5-5"`, `ANTHROPIC_FAST_MODEL = "claude-haiku-5-5"`, `successor_model()`, `MAX_STRICT_TOOLS = 20`, `parse_messages_response(_checked)`, `parse_messages_converse` |
 | OpenAI-compatible | `OpenAiCompatProvider { provider_id, base_url, api_key, model, local }` + `openai()`, `nim()`, `ollama()` (`openai_compat.rs:38-76`), `parse_chat_completion`, `parse_native_chat`, `parse_native_response`, `parse_openai_response` |
+| Context sizing | `openai_compat::{MAX_NUM_CTX (32,768), prompt_chars_for_ctx(num_ctx, max_tokens), max_prompt_chars(max_tokens)}`: the `num_ctx` sizing run backwards (3 characters per prompt token, plus the reply budget and 512), so a caller can budget a prompt against the context actually sent |
 | Streaming | `stream::{LineBuffer, MAX_LINE_BYTES, sse_data, replay, response_events, collect, Accumulator, parse_tool_args}` |
 | Tool loop (fly-ask) | `tool_loop::{run_tool_loop, run_tool_loop_async, ToolLoopLimits (default 8 calls / 5 rounds / 6,000 chars), LoopEnd, ToolCallRecord, ToolLoopOutcome, ToolExecutor, UNKNOWN_TOOL}` |
 | Repair | `repair::{classify, TextToolCall}` |

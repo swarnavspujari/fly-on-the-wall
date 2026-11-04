@@ -573,6 +573,9 @@ impl Db {
                             }
                         },
                         markdown: b.markdown.clone(),
+                        // (the fixtures' notes were never run through the check)
+                        flags: Vec::new(),
+                        partial: None,
                     })
                     .collect();
                 storage.update_note_blocks(&note.id, &blocks)?;
