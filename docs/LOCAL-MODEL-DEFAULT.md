@@ -46,8 +46,10 @@ can't.
 
 **Memory unreadable.** If the OS won't say (a reading under 1 GB), nothing is guessed:
 no pin is written and no offer is made, the default stays `llama3.1`, the picker shows
-every model without a "this computer has less memory" claim, and the next launch tries
-again.
+every model without a "this computer has less memory" claim. That launch still writes
+the hardware cache, so the next one counts as an existing install: it pins `llama3.1`
+(not the recommendation), and if the reading is good by then the better model arrives as
+the one-time offer (§2), never as a switch.
 
 * **Graphics memory is not an input.** The bench ran on a 4 GB GPU with 24–75%
   of each model on it and still met the quality floors; a bigger GPU only
@@ -84,17 +86,34 @@ that isn't on the disk. A failed download switches nothing. After a switch the
 old model is offered for deletion (the existing prompt), never deleted.
 
 **Disk room.** Before a download starts, the app checks the drive the model will land
-on (the app's own models folder for the runtime it manages; `OLLAMA_MODELS` or Ollama's
-default for one the user runs) and refuses when the free space is less than the download
-plus 2.0 GB to spare:
+on and refuses when the free space is less than what is still to download plus 2.0 GB to
+spare:
 
 > Not enough free disk space for qwen3.5:9b. It needs about 8.6 GB free (a 6.6 GB
 > download plus 2.0 GB to spare) and this drive has 3.1 GB. Free up space (Settings ›
 > Your files and privacy shows what the app keeps), or choose a smaller model.
 
+* **A resumed download only counts what is left.** Ollama keeps an interrupted layer as a
+  sparse `blobs/<digest>-partial` (its length is the whole layer) and a small
+  `<digest>-partial-<n>` JSON per chunk with the bytes written (`Completed`). The app adds
+  those up (only records whose data file is beside them) and takes them off the download:
+  a 6.6 GB pull that dropped at 5 GB needs 1.6 GB plus the 2.0 GB, and the message says
+  "1.6 GB still to download of 6.6 GB". The credit never exceeds the download, because a
+  dropped pull of another model leaves files that can't be told apart.
+* **Which folder.** For the runtime the app manages, its own models folder, always. For a
+  server the user runs on this computer, `OLLAMA_MODELS` when set, else `~/.ollama/models`,
+  else (Linux) `/usr/share/ollama/.ollama/models`, where the package's service keeps them;
+  a folder is trusted only if it exists and holds `manifests/`. Links, junctions and
+  symlinks are followed before the free space is read, so a store moved to another drive is
+  measured there.
+
 Nothing is refused when the free space can't be read, when the model is already on the
-disk, for a model that isn't in the table, or for a server on another computer. The
-refusal reaches Settings as it is written, and nothing is switched.
+disk, for a model that isn't in the table, for a server on another computer, or when the
+store can't be found: a location this app can't see (the Ollama app's "Model location"
+setting, a service's own `OLLAMA_MODELS`) isn't guessed at, because measuring the home
+drive could refuse a pull that fits or pass one that doesn't. (If a stale
+`~/.ollama/models` is also there, that one is what is measured.) The refusal reaches
+Settings as it is written, and nothing is switched.
 
 ## 3. What the user is shown
 
