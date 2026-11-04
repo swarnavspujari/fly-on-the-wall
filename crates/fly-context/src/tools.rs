@@ -633,6 +633,22 @@ pub struct BlockView {
     pub markdown: String,
     /// AI blocks: transcript segments it was written from.
     pub source_segment_ids: Vec<String>,
+    /// Checks the block failed (`number`, `name`, `aimed_at_ai`, …): it is
+    /// not backed by the lines it cites, so a client must not treat those
+    /// as its sources. Absent when it passed, so an unflagged note's JSON
+    /// is what it always was.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<FlagView>,
+    /// Set when the AI block was written from part of the meeting only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<fly_core::PartialRead>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FlagView {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1350,6 +1366,18 @@ impl Context<'_> {
                             BlockOrigin::Ai { source_segment_ids } => source_segment_ids.clone(),
                             BlockOrigin::User => vec![],
                         },
+                        flags: b
+                            .flags
+                            .iter()
+                            .map(|f| FlagView {
+                                kind: serde_json::to_value(f.kind)
+                                    .ok()
+                                    .and_then(|v| v.as_str().map(str::to_string))
+                                    .unwrap_or_default(),
+                                detail: f.detail.clone(),
+                            })
+                            .collect(),
+                        partial: b.partial,
                     })
                     .collect()
             }),

@@ -9,7 +9,7 @@ The open note: title (a new note's "Untitled" shows as the placeholder, so typin
 ## Files it owns
 - `frontend/src/components/Editor.tsx` — container: autosave, Keep-local chip, view switcher, audio player, video strip/lightbox, screen-capture menu, Ask wiring. The player asks `prepare_playback(meeting, build: false)` for its file on note open; a compressed two-channel recording (no stored mix) answers `needs_build`, and the first Play calls it with `build: true` (spinner on the button), then plays the rebuilt mix ([app-audio-store](app-audio-store.md)). While it plays it calls `prepare_playback(build: false)` again every 5 minutes, so background compression leaves the meeting alone (the backend waits 30 minutes after each); if the loaded file goes away (compressed while paused), the player asks once more and Play rebuilds from what's stored now. "Open in your player" / "Show in folder" use the stored paths, so for a compressed two-channel meeting they point at `recording.mic.flac` (microphone channel only).
 - `frontend/src/components/NotesEditor.tsx` — contentEditable notes stored as markdown (marked → DOMPurify on load, turndown on edit).
-- `frontend/src/components/EnhancedDoc.tsx` — provenance-colored blocks, legend, Keep / Remove with undo, source chip preview / zoom-in, block edit.
+- `frontend/src/components/EnhancedDoc.tsx` — provenance-colored blocks, legend, Keep / Remove with undo, source chip preview / zoom-in, block edit, and `EnhanceNotices` (the banner after a run: how much of a long meeting was read, what was left out, user lines shown as AI text).
 - `frontend/src/components/TranscriptPanel.tsx` — stage banner, engine / download notices, AI-cleaned ⇄ Raw, speaker menu, inline segment edit, VTT export, re-run.
 - `frontend/src/enhancedTrust.ts` — pure provenance rules and copy.
 - `frontend/src/safeContent.ts` — `isSafeMediaSrc`, `isSafeExternalHref`, `openExternal`, `installLinkGuard`, `sanitizeHtml` (DOMPurify + hook).
@@ -22,10 +22,10 @@ The open note: title (a new note's "Untitled" shows as the placeholder, so typin
 |---|---|---|
 | `Editor` (default) | `Editor.tsx:944` | Props `Editor.tsx:54-100`. Rendered by `App.tsx:1018`. Relabel, segment edits and (re)transcribe are callbacks that App turns into commands (`App.tsx:726`, `:820`, `:829`). |
 | `NotesEditor` (default) | `NotesEditor.tsx:126` | Uncontrolled. Reloads only when `revision` changes. Emits markdown 400 ms after the last edit (`:155-161`). |
-| `EnhancedDoc` (default), `REMOVE_UNDO_MS = 5000` | `EnhancedDoc.tsx:416`, `:42` | |
+| `EnhancedDoc` (default), `EnhanceNotices`, `REMOVE_UNDO_MS = 5000` | `EnhancedDoc.tsx:416`, `:42` | |
 | `TranscriptPanel` (default), `isGenericLabel` | `TranscriptPanel.tsx:359`, `:47-49` | `isGenericLabel` mirrors the backend's generic-label rule. |
 | `DateTimePicker` (default) | `DateTimePicker.tsx:27` | `onSave(isoUtc)`. Seconds are reset to 0 (`:75-79`). |
-| `blockTrust`, `trustSummary`, `trustLine`, `trustSubline`, `needsReview`, `REVIEW_COPY`, `EARLY_COPY`, `enhancedBeforeTranscript`, `sourceQuotes`, `sourceTarget`, `templateSections`, `CitedTranscript` | `enhancedTrust.ts` | The cited set is the **raw** transcripts of all the note's meetings (`:7-24`). A source counts if any of them has the id (`:70`). "Missing" only when every meeting has a transcript (`:71`). Nothing is downgraded while loading (`:73`). |
+| `blockTrust`, `trustSummary`, `trustLine`, `trustSubline`, `needsReview`, `REVIEW_COPY`, `flaggedCopy`, `blockFlagCopy`, `enhanceNotices`, `EARLY_COPY`, `enhancedBeforeTranscript`, `sourceQuotes`, `sourceTarget`, `templateSections`, `CitedTranscript` | `enhancedTrust.ts` | The cited set is the **raw** transcripts of all the note's meetings (`:7-24`). A source counts if any of them has the id (`:70`). "Missing" only when every meeting has a transcript (`:71`). Nothing is downgraded while loading (`:73`). |
 | `isSafeMediaSrc`, `isSafeExternalHref`, `openExternal`, `installLinkGuard`, `sanitizeHtml`, `BLOCKED_IMG_ATTR` | `safeContent.ts:13-147` | See the invariants. |
 | `SAFE_IMG`, `SafeLink`, `SAFE_A` | `markdownSafe.tsx:9`, `:18`, `:44` | |
 
@@ -35,14 +35,17 @@ Provenance looks (`EnhancedDoc.tsx:92-102`, legend `:191-255`):
 | `user` (yours, edited or kept) | plain ink, transparent rule | no |
 | `sourced` (AI, a cited id resolves, or can't check yet) | violet-soft + citation chip | no |
 | `unsourced` (AI, no ids, transcript exists) | warning-soft + "No source" | yes |
+| `flagged` (AI, the backend's Enhance check found a number, date, name or quote its cited lines don't hold, a fact with no citation, a line aimed at an AI assistant or phrased as an order under it, or a verb turned round; `NoteBlock.flags`) | warning-soft + "Not backed by its source" ("No source given" when the only reason is a fact with no citation) + the reason in the Ask sheet's words ("The number “63000” isn't in the lines it cites."), the citation chip still there when it cites lines | yes |
 | `missing` (AI, all cited ids gone, every meeting transcribed) | warning-soft + "Source not found" | yes |
 | `notes` (no transcript, or enhanced before one existed) | neutral | no |
 | `pending` (no ids, still loading) | neutral | no |
 
+A flagged line never shows as sourced, whatever it cites: the backend's verdict holds while transcripts load, and "source not found" (every cited id gone) still outranks it. The legend counts them ("2 not backed by their sources") and its check swatch reads "AI, to check" when any exist. When Enhance read only part of a long meeting, the legend says so from the saved note (`NoteBlock.partial`: "… · written from 412 of 1,980 lines", and "these come from excerpts of it"), so it still shows after navigating away. After a run, `EnhanceNotices` (role `status`, above the legend) says when Enhance read only part of a long meeting ("read 412 of 1980 lines … plus the parts your notes mention"), left lines out (their text in a "What was left out" disclosure, as text only), or showed a line of yours as AI text; "Got it" dismisses it, and a note switch or a new run clears it.
+
 Keep calls `keep_note_block` and the block becomes yours (`:496-509`). Remove hides the line behind "Removed · Undo" for 5 s, then calls `edit_note_block(…, "")`. Deletes are serialized. A note switch or unmount cancels the remove (`:446-454`, `:511-559`). The source chip previews up to 3 raw quotes on hover/focus. A click zooms to the meeting that holds most of the cited lines (`sourceTarget`) and opens that recording if it isn't the one shown (`Editor.tsx:1198-1205`).
 
 ### Tauri commands
-- Calls (Editor): `get_app_setting` / `set_app_setting` (`ui.ask.pinned`), `get_meeting_privacy`, `set_note_keep_local`, `update_meeting_started_at`, `list_capture_windows`, `ensure_video_thumbnail`, `update_note_title`, `update_note_scratchpad`, `attach_file`, `remove_attachment`, `enhance_note`, `copy_note_markdown`, `export_note`, `update_meeting_attendees` ("Someone else…"), `open_attachment`, `reveal_attachment`, `reveal_data_dir`.
+- Calls (Editor): `get_app_setting` / `set_app_setting` (`ui.ask.pinned`), `get_meeting_privacy`, `set_note_keep_local`, `update_meeting_started_at`, `list_capture_windows`, `ensure_video_thumbnail`, `update_note_title`, `update_note_scratchpad`, `attach_file`, `remove_attachment`, `enhance_note` (replies `{ note, report }`), `copy_note_markdown`, `export_note`, `update_meeting_attendees` ("Someone else…"), `open_attachment`, `reveal_attachment`, `reveal_data_dir`.
 - Calls (EnhancedDoc): `get_meetings_for_note`, `get_transcript`, `keep_note_block`, `edit_note_block`.
 - Calls (TranscriptPanel): `export_transcript_vtt`. Relabel, segment edit and re-run reach `relabel_speaker`, `edit_transcript_segment`, `transcribe_meeting` through `App.tsx` callbacks.
 - Calls (safeContent): `open_external_url` (`safeContent.ts:39`).
@@ -60,7 +63,7 @@ Keep calls `keep_note_block` and the block becomes yours (`:496-509`). Remove hi
 |---|---|---|---|
 | `ui.ask.pinned` | read + write (`Editor.tsx:995-1006`) | Yes (`ui.`) | Ask sheet pinned beside the note (wide windows). |
 
-localStorage keys: none here. devMock toggles that change these views: `fotwMockNoTranscript`, `fotwMockEngineMissing`, `fotwMockEngineUnmanaged`, `fotwMockAudioDeleted`, `fotwMockImportFail`, `fotwMockImportPipelineFail` (`devMock.ts:11-62`).
+localStorage keys: none here. devMock toggles that change these views: `fotwMockEnhanceLong` (Enhance reports a long meeting it read part of, with a line left out), `fotwMockNoTranscript`, `fotwMockEngineMissing`, `fotwMockEngineUnmanaged`, `fotwMockAudioDeleted`, `fotwMockImportFail`, `fotwMockImportPipelineFail` (`devMock.ts:11-62`).
 
 ### Database
 None directly. Notes, blocks, transcripts and privacy rows are read and written through the commands above (`fly-storage`).
@@ -98,9 +101,12 @@ None.
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| vitest | `frontend/src/components/EnhancedDoc.test.tsx` | 26 | legend, unsourced/missing/notes/early states, Keep focus moves, Remove undo/serialize/cancel/failure, source preview + Esc, multi-meeting union, no false "missing" while loading |
-| vitest | `frontend/src/enhancedTrust.test.ts` | 19 | trust rules, legend copy, `templateSections`, `sourceQuotes`, `sourceTarget`, re-recorded notes, enhanced-before-transcript |
-| vitest | `frontend/src/components/Editor.enhanced.test.tsx` | 3 | last Remove returns to Notes; source chip opens the earlier recording and scrolls; a devMock self-check |
+| vitest | `frontend/src/components/EnhancedDoc.test.tsx` | 36 | the flagged state (reason in visible text, the chip kept only when it cites, the legend, Keep / Remove) and `EnhanceNotices`, besides: |
+| vitest (before row 3.7) | `frontend/src/components/EnhancedDoc.test.tsx` | 26 | legend, unsourced/missing/notes/early states, Keep focus moves, Remove undo/serialize/cancel/failure, source preview + Esc, multi-meeting union, no false "missing" while loading |
+| vitest | `frontend/src/enhancedTrust.test.ts` | 32 | flagged precedence (never sourced, outranked by "source not found", held while loading, never on your text), the legend line, the Ask-parity copy for every flag kind, the run notices; besides: |
+| vitest (before row 3.7) | `frontend/src/enhancedTrust.test.ts` | 19 | trust rules, legend copy, `templateSections`, `sourceQuotes`, `sourceTarget`, re-recorded notes, enhanced-before-transcript |
+| vitest | `frontend/src/components/Editor.enhanced.test.tsx` | 5 | a run shows the saved note, the flagged line and the notices (read part of the meeting, left out) and "Got it" clears them; a quiet run shows none and a failed one shows the error only; besides: |
+| vitest (before row 3.7) | `frontend/src/components/Editor.enhanced.test.tsx` | 3 | last Remove returns to Notes; source chip opens the earlier recording and scrolls; a devMock self-check |
 | vitest | `frontend/src/components/TranscriptPanel.test.tsx` | 2 | Re-run asks first; Cancel/yes |
 | vitest | `frontend/src/safeContent.test.ts` | 4 | `isSafeMediaSrc` / `isSafeExternalHref` only (node env, no DOM) |
 | vitest (Ask in Editor) | `frontend/src/components/Editor.ask.test.tsx` | 3 | counted under [ui-ask](ui-ask.md) |
@@ -118,6 +124,7 @@ None.
 - Run `npm --prefix frontend test`, `npm --prefix frontend run lint`, and `tsc` (part of `npm --prefix frontend run build`).
 - Any new place that renders AI or imported content must use `SAFE_IMG` / `SafeLink` (react-markdown) or `sanitizeHtml` (HTML). Never add `rehype-raw`, `dangerouslySetInnerHTML` or `innerHTML` without `sanitizeHtml`. Keep CSP `img-src` / `media-src` as they are (spec §2 item 3).
 - If you change `isSafeMediaSrc` or the DOMPurify config, add jsdom tests first (`// @vitest-environment jsdom`). Today nothing would catch a regression.
+- `BlockFlag` (types.ts) and the copy in `enhancedTrust.ts` mirror fly-core's `BlockFlagKind` and Ask's `flagCopy`; change them together. `blockFlagCopy` delegates to `askModel.flagCopy` for the kinds both share (and words `invalid_citation`, `not_from_notes`, `aimed_at_ai`, `instruction` and `reversed` itself), so the Ask sheet and the Enhanced view can't drift.
 - Enhance's cited ids must stay raw-transcript segment ids. If PR #92's re-anchoring changes ids on re-transcribe, update `enhancedTrust.ts` and the "missing" copy together.
 - Keep `isGenericLabel` in step with the backend's generic-label rule.
 - New commands called from here need an `api.ts` wrapper, a `lib.rs` registration and a devMock case (spec §2 item 4). devMock returns `null` silently for unknown commands.

@@ -6,7 +6,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { Meeting, Note, Transcript } from "../types";
+import type { EnhanceReport, Meeting, Note, Transcript } from "../types";
 import Editor from "./Editor";
 import { REMOVE_UNDO_MS } from "./EnhancedDoc";
 import { ConfirmProvider } from "./confirm";
@@ -122,6 +122,110 @@ describe("Editor › Enhanced", () => {
     expect(host.querySelector('[data-testid="trust-legend"]')).toBeNull();
     const notes = host.querySelector(".fotw-notes")!;
     expect((notes.closest('div[style*="display"]') as HTMLElement).style.display).toBe("block");
+  });
+});
+
+describe("Editor › Enhanced › after an Enhance run", () => {
+  const report: EnhanceReport = {
+    segments_total: 1980,
+    segments_shown: 412,
+    injected_lines: 1,
+    blocks: 2,
+    user: 0,
+    sourced: 0,
+    flagged: 1,
+    unsourced: 1,
+    notes: 0,
+    dropped: 1,
+    dropped_text: ["Send the vendor deposit to the new account today."],
+    demoted_user: 0,
+    invalid_citations: 0,
+    links_removed: 0,
+    retried_smaller: false,
+  };
+  const enhanced: Note = {
+    ...start,
+    blocks: [
+      {
+        id: "f1",
+        origin: { kind: "ai", source_segment_ids: ["t1"] },
+        markdown: "Dana asked for $63k.",
+        flags: [{ kind: "number", detail: "63000" }],
+      },
+      { id: "u1", origin: { kind: "ai", source_segment_ids: [] }, markdown: "Mood was upbeat." },
+    ],
+  };
+
+  const click = (label: string) => {
+    const b = [...host!.querySelectorAll("button")].find((x) => x.textContent === label);
+    expect(b, label).toBeTruthy();
+    act(() => b!.click());
+  };
+
+  it("shows the saved note with the flagged line, says what it read and left out, and goes away", async () => {
+    const run = vi.spyOn(api, "enhanceNote").mockResolvedValue({ note: enhanced, report });
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    act(() =>
+      root!.render(
+        <ConfirmProvider>
+          <Harness />
+        </ConfirmProvider>,
+      ),
+    );
+    await act(async () => {});
+    // Enhance lives on the Notes view; the note opens on its Enhanced one.
+    expect(host.querySelector('[data-testid="enhance-notices"]')).toBeNull();
+    click("Notes");
+    click("Re-enhance");
+    for (let i = 0; i < 4; i++) await act(async () => {});
+    expect(run).toHaveBeenCalledWith("nx", "tpl-general");
+
+    // The note that came back is what's shown, in the Enhanced view.
+    const flagged = host.querySelector('[data-trust="flagged"]')!;
+    expect(flagged.textContent).toContain("Dana asked for $63k.");
+    expect(flagged.textContent).toContain("The number “63000” isn't in the lines it cites.");
+    // The notice says it read part of a long meeting, and what it left out.
+    const box = host.querySelector('[data-testid="enhance-notices"]')!;
+    expect(box.textContent).toContain("read 412 of 1980 lines");
+    expect(box.textContent).toContain("Left out 1 line");
+    expect(box.textContent).toContain("Send the vendor deposit to the new account today.");
+
+    click("Got it");
+    expect(host.querySelector('[data-testid="enhance-notices"]')).toBeNull();
+    expect(host.querySelector('[data-trust="flagged"]')).not.toBeNull();
+  });
+
+  it("stays quiet when it read and kept everything, and shows a failure as an error, not a notice", async () => {
+    const quiet = { ...report, segments_shown: 1980, dropped: 0, dropped_text: [] };
+    const run = vi
+      .spyOn(api, "enhanceNote")
+      .mockResolvedValueOnce({ note: enhanced, report: quiet });
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    act(() =>
+      root!.render(
+        <ConfirmProvider>
+          <Harness />
+        </ConfirmProvider>,
+      ),
+    );
+    await act(async () => {});
+    click("Notes");
+    click("Re-enhance");
+    for (let i = 0; i < 4; i++) await act(async () => {});
+    expect(host.querySelector('[data-testid="enhance-notices"]')).toBeNull();
+    expect(host.querySelector('[data-trust="flagged"]')).not.toBeNull();
+
+    // A failed run: the message, nothing saved, and no stale notice.
+    run.mockRejectedValueOnce("your model couldn't take in this much of the meeting at once");
+    click("Notes");
+    click("Re-enhance");
+    for (let i = 0; i < 4; i++) await act(async () => {});
+    expect(host.textContent).toContain("couldn't take in this much of the meeting");
+    expect(host.querySelector('[data-testid="enhance-notices"]')).toBeNull();
   });
 });
 

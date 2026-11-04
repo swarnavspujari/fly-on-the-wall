@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type {
   Attachment,
   CaptureTarget,
+  EnhanceReport,
   Folder,
   ImportFile,
   ImportStaged,
@@ -51,7 +52,7 @@ import ImportQueue from "./ImportQueue";
 import NotesEditor from "./NotesEditor";
 import TranscriptPanel from "./TranscriptPanel";
 import LivePane from "./LivePane";
-import EnhancedDoc from "./EnhancedDoc";
+import EnhancedDoc, { EnhanceNotices } from "./EnhancedDoc";
 import { AskComposer, AskSheet, OPEN_ASK_EVENT, useAskChat, useWideWindow } from "./AskPanel";
 import type { OpenAskDetail } from "./AskPanel";
 import type { AskChatStore } from "../askStore";
@@ -1063,6 +1064,7 @@ export default function Editor({
   const [templateId, setTemplateId] = useState("tpl-general");
   const [enhancing, setEnhancing] = useState(false);
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
+  const [enhanceReport, setEnhanceReport] = useState<EnhanceReport | null>(null);
   const [askOpen, setAskOpen] = useState(false);
   // Whether the Ask sheet is pinned beside the note (wide windows only;
   // remembered). The chat itself is set up below, once hasMeeting is known.
@@ -1168,6 +1170,7 @@ export default function Editor({
       setSaveState("saved");
       setView(note.blocks.length > 0 ? "enhanced" : "notes");
       setEnhanceError(null);
+      setEnhanceReport(null);
       setAskOpen(false);
       setZoomIds([]);
       setLightboxAtt(null);
@@ -1252,9 +1255,11 @@ export default function Editor({
   const enhance = async () => {
     setEnhancing(true);
     setEnhanceError(null);
+    setEnhanceReport(null);
     try {
-      const updated = await api.enhanceNote(note.id, templateId);
-      onNoteChanged(updated);
+      const reply = await api.enhanceNote(note.id, templateId);
+      onNoteChanged(reply.note);
+      setEnhanceReport(reply.report);
       setView("enhanced");
     } catch (e) {
       setEnhanceError(String(e));
@@ -1718,6 +1723,9 @@ export default function Editor({
             {showEnhanced && (
               <>
                 {clipStrip(true)}
+                {enhanceReport && (
+                  <EnhanceNotices report={enhanceReport} onDismiss={() => setEnhanceReport(null)} />
+                )}
                 <EnhancedDoc
                   note={note}
                   onNoteChanged={onNoteChanged}
