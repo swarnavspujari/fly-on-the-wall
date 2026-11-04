@@ -11,6 +11,7 @@ import type {
   CalendarToggle,
   LlmSettings,
   ModelProgress,
+  LocalModelAdvice,
   OllamaStatus,
   Template,
 } from "../types";
@@ -35,6 +36,8 @@ import { briefError } from "../pipelineNotice";
 import { useCloudConsent } from "./CloudConsent";
 import { useConfirm } from "./confirm";
 import ConnectorsSection from "./ConnectorsSection";
+import { LocalModelChoices, LocalModelOffer } from "./LocalModelChoices";
+import { rowFor, showOffer, sizeLabel } from "../localModels";
 import ModelsOnComputer from "./ModelsOnComputer";
 import PrivacySection from "./PrivacySection";
 import StorageRows from "./StorageRows";
@@ -272,6 +275,11 @@ export default function SettingsModal({
   const [ollama, setOllama] = useState<OllamaStatus | null>(null);
   const [ollamaBusy, setOllamaBusy] = useState<"install" | "pull" | null>(null);
   const [ollamaMsg, setOllamaMsg] = useState<string | null>(null);
+  // What the app recommends for this computer, the one-time offer for an
+  // existing install and what was measured (local_models.rs), and the model a
+  // click is downloading right now.
+  const [advice, setAdvice] = useState<LocalModelAdvice | null>(null);
+  const [pullingModel, setPullingModel] = useState<string | null>(null);
   // Guided model swap: `swapOffer` = the user saved an Ollama model that
   // isn't installed (offer pull-with-progress instead of failing at first
   // use); `deleteOffer` = a swap completed and the old model still sits on
@@ -373,7 +381,16 @@ export default function SettingsModal({
       },
     );
 
-  const loadOllama = () => api.ollamaStatus().then(setOllama);
+  // Status and advice together: every Ollama action can change both (the
+  // offer goes away once its model is in use).
+  const loadOllama = () =>
+    Promise.all([
+      api.ollamaStatus().then(setOllama),
+      api
+        .localModelAdvice()
+        .then(setAdvice)
+        .catch(() => setAdvice(null)),
+    ]).then(() => undefined);
 
   useEffect(() => {
     load().catch(console.error);
@@ -668,6 +685,42 @@ export default function SettingsModal({
       await api.ollamaDelete(model);
       setOllamaMsg(`${model} deleted.`);
       setDeleteOffer((d) => (d && sameOllamaModel(d.name, model) ? null : d));
+    } catch (e) {
+      setOllamaMsg(String(e));
+    } finally {
+      loadOllama().catch(console.error);
+    }
+  };
+
+  /** The user's click on a local model (the offer or the picker): download it
+   *  if it isn't here, then make it their explicit choice. Nothing happens
+   *  before the click, and a failed download switches nothing. */
+  const switchToLocalModel = async (model: string) => {
+    const from = effOllamaModel;
+    setOllamaBusy("pull");
+    setPullingModel(model);
+    setOllamaMsg(null);
+    try {
+      if (!installedOllamaModel(model)) await api.ollamaPull(model);
+      await api.useLocalModel(model);
+      await loadLlm();
+      setOllamaMsg(`Now using ${model}.`);
+      // Offer — never force — reclaiming the model it replaced.
+      const old = from && !sameOllamaModel(from, model) ? installedOllamaModel(from) : null;
+      if (old) setDeleteOffer(old);
+    } catch (e) {
+      setOllamaMsg(String(e));
+    } finally {
+      setOllamaBusy(null);
+      setPullingModel(null);
+      loadOllama().catch(console.error);
+    }
+  };
+
+  /** "Not now" on the offer: it never comes back for that model. */
+  const dismissModelOffer = async (model: string) => {
+    try {
+      await api.dismissLocalModelOffer(model);
     } catch (e) {
       setOllamaMsg(String(e));
     } finally {
@@ -992,11 +1045,14 @@ export default function SettingsModal({
   // Progress for the runtime install or the model pull.
   const ollamaProg =
     modelProgress &&
-    (modelProgress.id === "ollama-bin" || modelProgress.id === `ollama:${effOllamaModel}`) &&
+    (modelProgress.id === "ollama-bin" ||
+      modelProgress.id === `ollama:${pullingModel ?? effOllamaModel}`) &&
     ollamaBusy !== null &&
     modelProgress.total > 0
       ? modelProgress
       : null;
+  // What the model in use measured and weighs (for the Download button).
+  const effRow = rowFor(advice, effOllamaModel);
   const ollamaPct = ollamaProg
     ? Math.round((ollamaProg.downloaded / ollamaProg.total) * 100)
     : null;
@@ -1768,12 +1824,23 @@ export default function SettingsModal({
                                 >
                                   {ollamaBusy === "pull"
                                     ? "Downloading…"
-                                    : `Download ${effOllamaModel}`}
+                                    : `Download ${effOllamaModel}${effRow ? ` (${sizeLabel(effRow.download_bytes)})` : ""}`}
                                 </Button>
                               )}
                             </>
                           }
                         >
+                          {advice && showOffer(advice, !!ollama?.installed, llmProvider) && (
+                            <div className="mb-2">
+                              <LocalModelOffer
+                                advice={advice}
+                                installed={ollama?.models}
+                                busy={ollamaBusy !== null}
+                                onAccept={(m) => void switchToLocalModel(m)}
+                                onDismiss={(m) => void dismissModelOffer(m)}
+                              />
+                            </div>
+                          )}
                           {(ollamaPct !== null || ollamaMsg || swapOffer || deleteOffer) && (
                             <div className="space-y-2">
                               {ollamaPct !== null && (
@@ -1840,6 +1907,17 @@ export default function SettingsModal({
                                   </Button>
                                 </div>
                               )}
+                            </div>
+                          )}
+                          {advice && ollama?.installed && (
+                            <div className="mt-2">
+                              <LocalModelChoices
+                                advice={advice}
+                                installed={ollama.models}
+                                effective={effOllamaModel}
+                                busy={ollamaBusy !== null}
+                                onUse={(m) => void switchToLocalModel(m)}
+                              />
                             </div>
                           )}
                         </SettingsRow>

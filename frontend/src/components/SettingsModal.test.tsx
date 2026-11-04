@@ -723,3 +723,187 @@ describe("dev mock › cloud consent mirrors the backend", () => {
     await expect(api.requestCloudConsent("someday")).rejects.toBe("unknown provider 'someday'");
   });
 });
+
+describe("Settings › the local model for this computer", () => {
+  // An existing install on the old default, on a computer that can run the
+  // better model. The backend decides this (local_models.rs); the mock's
+  // advice is replaced by this fixture so each test states its own case.
+  const row = (over: Record<string, unknown> = {}) => ({
+    model: "qwen3.5:9b",
+    download_bytes: 6_600_000_000,
+    memory_gb: 6.2,
+    ram_class_gb: 16,
+    fits: true,
+    recommended: true,
+    needs_newer_ollama: null,
+    measured: { sourced_pct: 83, declines_pct: 94, seconds: 30 },
+    ...over,
+  });
+  const advice = (over: Record<string, unknown> = {}) => ({
+    ram_gb: 31.7,
+    ollama_version: "0.40.13",
+    recommended: "qwen3.5:9b",
+    held_back: null,
+    default_model: "llama3.1",
+    explicit_model: null,
+    offer: { model: "qwen3.5:9b", download_bytes: 6_600_000_000 },
+    models: [
+      row(),
+      row({
+        model: "llama3.1",
+        download_bytes: 4_920_000_000,
+        memory_gb: 5.8,
+        ram_class_gb: 12,
+        recommended: false,
+        measured: { sourced_pct: 62, declines_pct: 75, seconds: 25 },
+      }),
+    ],
+    measured_on:
+      "Measured on one test laptop (4 GB graphics memory, 32 GB RAM) while other programs were running. Your computer will differ.",
+    doc_url: "https://example.com/docs/ASK-MODEL-BENCH.md",
+    ...over,
+  });
+  const offerCard = () => $('[aria-label="Local model offer"]');
+  const openLocal = async () => {
+    await open();
+    await choose($<HTMLSelectElement>('select[aria-label="Runs on"]')!, "ollama");
+  };
+  afterEach(async () => {
+    // the mock is stateful: back to the cloud provider the other tests expect
+    await api.setLlmSettings({
+      provider: "anthropic",
+      model: "claude-sonnet-5-5",
+      base_url: null,
+      api_key: null,
+    });
+  });
+
+  it("shows the offer once, with the numbers, and downloads nothing by itself", async () => {
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(advice());
+    const pull = vi.spyOn(api, "ollamaPull");
+    const use = vi.spyOn(api, "useLocalModel");
+    await openLocal();
+    const card = offerCard()!;
+    expect(card.textContent).toContain(
+      "A better local model for this computer: qwen3.5:9b · 6.6 GB",
+    );
+    expect(card.textContent).toContain("Answers backed by a source: 83%");
+    expect(card.textContent).toContain("About 30 seconds per answer");
+    expect(card.textContent).toContain("Measured on one test laptop");
+    // Seeing it changes nothing: no download, no switch, no dismissal.
+    expect(pull).not.toHaveBeenCalled();
+    expect(use).not.toHaveBeenCalled();
+  });
+
+  it("'Download and switch' downloads first, then makes it the user's choice", async () => {
+    // The backend's advice follows the saved choice: the offer is there until
+    // the user's click makes the model theirs.
+    let chosen = false;
+    vi.spyOn(api, "localModelAdvice").mockImplementation(async () =>
+      chosen ? advice({ offer: null, explicit_model: "qwen3.5:9b" }) : advice(),
+    );
+    // (no call-through: the mock would keep the model on disk for later tests)
+    const pull = vi.spyOn(api, "ollamaPull").mockResolvedValue(undefined);
+    const use = vi.spyOn(api, "useLocalModel").mockImplementation(async () => {
+      chosen = true;
+    });
+    await openLocal();
+    expect(offerCard()).not.toBeNull();
+    await click(byText("button", "Download and switch (6.6 GB)"));
+    expect(pull).toHaveBeenCalledExactlyOnceWith("qwen3.5:9b");
+    expect(use).toHaveBeenCalledExactlyOnceWith("qwen3.5:9b");
+    // The model is on disk before the setting moves: no window where Ask
+    // and Enhance point at a model that isn't here.
+    expect(pull.mock.invocationCallOrder[0]).toBeLessThan(use.mock.invocationCallOrder[0]);
+    expect(host!.textContent).toContain("Now using qwen3.5:9b.");
+    expect(offerCard()).toBeNull();
+  });
+
+  it("a failed download switches nothing", async () => {
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(advice());
+    vi.spyOn(api, "ollamaPull").mockRejectedValue("the download stopped");
+    const use = vi.spyOn(api, "useLocalModel");
+    await openLocal();
+    await click(byText("button", "Download and switch (6.6 GB)"));
+    expect(use).not.toHaveBeenCalled();
+    expect(host!.textContent).toContain("the download stopped");
+    expect(offerCard()).not.toBeNull(); // still there to try again
+  });
+
+  it("'Not now' dismisses it for that model and nothing else happens", async () => {
+    let dismissed = false;
+    const adv = vi
+      .spyOn(api, "localModelAdvice")
+      .mockImplementation(async () => (dismissed ? advice({ offer: null }) : advice()));
+    const dismiss = vi.spyOn(api, "dismissLocalModelOffer").mockImplementation(async () => {
+      dismissed = true;
+    });
+    const pull = vi.spyOn(api, "ollamaPull");
+    const use = vi.spyOn(api, "useLocalModel");
+    await openLocal();
+    await click(byText("button", "Not now"));
+    expect(dismiss).toHaveBeenCalledExactlyOnceWith("qwen3.5:9b");
+    expect(adv.mock.calls.length).toBeGreaterThan(1); // advice reloaded
+    expect(offerCard()).toBeNull();
+    expect(pull).not.toHaveBeenCalled();
+    expect(use).not.toHaveBeenCalled();
+  });
+
+  it("no offer for a cloud provider, or when the backend has none", async () => {
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(advice());
+    await open();
+    expect(offerCard()).toBeNull(); // the mock's provider is the cloud one
+    act(() => root!.unmount());
+    host!.remove();
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(advice({ offer: null }));
+    await openLocal();
+    expect(offerCard()).toBeNull();
+  });
+
+  it("the picker lists the measured models and the one in use needs no button", async () => {
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(advice({ offer: null }));
+    await openLocal();
+    const choices = $(".fly-model-choices")!;
+    expect(choices.textContent).toContain("qwen3.5:9b");
+    expect(choices.textContent).toContain("Declines what it can’t answer: 94%");
+    expect(choices.textContent).toContain("Declines what it can’t answer: 75%");
+    expect(choices.textContent).toContain("recommended for this computer");
+    const nine = choices.querySelector('[data-model="qwen3.5:9b"]')!;
+    const llama = choices.querySelector('[data-model="llama3.1"]')!;
+    expect(llama.textContent).toContain("in use");
+    expect([...llama.querySelectorAll("button")]).toHaveLength(0);
+    expect(nine.querySelector("button")?.textContent).toBe("Download and use (6.6 GB)");
+  });
+
+  it("a new install sees the recommended model pre-selected, with its size", async () => {
+    // The backend pinned the default to the 9B on this computer; Settings
+    // shows it as the model Ask and Enhance need, and the confirm step names
+    // the download size. Nothing downloads until the click.
+    const llm = await api.getLlmSettings();
+    vi.spyOn(api, "getLlmSettings").mockResolvedValue({
+      ...llm,
+      provider: "ollama",
+      providers: llm.providers.map((p) =>
+        p.id === "ollama" ? { ...p, default_model: "qwen3.5:9b", model: null } : p,
+      ),
+    });
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(
+      advice({ offer: null, default_model: "qwen3.5:9b" }),
+    );
+    const pull = vi.spyOn(api, "ollamaPull");
+    await open();
+    expect(host!.textContent).toContain("qwen3.5:9b isn't downloaded yet.");
+    expect(byText("button", "Download qwen3.5:9b (6.6 GB)")).not.toBeNull();
+    expect(pull).not.toHaveBeenCalled();
+  });
+});
+
+describe("dev mock › local model advice mirrors the backend", () => {
+  it("names the offered models only", async () => {
+    const a = await api.localModelAdvice();
+    expect(a.models.map((m) => m.model)).toEqual(["qwen3.5:9b", "llama3.1", "qwen3.5:4b"]);
+    expect(a.models.filter((m) => m.recommended)).toHaveLength(1);
+    await expect(api.useLocalModel("gemma4:12b-it-qat")).rejects.toContain("isn't one of");
+    await expect(api.dismissLocalModelOffer("rm -rf")).rejects.toContain("isn't one of");
+  });
+});

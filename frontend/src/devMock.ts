@@ -772,15 +772,20 @@ const asrSettings = {
   },
 };
 
+// fotwMockModelOffer = "1": an existing install on Ollama with no model of its
+// own pick (the old default), so the one-time offer can be previewed.
+// fotwMockRam = "8" | "12" | "16" | "32" (default 32): this computer's memory.
+const mockModelOffer =
+  typeof localStorage !== "undefined" && localStorage.getItem("fotwMockModelOffer") === "1";
 const llmSettings = {
-  provider: "anthropic",
+  provider: mockModelOffer ? "ollama" : "anthropic",
   providers: [
     {
       id: "ollama",
       default_model: "llama3.1",
       is_local: true,
       has_key: true,
-      model: "llama3.1",
+      model: mockModelOffer ? null : "llama3.1",
       base_url: "http://localhost:11434",
     },
     {
@@ -1143,6 +1148,7 @@ const mockUiSettings: Record<string, string> = initialUiSettings();
 /** Tests: put the get/set_app_setting store back to its starting state, so a
  *  consent one test gives can't leak into the next. */
 export function resetMockAppSettings() {
+  mockOfferDismissed = null;
   for (const k of Object.keys(mockUiSettings)) delete mockUiSettings[k];
   Object.assign(mockUiSettings, initialUiSettings());
 }
@@ -1224,6 +1230,79 @@ function meetingPrivacy(meetingId: string) {
     meeting_id: meetingId,
     ...p,
     keep_local_from_folder: folder != null && mockLocalFolders.has(folder),
+  };
+}
+
+/* ---- local model advice (local_models.rs) ---- */
+// The same table and rule as the backend: the numbers are what the Ask bench
+// measured (docs/ASK-MODEL-BENCH.md), the cut-offs are 15 GB and 11 GB.
+const MOCK_MODEL_TABLE = [
+  {
+    model: "qwen3.5:9b",
+    rank: 2,
+    download_bytes: 6_600_000_000,
+    memory_gb: 6.2,
+    min_ram_gb: 15,
+    ram_class_gb: 16,
+    measured: { sourced_pct: 83, declines_pct: 94, seconds: 30 },
+  },
+  {
+    model: "llama3.1",
+    rank: 1,
+    download_bytes: 4_920_000_000,
+    memory_gb: 5.8,
+    min_ram_gb: 11,
+    ram_class_gb: 12,
+    measured: { sourced_pct: 62, declines_pct: 75, seconds: 25 },
+  },
+  {
+    model: "qwen3.5:4b",
+    rank: 1,
+    download_bytes: 3_330_000_000,
+    memory_gb: 3.6,
+    min_ram_gb: 7,
+    ram_class_gb: 8,
+    measured: { sourced_pct: 65, declines_pct: 56, seconds: 20 },
+  },
+];
+let mockOfferDismissed: string | null = null;
+function mockLocalModelAdvice() {
+  const flag = Number(mockFlag("fotwMockRam"));
+  const ram = Number.isFinite(flag) && flag > 0 ? flag - 0.3 : 31.7;
+  const ideal =
+    MOCK_MODEL_TABLE.find((c) => ram >= c.min_ram_gb) ??
+    MOCK_MODEL_TABLE[MOCK_MODEL_TABLE.length - 1];
+  const ollama = llmSettings.providers.find((p) => p.id === "ollama")!;
+  const current = MOCK_MODEL_TABLE.find((c) => c.model === ollama.default_model);
+  const offer =
+    llmSettings.provider === "ollama" &&
+    !ollama.model &&
+    current &&
+    ideal.rank > current.rank &&
+    mockOfferDismissed !== ideal.model
+      ? { model: ideal.model, download_bytes: ideal.download_bytes }
+      : null;
+  return {
+    ram_gb: Math.round(ram * 10) / 10,
+    ollama_version: "0.40.13",
+    recommended: ideal.model,
+    held_back: null,
+    default_model: ollama.default_model,
+    explicit_model: ollama.model,
+    offer,
+    models: MOCK_MODEL_TABLE.map((c) => ({
+      model: c.model,
+      download_bytes: c.download_bytes,
+      memory_gb: c.memory_gb,
+      ram_class_gb: c.ram_class_gb,
+      fits: ram >= c.min_ram_gb,
+      recommended: c.model === ideal.model,
+      needs_newer_ollama: null,
+      measured: c.measured,
+    })),
+    measured_on:
+      "Measured on one test laptop (4 GB graphics memory, 32 GB RAM) while other programs were running. Your computer will differ.",
+    doc_url: "https://github.com/swarnavspujari/fly-on-the-wall/blob/main/docs/ASK-MODEL-BENCH.md",
   };
 }
 
@@ -3177,6 +3256,23 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         // ollama.rs used_for: the saved Ask/Enhance model, search embeddings
         models: o.models.map((m) => ({ ...m, used_for: mockOllamaUsedFor(m.name) })),
       };
+    }
+    case "local_model_advice":
+      return mockLocalModelAdvice();
+    case "dismiss_local_model_offer": {
+      const model = String(args.model);
+      if (!MOCK_MODEL_TABLE.some((c) => c.model === model))
+        throw `'${model}' isn't one of the offered models`;
+      mockOfferDismissed = model;
+      return null;
+    }
+    case "use_local_model": {
+      const model = String(args.model);
+      if (!MOCK_MODEL_TABLE.some((c) => c.model === model))
+        throw `'${model}' isn't one of the offered models`;
+      const ollama = llmSettings.providers.find((p) => p.id === "ollama");
+      if (ollama) ollama.model = model;
+      return null;
     }
     case "ollama_pull": {
       const o = ollamaState();
