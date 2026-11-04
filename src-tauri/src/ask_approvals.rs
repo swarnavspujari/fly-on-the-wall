@@ -321,7 +321,7 @@ fn apply_insert(
     markdown: &str,
     segment_ids: &[String],
 ) -> Result<Note, String> {
-    let markdown = fly_ask::text::strip_links(markdown.trim()).0;
+    let markdown = fly_ask::text::strip_links_and_emails(markdown.trim()).0;
     if markdown.trim().is_empty() {
         return Err("nothing to insert".into());
     }
@@ -366,7 +366,7 @@ fn apply_item(
     owner: Option<&str>,
     segment_ids: &[String],
 ) -> Result<MeetingItem, String> {
-    let text = fly_ask::text::strip_links(text.trim()).0;
+    let text = fly_ask::text::strip_links_and_emails(text.trim()).0;
     if text.trim().is_empty() {
         return Err("the action item is empty".into());
     }
@@ -566,5 +566,28 @@ mod tests {
         // A webview-supplied id is logged as a bounded token.
         let (_, row) = a.approve(&f.s, "<script>x</script>", Kind::Insert, now);
         assert_eq!(row.approval_id, "scriptxscript");
+    }
+
+    #[test]
+    fn an_approved_insert_does_not_write_an_address_into_the_note() {
+        let f = fx();
+        let a = Approvals::default();
+        let now = Utc::now();
+        let ids = vec!["r01".to_string()];
+        let id = a.register_answer(
+            &f.note,
+            "Ilka posts the kiln rota by Thursday, cc ilka@example.test.",
+            &ids,
+            now,
+        );
+        let (r, _) = a.approve(&f.s, &id, Kind::Insert, now);
+        let Ok(Applied::Note(note)) = r else {
+            panic!("{r:?}")
+        };
+        let md = &note.blocks.last().unwrap().markdown;
+        assert!(
+            !md.contains('@') && md.contains("Ilka posts the kiln rota"),
+            "{md}"
+        );
     }
 }

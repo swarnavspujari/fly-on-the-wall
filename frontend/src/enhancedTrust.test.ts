@@ -313,8 +313,13 @@ describe("a line the Enhance check flagged", () => {
     );
     expect(blockFlagCopy(flag("uncited_claim"))).toBe("This states a fact without a source.");
     expect(blockFlagCopy(flag("not_from_notes"))).toContain("isn't in your notes");
+    // ...and, when the backend says which part, that part.
+    expect(blockFlagCopy(flag("not_from_notes", "Glass notes"))).toBe(
+      "“Glass notes” isn't in your notes, so this isn't shown as yours.",
+    );
     expect(blockFlagCopy(flag("aimed_at_ai"))).toContain("aimed at an AI assistant");
     expect(blockFlagCopy(flag("instruction"))).toContain("phrased as an order");
+    expect(blockFlagCopy(flag("instruction"))).toContain("request to add to the notes");
     expect(blockFlagCopy(flag("reversed", "approved"))).toBe(
       "It says “approved” where its source says the opposite.",
     );

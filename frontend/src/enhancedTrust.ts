@@ -223,11 +223,14 @@ export function blockFlagCopy(flag: BlockFlag): string {
     case "invalid_citation":
       return "It pointed to a line Enhance didn't read.";
     case "not_from_notes":
-      return "This isn't in your notes, so it isn't shown as yours.";
+      // Says which part: a merged line, an added heading, a link or a figure.
+      return flag.detail
+        ? `“${flag.detail}” isn't in your notes, so this isn't shown as yours.`
+        : "This isn't in your notes, so it isn't shown as yours.";
     case "aimed_at_ai":
       return "It leans on a line that reads as aimed at an AI assistant, or says what only that line says.";
     case "instruction":
-      return "It rests on a line phrased as an order, which may not be a decision of the meeting.";
+      return "It rests on a line phrased as an order or a request to add to the notes, which may not be a decision of the meeting.";
     case "reversed":
       return flag.detail
         ? `It says “${flag.detail}” where its source says the opposite.`
