@@ -41,6 +41,16 @@ fn base_messages() -> Vec<Value> {
     ]
 }
 
+/// Output cap per call (`FOTW_OLLAMA_ISSUES_PREDICT`): enough for a tool
+/// call or a one-line answer, short enough that a model that thinks until
+/// the cap (the #10976 failure) doesn't take minutes.
+fn predict() -> u32 {
+    std::env::var("FOTW_OLLAMA_ISSUES_PREDICT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400)
+}
+
 /// One `/api/chat` call; `think` is `None` to omit the field.
 async fn chat(
     http: &reqwest::Client,
@@ -52,7 +62,7 @@ async fn chat(
 ) -> Value {
     let mut body = json!({
         "model": model, "messages": messages, "stream": false,
-        "options": {"temperature": 0, "num_predict": 600, "num_ctx": 4096},
+        "options": {"temperature": 0, "num_predict": predict(), "num_ctx": 4096},
     });
     if tools {
         body["tools"] = json!([tool()]);

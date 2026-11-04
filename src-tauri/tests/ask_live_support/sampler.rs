@@ -110,7 +110,7 @@ impl Sampler {
                 acc.peak_ollama_rss = acc.peak_ollama_rss.max(rss);
                 acc.ollama_cpu += cpu / cores;
                 acc.build_samples += u32::from(building);
-                if tick % 2 == 0 {
+                if tick.is_multiple_of(2) {
                     if let Ok(Some((used, total, util))) =
                         tokio::task::spawn_blocking(nvidia_smi).await
                     {
@@ -121,7 +121,7 @@ impl Sampler {
                         acc.gpu_n += 1;
                     }
                 }
-                if tick % 4 == 0 {
+                if tick.is_multiple_of(4) {
                     if let Some(ps) = ollama_ps(&client, &upstream).await {
                         acc.ps.push(ps);
                     }

@@ -22,17 +22,20 @@
 //! FOTW_ASK_LIVE_KINDS=quality    quality (default) and/or red_team, guard
 //! FOTW_ASK_LIVE_TIER=S           force a tier (default: the app's measured tier)
 //! FOTW_ASK_LIVE_COLD=0           skip the unload before the first scenario
+//! FOTW_ASK_LIVE_COLD_EVERY=1     unload before every scenario (cold p50 / p95)
 //! FOTW_ASK_LIVE_RESUME=1         keep rows already in <out>/<model>/rows.jsonl
 //! FOTW_ASK_LIVE_TIMEOUT_S=900    give up on one Ask after this long
 //! FOTW_ASK_LIVE_QUIET_MAX_S=600  before each scenario wait up to this long for the machine
 //!                                to go quiet (CPU below FOTW_ASK_LIVE_QUIET_PCT, default 30)
 //! FOTW_ASK_LIVE_OUT=<dir outside the repo>   default: <temp>/fotw-ask-live
 //! ```
-//! Replays land in `<out>/<model>/<scenario>.json`, rows in `rows.jsonl`
-//! and the model's summary in `bench.json`; copying a replay into
-//! `evals/suites/ask_contract/replays/` is a locked change for the user.
-//! Other work on the machine skews every number: `bench.json` records the
-//! non-Ollama CPU and whether builds were running.
+//! Replays land in `<out>/<model>/<scenario>.json` (that folder is what the
+//! evals read, so it holds nothing else); rows go to
+//! `<out>/_bench/<model>/rows.jsonl` and the model's summary to `bench.json`
+//! beside it. Copying a replay into `evals/suites/ask_contract/replays/` is
+//! a locked change for the user. Other work on the machine skews every
+//! number: `bench.json` records the non-Ollama CPU and whether builds were
+//! running.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -354,6 +357,8 @@ async fn ask_live() {
             other => panic!("FOTW_ASK_LIVE_TIER must be S, M or C, not {other}"),
         });
     let cold_start = std::env::var("FOTW_ASK_LIVE_COLD").map_or(true, |v| v != "0");
+    // Every Ask cold (the model unloaded before each): cold p50 / p95.
+    let cold_every = std::env::var("FOTW_ASK_LIVE_COLD_EVERY").is_ok_and(|v| v == "1");
     let resume = std::env::var("FOTW_ASK_LIVE_RESUME").is_ok_and(|v| v == "1");
     let timeout = Duration::from_secs(env_num("FOTW_ASK_LIVE_TIMEOUT_S").unwrap_or(900) as u64);
     let quiet_max = Duration::from_secs(env_num("FOTW_ASK_LIVE_QUIET_MAX_S").unwrap_or(0) as u64);
@@ -449,7 +454,11 @@ async fn ask_live() {
 
         let model_dir = out.join(model.replace([':', '/', '\\'], "_"));
         std::fs::create_dir_all(&model_dir).expect("out dir");
-        let rows_path = model_dir.join("rows.jsonl");
+        let bench_dir = out
+            .join("_bench")
+            .join(model.replace([':', '/', '\\'], "_"));
+        std::fs::create_dir_all(&bench_dir).expect("bench dir");
+        let rows_path = bench_dir.join("rows.jsonl");
         let mut rows = if resume {
             read_rows(&rows_path)
         } else {
@@ -486,12 +495,7 @@ async fn ask_live() {
                 .copied()
                 .collect(),
         };
-        chosen.extend(
-            at_tier
-                .iter()
-                .filter(|s| s.kind != ScenarioKind::Quality)
-                .map(|s| s),
-        );
+        chosen.extend(at_tier.iter().filter(|s| s.kind != ScenarioKind::Quality));
         chosen.sort_by_key(|s| position(s));
         chosen.truncate(limit);
         eprintln!(
@@ -532,14 +536,17 @@ async fn ask_live() {
                     on_device: t.on_device,
                 })
                 .collect();
-            let first = i == 0 && cold_start && done_ids.is_empty();
-            // The cold scenario goes right after the unload; the rest wait
-            // for a quiet machine when asked to.
-            let (quiet_wait_ms, cpu_before) = if quiet_max.is_zero() || first {
+            let first = (i == 0 && cold_start && done_ids.is_empty()) || cold_every;
+            // Wait for a quiet machine when asked to, then (cold runs) drop
+            // the model, so the Ask pays the load.
+            let (quiet_wait_ms, cpu_before) = if quiet_max.is_zero() {
                 (0, f32::NAN)
             } else {
                 wait_quiet(quiet_max, quiet_below).await
             };
+            if cold_every {
+                unload_all(&http).await;
+            }
             let t0 = Instant::now();
             let asked = tokio::time::timeout(
                 timeout,
@@ -650,7 +657,7 @@ async fn ask_live() {
         });
         entry["results"] = summarize(&rows);
         std::fs::write(
-            model_dir.join("bench.json"),
+            bench_dir.join("bench.json"),
             serde_json::to_string_pretty(&entry).unwrap(),
         )
         .expect("write bench.json");
