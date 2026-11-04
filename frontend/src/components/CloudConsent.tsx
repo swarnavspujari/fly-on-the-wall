@@ -90,6 +90,10 @@ export function CloudConsentOnLaunch() {
 export interface ConsentSkips {
   /** Meetings waiting (0 once dismissed, or while the re-run starts). */
   count: number;
+  /** Meetings the model stopped short of (took too long, looped, listed
+   *  only part): they run again with the rest, but the notice words them
+   *  differently. Same dismissal and re-run rules as `count`. */
+  cutOff: number;
   /** Who needs the OK, or null when the saved provider doesn't (allowed
    *  meanwhile, or local now): then running them is all that's left. */
   vendor: string | null;
@@ -105,11 +109,13 @@ export interface ConsentSkips {
 
 /** Background cleanup and action items the backend skipped for missing
  *  consent or a missing API key this session (`consent_skipped_meetings`,
- *  then each `llm:consent-skips` update). Dismissing hides the notice for
- *  the session. */
+ *  then each `llm:consent-skips` update), and the ones the model stopped
+ *  short of (`ai_cut_off_meetings`, `llm:ai-cut-off`). Dismissing hides the
+ *  notice for the session. */
 export function useConsentSkips(): ConsentSkips {
   const ask = useCloudConsent();
   const [skipped, setSkipped] = useState<string[]>([]);
+  const [cutOff, setCutOff] = useState<string[]>([]);
   const [vendor, setVendor] = useState<string | null>(null);
   const [keyVendor, setKeyVendor] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
@@ -117,29 +123,38 @@ export function useConsentSkips(): ConsentSkips {
 
   useEffect(() => {
     let live = true;
-    let unlisten: (() => void) | null = null;
     api
       .consentSkippedMeetings()
       .then((ids) => {
         if (live) setSkipped(ids);
       })
       .catch(() => {});
-    listen<string[]>("llm:consent-skips", (e) => setSkipped(e.payload))
-      .then((un) => {
-        if (live) unlisten = un;
-        else un();
+    api
+      .aiCutOffMeetings()
+      .then((ids) => {
+        if (live) setCutOff(ids);
       })
       .catch(() => {});
+    const unlistens: (() => void)[] = [];
+    const follow = (event: string, set: (ids: string[]) => void) =>
+      listen<string[]>(event, (e) => set(e.payload))
+        .then((un) => {
+          if (live) unlistens.push(un);
+          else un();
+        })
+        .catch(() => {});
+    follow("llm:consent-skips", setSkipped);
+    follow("llm:ai-cut-off", setCutOff);
     return () => {
       live = false;
-      unlisten?.();
+      unlistens.forEach((un) => un());
     };
   }, []);
 
   // Who to name: the saved provider, unless it's local or already allowed.
   // Read again whenever the provider or a consent changes (Settings, Ask),
   // so the copy never names a provider that no longer needs the OK.
-  const waiting = skipped.length > 0;
+  const waiting = skipped.length > 0 || cutOff.length > 0;
   const [settingsVersion, setSettingsVersion] = useState(0);
   useEffect(() => {
     const changed = () => setSettingsVersion((v) => v + 1);
@@ -177,6 +192,7 @@ export function useConsentSkips(): ConsentSkips {
       if (!(await ask(s.providers, s.provider))) return;
       await api.retryConsentSkipped();
       setSkipped([]);
+      setCutOff([]);
     } catch {
       /* the backend still refuses without consent; the notice stays */
     } finally {
@@ -186,6 +202,7 @@ export function useConsentSkips(): ConsentSkips {
 
   return {
     count: dismissed ? 0 : skipped.length,
+    cutOff: dismissed ? 0 : cutOff.length,
     vendor,
     keyVendor,
     busy,

@@ -283,6 +283,11 @@ const LOCAL_TOKENS_PER_WORD: u32 = 2;
 const LOCAL_MIN_TOKENS: u32 = 1024;
 /// One item a speech this long is already a dense meeting.
 const WORDS_PER_ITEM: usize = 15;
+/// The most bytes a reply may take per token of its output allowance. Real
+/// text is two to four (a token of CJK is about two bytes); the server stops
+/// at the allowance by itself, so this only bites for one that ignores
+/// `max_tokens` and streams on.
+const MAX_BYTES_PER_TOKEN: usize = 8;
 
 fn clamp_u32(n: usize) -> u32 {
     n.min(u32::MAX as usize) as u32
@@ -299,6 +304,13 @@ pub fn local_output_budget(lines: usize, words: usize, profile_cap: u32) -> u32 
         .saturating_add(by_lines.max(by_words))
         .max(LOCAL_MIN_TOKENS)
         .min(profile_cap)
+}
+
+/// The most a local reply may stream before it is cut off, whatever the
+/// server says about its own limit: [`MAX_BYTES_PER_TOKEN`] for each token of
+/// the allowance.
+fn local_byte_cap(budget: u32) -> usize {
+    (budget as usize).saturating_mul(MAX_BYTES_PER_TOKEN)
 }
 
 /// Most array elements a batch can sensibly produce: two a line (a figure and
@@ -319,6 +331,9 @@ pub enum Runaway {
     Repeating,
     /// More elements than the transcript can hold.
     TooManyItems,
+    /// More text than the output allowance can hold: the server isn't
+    /// stopping at the limit it was given.
+    TooMuchText,
 }
 
 /// The complete array elements of a reply, read from byte `pos` (0 = before
@@ -364,6 +379,7 @@ pub struct RunawayGuard {
     /// Where the next unread element starts (0 = array not opened yet).
     pos: usize,
     max_items: usize,
+    max_bytes: usize,
     seen: HashSet<(String, String)>,
     items: usize,
     repeats: usize,
@@ -375,10 +391,17 @@ impl RunawayGuard {
             text: String::new(),
             pos: 0,
             max_items,
+            max_bytes: usize::MAX,
             seen: HashSet::new(),
             items: 0,
             repeats: 0,
         }
+    }
+
+    /// Also cut the reply off once it has streamed more than `bytes`.
+    pub fn with_byte_cap(mut self, bytes: usize) -> Self {
+        self.max_bytes = bytes;
+        self
     }
 
     /// Add the next piece of the reply. `Some` once it should be cut off.
@@ -400,6 +423,8 @@ impl RunawayGuard {
             Some(Runaway::Repeating)
         } else if self.items > self.max_items {
             Some(Runaway::TooManyItems)
+        } else if self.text.len() > self.max_bytes {
+            Some(Runaway::TooMuchText)
         } else {
             None
         }
@@ -431,6 +456,7 @@ impl Cut {
             Cut::Runaway(Runaway::TooManyItems) => {
                 "the model wrote more items than the transcript holds"
             }
+            Cut::Runaway(Runaway::TooMuchText) => "the model wrote past its output allowance",
             Cut::TokenLimit => "the model ran out of its output allowance",
             Cut::Stalled => "the model went quiet",
             Cut::TimedOut => "the model took too long to answer",
@@ -507,8 +533,9 @@ async fn read_batch(
             }),
         };
     }
-    let mut guard = RunawayGuard::new(local_item_limit(lines, words));
     let budget = local_output_budget(lines, words, profile_cap);
+    let mut guard =
+        RunawayGuard::new(local_item_limit(lines, words)).with_byte_cap(local_byte_cap(budget));
     let cut = chat_local(provider, request(budget), &mut guard, limits.idle).await?;
     let raw = match cut {
         None => parse_extraction_response(guard.text()).unwrap_or_default(),
@@ -518,6 +545,7 @@ async fn read_batch(
 }
 
 /// What an extraction produced.
+#[derive(Debug)]
 pub struct Extraction {
     pub items: Vec<MeetingItem>,
     /// Why it stopped short, when it did: a batch was cut off (a loop, the
@@ -623,10 +651,15 @@ pub async fn extract_with_limits(
 }
 
 /// What [`run_extraction`] stored.
+#[derive(Debug)]
 pub struct ExtractionRun {
+    /// How many items the meeting has now.
     pub items: usize,
     /// See [`Extraction::incomplete`].
     pub incomplete: Option<String>,
+    /// The run was cut off with fewer items than the meeting already had, so
+    /// the earlier set was kept (and the meeting stays retryable).
+    pub kept_earlier: bool,
 }
 
 /// Run extraction for one meeting and persist the result. Prefers the
@@ -664,9 +697,52 @@ pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<Extrac
         "meeting item extraction finished"
     );
     let storage = state.storage.lock().unwrap();
+    store_extraction(
+        &storage,
+        meeting_id,
+        provider.id(),
+        Extraction { items, incomplete },
+    )
+}
+
+/// Write an extraction's result, with the storage lock held by the caller for
+/// the look and the write both. The writes refuse a meeting that was deleted
+/// while the model worked (`NotFound`), so a late pass can't put its text back
+/// into the database.
+///
+/// A run that was cut off can know less than an earlier one did (a re-analyze
+/// that looped in its second batch has only the first batch's items): its
+/// thinner set doesn't replace the fuller one that is stored. The meeting is
+/// still reported incomplete, so it stays retryable.
+fn store_extraction(
+    storage: &fly_storage::Storage,
+    meeting_id: &str,
+    extracted_by: &str,
+    extraction: Extraction,
+) -> Result<ExtractionRun, String> {
+    let Extraction { items, incomplete } = extraction;
+    let extracted_before = storage
+        .get_meeting_items(meeting_id)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|i| !i.extracted_by.starts_with(fly_storage::USER_ITEM_PREFIX))
+        .count();
+    if incomplete.is_some() && extracted_before > items.len() {
+        tracing::warn!(
+            meeting_id,
+            earlier = extracted_before,
+            this_run = items.len(),
+            "extraction was cut off with fewer items than before; keeping the earlier set"
+        );
+        return Ok(ExtractionRun {
+            items: extracted_before,
+            incomplete,
+            kept_earlier: true,
+        });
+    }
     if items.is_empty() {
         storage
-            .mark_extracted(meeting_id, provider.id())
+            .mark_extracted(meeting_id, extracted_by)
             .map_err(|e| e.to_string())?;
     } else {
         storage
@@ -676,6 +752,7 @@ pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<Extrac
     Ok(ExtractionRun {
         items: items.len(),
         incomplete,
+        kept_earlier: false,
     })
 }
 
@@ -721,14 +798,18 @@ pub async fn extract_after_transcribe(state: &AppState, meeting_id: &str) {
 }
 
 /// Re-extract one meeting on demand (also used to backfill a single meeting).
+/// The run decides the meeting's place on the notice afresh, and the notice
+/// hears the result either way.
 #[tauri::command]
 pub async fn extract_meeting_items(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     meeting_id: String,
 ) -> CmdResult<usize> {
-    extract_meeting(&state, &meeting_id)
-        .await
-        .map(|run| run.items)
+    crate::llm_commands::clear_skips(&state, &meeting_id);
+    let result = extract_meeting(&state, &meeting_id).await;
+    crate::llm_commands::emit_skips(&app, crate::llm_commands::current_skips(&state));
+    result.map(|run| run.items)
 }
 
 #[derive(serde::Serialize)]
@@ -744,7 +825,10 @@ pub struct BackfillResult {
 /// On-demand backfill: run extraction for every transcribed meeting that has
 /// none yet (oldest first).
 #[tauri::command]
-pub async fn backfill_meeting_items(state: State<'_, AppState>) -> CmdResult<BackfillResult> {
+pub async fn backfill_meeting_items(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<BackfillResult> {
     let pending = {
         let storage = state.storage.lock().unwrap();
         storage
@@ -759,6 +843,7 @@ pub async fn backfill_meeting_items(state: State<'_, AppState>) -> CmdResult<Bac
     };
     for meeting_id in pending {
         result.processed += 1;
+        crate::llm_commands::clear_skips(&state, &meeting_id);
         match extract_meeting(&state, &meeting_id).await {
             Ok(run) => result.extracted += run.items,
             Err(e) => {
@@ -768,6 +853,8 @@ pub async fn backfill_meeting_items(state: State<'_, AppState>) -> CmdResult<Bac
             }
         }
     }
+    // meetings it cut short or that were refused are on the notice now
+    crate::llm_commands::emit_skips(&app, crate::llm_commands::current_skips(&state));
     Ok(result)
 }
 
@@ -1046,6 +1133,9 @@ mod tests {
         fails: bool,
         /// Take this long to start answering (a slow machine).
         delay: Duration,
+        /// Pause this long before every piece (a slow machine that keeps
+        /// writing).
+        piece_delay: Duration,
     }
 
     impl Script {
@@ -1057,6 +1147,7 @@ mod tests {
                 stalls: false,
                 fails: false,
                 delay: Duration::ZERO,
+                piece_delay: Duration::ZERO,
             }
         }
 
@@ -1086,6 +1177,11 @@ mod tests {
 
         fn slow(mut self, ms: u64) -> Self {
             self.delay = Duration::from_millis(ms);
+            self
+        }
+
+        fn steadily(mut self, ms: u64) -> Self {
+            self.piece_delay = Duration::from_millis(ms);
             self
         }
 
@@ -1194,6 +1290,9 @@ mod tests {
             Ok(Box::pin(futures_util::stream::unfold(0usize, move |i| {
                 let (script, sent) = (script.clone(), sent.clone());
                 async move {
+                    if !script.piece_delay.is_zero() {
+                        tokio::time::sleep(script.piece_delay).await;
+                    }
                     let pieces = &script.pieces;
                     let event = if i < pieces.len() {
                         StreamEvent::TextDelta {
@@ -1464,13 +1563,233 @@ mod tests {
         assert_eq!(provider.calls(), 4);
     }
 
+    /// The idle limit is the time since the LAST piece: a model that writes
+    /// steadily is never "quiet", however long the whole reply takes (here
+    /// about 700 ms against a 300 ms limit). One that stops mid-reply is.
+    #[tokio::test]
+    async fn the_idle_limit_restarts_with_every_piece() {
+        let item = item_json("decision", "go with the annual plan", "s1");
+        let mut pieces = vec!["[".to_string()];
+        pieces.extend(
+            item.as_bytes()
+                .chunks(6)
+                .map(|c| String::from_utf8_lossy(c).into_owned()),
+        );
+        pieces.push("]".into());
+        // about 17 pieces at 40 ms each: some 700 ms in all, and no gap
+        // anywhere near the 300 ms limit
+        let steady = Scripted::sequence(true, vec![Script::pieces(pieces.clone()).steadily(40)]);
+        let started = std::time::Instant::now();
+        let extraction = extract_with_limits(&steady, &meeting(), &transcript(), quick(300))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() > Duration::from_millis(300),
+            "the reply must outlast the idle limit for this to prove anything ({:?}, {} pieces)",
+            started.elapsed(),
+            pieces.len()
+        );
+        assert_eq!(extraction.items.len(), 1);
+        assert!(
+            extraction.incomplete.is_none(),
+            "{:?}",
+            extraction.incomplete
+        );
+
+        // the same reply that stops after its first pieces is quiet
+        let broken = Scripted::sequence(
+            true,
+            vec![Script::pieces(vec!["[".into(), "{\"kind\"".into()])
+                .steadily(40)
+                .stalling()],
+        );
+        let err = extract_with_limits(&broken, &meeting(), &transcript(), quick(300))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(is_stopped(&err), "{err}");
+    }
+
+    /// A server that ignores the output allowance and streams on is cut off
+    /// at a byte cap, whatever it writes: here the inside of a string that
+    /// never ends, which the item guard can't see (no element ever completes).
+    #[tokio::test]
+    async fn a_server_that_ignores_the_allowance_is_cut_at_the_byte_cap() {
+        let provider = Scripted::local(vec![
+            "[".into(),
+            r#"{"kind":"decision","text":""#.into(),
+            "blah blah ".into(),
+        ])
+        .endless();
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            extract_with_limits(&provider, &meeting(), &transcript(), BATCH_LIMITS),
+        )
+        .await
+        .expect("a reply past the cap must be cut off, not read for ever")
+        .map(|_| ())
+        .unwrap_err();
+        assert!(
+            is_stopped(&err) && err.contains("output allowance"),
+            "{err}"
+        );
+        // the cap is 8 bytes a token of an allowance of 1,024 tokens or more
+        assert!(provider.sent() > 100, "allowed its bytes first");
+        assert!(provider.sent() < 5_000, "read {} pieces", provider.sent());
+
+        let mut guard = RunawayGuard::new(100).with_byte_cap(64);
+        assert_eq!(guard.push(&"x".repeat(60)), None);
+        assert_eq!(guard.push(&"x".repeat(10)), Some(Runaway::TooMuchText));
+        assert_eq!(local_byte_cap(1024), 8 * 1024);
+        assert_eq!(local_byte_cap(u32::MAX), u32::MAX as usize * 8);
+    }
+
+    // ----------------------------------------- what a cut-off run may replace
+
+    fn stored_item(meeting_id: &str, text: &str, by: &str) -> MeetingItem {
+        MeetingItem {
+            id: fly_core::new_id(),
+            meeting_id: meeting_id.into(),
+            kind: ItemKind::Decision,
+            text: text.into(),
+            owner: None,
+            status: None,
+            speaker_key: None,
+            segment_ids: vec!["s1".into()],
+            created_at: chrono::Utc::now(),
+            extracted_by: by.into(),
+        }
+    }
+
+    fn storage_with_meeting() -> (tempfile::TempDir, fly_storage::Storage, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = fly_storage::Storage::open(dir.path()).unwrap();
+        let note = storage.create_note("Renewal sync", None).unwrap();
+        let id = storage
+            .create_meeting("Renewal sync", &note.id, &[])
+            .unwrap()
+            .id;
+        (dir, storage, id)
+    }
+
+    fn texts(storage: &fly_storage::Storage, meeting_id: &str) -> Vec<String> {
+        storage
+            .get_meeting_items(meeting_id)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.text)
+            .collect()
+    }
+
+    /// The reviewer's case: a meeting with 30 items is analyzed again, the
+    /// model loops in the second batch, and the first batch's few items must
+    /// not replace the 30. The meeting still reads incomplete (retryable).
+    #[tokio::test]
+    async fn a_cut_off_rerun_does_not_replace_a_fuller_set() {
+        let (_dir, storage, m) = storage_with_meeting();
+        let before: Vec<MeetingItem> = (0..30)
+            .map(|i| stored_item(&m, &format!("earlier {i}"), "ollama"))
+            .collect();
+        storage.replace_meeting_items(&m, &before).unwrap();
+        storage
+            .add_meeting_item(&stored_item(&m, "mine", "user:ask"))
+            .unwrap();
+
+        // the re-run, on a fake model: one good batch, then it goes quiet
+        let provider = Scripted::sequence(
+            false,
+            vec![
+                Script::reply(&[("decision", "ship on Friday", "s10")]),
+                Script::pieces(vec![]).stalling(),
+            ],
+        );
+        let extraction = extract_with_limits(&provider, &meeting(), &long_transcript(), quick(100))
+            .await
+            .unwrap();
+        assert_eq!(extraction.items.len(), 1);
+        assert!(extraction.incomplete.is_some());
+
+        let run = store_extraction(&storage, &m, "ollama", extraction).unwrap();
+        assert!(run.kept_earlier && run.incomplete.is_some());
+        assert_eq!(run.items, 30, "reports what the meeting has");
+        let now = texts(&storage, &m);
+        assert_eq!(now.len(), 31, "the 30 and the user's own item");
+        assert!(
+            now.contains(&"earlier 7".to_string()) && !now.contains(&"ship on Friday".to_string())
+        );
+    }
+
+    /// Only a cut-off run that knows LESS is held back: one that found as
+    /// many or more replaces the set, and a run that finished always does
+    /// (the meeting really has fewer now: the transcript changed).
+    #[test]
+    fn a_run_that_is_as_full_or_finished_replaces_the_set() {
+        let (_dir, storage, m) = storage_with_meeting();
+        let seed = |n: usize| {
+            let items: Vec<MeetingItem> = (0..n)
+                .map(|i| stored_item(&m, &format!("seed {i}"), "ollama"))
+                .collect();
+            storage.replace_meeting_items(&m, &items).unwrap();
+        };
+        let run_of = |n: usize, incomplete: Option<&str>| Extraction {
+            items: (0..n)
+                .map(|i| stored_item(&m, &format!("new {i}"), "ollama"))
+                .collect(),
+            incomplete: incomplete.map(String::from),
+        };
+
+        seed(5);
+        // as many: replaced, still incomplete
+        let run = store_extraction(&storage, &m, "ollama", run_of(5, Some("looped"))).unwrap();
+        assert!(!run.kept_earlier && run.incomplete.is_some());
+        assert_eq!(texts(&storage, &m)[0], "new 0");
+        // more: replaced
+        let run = store_extraction(&storage, &m, "ollama", run_of(8, Some("looped"))).unwrap();
+        assert!(!run.kept_earlier);
+        assert_eq!(texts(&storage, &m).len(), 8);
+        // fewer, but finished: replaced
+        let run = store_extraction(&storage, &m, "ollama", run_of(2, None)).unwrap();
+        assert!(!run.kept_earlier && run.items == 2);
+        assert_eq!(texts(&storage, &m), ["new 0", "new 1"]);
+        // a first run that was cut off has nothing to protect
+        let (_d2, other, m2) = storage_with_meeting();
+        let run = store_extraction(&other, &m2, "ollama", run_of(3, Some("looped"))).unwrap();
+        assert!(!run.kept_earlier);
+        assert_eq!(texts(&other, &m2).len(), 3);
+    }
+
+    /// The privacy case: the note was deleted while the model worked, so its
+    /// meeting is purged. The pass finishing afterwards must not write the
+    /// meeting's text back (`meeting_items` has no foreign key).
+    #[test]
+    fn a_pass_that_finishes_after_its_note_was_deleted_writes_nothing() {
+        let (_dir, storage, m) = storage_with_meeting();
+        storage.purge_meeting(&m).unwrap();
+
+        let extraction = Extraction {
+            items: vec![stored_item(&m, "the budget is 5k", "ollama")],
+            incomplete: None,
+        };
+        let err = store_extraction(&storage, &m, "ollama", extraction).unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+        let nothing = Extraction {
+            items: vec![],
+            incomplete: None,
+        };
+        assert!(store_extraction(&storage, &m, "ollama", nothing).is_err());
+        assert!(storage.get_meeting_items(&m).unwrap().is_empty());
+        assert!(
+            !storage.has_meeting_items(&m).unwrap(),
+            "not even the 'extraction ran' marker"
+        );
+    }
+
     #[tokio::test]
     async fn a_quiet_first_batch_with_nothing_before_it_is_an_error() {
         let provider = Scripted::sequence(true, vec![Script::pieces(vec!["[".into()]).stalling()]);
         let err = extract_with_limits(&provider, &meeting(), &long_transcript(), quick(100))
             .await
-            .err()
-            .expect("nothing was read");
+            .expect_err("nothing was read");
         assert!(is_stopped(&err) && err.contains("quiet"), "{err}");
     }
 
@@ -1531,8 +1850,7 @@ mod tests {
         let provider = Scripted::sequence(true, vec![Script::failing()]);
         let err = extract_with_limits(&provider, &meeting(), &long_transcript(), BATCH_LIMITS)
             .await
-            .err()
-            .expect("nothing was read");
+            .expect_err("nothing was read");
         assert!(err.contains("overloaded") && !is_stopped(&err), "{err}");
     }
 }

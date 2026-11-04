@@ -516,16 +516,50 @@ pub fn record_consent_skip(state: &AppState, meeting_id: &str, error: &str) -> b
 }
 
 /// Background cleanup / extraction for `meeting_id` reached the model and it
-/// didn't deliver (it took too long, or got stuck before listing anything):
-/// remember the meeting like a consent skip, so the same notice offers to run
-/// it again. Only for a model that was reached; a provider that isn't set up
-/// stays quiet.
+/// didn't deliver (it took too long, got stuck, or listed only part of the
+/// meeting): remember the meeting so the app's notice offers to run it again.
+/// Only for a model that was reached; a provider that isn't set up stays
+/// quiet.
 pub fn record_incomplete(state: &AppState, meeting_id: &str) {
     state
-        .consent_skipped
+        .ai_incomplete
         .lock()
         .unwrap()
         .insert(meeting_id.to_string());
+}
+
+/// Forget what an earlier run recorded about `meeting_id` (a run that decides
+/// it afresh, or a meeting that is gone).
+pub fn clear_skips(state: &AppState, meeting_id: &str) {
+    state.consent_skipped.lock().unwrap().remove(meeting_id);
+    state.ai_incomplete.lock().unwrap().remove(meeting_id);
+}
+
+/// The two lists the app's notice is built from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AiSkips {
+    /// Refused for missing cloud consent or a missing key.
+    pub consent: Vec<String>,
+    /// Reached the model, which stopped short.
+    pub cut_off: Vec<String>,
+}
+
+pub fn current_skips(state: &AppState) -> AiSkips {
+    let list = |set: &std::sync::Mutex<std::collections::BTreeSet<String>>| {
+        set.lock().unwrap().iter().cloned().collect()
+    };
+    AiSkips {
+        consent: list(&state.consent_skipped),
+        cut_off: list(&state.ai_incomplete),
+    }
+}
+
+/// Tell the app's notice what is waiting: `llm:consent-skips` and
+/// `llm:ai-cut-off`, each with its full list.
+pub fn emit_skips<R: tauri::Runtime>(app: &tauri::AppHandle<R>, skips: AiSkips) {
+    use tauri::Emitter;
+    let _ = app.emit("llm:consent-skips", skips.consent);
+    let _ = app.emit("llm:ai-cut-off", skips.cut_off);
 }
 
 /// Meetings whose cleanup / action items were skipped for missing consent
@@ -533,13 +567,14 @@ pub fn record_incomplete(state: &AppState, meeting_id: &str) {
 /// arrive as `llm:consent-skips` events with the same list).
 #[tauri::command]
 pub fn consent_skipped_meetings(state: State<'_, AppState>) -> Vec<String> {
-    state
-        .consent_skipped
-        .lock()
-        .unwrap()
-        .iter()
-        .cloned()
-        .collect()
+    current_skips(&state).consent
+}
+
+/// Meetings whose cleanup / action items the model stopped short of this
+/// session (same catch-up and `llm:ai-cut-off` events).
+#[tauri::command]
+pub fn ai_cut_off_meetings(state: State<'_, AppState>) -> Vec<String> {
+    current_skips(&state).cut_off
 }
 
 /// Run the skipped cleanup and item extraction now (after the user allowed

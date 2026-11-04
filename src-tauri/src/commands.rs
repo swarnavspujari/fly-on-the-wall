@@ -288,7 +288,12 @@ pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String
         delete_allowed_while_recording(&id, rec.as_ref().map(|r| r.note_id.as_str()))?;
     }
     let on_stage = crate::scheduler::stage_emitter(&app);
-    delete_note_with(&state, &on_stage, &id)
+    let deleted = delete_note_with(&state, &on_stage, &id);
+    if deleted.is_ok() {
+        // the notice must not keep counting a meeting that is gone
+        crate::llm_commands::emit_skips(&app, crate::llm_commands::current_skips(&state));
+    }
+    deleted
 }
 
 /// [`delete_note`] past the recording check (tests call it without an app).
@@ -305,6 +310,10 @@ pub(crate) fn delete_note_with(
         .map_err(err_str)?;
     for m in &meetings {
         crate::scheduler::cancel(state, on_stage, &m.id).map_err(err_str)?;
+        // An AI pass still working on the meeting is stopped too. It winds
+        // down on its own: while its busy marker stands the purge below is
+        // skipped, and the pass purges the meeting itself on its way out.
+        state.ai_queue.cancel_running(&m.id);
     }
     // The opt-in video job may have one of this note's files open in
     // ffmpeg: stop it BEFORE the files go (Windows refuses to delete an open
@@ -332,6 +341,9 @@ pub(crate) fn delete_note_with(
                 tracing::warn!(meeting_id = %m.id, error = %e, "purging deleted note's meeting failed");
             }
         }
+        // after the pass has had its say: what it recorded about a meeting
+        // that is gone has no one to run it
+        crate::llm_commands::clear_skips(state, &m.id);
     }
     Ok(())
 }
@@ -803,6 +815,8 @@ mod security_tests {
             "llm.openai.base_url",
             "llm.provider",
             "import.staged.abc",
+            // the saved AI pass queue: the app's own, never the webview's
+            "ai.pending_passes",
             "calendar.google.client_id",
             "consent.",
             "consent.a b",

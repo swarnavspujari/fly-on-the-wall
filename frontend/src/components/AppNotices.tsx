@@ -211,9 +211,11 @@ export default function AppNotices({
   }
 
   // Cleanup and action items the backend skipped for missing cloud consent:
-  // ask for it here, then run them. Not urgent, so it waits out a recording.
-  if (skips.count > 0 && !recordingActive) {
-    const copy = consentSkipsCopy(skips.count, skips.vendor, skips.keyVendor);
+  // ask for it here, then run them. Also the meetings the model stopped
+  // short of, which run again the same way. Not urgent, so it waits out a
+  // recording.
+  if ((skips.count > 0 || skips.cutOff > 0) && !recordingActive) {
+    const copy = consentSkipsCopy(skips.count, skips.vendor, skips.keyVendor, skips.cutOff);
     notices.push({
       id: "consent-skips",
       priority: NOTICE_PRIORITY.consentSkips,
@@ -228,7 +230,7 @@ export default function AppNotices({
                 variant="primary"
                 size="sm"
                 disabled={skips.busy}
-                onClick={() => (skips.keyVendor ? onOpenLlmKeySettings() : void skips.run())}
+                onClick={() => (copy.needsKey ? onOpenLlmKeySettings() : void skips.run())}
               >
                 {copy.action}
               </Button>

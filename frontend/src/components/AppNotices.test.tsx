@@ -39,11 +39,13 @@ function render(ui: ReactNode) {
 
 // The consent-skips notice reads these; by default nothing was skipped.
 let skipped: string[];
+let cutOff: string[];
 let recovered: RecoveredMeeting[];
 let consents: Record<string, string>;
 let llm: LlmSettings;
 beforeEach(() => {
   skipped = [];
+  cutOff = [];
   recovered = [];
   consents = {};
   llm = {
@@ -68,14 +70,16 @@ beforeEach(() => {
     ],
   };
   vi.spyOn(api, "consentSkippedMeetings").mockImplementation(async () => [...skipped]);
+  vi.spyOn(api, "aiCutOffMeetings").mockImplementation(async () => [...cutOff]);
   vi.spyOn(api, "recoveredKeptLocal").mockImplementation(async () => [...recovered]);
   vi.spyOn(api, "dismissRecoveredKeptLocal").mockImplementation(async (id) => {
     recovered = id ? recovered.filter((m) => m.meeting_id !== id) : [];
     return [...recovered];
   });
   vi.spyOn(api, "retryConsentSkipped").mockImplementation(async () => {
-    const n = skipped.length;
+    const n = skipped.length + cutOff.length;
     skipped = [];
+    cutOff = [];
     return n;
   });
   vi.spyOn(api, "getLlmSettings").mockImplementation(async () => structuredClone(llm));
@@ -474,6 +478,43 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
     click(button(host, "Run them now"));
     await flush();
     expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
+  });
+
+  it("meetings the model stopped short of: their own wording, and Run them now runs them", async () => {
+    cutOff = ["m1", "m2"];
+    consents["consent.cloud_llm.anthropic"] = "true";
+    const { host } = render(<AppNotices {...props()} />);
+    await flush();
+    const n = Array.from(host.querySelectorAll("*")).find((el) =>
+      el.textContent?.includes("Some action items couldn't be read"),
+    );
+    expect(n).toBeDefined();
+    expect(host.textContent).toContain(
+      "The AI model didn't finish reading 2 meetings, so some action items may be missing.",
+    );
+    expect(host.textContent).not.toContain("kept the raw transcript");
+    click(button(host, "Run them now"));
+    await flush();
+    expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
+    expect(host.textContent).not.toContain("Some action items couldn't be read");
+  });
+
+  it("a cut-off meeting that arrives by event shows the notice; with a consent skip it is one sentence more", async () => {
+    const { host } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(host.textContent).not.toContain("couldn't be read");
+    act(() => eventHandlers["llm:ai-cut-off"]({ payload: ["m4"] }));
+    await flush();
+    expect(host.textContent).toContain("Some action items couldn't be read");
+    act(() => eventHandlers["llm:consent-skips"]({ payload: ["m3"] }));
+    await flush();
+    expect(host.textContent).toContain("Anthropic needs your OK");
+    expect(host.textContent).toContain("1 more meeting was only partly read.");
+    // a refresh that empties the cut-off list leaves the consent notice alone
+    act(() => eventHandlers["llm:ai-cut-off"]({ payload: [] }));
+    await flush();
+    expect(host.textContent).not.toContain("only partly read");
+    expect(host.textContent).toContain("Anthropic needs your OK");
   });
 
   it("follows the backend's list, waits out a recording, and Dismiss hides it", async () => {

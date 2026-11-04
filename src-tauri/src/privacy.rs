@@ -910,6 +910,7 @@ pub async fn delete_all_data(
         if result.is_err() {
             crate::audio_store::resume(&state);
             crate::video_store::resume(&state);
+            crate::scheduler::resume_ai_passes(&state);
         }
         result
     })
@@ -924,6 +925,15 @@ fn perform_delete_all(
 ) -> CmdResult<WipeReport> {
     let data_dir = state.data_dir.clone();
     tracing::warn!(include_models, "deleting all user data");
+    // The AI worker stops before anything is erased: a pass waiting its turn
+    // is dropped, one running is cancelled, and nothing queues again, so no
+    // model output is written into a database that is being emptied (its
+    // saved queue is emptied here too). The caller starts it again if the
+    // wipe fails.
+    if !crate::scheduler::halt_ai_passes(state, Duration::from_secs(20)) {
+        crate::scheduler::resume_ai_passes(state);
+        return Err("an AI pass didn't stop in time — nothing was deleted; try again".into());
+    }
     // Marker first: whatever happens next, a restart within 10 minutes
     // finishes the job (and an older marker can't fire later).
     let marker = serde_json::to_string(&WipeMarker {
@@ -1490,6 +1500,77 @@ mod tests {
             .list_recent_notes(10)
             .unwrap()
             .is_empty());
+    }
+
+    /// The AI worker is stopped before the erase: the pass that was running is
+    /// cancelled, the one waiting is dropped, nothing queues again, and the
+    /// saved queue holds no meeting ids afterwards.
+    #[test]
+    fn delete_all_stops_the_ai_worker_and_empties_its_saved_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(MemorySecretStore::default()),
+        )
+        .unwrap();
+        let legacy = MemorySecretStore::default();
+        crate::scheduler::queue_extraction(&state, "m-running");
+        crate::scheduler::queue_extraction(&state, "m-waiting");
+        let saved = |state: &AppState| {
+            state
+                .storage
+                .lock()
+                .unwrap()
+                .get_setting(crate::scheduler::AI_QUEUE_KEY)
+                .unwrap()
+        };
+        assert!(saved(&state).unwrap().contains("m-waiting"));
+
+        std::thread::scope(|scope| {
+            let (_job, running) = state.ai_queue.next().unwrap();
+            // the AI worker: it ends the pass when it is told to stop
+            scope.spawn(move || {
+                tokio::runtime::Runtime::new()
+                    .unwrap()
+                    .block_on(running.cancelled());
+                drop(running);
+            });
+            let report = perform_delete_all(&state, false, &legacy).unwrap();
+            assert!(report.db_erased);
+        });
+
+        assert!(state.ai_queue.is_halted());
+        assert!(state.ai_queue.snapshot().is_empty());
+        crate::scheduler::queue_extraction(&state, "m-late");
+        assert!(
+            !state.ai_queue.is_pending("m-late"),
+            "refused after the wipe"
+        );
+        assert!(
+            saved(&state).is_none_or(|row| !row.contains("m-")),
+            "no meeting id left in the saved queue"
+        );
+    }
+
+    /// A pass that won't stop in time refuses the wipe, and the worker picks
+    /// up again.
+    #[test]
+    fn delete_all_is_refused_when_an_ai_pass_will_not_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(MemorySecretStore::default()),
+        )
+        .unwrap();
+        crate::scheduler::queue_extraction(&state, "m-stuck");
+        let _stuck = state.ai_queue.next().unwrap();
+        assert!(!crate::scheduler::halt_ai_passes(
+            &state,
+            Duration::from_millis(100)
+        ));
+        assert!(state.ai_queue.is_halted());
+        crate::scheduler::resume_ai_passes(&state);
+        assert!(!state.ai_queue.is_halted());
     }
 
     /// H1: an MCP client holding the DB open blocks the checkpoint — the
