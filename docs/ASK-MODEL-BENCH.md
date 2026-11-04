@@ -9,53 +9,54 @@ meeting).
 
 ## 1. Verdict
 
-**Keep `llama3.1` as the default local model for 2.5.0.** No challenger beats it
-on quality without costing something else, and the one place a model is clearly
-better (the 9B class) needs more RAM and more time per Ask than a default can ask
-of an 8 GB machine.
+**2.5.0: keep `llama3.1` as the built-in default, and make `qwen3.5:9b` the
+model the app offers on machines with 16 GB or more.** On main as it stands
+(with the claim-check fixes of #133), `qwen3.5:9b` and `gemma4:12b-it-qat` meet
+every tier-M floor, `qwen3.5:9b` also meets every tier-S floor with no tools, and
+`llama3.1` misses three of the five tier-S floors. The default stays because it
+is a default for everyone, including 8 GB machines that can't hold a 6.2 GB
+model, and because the spec says to offer a better model and never switch one
+silently.
 
-| RAM | Default | Why | Not measured here |
+| RAM | Recommended | Evidence (on main with #133, 60 + 16 Asks unless noted) | Not measured here |
 |---|---|---|---|
-| 8 GB | `llama3.1` (tier S) | Works with the harness: 0 empty replies, 0 failures in 76 Asks. `qwen3.5:4b` is statistically tied on quality (§4.1) and faster, but answered more unanswerable questions (6 of 16 vs 4) and had one runner failure; `granite4.1:3b` is 3.6× faster but refuses 47% of answerable questions. | An 8 GB machine. Footprints below are from a 32 GB laptop; llama3.1 held 5.8 GB at an 8192 window, so on 8 GB `qwen3.5:4b` (3.6 GB) is the fallback if llama3.1 doesn't fit. |
-| 16 GB | **Offer** `qwen3.5:9b` (tier M); never switch silently | Spoken numbers kept (2 sentences flagged for a number in 76 Asks vs 11 for llama3.1), 1 of 16 unanswerable questions answered (llama3.1: 4), grounded 65% vs 53% as scored and 93% vs 65% without the claim check's name rule. Costs ~8 s more per Ask (p50 32 s vs 24 s, both contended). | Whether 16 GB holds the 6.2 GB model plus the OS and an open meeting. |
-| 32 GB | `qwen3.5:9b`, or `gemma4:12b-it-qat` | `gemma4:12b-it-qat` is the best on quality as scored (grounded 73%, no number ever corrupted) but 35% slower (p50 44 s) and 8 GB. The 35B / 26B models of the 32 GB tier were **not run**: they need 38.5 GB more disk (over the 30 GB cap) and, on a 4 GB GPU, would be CPU-bound. | `qwen3.6:35b`, `gemma4:26b-a4b`. |
+| 8 GB | `llama3.1` (tier S), as today | 0 empty replies, 0 failures in 76 Asks, warm p50 24 s. It **misses the tier-S floors**: grounded 62% (≥ 70%), unsourced sentences 38% (≤ 30%), correct refusal 75% (≥ 85%; it answered 4 of 16 unanswerable questions). No small model does better overall: `qwen3.5:4b` grounded 65%, unsourced 32%, correct refusal 56%, one runner failure; `granite4.1:3b` is 3.6× faster but refuses 47% of answerable questions. | An 8 GB machine. Footprints are from a 32 GB laptop; `llama3.1` held 5.8 GB at an 8192 window, so on 8 GB `qwen3.5:4b` (3.6 GB) is the fallback if it doesn't fit. |
+| 16 GB | **`qwen3.5:9b`**, offered ("A better local model is available · 6.6 GB"), never silent | Meets every tier-M floor: grounded 83%, unsourced 18%, correct refusal 94% (1 of 16 unanswered), false refusal 2%. Forced to tier S (no tools, 30 + 8 Asks) it meets every tier-S floor too: 77% / 25% / 88%. Costs time: warm p50 32 s vs `llama3.1`'s 24 s (the `llama3.1` run was the more contended, so the gap is at least 8 s). | Whether 16 GB holds 6.2 GB plus the OS and an open meeting. |
+| 32 GB | `qwen3.5:9b`; `gemma4:12b-it-qat` is the alternative | `gemma4:12b-it-qat` also meets every tier-M floor (grounded 83%, unsourced 16%) and never had a spoken number flagged, but is 35% slower (p50 44 s) and 8 GB. The 35B / 26B models of the 32 GB tier were **not run**: they need 38.5 GB more disk (over the 30 GB cap) and on a 4 GB GPU would be CPU-bound. | `qwen3.6:35b`, `gemma4:26b-a4b`. |
 
 Other findings a release should know:
 
 * **Every retrieval Ask reloaded the model**, 12–22 s each on this machine. The
   provider sized `num_ctx` per request, and Ollama reloads when it changes, even
-  by 4 tokens. Fixed in this PR (§3.1). This is the one change that should ship
-  in 2.5.0.
-* **No model fails a security gate.** 443 real-model replays (five models, quality
-  plus red-team and guard scenarios): 0 executed proposals, 0 rendered links, 0
+  by 4 tokens. Fixed in this PR (§3.1). **This is the one change that should ship
+  in 2.5.0.**
+* **No model fails a security gate.** 481 real-model replays (five models: quality,
+  red-team and guard scenarios): 0 executed proposals, 0 rendered links, 0
   keep-local off-device requests, 0 out-of-scope reads, 0 run-log free text, 0
-  frame mismatches, 0 budget violations, citation validity 1.0 and
-  claim-check pass rate 1.0. No model wrote a link or tried a proposal (§4.2).
-* **No model meets every tier floor as scored**, and most of the gap is one rule:
-  the claim check flags correct names that aren't in the cited line (a project
-  name from the question, a customer name). With the name rule switched off in a
-  throwaway local patch, `qwen3.5:9b` and `gemma4:12b-it-qat` meet every tier-M
-  floor and `llama3.1` still misses two tier-S floors (§4.1). Whether to relax
-  that rule is the user's eval decision.
+  frame mismatches, 0 budget violations, citation validity 1.0, claim-check pass
+  rate 1.0, 0 stale replays. No model wrote a link or tried a proposal (§4.2).
 * **The tool tier never used its tools.** In 152 tier-M Asks the models made 0
-  tool calls; the nine tool definitions only cost ~4,000 prompt tokens per Ask
-  (10.0k vs 5.6–6.6k, §4.5).
+  tool calls, and the nine tool definitions cost ~4,000 prompt tokens per Ask
+  (10.0k vs 5.6–6.6k, §4.5). Run at tier S, `qwen3.5:9b` is as good (§4.6).
 * **Ollama issues:** #18944 and #10976 are still real on 0.40.13; #18861 did not
   reproduce (§5). The provider's rules (never `format` + `tools`, always send
   `think`) stay.
-* **Ollama pin:** Windows bumped 0.31.2 → 0.40.13, the version every number here
-  was measured on. New installs only (§6). macOS stays on 0.31.2.
+* **Ollama pin:** Windows bumped 0.31.2 → 0.40.13, the version every recording
+  was made on. New installs only (§6). macOS stays on 0.31.2.
+* **No model profile change** is justified: `qwen3.5` already has its entry
+  (thinking off); `gemma4` and `granite4.1` ran on the default profile with 0 empty
+  replies and 0 thinking output.
 
 ## 2. Setup
 
 | | |
 |---|---|
 | Machine | Windows 11 Pro, i7-12700H (20 threads), 31.7 GB RAM, RTX 3050 Laptop GPU with 4 GB (2.8 GiB free to Ollama; the desktop holds the rest). No model fit fully on the GPU (24–75% did). |
-| Ollama | 0.40.13, the user-installed server on defaults (flash attention off, `NUM_PARALLEL` 1, keep-alive 5 min, CUDA). It self-updated to 0.40.14 on 2026-11-03 22:21, after every recording below; one later pass (§4.6) ran on 0.40.14. |
-| Code | `claude/model-bench-35-903802`, from main `e4a6a4a`, plus this PR |
+| Ollama | 0.40.13, the user-installed server on defaults (flash attention off, `NUM_PARALLEL` 1, keep-alive 5 min, CUDA). It self-updated to 0.40.14 on 2026-11-03 22:21, after every recording except §4.6, which ran on 0.40.14. |
+| Code | recorded on `claude/model-bench-35-903802` from main `e4a6a4a` plus this PR; **scored on that branch merged with main `65e9626`** (it includes #120, #121 and #133). All 481 replays stayed valid across that merge (0 stale) |
 | Provider | the app's `build_provider_with_reach` on a throwaway data dir, Ollama native `/api/chat`, streaming (the harness always streams), `think:false` |
-| Corpus | `evals/fixtures` (synthetic). Retrieval used the CI embedder (`hashed-bow-v1`), so a replay's request fingerprint equals what CI computes: no replay was stale |
-| Scenarios | 60 answerable + 16 unanswerable quality scenarios, evenly spaced over the gold set and the same for every model; plus the 4 on-device tier-S red-team and 7 guard scenarios for every model (the M models forced to tier S) and the 4 tier-C red-team scenarios for the two M models |
+| Corpus | `evals/fixtures` (synthetic). Retrieval used the CI embedder (`hashed-bow-v1`), so a replay's request fingerprint equals what CI computes |
+| Scenarios | 60 answerable + 16 unanswerable quality scenarios, evenly spaced over the gold set and the same for every model; for every model also the 4 on-device tier-S red-team and 7 guard scenarios (the M models forced to tier S), and for the two M models the 4 tier-C red-team scenarios |
 | Models | `llama3.1` (4.9 GB), `qwen3.5:4b` (3.3 GB), `granite4.1:3b` (2.1 GB), `qwen3.5:9b` (6.6 GB), `gemma4:12b-it-qat` (7.2 GB). The four pulls total **19.2 GB**; `llama3.1` was already installed |
 | Tiers | measured by the app's `ask_tier`: the three small models S; `qwen3.5:9b` and `gemma4:12b-it-qat` passed the tool smoke test (6.2 s, 9.5 s) and ran as M |
 | Build | the bench is a debug build; harness work (retrieval, validation) was ~0.6 s per Ask, small next to the model |
@@ -84,20 +85,26 @@ runner's.
   only (4622/4623 → 8192, 8719 → 12288, 16910 → 20480).
 * Residual: 2 of the 75 warm `llama3.1` Asks (and 2 of `granite4.1:3b`'s) had a
   short prompt that fit the 4096 window; the only warm reloads (2 and 3) sit next
-  to them, one into the small window and one back out. The Asks in a session
-  mostly share 8192 (tier S) or 12288 (tier M); a floor of 8192 would remove
-  the rest, at the cost of a bigger window for Enhance, Polish and Extraction.
-  Not done here.
+  to them, one into the small window and one back out. A floor of 8192 for Ask
+  would remove them, at the cost of a bigger window for Enhance, Polish and
+  Extraction. Not done here.
 
-### 3.2 The claim check's name rule decides the scores
+### 3.2 The claim check's name rule, and #133
 
-Every model's non-sourced sentences are mostly flagged for **names** (20–49
-sentences per model vs 0–23 for numbers), and in 8–21 Asks per model the name
-was the only flag. The flagged names are correct: a project or customer name
-that came from the question or the meeting title but isn't in the cited line.
-The name rule requires a name to appear in the cited text or the speaker label. The previous
-harness session recorded the same thing for `llama3.1` (26 of 31 non-sourced
-sentences). §4.1 shows the scores with and without the rule.
+While recording, every model's non-sourced sentences were mostly flagged for
+**names** (20–49 sentences per model vs 0–23 for numbers), and in 8–21 Asks per
+model the name was the only flag. The flagged names were correct: a project or
+customer name that came from the question or the meeting title but isn't in the
+cited line. The previous harness session found the same for `llama3.1` (26 of 31
+non-sourced sentences).
+
+Main fixed part of that during this work (#133: a name in the cited meeting's
+title now supports a claim; a speaker label is a name, not a number; a currency
+sign glued to the previous word still reads as an amount). Scoring all 481 replays
+again on the merged tree (§4.1) moved both M groups from missing two floors to
+meeting every floor. As a bound on what is left, the scorer was also run with a
+**throwaway local patch that turns the name rule off in the harness and the
+scorer** (reverted, never committed).
 
 ### 3.3 The scorer panicked on any real reply with an em dash
 
@@ -120,33 +127,26 @@ p50 / p95.
 
 ### 4.1 Quality against the tier floors (`evals/thresholds.toml`)
 
-As scored (strict claim check):
+Scored on main with #133 (what ships). The right-hand columns show the same
+replays scored by the harness as recorded (before #133) and with the name rule
+off (the throwaway patch), grounded / unsourced:
 
-| group | grounded | unsourced sentences | correct refusal | false refusal | verdict |
-|---|---|---|---|---|---|
-| `llama3.1` @S | 53% | 46% | 75% | 5% | misses unsourced, grounded, correct refusal |
-| `qwen3.5:4b` @S | 57% | 38% | 63% | 2% | misses unsourced, grounded, correct refusal |
-| `granite4.1:3b` @S | 13% | 85% | 100% | 47% | misses unsourced, grounded, false refusal |
-| `qwen3.5:9b` @M | 65% | 33% | 94% | 2% | misses unsourced, grounded |
-| `gemma4:12b-it-qat` @M | 73% | 27% | 94% | 3% | misses unsourced, grounded |
+| group | grounded | unsourced sentences | correct refusal | false refusal | verdict | before #133 | name rule off |
+|---|---|---|---|---|---|---|---|
+| `gemma4:12b-it-qat` @M | 83% | 16% | 94% | 3% | **meets every floor** | 73% / 27% | 92% / 8% |
+| `qwen3.5:9b` @M | 83% | 18% | 94% | 2% | **meets every floor** | 65% / 33% | 93% / 9% |
+| `qwen3.5:9b` @S (30 + 8 Asks) | 77% | 25% | 88% | 0% | **meets every floor** | 70% / 31% | n/a |
+| `llama3.1` @S | 62% | 38% | 75% | 5% | misses unsourced, grounded, correct refusal | 53% / 46% | 65% / 27% |
+| `qwen3.5:4b` @S | 65% | 32% | 56% | 2% | misses unsourced, grounded, correct refusal | 57% / 38% | 72% / 23% |
+| `granite4.1:3b` @S | 15% | 82% | 100% | 47% | misses unsourced, grounded, false refusal | 13% / 85% | 17% / 70% |
 
 Floors: S grounded ≥ 70%, unsourced ≤ 30%, correct refusal ≥ 85%, false refusal
 ≤ 15%; M grounded ≥ 75%, unsourced ≤ 20%, correct refusal ≥ 90%, false refusal ≤
 10%. Request shortfall (must-cite lines never sent) is 0 for every model. Every
-group is gated: 60 answerable, 16 unanswerable.
+group is gated (≥ 30 answerable and ≥ 8 unanswerable).
 
-What-if, **a throwaway local patch that turns the name rule off in both the
-harness and the scorer** (reverted, not committed, only to size the effect):
-
-| group | grounded | unsourced sentences | correct refusal | false refusal | verdict |
-|---|---|---|---|---|---|
-| `llama3.1` @S | 65% | 27% | 75% | 5% | misses grounded, correct refusal |
-| `qwen3.5:4b` @S | 72% | 23% | 56% | 2% | misses correct refusal |
-| `granite4.1:3b` @S | 17% | 70% | 100% | 47% | misses three |
-| `qwen3.5:9b` @M | 93% | 9% | 94% | 2% | meets every floor |
-| `gemma4:12b-it-qat` @M | 92% | 8% | 94% | 3% | meets every floor |
-
-Why the small models lose, from the run logs (sentences over 76 Asks):
+Why the small models lose, from the run logs at recording time (before #133;
+sentences over 76 Asks):
 
 | model | sentences | sourced | flagged: number | flagged: name | no valid citation | invalid citations | Asks flagged for names only |
 |---|---|---|---|---|---|---|---|
@@ -157,29 +157,30 @@ Why the small models lose, from the run logs (sentences over 76 Asks):
 | `gemma4:12b-it-qat` | 90 | 67 | 0 | 21 | 3 | 3 | 16 |
 
 The July finding holds: small local models turn a spoken "eighty four hundred
-dollars" into `$84,000`, and the claim check catches it. `qwen3.5:4b` writes
-twice as much as `llama3.1` (126 vs 55 output tokens) and cites lines it wasn't
-shown 14 times. Both small models answer unanswerable questions (`llama3.1` 4 of
-16, `qwen3.5:4b` 6 of 16); both M models answer 1.
+dollars" into `$84,000`, and the claim check catches it (11 sentences for
+`llama3.1`, 23 for `qwen3.5:4b`; 2 for `qwen3.5:9b`, 0 for `gemma4:12b-it-qat`).
+`qwen3.5:4b` writes twice as much as `llama3.1` (126 vs 55 output tokens) and
+cites lines it wasn't shown 14 times. Both small models answer unanswerable
+questions (`llama3.1` 4 of 16, `qwen3.5:4b` 7 of 16); both M models answer 1.
 
-Sample sizes matter: 16 unanswerable questions means 4 vs 6 wrong is within
-noise, and 60 answerable ones means ±6 points on a rate. The 9B-class models'
-lead over the 8B class is larger than that; the `qwen3.5:4b` vs `llama3.1`
-difference is not.
+Sample sizes matter: 16 unanswerable questions means 4 vs 7 wrong is within noise,
+and 60 answerable ones means ±6 points on a rate (±9 for the 30 of the tier-S
+`qwen3.5:9b` run). The 9B-class lead over the 8B class is larger than that; the
+`qwen3.5:4b` vs `llama3.1` difference is not.
 
 ### 4.2 Security and guard gates
 
-Suite-wide over all 443 replays (the five models' 76 quality Asks, 7 guard and
-4 red-team scenarios each, and 4 tier-C red-team scenarios for the two M
-models): citation validity 1.0, claim-check pass rate 1.0, executed proposals 0,
-rendered links 0, keep-local off-device requests 0, out-of-scope reads 0,
-run-log free text 0, stream-frame mismatches 0, tier-budget violations 0, stale
-replays 0, errored scenarios 0. Per model the same counts are all zero
-(`scripts/ask-bench-report.mjs`, "Guards per model"). In the run logs no model
-wrote a link or image (the harness removed 0) and none produced a proposal.
+Suite-wide over all 481 replays on main with #133: citation validity 1.0,
+claim-check pass rate 1.0, executed proposals 0, rendered links 0, keep-local
+off-device requests 0, out-of-scope reads 0, run-log free text 0, stream-frame
+mismatches 0, tier-budget violations 0, stale replays 0, errored scenarios 0.
+Per model the same counts are all zero (`scripts/ask-bench-report.mjs`, "Guards
+per model"). In the run logs no model wrote a link or image (the harness removed
+0) and none produced a proposal.
 
-Limit: 15 red-team Asks per M model and 11 per S model. They test whether the
-injected speech in the corpus steers a real model, not an adaptive attacker.
+Limit: 15 red-team and guard Asks per M model and 11 per S model. They test
+whether the injected speech in the corpus steers a real model, not an adaptive
+attacker.
 
 ### 4.3 Latency (per Ask, seconds, contended; see §2)
 
@@ -215,9 +216,10 @@ sessions), so the sizes above, not the system figure, are the per-model footprin
 ### 4.5 What the provider sent (the wire)
 
 From a logging pass-through between the provider and Ollama, over every call
-(75–82 per model; a refused question never reaches the model): `format` sent 0 times, `format` with tools 0, `think`
-omitted 0, `think:false` on every call, HTTP errors 1 (§3.4), empty replies 0,
-thinking characters 0, done reason `stop` on every call but the failed one.
+(75–82 per model; a refused question never reaches the model): `format` sent 0
+times, `format` with tools 0, `think` omitted 0, `think:false` on every call,
+HTTP errors 1 (§3.4), empty replies 0, thinking characters 0, done reason `stop`
+on every call but the failed one.
 
 Tier M offers nine tools. The prompt on the first call is ~10k tokens against
 5.6–6.6k at tier S: the tool definitions cost ~4k tokens and, at 350–510
@@ -229,25 +231,25 @@ model-chosen tool calls; the extra calls were retries (7 Asks for
 
 One more pass ran `qwen3.5:9b` at tier S (same harness, no tools) on 30
 answerable + 8 unanswerable Asks. Its even spacing differs from the M run's, so
-the two are not paired. It ran on Ollama 0.40.14.
+the two are not paired. It ran on Ollama 0.40.14. On main with #133:
 
 | | @M (60 + 16 Asks) | @S (30 + 8 Asks) |
 |---|---|---|
 | prompt tokens per Ask (p50) | 10,112 | 6,652 |
-| grounded | 65% | 70% |
-| unsourced sentences | 33% | 31% |
+| grounded | 83% | 77% |
+| unsourced sentences | 18% | 25% |
 | correct refusal | 94% (15 of 16) | 88% (7 of 8) |
 | false refusal | 2% | 0% |
 | model-chosen tool calls | 0 | not offered |
 
-At tier S the group meets every tier-S floor except unsourced sentences (30.9%
-against ≤ 30%). With 30 and 8 Asks the differences are inside the noise, so the
-honest reading is: **the tool loop bought nothing for this model on this corpus**,
-and it costs a third of the prompt (10.1k vs 6.7k tokens). The latency of this
-pass is not comparable and isn't reported as a result: another process held
-3.7 GB of the 4 GB of VRAM the whole time (3,764 MB in use before the model
-loaded), so the model ran almost entirely on the CPU (Ask p50 51 s, other CPU
-54%, builds in every sample).
+Both meet their tier's floors. With 30 and 8 Asks the differences are inside the
+noise, so the honest reading is: **the tool loop bought nothing for this model on
+this corpus**, and it costs a third of the prompt (10.1k vs 6.7k tokens). The
+latency of this pass is not comparable and isn't reported as a result: another
+process held 3.7 GB of the 4 GB of VRAM the whole time (3,764 MB in use before
+the model loaded), so the model ran almost entirely on the CPU (Ask p50 51 s,
+other CPU 54%, builds in every sample). At tier S it writes longer answers (105
+output tokens vs 66), which at 4–5 tok/s is ~8 s.
 
 ## 5. Known Ollama issues, re-tested on 0.40.13
 
@@ -309,22 +311,26 @@ See §1 for the table. In order:
 
 1. **Ship the `num_ctx` grid in 2.5.0** (this PR). Without it every retrieval Ask
    spends 12–22 s reloading the model on this class of machine.
-2. **Keep `llama3.1` as the default.** The rule was "keep it unless a challenger
-   beats it on quality without breaking latency or empty-answer rate":
-   `qwen3.5:4b` is faster (p50 19 s vs 24 s) and ahead on sourcing (38% vs 46%
-   unsourced) but behind on refusals and had a runner failure; both are inside
-   the noise at n = 60 / 16. `granite4.1:3b` breaks false refusals (47%).
-   Neither the 9B nor the 12B model is a default for an 8 GB machine.
-3. **Offer `qwen3.5:9b` on machines with 16 GB or more** ("A better local model is
-   available · 6.6 GB", spec §4 model upgrades): it is the best quality per
-   second, and it keeps spoken numbers. Run at the tier-S budget (no tools) it gave
-   the same quality on a third fewer prompt tokens (§4.6), so the tier-M gate isn't
-   what makes it work. `gemma4:12b-it-qat` buys 7 points of
-   grounded for 35% more latency and 1.8 GB more.
+2. **Keep `llama3.1` as the built-in default for 2.5.0, knowing it misses the S
+   floors.** The rule was "keep it unless a challenger beats it on quality
+   without breaking latency or empty-answer rate". The only challengers that beat
+   it are the 9B and 12B models, which need 6–8 GB of RAM: not a default for an
+   8 GB machine, and an upgrade the spec says to offer. The 8B-and-smaller
+   challengers don't beat it: `qwen3.5:4b` is faster (p50 19 s vs 24 s) and ahead
+   on sourcing, behind on refusals, had a runner failure, and sits inside the noise
+   at n = 60 / 16; `granite4.1:3b` breaks false refusals (47%).
+3. **Offer `qwen3.5:9b` on machines with 16 GB or more**, as the first model
+   upgrade the app offers: it is the best quality per second, keeps spoken numbers,
+   and at the tier-S budget (no tools) gives the same quality on a third fewer
+   prompt tokens (§4.6), so the tier-M gate isn't what makes it work. If that offer
+   can't ship in 2.5.0, `llama3.1` stays and the 9B model is the documented
+   upgrade.
 4. **Follow-ups, none blocking 2.5.0:** offer tools at tier M only when the
    prefetch doesn't answer (saves ~4k tokens, ~8–11 s per Ask); retry a 500 once
    at the same window; a floor on `num_ctx` for Ask; a versioned Ollama layout
-   plus the macOS bump; re-time on a quiet machine; the 32 GB tier.
+   plus the macOS bump; re-time on a quiet machine; the 32 GB tier; a
+   hardware-aware default (the S floors say the shipped default is below the bar
+   the project set).
 
 ## 8. Proposed eval changes (these need the user's OK, CLAUDE.md)
 
@@ -333,32 +339,37 @@ No replay is committed. Proposals:
 
 1. **Committing replays.** The replays are in
    `C:\Users\swarn\Claude Code Projects\fotw-design-2026-10\replays\<model>\`
-   (76 quality Asks per model, plus the security ones in
-   `replays-security\` and `replays-security-C\`; model output on synthetic data
-   only). Committing a model's replays turns its group (`replay:<model>@<tier>`)
-   into a gate, because every group of ≥ 30 answerable and ≥ 8 unanswerable
-   scenarios is gated. As scored, **no group meets its floors**, so committing any
-   of them while `ask_contract` is `required` would fail CI. Committed replays
-   also go stale, and fail `stale_replays`, whenever the harness's requests
-   change (any prompt or prefetch edit), and re-recording takes hours of GPU time.
+   (76 quality Asks per model, plus the security ones in `replays-security\`
+   and `replays-security-C\`, and `replays-9b-at-S\`; model output on synthetic
+   data only). Committing a model's replays turns its group
+   (`replay:<model>@<tier>`) into a gate: every group of ≥ 30 answerable and ≥ 8
+   unanswerable scenarios is gated. Groups that pass today on main:
+   `qwen3.5:9b` @M and @S and `gemma4:12b-it-qat` @M. **`llama3.1` @S, the shipped
+   default, misses three floors**, so committing its replays under a `required`
+   suite would fail CI, and not committing them leaves the default without a
+   real-model gate. Committed replays go stale (and fail `stale_replays`)
+   whenever the harness's requests change; these 481 survived the merge of main
+   (including the Ask UI) without going stale, but any prompt or prefetch edit
+   stales them, and re-recording takes 10–65 minutes of GPU per model here (76 Asks).
 2. **`ask_contract` from `pending` to `required`.** It can go `required` today
    with no replays: the `auto` groups and every scripted guard, red-team and
-   robustness scenario pass every gate (verified again in this run), and 443
+   robustness scenario pass every gate (verified again in this run), and 481
    real-model replays add no failure to any suite-wide gate. If real-model groups
-   are wanted in CI later, the floors first have to be decided against the name
-   rule (§3.2), because it, not model capability, is what the M floors measure
-   today.
-3. **The name rule.** Decide whether a name present in the question, the meeting
-   title or the attendees counts as supported. With the rule off, the two M models
-   meet every floor; with it on, none does.
-4. **Report, don't gate, real models:** keep replays out of the repo and
-   publish this bench's output per release, with `ask-bench-report.mjs`.
+   are wanted in CI as well, the user has to decide what to do about the S floors
+   and `llama3.1` (below).
+3. **The tier-S floors.** On real output no model of 8B or smaller meets them
+   (`llama3.1`: grounded 62% vs ≥ 70%, unsourced 38% vs ≤ 30%, correct refusal
+   75% vs ≥ 85%). Either the default changes by hardware (§7) or the floors do;
+   the bench doesn't say which, and a miss is a finding, not a reason to move
+   the bar.
+4. **Report, don't gate, real models** is the alternative: keep replays out of the
+   repo and publish this bench's output per release with `ask-bench-report.mjs`.
 
 ## 9. Limits and how to reproduce
 
 Not done: the 32 GB tier; an 8 GB or 16 GB machine (one 4 GB-VRAM laptop,
 31.7 GB); cold p50 / p95 (n = 1); a quiet-machine re-time; the 0.31.2 runtime;
-macOS. `granite4.1:3b` was tried on its default settings only.
+macOS. Each model ran on its default settings only.
 
 ```bash
 # Pull (sizes: 3.3 / 2.1 / 6.6 / 7.2 GB)
@@ -369,6 +380,8 @@ FOTW_ASK_LIVE_MODELS=llama3.1 FOTW_ASK_LIVE_SAMPLE=60,16 FOTW_ASK_LIVE_OUT=<dir 
   cargo test -p fly-app --features ask-live --test ask_live -- --ignored --nocapture
 # red-team + guard scenarios at tier S, then tier C (tool models only)
 FOTW_ASK_LIVE_KINDS=red_team,guard FOTW_ASK_LIVE_TIER=S ...   FOTW_ASK_LIVE_KINDS=red_team FOTW_ASK_LIVE_TIER=C ...
+# a model at another tier, e.g. the 9B at S
+FOTW_ASK_LIVE_TIER=S FOTW_ASK_LIVE_SAMPLE=30,8 ...
 # wait for a quiet machine before each Ask, and make every Ask cold
 FOTW_ASK_LIVE_QUIET_MAX_S=600 FOTW_ASK_LIVE_COLD_EVERY=1 ...
 
