@@ -4,24 +4,150 @@
   "note": null,
   "metrics": {
     "answerable_questions": 102.0,
-    "evidence_mrr_at_8": 0.5604691876750701,
-    "evidence_recall_at_8": 0.8166666666666667,
+    "cosine_floor_auroc": 0.7417043740573153,
+    "cosine_floor_auroc_near_miss": 0.6900093370681606,
+    "cosine_floor_auroc_off_corpus": 0.9588235294117647,
+    "evidence_mrr_at_8": 0.6870214752567695,
+    "evidence_recall_at_8": 0.9705882352941176,
+    "fts_empty_rate": 0.010416666666666666,
     "keep_local_leaks": 0.0,
-    "keyword_only_mrr_at_8": 0.04248366013071896,
-    "keyword_only_recall_at_8": 0.049019607843137254,
-    "mrr_at_8": 0.3113795518207282,
-    "must_cite_coverage": 0.6078431372549019,
-    "recall_at_8": 0.6205882352941177,
-    "unanswerable_questions": 26.0,
-    "unanswerable_returning_passages": 26.0
+    "keyword_only_mrr_at_8": 0.601750700280112,
+    "keyword_only_recall_at_8": 0.8137254901960784,
+    "keyword_only_recall_at_8_unscoped": 0.8229166666666666,
+    "mrr_at_8": 0.6147992530345473,
+    "must_cite_coverage": 0.8333333333333334,
+    "recall_at_8": 0.8333333333333334,
+    "unanswerable_questions": 26.0
   },
   "info": {
     "config": {
-      "embedder": "hashed-bow-v1",
+      "chunks_embedded": 192,
+      "embedder": {
+        "embedder": "hashed-bow-v1"
+      },
       "k": 8,
       "meetings": 29,
       "segments": 1275
     },
+    "cosine_floor_sweep": [
+      {
+        "answerable": 102,
+        "answerable_kept": 102,
+        "floor": 0.1,
+        "near_miss": 21,
+        "near_miss_blocked": 0,
+        "off_corpus": 5,
+        "off_corpus_blocked": 0
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 100,
+        "floor": 0.15,
+        "near_miss": 21,
+        "near_miss_blocked": 0,
+        "off_corpus": 5,
+        "off_corpus_blocked": 1
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 96,
+        "floor": 0.2,
+        "near_miss": 21,
+        "near_miss_blocked": 3,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 81,
+        "floor": 0.25,
+        "near_miss": 21,
+        "near_miss_blocked": 10,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 62,
+        "floor": 0.3,
+        "near_miss": 21,
+        "near_miss_blocked": 14,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 39,
+        "floor": 0.35,
+        "near_miss": 21,
+        "near_miss_blocked": 19,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 18,
+        "floor": 0.4,
+        "near_miss": 21,
+        "near_miss_blocked": 19,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 15,
+        "floor": 0.45,
+        "near_miss": 21,
+        "near_miss_blocked": 21,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 7,
+        "floor": 0.5,
+        "near_miss": 21,
+        "near_miss_blocked": 21,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 1,
+        "floor": 0.55,
+        "near_miss": 21,
+        "near_miss_blocked": 21,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 1,
+        "floor": 0.6,
+        "near_miss": 21,
+        "near_miss_blocked": 21,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 0,
+        "floor": 0.65,
+        "near_miss": 21,
+        "near_miss_blocked": 21,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      },
+      {
+        "answerable": 102,
+        "answerable_kept": 0,
+        "floor": 0.7,
+        "near_miss": 21,
+        "near_miss_blocked": 21,
+        "off_corpus": 5,
+        "off_corpus_blocked": 5
+      }
+    ],
     "keep_local_sweep": {
       "checks": 306,
       "leaks": [],
@@ -32,370 +158,411 @@
         "covered": true,
         "evidence_rank": 1,
         "id": "q01",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.47088170051574707
       },
       {
-        "covered": false,
+        "covered": true,
         "evidence_rank": 1,
         "id": "q02",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.39513179659843445
       },
       {
-        "covered": false,
+        "covered": true,
         "evidence_rank": 1,
         "id": "q03",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.45436960458755493
       },
       {
         "covered": false,
-        "evidence_rank": 3,
+        "evidence_rank": 2,
         "id": "q04",
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.39757341146469116
       },
       {
         "covered": false,
-        "evidence_rank": 3,
+        "evidence_rank": 4,
         "id": "q05",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 7,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.37099123001098633
       },
       {
         "covered": true,
-        "evidence_rank": 2,
+        "evidence_rank": 1,
         "id": "q06",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": 6,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.3779645264148712
       },
       {
         "covered": true,
-        "evidence_rank": 4,
+        "evidence_rank": 3,
         "id": "q07",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 3,
+        "recall": 1.0,
+        "top1_cosine": 0.5111658573150635
       },
       {
         "covered": true,
-        "evidence_rank": 2,
+        "evidence_rank": 1,
         "id": "q08",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 2,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.3212878108024597
       },
       {
         "covered": true,
-        "evidence_rank": 5,
+        "evidence_rank": 1,
         "id": "q09",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 8,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.23008939623832703
       },
       {
         "covered": true,
         "evidence_rank": 2,
         "id": "q10",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 6,
-        "recall": 1.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": 1,
-        "id": "q11",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": 8,
-        "id": "q12",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 2,
+        "recall": 1.0,
+        "top1_cosine": 0.2519763708114624
       },
       {
         "covered": true,
-        "evidence_rank": 2,
-        "id": "q13",
-        "keyword_only_rank": null,
+        "evidence_rank": 1,
+        "id": "q11",
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 2,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.31878846883773804
+      },
+      {
+        "covered": true,
+        "evidence_rank": 3,
+        "id": "q12",
+        "keyword_only_rank": 2,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0,
+        "top1_cosine": 0.2911112308502197
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q13",
+        "keyword_only_rank": 1,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.2690691351890564
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q14",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": 5,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.3057965338230133
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q15",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 4,
         "passages": 8,
-        "rank": 2,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.4539901614189148
       },
       {
-        "covered": false,
-        "evidence_rank": null,
+        "covered": true,
+        "evidence_rank": 1,
         "id": "q16",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.23094013333320618
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q17",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 2,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.33022916316986084
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q18",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.3923571705818176
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q19",
+        "keyword_only_rank": 5,
         "passages": 8,
         "rank": 2,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.34914863109588623
       },
       {
-        "covered": false,
-        "evidence_rank": null,
-        "id": "q19",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": 3,
+        "covered": true,
+        "evidence_rank": 1,
         "id": "q20",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 3,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.27854305505752563
       },
       {
-        "covered": false,
-        "evidence_rank": null,
+        "covered": true,
+        "evidence_rank": 6,
         "id": "q21",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 4,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 6,
+        "recall": 1.0,
+        "top1_cosine": 0.22271762788295746
       },
       {
-        "covered": false,
-        "evidence_rank": 5,
+        "covered": true,
+        "evidence_rank": 1,
         "id": "q22",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 5,
-        "recall": 0.5
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.24671754240989685
       },
       {
-        "covered": false,
-        "evidence_rank": null,
+        "covered": true,
+        "evidence_rank": 7,
         "id": "q23",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 7,
+        "recall": 1.0,
+        "top1_cosine": 0.24576951563358307
       },
       {
-        "covered": false,
+        "covered": true,
         "evidence_rank": 1,
         "id": "q24",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.10959935188293457
       },
       {
-        "covered": false,
-        "evidence_rank": 4,
+        "covered": true,
+        "evidence_rank": 1,
         "id": "q25",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.25065359473228455
       },
       {
         "covered": true,
         "evidence_rank": 3,
         "id": "q26",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 7,
         "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 3,
+        "recall": 1.0,
+        "top1_cosine": 0.2379155158996582
       },
       {
         "covered": true,
         "evidence_rank": 2,
         "id": "q27",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 3,
-        "recall": 1.0
+        "rank": 2,
+        "recall": 1.0,
+        "top1_cosine": 0.33075934648513794
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q28",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 2,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
-      },
-      {
-        "covered": true,
-        "evidence_rank": 4,
-        "id": "q29",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.2409658581018448
       },
       {
         "covered": true,
         "evidence_rank": 2,
-        "id": "q30",
-        "keyword_only_rank": null,
+        "id": "q29",
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": 3,
-        "recall": 1.0
+        "rank": 2,
+        "recall": 1.0,
+        "top1_cosine": 0.2357022762298584
       },
       {
-        "covered": false,
+        "covered": true,
         "evidence_rank": 1,
-        "id": "q31",
-        "keyword_only_rank": null,
+        "id": "q30",
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 0.8
+        "recall": 1.0,
+        "top1_cosine": 0.3535534143447876
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q31",
+        "keyword_only_rank": 1,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.3299560844898224
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q32",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.1693335473537445
       },
       {
-        "covered": false,
-        "evidence_rank": null,
+        "covered": true,
+        "evidence_rank": 1,
         "id": "q33",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": null,
-        "id": "q34",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": true,
-        "evidence_rank": 2,
-        "id": "q35",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": 2,
-        "recall": 1.0
-      },
-      {
-        "covered": true,
-        "evidence_rank": 1,
-        "id": "q36",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": 6,
-        "recall": 1.0
-      },
-      {
-        "covered": true,
-        "evidence_rank": 1,
-        "id": "q37",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": 4,
-        "recall": 1.0
-      },
-      {
-        "covered": true,
-        "evidence_rank": 3,
-        "id": "q38",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.3179994225502014
       },
       {
         "covered": true,
         "evidence_rank": 4,
-        "id": "q39",
-        "keyword_only_rank": null,
+        "id": "q34",
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 4,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.34412363171577454
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q35",
+        "keyword_only_rank": 1,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.24494904279708862
       },
       {
         "covered": true,
         "evidence_rank": 2,
-        "id": "q40",
-        "keyword_only_rank": null,
+        "id": "q36",
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 6,
+        "recall": 1.0,
+        "top1_cosine": 0.4699562191963196
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q37",
+        "keyword_only_rank": 1,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0,
+        "top1_cosine": 0.5091192722320557
+      },
+      {
+        "covered": true,
+        "evidence_rank": 4,
+        "id": "q38",
+        "keyword_only_rank": 2,
+        "passages": 8,
+        "rank": 5,
+        "recall": 1.0,
+        "top1_cosine": 0.5426587462425232
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q39",
+        "keyword_only_rank": 3,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.29019051790237427
+      },
+      {
+        "covered": true,
+        "evidence_rank": 1,
+        "id": "q40",
+        "keyword_only_rank": 1,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.46358639001846313
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q41",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 7,
         "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.31524428725242615
       },
       {
         "covered": false,
@@ -404,16 +571,18 @@
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.2737216353416443
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q47",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.5078334212303162
       },
       {
         "covered": true,
@@ -422,79 +591,88 @@
         "keyword_only_rank": null,
         "passages": 2,
         "rank": 2,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.10910894721746445
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q44",
         "keyword_only_rank": 1,
-        "passages": 2,
+        "passages": 1,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.3535534143447876
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q45",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 5,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.18257418274879456
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q46",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 2,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.4758310317993164
       },
       {
         "covered": false,
-        "evidence_rank": null,
+        "evidence_rank": 4,
         "id": "q13a",
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.24479606747627258
       },
       {
         "covered": false,
-        "evidence_rank": 7,
+        "evidence_rank": 4,
         "id": "q13b",
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.3300492763519287
       },
       {
-        "covered": false,
-        "evidence_rank": null,
+        "covered": true,
+        "evidence_rank": 1,
         "id": "q13c",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.21552643179893494
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q13d",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 4,
         "passages": 8,
-        "rank": 8,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.19080106914043427
       },
       {
         "covered": true,
-        "evidence_rank": 4,
+        "evidence_rank": 1,
         "id": "q14a",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.26843762397766113
       },
       {
         "covered": false,
@@ -503,34 +681,38 @@
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": true,
-        "evidence_rank": 1,
-        "id": "q14c",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": 1,
-        "recall": 1.0
+        "recall": 0.0,
+        "top1_cosine": 0.22011271119117737
       },
       {
         "covered": false,
-        "evidence_rank": null,
+        "evidence_rank": 2,
+        "id": "q14c",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0,
+        "top1_cosine": 0.30499711632728577
+      },
+      {
+        "covered": false,
+        "evidence_rank": 5,
         "id": "q14d",
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.18983164429664612
       },
       {
-        "covered": false,
-        "evidence_rank": null,
+        "covered": true,
+        "evidence_rank": 2,
         "id": "q15a",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 4,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 2,
+        "recall": 1.0,
+        "top1_cosine": 0.3539191782474518
       },
       {
         "covered": true,
@@ -539,142 +721,158 @@
         "keyword_only_rank": null,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.20826303958892822
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q15c",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.42008399963378906
       },
       {
         "covered": false,
-        "evidence_rank": null,
+        "evidence_rank": 4,
         "id": "q15d",
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": 8,
-        "id": "q16a",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": 3,
-        "id": "q16b",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.3779645264148712
       },
       {
         "covered": true,
         "evidence_rank": 3,
-        "id": "q16c",
-        "keyword_only_rank": null,
+        "id": "q16a",
+        "keyword_only_rank": 2,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0,
+        "top1_cosine": 0.3885144889354706
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q16b",
+        "keyword_only_rank": 4,
         "passages": 8,
         "rank": 3,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.3501504063606262
       },
       {
-        "covered": false,
-        "evidence_rank": 1,
-        "id": "q16d",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": false,
+        "covered": true,
         "evidence_rank": 2,
+        "id": "q16c",
+        "keyword_only_rank": 4,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0,
+        "top1_cosine": 0.3012975752353668
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q16d",
+        "keyword_only_rank": 1,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0,
+        "top1_cosine": 0.3481787443161011
+      },
+      {
+        "covered": false,
+        "evidence_rank": 4,
         "id": "q19a",
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.25854384899139404
       },
       {
         "covered": true,
-        "evidence_rank": 3,
+        "evidence_rank": 2,
         "id": "q19b",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 3,
         "passages": 8,
-        "rank": 3,
-        "recall": 1.0
+        "rank": 2,
+        "recall": 1.0,
+        "top1_cosine": 0.6030228137969971
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "q19c",
+        "keyword_only_rank": 4,
+        "passages": 8,
+        "rank": 2,
+        "recall": 1.0,
+        "top1_cosine": 0.3342047929763794
       },
       {
         "covered": false,
         "evidence_rank": null,
-        "id": "q19c",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": true,
-        "evidence_rank": 1,
         "id": "q19d",
         "keyword_only_rank": null,
         "passages": 8,
-        "rank": 1,
-        "recall": 1.0
+        "rank": null,
+        "recall": 0.0,
+        "top1_cosine": 0.2659290134906769
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q19e",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.5182677507400513
       },
       {
-        "covered": true,
-        "evidence_rank": 3,
+        "covered": false,
+        "evidence_rank": 2,
         "id": "q19f",
         "keyword_only_rank": null,
         "passages": 8,
-        "rank": 3,
-        "recall": 1.0
+        "rank": null,
+        "recall": 0.0,
+        "top1_cosine": 0.2752085328102112
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q19g",
         "keyword_only_rank": 1,
-        "passages": 4,
-        "rank": 1,
-        "recall": 1.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": null,
-        "id": "q19h",
-        "keyword_only_rank": null,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.4441158175468445
+      },
+      {
+        "covered": true,
+        "evidence_rank": 4,
+        "id": "q19h",
+        "keyword_only_rank": 4,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0,
+        "top1_cosine": 0.3559516370296478
       },
       {
         "covered": false,
-        "evidence_rank": 8,
+        "evidence_rank": 5,
         "id": "q20a",
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.2975308299064636
       },
       {
         "covered": false,
@@ -683,34 +881,38 @@
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.2645750939846039
+      },
+      {
+        "covered": false,
+        "evidence_rank": 3,
+        "id": "q20c",
+        "keyword_only_rank": null,
+        "passages": 8,
+        "rank": null,
+        "recall": 0.0,
+        "top1_cosine": 0.236491858959198
+      },
+      {
+        "covered": true,
+        "evidence_rank": 3,
+        "id": "q20d",
+        "keyword_only_rank": 1,
+        "passages": 8,
+        "rank": 3,
+        "recall": 1.0,
+        "top1_cosine": 0.28388750553131104
       },
       {
         "covered": true,
         "evidence_rank": 4,
-        "id": "q20c",
-        "keyword_only_rank": null,
+        "id": "q20e",
+        "keyword_only_rank": 2,
         "passages": 8,
         "rank": 4,
-        "recall": 1.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": null,
-        "id": "q20d",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": null,
-        "id": "q20e",
-        "keyword_only_rank": null,
-        "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "recall": 1.0,
+        "top1_cosine": 0.37032800912857056
       },
       {
         "covered": true,
@@ -719,34 +921,38 @@
         "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.29649966955184937
       },
       {
         "covered": true,
-        "evidence_rank": 2,
+        "evidence_rank": 1,
         "id": "q20g",
-        "keyword_only_rank": 3,
-        "passages": 4,
-        "rank": 2,
-        "recall": 1.0
+        "keyword_only_rank": 4,
+        "passages": 8,
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.2401922196149826
       },
       {
         "covered": true,
-        "evidence_rank": 3,
+        "evidence_rank": 1,
         "id": "q20h",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 3,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.35445886850357056
       },
       {
-        "covered": false,
-        "evidence_rank": null,
+        "covered": true,
+        "evidence_rank": 4,
         "id": "q21a",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 4,
+        "recall": 1.0,
+        "top1_cosine": 0.2664855122566223
       },
       {
         "covered": false,
@@ -755,25 +961,28 @@
         "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.2906591594219208
       },
       {
-        "covered": false,
-        "evidence_rank": 1,
+        "covered": true,
+        "evidence_rank": 2,
         "id": "q21c",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": null,
-        "recall": 0.0
+        "rank": 4,
+        "recall": 1.0,
+        "top1_cosine": 0.3125
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "q21d",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.408047080039978
       },
       {
         "covered": true,
@@ -782,195 +991,214 @@
         "keyword_only_rank": 1,
         "passages": 8,
         "rank": 2,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.26111653447151184
       },
       {
         "covered": false,
-        "evidence_rank": 1,
+        "evidence_rank": 2,
         "id": "q21f",
         "keyword_only_rank": null,
-        "passages": 4,
-        "rank": null,
-        "recall": 0.0
-      },
-      {
-        "covered": false,
-        "evidence_rank": 4,
-        "id": "q21g",
-        "keyword_only_rank": null,
         "passages": 8,
         "rank": null,
-        "recall": 0.0
+        "recall": 0.0,
+        "top1_cosine": 0.3125
       },
       {
         "covered": true,
-        "evidence_rank": 3,
-        "id": "q21h",
-        "keyword_only_rank": null,
+        "evidence_rank": 2,
+        "id": "q21g",
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": 3,
-        "recall": 1.0
+        "rank": 4,
+        "recall": 1.0,
+        "top1_cosine": 0.31752651929855347
       },
       {
         "covered": true,
         "evidence_rank": 1,
-        "id": "qd01",
-        "keyword_only_rank": null,
+        "id": "q21h",
+        "keyword_only_rank": 3,
         "passages": 8,
-        "rank": 8,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.3495311141014099
+      },
+      {
+        "covered": true,
+        "evidence_rank": 2,
+        "id": "qd01",
+        "keyword_only_rank": 2,
+        "passages": 8,
+        "rank": 4,
+        "recall": 1.0,
+        "top1_cosine": 0.3535533547401428
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "qd02",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.35464975237846375
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "qd03",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.32461732625961304
       },
       {
         "covered": true,
-        "evidence_rank": 1,
+        "evidence_rank": 2,
         "id": "qd04",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 3,
+        "recall": 1.0,
+        "top1_cosine": 0.3508232533931732
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "qd05",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.3910370469093323
       },
       {
         "covered": true,
         "evidence_rank": 2,
         "id": "qd06",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 2,
         "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 2,
+        "recall": 1.0,
+        "top1_cosine": 0.36514827609062195
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "qd07",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 7,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.45584234595298767
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "qd08",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 6,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.3857584297657013
       },
       {
         "covered": true,
-        "evidence_rank": 4,
+        "evidence_rank": 3,
         "id": "qd09",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 6,
-        "recall": 1.0
+        "rank": 3,
+        "recall": 1.0,
+        "top1_cosine": 0.36273816227912903
       },
       {
         "covered": true,
-        "evidence_rank": 4,
+        "evidence_rank": 5,
         "id": "qd10",
         "keyword_only_rank": null,
         "passages": 8,
         "rank": 5,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.2948838472366333
       },
       {
         "covered": true,
-        "evidence_rank": 2,
+        "evidence_rank": 1,
         "id": "qd11",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 4,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.3405025899410248
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "qd12",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 6,
         "passages": 8,
-        "rank": 2,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.4974684715270996
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "qd13",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 3,
-        "recall": 1.0
+        "rank": 1,
+        "recall": 1.0,
+        "top1_cosine": 0.30000001192092896
       },
       {
         "covered": true,
         "evidence_rank": 1,
         "id": "qd14",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
         "rank": 1,
-        "recall": 1.0
+        "recall": 1.0,
+        "top1_cosine": 0.5001928806304932
       },
       {
         "covered": true,
-        "evidence_rank": 1,
+        "evidence_rank": 2,
         "id": "q48",
-        "keyword_only_rank": null,
+        "keyword_only_rank": 1,
         "passages": 8,
-        "rank": 7,
-        "recall": 1.0
+        "rank": 3,
+        "recall": 1.0,
+        "top1_cosine": 0.32732686400413513
       }
     ],
     "recall_by_category": {
       "action_items": {
         "questions": 15,
-        "recall_at_8": 0.6533333333333334
+        "recall_at_8": 0.8
       },
       "attribution": {
         "questions": 5,
-        "recall_at_8": 0.6
+        "recall_at_8": 0.8
       },
       "cross_meeting": {
         "questions": 3,
-        "recall_at_8": 0.5
+        "recall_at_8": 1.0
       },
       "dates": {
         "questions": 20,
-        "recall_at_8": 0.5
+        "recall_at_8": 0.7
       },
       "decisions": {
         "questions": 31,
-        "recall_at_8": 0.5483870967741935
+        "recall_at_8": 0.7419354838709677
       },
       "decisions_vs_actions": {
         "questions": 4,
-        "recall_at_8": 0.7
+        "recall_at_8": 0.75
       },
       "distractor": {
         "questions": 14,
@@ -982,15 +1210,15 @@
       },
       "names": {
         "questions": 33,
-        "recall_at_8": 0.6363636363636364
+        "recall_at_8": 0.7878787878787878
       },
       "near_duplicate": {
         "questions": 43,
-        "recall_at_8": 0.5116279069767442
+        "recall_at_8": 0.7441860465116279
       },
       "numbers": {
         "questions": 38,
-        "recall_at_8": 0.5131578947368421
+        "recall_at_8": 0.868421052631579
       },
       "scoped": {
         "questions": 6,
@@ -998,113 +1226,139 @@
       },
       "series": {
         "questions": 9,
-        "recall_at_8": 0.4444444444444444
+        "recall_at_8": 0.7777777777777778
       }
     },
     "unanswerable": [
       {
         "id": "u01",
-        "passages": 8
+        "kind": "off_corpus",
+        "top1_cosine": 0.19826291501522064
       },
       {
         "id": "u02",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.26243191957473755
       },
       {
         "id": "u03",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.24659839272499084
       },
       {
         "id": "u04",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.1955154538154602
       },
       {
         "id": "u05",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.2538365423679352
       },
       {
         "id": "u06",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.2834733724594116
       },
       {
         "id": "u07",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.2401922643184662
       },
       {
         "id": "u08",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.34426528215408325
       },
       {
         "id": "u09",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.34412363171577454
       },
       {
         "id": "u10",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.19284728169441223
       },
       {
         "id": "u11",
-        "passages": 8
+        "kind": "off_corpus",
+        "top1_cosine": 0.13055826723575592
       },
       {
         "id": "u13",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.325608491897583
       },
       {
         "id": "u14",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.26843762397766113
       },
       {
         "id": "u15",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.3241017758846283
       },
       {
         "id": "u16",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.2259731888771057
       },
       {
         "id": "u17",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.2165408432483673
       },
       {
         "id": "u18",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.3396831154823303
       },
       {
         "id": "u19",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.1986798793077469
       },
       {
         "id": "u20",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.22651469707489014
       },
       {
         "id": "u21",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.4256283640861511
       },
       {
         "id": "u22",
-        "passages": 8
+        "kind": "off_corpus",
+        "top1_cosine": 0.18314749002456665
       },
       {
         "id": "u23",
-        "passages": 8
+        "kind": "off_corpus",
+        "top1_cosine": 0.17888543009757996
       },
       {
         "id": "u24",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.4225772023200989
       },
       {
         "id": "u25",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.2309401035308838
       },
       {
         "id": "u26",
-        "passages": 8
+        "kind": "off_corpus",
+        "top1_cosine": 0.19312188029289246
       },
       {
         "id": "u27",
-        "passages": 8
+        "kind": "near_miss",
+        "top1_cosine": 0.22205786406993866
       }
     ]
   },
