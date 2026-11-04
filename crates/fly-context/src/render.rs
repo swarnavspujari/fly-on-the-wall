@@ -174,11 +174,25 @@ pub fn note(n: &NoteView) -> String {
             out.push_str("(none yet)\n");
         }
         if let Some(p) = blocks.iter().find_map(|b| b.partial) {
-            let _ = writeln!(
-                out,
-                "(written from part of the meeting: {} of {} transcript lines)",
-                p.shown, p.total
-            );
+            let _ = match (p.cut_off, p.shown < p.total) {
+                (false, _) => writeln!(
+                    out,
+                    "(written from part of the meeting: {} of {} transcript lines)",
+                    p.shown, p.total
+                ),
+                // The AI's reply stopped at its length limit: the blocks
+                // below are the ones it finished.
+                (true, false) => writeln!(
+                    out,
+                    "(cut off at the AI's length limit, so later points may be missing)"
+                ),
+                (true, true) => writeln!(
+                    out,
+                    "(written from part of the meeting: {} of {} transcript lines, \
+                     and cut off at the AI's length limit, so later points may be missing)",
+                    p.shown, p.total
+                ),
+            };
         }
         for b in blocks {
             if b.flags.is_empty() {

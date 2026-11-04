@@ -290,6 +290,19 @@ impl AnthropicProvider {
         Ok(())
     }
 
+    /// The legacy text path: one request, the reply's text and usage.
+    async fn chat_text(&self, req: &ChatRequest) -> Result<(String, Usage)> {
+        let mut body = self.request_body(req);
+        let text = self.post_relaxed(&mut body).await?;
+        let structured = body.pointer("/output_config/format").is_some();
+        let (out, usage) = parse_messages_text(&text, structured)?;
+        // Undo the root-array wrapping applied in `api_schema`.
+        match (&req.format, structured) {
+            (Some(schema), true) if schema_root_is_array(schema) => Ok((unwrap_items(&out), usage)),
+            _ => Ok((out, usage)),
+        }
+    }
+
     /// POST with `relax_after_400` retries; the success body text.
     async fn post_relaxed(&self, body: &mut serde_json::Value) -> Result<String> {
         let (mut status, mut text) = self.post(body).await?;
@@ -578,15 +591,14 @@ impl LLMProvider for AnthropicProvider {
     }
 
     async fn chat(&self, req: ChatRequest) -> Result<String> {
-        let mut body = self.request_body(&req);
-        let text = self.post_relaxed(&mut body).await?;
-        let structured = body.pointer("/output_config/format").is_some();
-        let out = parse_messages_response_checked(&text, structured)?;
-        // Undo the root-array wrapping applied in `api_schema`.
-        match (&req.format, structured) {
-            (Some(schema), true) if schema_root_is_array(schema) => Ok(unwrap_items(&out)),
-            _ => Ok(out),
-        }
+        Ok(self.chat_text(&req).await?.0)
+    }
+
+    /// [`Self::chat`] with the usage report: `output_cut` says a plain
+    /// (not schema-constrained) reply stopped at `max_tokens`, so the text
+    /// is what was written before the cut. Every error rule of `chat` stands.
+    async fn chat_with_usage(&self, req: ChatRequest) -> Result<(String, Usage)> {
+        self.chat_text(&req).await
     }
 
     async fn test_connection(&self) -> Result<()> {
@@ -691,6 +703,7 @@ fn usage_of(u: Option<&Value>) -> Usage {
         cache_read_tokens: get("cache_read_input_tokens"),
         cache_write_tokens: get("cache_creation_input_tokens"),
         context_fallback: false,
+        output_cut: false,
     }
 }
 
@@ -735,10 +748,12 @@ pub fn parse_messages_converse(json_text: &str, strict: bool) -> Result<ChatResp
         }
     }
     let stop_reason = stop_reason_of(stop);
+    let mut usage = usage_of(v.get("usage"));
+    usage.output_cut = stop_reason == StopReason::MaxTokens;
     let resp = ChatResponse {
         blocks,
         stop_reason,
-        usage: usage_of(v.get("usage")),
+        usage,
     };
     if stop_reason == StopReason::MaxTokens {
         let empty = resp.text().is_empty() && resp.tool_uses().is_empty();
@@ -910,10 +925,9 @@ impl LineDecoder for AnthropicSse {
                         "response hit the token limit before it was complete".into(),
                     ));
                 }
-                out.push(StreamEvent::Done {
-                    stop_reason,
-                    usage: self.usage,
-                });
+                let mut usage = self.usage;
+                usage.output_cut = stop_reason == StopReason::MaxTokens;
+                out.push(StreamEvent::Done { stop_reason, usage });
             }
             "error" => {
                 let msg = v
@@ -958,6 +972,16 @@ pub fn parse_messages_response(json_text: &str) -> Result<String> {
 /// `strict` (structured JSON requested) hitting `max_tokens` is an error too,
 /// because a cut-off schema answer is not valid output.
 pub fn parse_messages_response_checked(json_text: &str, strict: bool) -> Result<String> {
+    parse_messages_text(json_text, strict).map(|(text, _)| text)
+}
+
+/// [`parse_messages_response_checked`] plus the usage. `output_cut` is set
+/// when the reply stopped at the token limit (`max_tokens`) or because the
+/// context window filled (`model_context_window_exceeded`), and the text
+/// is returned as far as it got. Only `max_tokens` is an error, when
+/// `strict` (a cut schema answer) or when there is no text, so a strict
+/// `model_context_window_exceeded` reply with text comes back flagged.
+pub fn parse_messages_text(json_text: &str, strict: bool) -> Result<(String, Usage)> {
     let v: serde_json::Value = serde_json::from_str(json_text)
         .map_err(|e| LlmError::Provider(format!("bad JSON from provider: {e}")))?;
     let stop = v.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
@@ -990,7 +1014,9 @@ pub fn parse_messages_response_checked(json_text: &str, strict: bool) -> Result<
     if text.is_empty() {
         return Err(LlmError::Provider("response had no text blocks".into()));
     }
-    Ok(text)
+    let mut usage = usage_of(v.get("usage"));
+    usage.output_cut = stop_reason_of(stop) == StopReason::MaxTokens;
+    Ok((text, usage))
 }
 
 #[cfg(test)]
@@ -1458,6 +1484,60 @@ mod tests {
             parse_messages_response_checked(j, false).unwrap(),
             "[{\"a\":1},"
         );
+    }
+
+    /// The text path says when a plain reply stopped at the token limit, and
+    /// keeps every error rule: strict JSON cut, empty text and refusal.
+    #[test]
+    fn text_path_reports_a_cut_reply_and_keeps_its_errors() {
+        let cut = r#"{"content":[{"type":"text","text":"[{\"a\":1},"}],"stop_reason":"max_tokens","usage":{"input_tokens":12,"output_tokens":4096}}"#;
+        let (text, usage) = parse_messages_text(cut, false).unwrap();
+        assert_eq!(text, "[{\"a\":1},");
+        assert!(usage.output_cut);
+        assert_eq!(usage.output_tokens, Some(4096));
+        // Cut and strict is still the error it was.
+        assert!(parse_messages_text(cut, true).is_err());
+        // A full context window is flagged too, and (as before) is not an
+        // error even when strict.
+        let full = r#"{"content":[{"type":"text","text":"[{\"a\":1},"}],"stop_reason":"model_context_window_exceeded"}"#;
+        assert!(parse_messages_text(full, true).unwrap().1.output_cut);
+        // Finished: no flag.
+        let done = r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}"#;
+        assert!(!parse_messages_text(done, false).unwrap().1.output_cut);
+        // Nothing usable stays an error, cut or not.
+        let empty = r#"{"content":[{"type":"thinking","thinking":""}],"stop_reason":"max_tokens"}"#;
+        assert!(parse_messages_text(empty, false).is_err());
+        let refusal = r#"{"content":[{"type":"text","text":"Sure"}],"stop_reason":"refusal","stop_details":{"category":"cyber"}}"#;
+        assert!(parse_messages_text(refusal, false).is_err());
+    }
+
+    #[test]
+    fn converse_and_stream_mark_a_cut_reply_in_the_usage() {
+        let cut = r#"{"content":[{"type":"text","text":"The bud"}],"stop_reason":"max_tokens"}"#;
+        assert!(
+            parse_messages_converse(cut, false)
+                .unwrap()
+                .usage
+                .output_cut
+        );
+        let done = r#"{"content":[{"type":"text","text":"The budget"}],"stop_reason":"end_turn"}"#;
+        assert!(
+            !parse_messages_converse(done, false)
+                .unwrap()
+                .usage
+                .output_cut
+        );
+        let sse = [
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":5}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]
+        .join("\n");
+        let r = decode_sse(&sse).unwrap();
+        assert_eq!(r.stop_reason, StopReason::MaxTokens);
+        assert!(r.usage.output_cut);
     }
 
     // ---- tool calling -------------------------------------------------

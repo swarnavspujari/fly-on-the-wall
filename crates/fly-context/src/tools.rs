@@ -639,7 +639,9 @@ pub struct BlockView {
     /// is what it always was.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<FlagView>,
-    /// Set when the AI block was written from part of the meeting only.
+    /// Set when the AI block was written from part of the meeting only, or
+    /// when the AI's reply was cut off at its length limit (`cut_off`; then
+    /// `shown == total` if the whole meeting was read).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial: Option<fly_core::PartialRead>,
 }

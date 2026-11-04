@@ -79,6 +79,10 @@
                                      (the notices banner in the Enhanced view),
                                      and saves "written from 412 of 1,980
                                      lines" on its AI lines (the legend)
+     fotwMockEnhanceCut = "1"      → Enhance's reply stops at the AI's length
+                                     limit: a notice in the Enhanced view and
+                                     "cut off at the AI's length limit" on its
+                                     AI lines (alone, or with the long meeting)
 
    Settings commands are stateful for the session (ASR save bar, provider
    pick + consent, calendars, templates) and reset on reload.
@@ -304,9 +308,11 @@ function editMockBlock(blockId: string, markdown: string | null): boolean {
 // What a finished Enhance reports. fotwMockEnhanceLong=1 plays a long meeting
 // the model could only read part of, with a line left out because it came only
 // from speech aimed at an AI (the notices banner); otherwise it read it all.
+// fotwMockEnhanceCut=1 plays a reply that stopped at the model's length limit.
 function mockEnhanceReport() {
   const long = mockFlag("fotwMockEnhanceLong") === "1";
   return {
+    output_cut: mockFlag("fotwMockEnhanceCut") === "1",
     segments_total: long ? 1980 : 5,
     segments_shown: long ? 412 : 5,
     injected_lines: long ? 1 : 0,
@@ -327,11 +333,19 @@ function mockEnhanceReport() {
 
 // Like the backend: a partial read is saved on the AI lines it wrote, and
 // goes when the user keeps or edits a line (editMockBlock rebuilds it).
-function stampMockRead(r: { segments_shown: number; segments_total: number }) {
+function stampMockRead(r: {
+  segments_shown: number;
+  segments_total: number;
+  output_cut?: boolean;
+}) {
   for (const b of blocks as unknown as { origin: { kind: string }; partial?: unknown }[]) {
     if (b.origin.kind !== "ai") continue;
-    if (r.segments_shown < r.segments_total) {
-      b.partial = { shown: r.segments_shown, total: r.segments_total };
+    if (r.segments_shown < r.segments_total || r.output_cut) {
+      b.partial = {
+        shown: r.segments_shown,
+        total: r.segments_total,
+        ...(r.output_cut ? { cut_off: true } : {}),
+      };
     } else {
       delete b.partial;
     }
