@@ -41,7 +41,7 @@
 | `model_storage_report` | none | `Result<ModelStorageReport, String>`: `artifacts[]` (`id`, `display`, `installed`, `size_on_disk`, `download_bytes`, `in_use` "Used for …", `note`, `can_delete`, `blocked`), `leftovers[]` and `unrecognised[]` (`path`, `bytes`, `kind`, `label`), `reclaimable_bytes`, `busy` | `ui-settings` (`ModelsOnComputer.tsx`, on open and whenever the saved transcript settings reload), via `api.modelStorageReport` |
 | `delete_model_files` | `ids: Vec<String>`, `paths: Vec<String>` | `Result<DeleteOutcome, String>`: `freed_bytes`, `removed[]`, `skipped[]` (in use now or gone), `failed[]`, `report`. Refused while recording, transcribing or installing | `ui-settings` (`ModelsOnComputer.tsx`: per-row Delete sends one id; Free up sends what its confirm listed), via `api.deleteModelFiles` |
 
-`download_model` has no gate beyond the id being in the registry (`asr_commands.rs:403-417`): the webview can start any pinned download, including the 1.5 GB Ollama runtime. devMock mirrors it (`devMock.ts:1381-1387`) but returns `""` instead of a path and emits no `model:progress`.
+`download_model` has no gate beyond the id being in the registry (`asr_commands.rs:403-417`): the webview can start any pinned download, including the 1.6 GB Ollama runtime. devMock mirrors it (`devMock.ts:1381-1387`) but returns `""` instead of a path and emits no `model:progress`.
 
 **What "in use" means** (`model_cleanup.rs` `use_phrases`, from the same settings and code paths that use the files):
 - whisper model: the one the pipeline asks for (`asr.model_id`, else `hw::default_model_for_tier(tier, asr.max_quality)`; tier `cloud` = backing up Groq), and while that one isn't on disk, the stand-in `best_installed_asr_model` would pick; Whisper small while `live.enabled` isn't `"false"` (live captions, `live::LIVE_MODEL`). Queued and scheduled (re-)transcriptions read the same settings when they start, so they need nothing more.
@@ -88,7 +88,7 @@ All downloads are HTTPS GET, 8 s connect / 30 s read timeouts, no overall timeou
 | `github.com/swarnavspujari/fly-on-the-wall` (`tools-whisper-v1.9.5`, `tools-whisper-vulkan-v1.9.5`) | macOS whisper engine; Windows Vulkan build on the first post-meeting transcription with `asr.use_gpu` on (default) | `asr.use_gpu` (Windows Vulkan); none for the macOS engine |
 | `github.com/k2-fsa/sherpa-onnx` | sherpa CLI (all OS) and the pyannote / CAM++ models, first diarization | Transcription |
 | `github.com/BtbN/FFmpeg-Builds` | ffmpeg (Windows, Linux), first screen recording or media import | User action |
-| `github.com/ollama/ollama` | Ollama runtime (Windows 1.5 GB, macOS 129 MB) | User clicks Install in Settings (`download_model("ollama-bin")`) |
+| `github.com/ollama/ollama` | Ollama runtime (Windows 1.6 GB v0.40.13, macOS 129 MB v0.31.2) | User clicks Install in Settings (`download_model("ollama-bin")`) |
 | `huggingface.co/ggerganov/whisper.cpp` | Whisper weights (small, medium, large-v3-turbo, large-v3) | Transcription, or Settings download |
 | `hf-mirror.com` (community proxy, not affiliated) | Only after both huggingface.co attempts fail (`models.rs:482-494`; docs/MODELS.md "Download sources") | Opt-out via `FLYONTHEWALL_NO_HF_MIRROR` |
 
