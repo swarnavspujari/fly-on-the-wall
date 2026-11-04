@@ -2373,8 +2373,9 @@ mod security_tests {
         );
     }
 
-    /// What each dialog path reports for each answer (read from rfd 0.16's
-    /// backends), and what it means here: only a click on the allow button
+    /// What each dialog path reports for each answer (read from rfd 0.17.2's
+    /// backends; the message dialogs are unchanged from 0.16), and what it
+    /// means here: only a click on the allow button
     /// is a yes. Pinned so an rfd upgrade or a change of dialog path gets
     /// checked again.
     #[test]

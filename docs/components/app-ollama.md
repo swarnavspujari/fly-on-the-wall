@@ -85,7 +85,7 @@ devMock mirrors the three model commands too, on the shared `localModels.table.j
 
 Lifecycle: the `Child` sits in `AppState.ollama`. `shutdown` kills and waits it on `RunEvent::Exit` (`lib.rs:202-211`). A child that died is reaped and respawned on the next `ensure_running` (`ollama.rs:97-102`). There is no Job Object (Windows), process group or parent-death signal, so the child **survives** any exit that skips `RunEvent::Exit`:
 - a crash, Task Manager kill or power loss;
-- **every Windows auto-update**: tauri-plugin-updater 2.14.0 runs the NSIS installer and calls `std::process::exit(0)` after its `on_before_exit` hook, which only runs `AppHandle::cleanup_before_exit` (`tauri-plugin-updater-2.14.0/src/updater.rs:1009-1050`, `src/lib.rs:119-122`; `tauri-2.12.5/src/app.rs:1128-1140`). `RunEvent::Exit` never fires. The NSIS hook only kills `flyonthewall-mcp.exe`.
+- **every Windows auto-update**: tauri-plugin-updater 2.14.1 runs the NSIS installer and calls `std::process::exit(0)` after its `on_before_exit` hook, which only runs `AppHandle::cleanup_before_exit` (`tauri-plugin-updater-2.14.1/src/updater.rs:1009-1050`, `src/lib.rs:121-123`; `tauri-2.12.5/src/app.rs:1128-1140`). `RunEvent::Exit` never fires. The NSIS hook only kills `flyonthewall-mcp.exe`.
 
 An orphan keeps holding RAM/VRAM and port 11434. On the next launch `server_alive` finds it, the app treats it as user-run (`managed: false`), and nothing ever stops it.
 

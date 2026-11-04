@@ -30,19 +30,6 @@ ignore = [
   # until the upstream Tauri bundler/plist chain moves to a patched quick-xml.
   { id = "RUSTSEC-2026-0194", reason = "quick-xml via build-time plist only; awaiting upstream bump" },
   { id = "RUSTSEC-2026-0195", reason = "quick-xml via build-time plist only; awaiting upstream bump" },
-  # zip 4.x — our own extraction (models.rs::extract_archive) is on zip 9,
-  # where these are fixed. The only remaining zip 4 is tauri-plugin-updater's
-  # private copy (Windows only; 2.14.0 is the newest 2.x and still requires
-  # ^4), which extracts nothing but update archives whose minisign signature
-  # has already been verified against the pubkey in tauri.conf.json. Drop
-  # these once the updater moves to a fixed zip.
-  { id = "RUSTSEC-2026-0367", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
-  { id = "RUSTSEC-2026-0368", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
-  { id = "RUSTSEC-2026-0369", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
-  # Published 2026-11-04: ZipArchive::extract aborts on a symlink entry that
-  # declares a huge size (a denial of service only: no memory unsafety, no
-  # disclosure). Same private zip 4 copy, same reasoning as above.
-  { id = "RUSTSEC-2026-0429", reason = "only tauri-plugin-updater's zip 4 remains; it extracts only minisign-verified update archives" },
   # RUSTSEC-2024-0429 (glib < 0.20, "unsound", GHSA-wrw7-89jp-8q8g) needs no
   # entry: it's an informational unsound notice on a transitive crate, so
   # `unsound = "workspace"` above already leaves it out. Reviewed 2026-10-28:
