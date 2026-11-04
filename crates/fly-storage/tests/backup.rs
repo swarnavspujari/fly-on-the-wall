@@ -103,7 +103,7 @@ fn v2_library(dir: &Path) -> Connection {
 }
 
 fn before(dir: &Path, version: &str) -> Outcome {
-    backup::before_open_with(dir, version, ROOMY, &mut || {}, &QUICK)
+    backup::before_open_with(dir, version, ROOMY, &mut |_| {}, &QUICK)
 }
 
 /// Open the library the way the app does and record the backup step.
@@ -135,6 +135,17 @@ fn titles(conn: &Connection) -> Vec<String> {
     rows.map(|r| r.unwrap()).collect()
 }
 
+/// A stand-in backup in `folder`: a small, real SQLite file at schema
+/// version `schema`, which is what retention counts as a complete copy.
+fn stand_in(folder: &Path, name: &str, schema: i64) {
+    std::fs::create_dir_all(folder).unwrap();
+    let conn = Connection::open(folder.join(name)).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE t (x); PRAGMA user_version = {schema};"
+    ))
+    .unwrap();
+}
+
 fn backup_files(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir.join(BACKUP_DIR))
         .map(|d| {
@@ -151,12 +162,26 @@ fn backup_files(dir: &Path) -> Vec<String> {
 fn upgrading_a_v2_library_makes_exactly_one_verified_backup() {
     let dir = tempfile::tempdir().unwrap();
     let live = v2_library(dir.path());
-    let mut announced = 0;
+    let mut announced = Vec::new();
+    let db_bytes = std::fs::metadata(dir.path().join("flyonthewall.db"))
+        .unwrap()
+        .len()
+        + std::fs::metadata(dir.path().join("flyonthewall.db-wal"))
+            .unwrap()
+            .len();
 
-    let outcome =
-        backup::before_open_with(dir.path(), "2.5.0", ROOMY, &mut || announced += 1, &QUICK);
+    let outcome = backup::before_open_with(
+        dir.path(),
+        "2.5.0",
+        ROOMY,
+        &mut |bytes| announced.push(bytes),
+        &QUICK,
+    );
     let file = saved(outcome.clone());
-    assert_eq!(announced, 1, "the startup gate is told once");
+    // The startup gate is told once, with how much is about to be copied (the
+    // main file and its WAL: the row that only the WAL holds is in the copy).
+    assert_eq!(announced, [db_bytes]);
+    assert!(db_bytes > 0);
 
     // One file, in backups/, with the documented name: this build recorded
     // no version, so the label is the schema it found.
@@ -321,11 +346,11 @@ fn retention_only_touches_exact_backup_names() {
     .iter()
     .enumerate()
     {
-        std::fs::write(
-            folder.join(format!("flyonthewall-1.0.{i}-{stamp}.db")),
-            b"old",
-        )
-        .unwrap();
+        stand_in(
+            &folder,
+            &format!("flyonthewall-1.0.{i}-{stamp}.db"),
+            Storage::SCHEMA_VERSION,
+        );
     }
 
     saved(before(dir.path(), "9.9.9"));
@@ -377,7 +402,7 @@ fn too_little_disk_space_skips_the_backup_with_a_notice_and_the_open_still_runs(
         dir.path(),
         "2.5.0",
         &|_| Some(needed - 1),
-        &mut || {},
+        &mut |_| {},
         &QUICK,
     );
     assert_eq!(
@@ -413,7 +438,7 @@ fn too_little_disk_space_skips_the_backup_with_a_notice_and_the_open_still_runs(
         dir2.path(),
         "2.5.0",
         &|_| Some(needed),
-        &mut || {},
+        &mut |_| {},
         &QUICK,
     ));
     let dir3 = tempfile::tempdir().unwrap();
@@ -422,9 +447,40 @@ fn too_little_disk_space_skips_the_backup_with_a_notice_and_the_open_still_runs(
         dir3.path(),
         "2.5.0",
         &|_| None,
-        &mut || {},
+        &mut |_| {},
         &QUICK,
     ));
+}
+
+#[test]
+fn a_copy_left_half_written_by_a_crash_is_cleared_before_the_space_check() {
+    // The crashed run's `.partial` can be the very thing that fills the disk,
+    // so the free space the folder reports depends on whether it is still
+    // there. Checking first would skip this backup too, and every one after.
+    let dir = tempfile::tempdir().unwrap();
+    let live = v2_library(dir.path());
+    let folder = dir.path().join(BACKUP_DIR);
+    std::fs::create_dir_all(&folder).unwrap();
+    let partial = folder.join("flyonthewall-2.4.0-20260101T000000Z.db.partial");
+    std::fs::write(&partial, b"half a copy").unwrap();
+    let free = |backups: &Path| {
+        let has_partial = std::fs::read_dir(backups)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".partial"));
+        Some(if has_partial { 0 } else { u64::MAX })
+    };
+
+    let file = saved(backup::before_open_with(
+        dir.path(),
+        "2.5.0",
+        &free,
+        &mut |_| {},
+        &QUICK,
+    ));
+    assert!(!partial.exists(), "the leftover is swept");
+    assert_eq!(backup_files(dir.path()), [file.name]);
+    drop(live);
 }
 
 #[test]
@@ -544,19 +600,62 @@ fn the_compression_backup_is_owed_once_and_not_after_a_startup_backup() {
     let outcome = backup::before_compression(dir.path(), "2.5.0", ROOMY);
     let file = saved(outcome.clone());
     assert_eq!(file.label, "2.5.0");
-    backup::after_compression_backup(&storage, &outcome);
+    backup::after_compression_backup(&storage, "2.5.0", &outcome);
     assert!(!backup::compression_backup_due(&storage));
 
-    // A failed one raises the notice once, and not over a pending notice.
+    // A skipped one raises the notice, worded for this step (nothing was
+    // upgraded here), and the backup stays owed.
     let low: &dyn Fn(&Path) -> Option<u64> = &|_| Some(10);
     let skipped = backup::before_compression(dir.path(), "2.5.0", low);
     assert!(matches!(skipped, Outcome::NoSpace { .. }));
     storage
         .delete_setting(backup::BEFORE_COMPRESSION_KEY)
         .unwrap();
-    backup::after_compression_backup(&storage, &skipped);
-    assert_eq!(backup::pending_notice(&storage), Some(NoticeKind::NoSpace));
+    backup::after_compression_backup(&storage, "2.5.0", &skipped);
+    assert_eq!(
+        backup::pending_notice(&storage),
+        Some(NoticeKind::CompressionNoSpace)
+    );
     assert!(backup::compression_backup_due(&storage));
+}
+
+#[test]
+fn a_dismissed_notice_stays_dismissed_for_the_rest_of_that_app_version() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Storage::open(dir.path()).unwrap());
+    let storage = Storage::open(dir.path()).unwrap();
+    let low = Outcome::NoSpace { free: 1, needed: 2 };
+
+    // The startup step tells the user, who dismisses it.
+    backup::after_open(&storage, "2.5.0", &low);
+    assert_eq!(backup::pending_notice(&storage), Some(NoticeKind::NoSpace));
+    backup::dismiss_notice(&storage);
+    assert_eq!(backup::pending_notice(&storage), None);
+
+    // The skipped backup is owed again every launch: the compression job's
+    // attempt (and a startup step that fails again) must not tell them again.
+    for _ in 0..3 {
+        backup::after_compression_backup(&storage, "2.5.0", &low);
+        backup::after_compression_backup(&storage, "2.5.0", &Outcome::Failed("x".into()));
+        backup::after_open(&storage, "2.5.0", &Outcome::Failed("x".into()));
+        assert_eq!(backup::pending_notice(&storage), None);
+    }
+
+    // A new app version is a new upgrade: it tells again, and the notice
+    // names the first step that failed (a later step keeps quiet behind it).
+    backup::after_open(&storage, "2.5.1", &Outcome::Failed("x".into()));
+    assert_eq!(backup::pending_notice(&storage), Some(NoticeKind::Failed));
+    backup::after_compression_backup(&storage, "2.5.1", &low);
+    assert_eq!(backup::pending_notice(&storage), Some(NoticeKind::Failed));
+    backup::dismiss_notice(&storage);
+
+    // ...and when the compression job is the one that fails first, its own
+    // wording is used.
+    backup::after_compression_backup(&storage, "2.5.2", &Outcome::Failed("x".into()));
+    assert_eq!(
+        backup::pending_notice(&storage),
+        Some(NoticeKind::CompressionFailed)
+    );
 }
 
 #[test]
@@ -581,20 +680,178 @@ fn a_backup_restores_by_the_documented_steps() {
     let restored = Storage::open(dir.path()).unwrap();
     assert_eq!(
         restored.get_setting("asr.tier").unwrap().as_deref(),
-        Some("balanced")
+        Some("balanced"),
+        "the change made after the backup is gone"
     );
     assert_eq!(
         restored.get_setting(backup::LAST_RUN_VERSION_KEY).unwrap(),
         None,
         "the restored library is judged on its own content"
     );
-    // Both notes came back, and the backup itself was not consumed.
-    let conn = read_only(&file.path);
-    assert_eq!(titles(&conn), ["Weekly sync", "Only in the WAL"]);
-    // The next launch backs the restored (v2) library up again before
-    // upgrading it.
     drop(restored);
-    assert!(backup::list(dir.path()).len() == 1);
+
+    // The rows the backup held are back in the restored library (known
+    // content, not just a file count): the one the main file held, and the
+    // one only the WAL held when the backup was taken. The v2 copy was
+    // upgraded on open, as an update would.
+    let live = read_only(&db);
+    assert_eq!(titles(&live), ["Weekly sync", "Only in the WAL"]);
+    assert_eq!(user_version(&live), Storage::SCHEMA_VERSION);
+    drop(live);
+
+    // The backup itself was not consumed: still the v2 copy, still the only one.
+    assert_eq!(
+        titles(&read_only(&file.path)),
+        ["Weekly sync", "Only in the WAL"]
+    );
+    assert_eq!(user_version(&read_only(&file.path)), 2);
+    assert_eq!(backup::list(dir.path()).len(), 1);
+}
+
+#[test]
+fn the_copy_from_before_the_schema_change_survives_a_run_of_version_bumps() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(v2_library(dir.path()));
+
+    // 2.5.0 is the first launch on the new schema: the v2 library is saved
+    // first, then upgraded.
+    let outcome = before(dir.path(), "2.5.0");
+    let pre_migration = saved(outcome.clone());
+    drop(open_and_record(dir.path(), "2.5.0", &outcome));
+
+    // Routine updates, more than enough to push it out of a plain newest-3.
+    // They run back to back, so on a fast machine several land in the same
+    // second of the clock: the order must not depend on that. Every backup is
+    // stamped after the one before it (never the same name, never replacing
+    // one), and the listing puts the newest first, by the stamp in the name.
+    let mut routine = Vec::new();
+    let mut last_stamp = pre_migration.taken_at.clone();
+    for patch in 1..=6 {
+        let version = format!("2.5.{patch}");
+        let outcome = before(dir.path(), &version);
+        let file = saved(outcome.clone());
+        assert!(
+            file.taken_at > last_stamp,
+            "{} was not stamped after {last_stamp}",
+            file.name
+        );
+        last_stamp = file.taken_at.clone();
+        assert_eq!(backup::list(dir.path())[0].name, file.name);
+        routine.push(file.name);
+        drop(open_and_record(dir.path(), &version, &outcome));
+        let left = backup_files(dir.path());
+        assert!(
+            left.contains(&pre_migration.name),
+            "the pre-migration copy was removed at {version}: {left:?}"
+        );
+        assert!(left.len() <= KEEP_BACKUPS + 1, "{left:?}");
+    }
+
+    // The newest three plus the last copy from before the schema change.
+    let left = backup_files(dir.path());
+    assert_eq!(left.len(), KEEP_BACKUPS + 1, "{left:?}");
+    for newest in routine.iter().rev().take(KEEP_BACKUPS) {
+        assert!(left.contains(newest), "{newest} missing: {left:?}");
+    }
+
+    // And it is the real thing: the library exactly as v2 left it.
+    let copy = read_only(&pre_migration.path);
+    assert_eq!(user_version(&copy), 2);
+    assert_eq!(titles(&copy), ["Weekly sync", "Only in the WAL"]);
+}
+
+#[test]
+fn the_last_copy_of_each_recent_schema_is_kept_and_older_ones_are_not() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Storage::open(dir.path()).unwrap());
+    let folder = dir.path().join(BACKUP_DIR);
+    // The history of an old install: copies at schemas 0, 1, 2 (two of them)
+    // and 3 (four), oldest first. Names carry the schema so the result reads
+    // plainly.
+    for (stamp, schema) in [
+        ("20180101T000000Z", 0),
+        ("20190101T000000Z", 1),
+        ("20200101T000000Z", 2),
+        ("20200201T000000Z", 2),
+        ("20210101T000000Z", 3),
+        ("20210201T000000Z", 3),
+        ("20210301T000000Z", 3),
+        ("20210401T000000Z", 3),
+    ] {
+        stand_in(
+            &folder,
+            &format!("flyonthewall-s{schema}-{stamp}.db"),
+            schema,
+        );
+    }
+    saved(before(dir.path(), "9.9.9"));
+
+    let kept: Vec<String> = backup::list(dir.path())
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    // Newest first: the new copy and the two before it, then the newest copy
+    // of each of the next two schemas down. Schema 0 is the fourth-latest
+    // schema: gone, with the older schema-2 copy and the other schema-3 ones.
+    assert_eq!(kept.len(), 5, "{kept:?}");
+    assert!(kept[0].starts_with("flyonthewall-schema3-"), "{kept:?}");
+    assert_eq!(kept[1], "flyonthewall-s3-20210401T000000Z.db");
+    assert_eq!(kept[2], "flyonthewall-s3-20210301T000000Z.db");
+    assert_eq!(kept[3], "flyonthewall-s2-20200201T000000Z.db");
+    assert_eq!(kept[4], "flyonthewall-s1-20190101T000000Z.db");
+}
+
+#[test]
+fn a_damaged_backup_does_not_take_a_slot_and_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Storage::open(dir.path()).unwrap());
+    let folder = dir.path().join(BACKUP_DIR);
+    let schema = Storage::SCHEMA_VERSION;
+    for name in [
+        "flyonthewall-1.0.0-20200101T000000Z.db",
+        "flyonthewall-1.0.1-20200102T000000Z.db",
+        "flyonthewall-1.0.2-20200103T000000Z.db",
+    ] {
+        stand_in(&folder, name, schema);
+    }
+    // The newest of the older ones is a stub (a full disk, a scanner): counted
+    // by name alone it would push a good copy out.
+    let stub = "flyonthewall-1.0.3-20200104T000000Z.db";
+    std::fs::write(folder.join(stub), b"half a copy").unwrap();
+    // ...and a good copy cut short by one page is just as unusable.
+    let cut = "flyonthewall-1.0.4-20200105T000000Z.db";
+    stand_in(&folder, cut, schema);
+    let len = std::fs::metadata(folder.join(cut)).unwrap().len();
+    assert!(len >= 8192, "needs at least two pages: {len}");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(folder.join(cut))
+        .unwrap()
+        .set_len(len - 4096)
+        .unwrap();
+
+    let new = saved(before(dir.path(), "9.9.9"));
+
+    // Complete copies: the new one and the two before it. The oldest good one
+    // is the only casualty; the damaged files take no slot and are left for
+    // the user to look at.
+    let left = backup_files(dir.path());
+    for kept in [
+        new.name.as_str(),
+        "flyonthewall-1.0.2-20200103T000000Z.db",
+        "flyonthewall-1.0.1-20200102T000000Z.db",
+        stub,
+        cut,
+    ] {
+        assert!(left.iter().any(|n| n == kept), "{kept} missing: {left:?}");
+    }
+    assert!(
+        !left
+            .iter()
+            .any(|n| n == "flyonthewall-1.0.0-20200101T000000Z.db"),
+        "{left:?}"
+    );
+    assert_eq!(left.len(), 5, "{left:?}");
 }
 
 #[test]

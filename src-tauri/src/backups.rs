@@ -28,10 +28,13 @@ pub const BACKUP_EVENT: &str = "backup:status";
 /// What Settings and the notice show.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BackupStatus {
-    /// Backups on disk (at most [`backup::KEEP_BACKUPS`]).
+    /// Backups on disk: the newest [`backup::KEEP_BACKUPS`] plus the last
+    /// copy from before each recent schema change.
     pub count: usize,
-    /// `space` (not enough free disk space) or `failed` while the one-time
-    /// notice is due; otherwise none.
+    /// While the one-time notice is due, why (a [`backup::NoticeKind`]'s
+    /// string: `space` / `failed` before an upgrade, `compression_space` /
+    /// `compression_failed` before the compression job's first pass);
+    /// otherwise none.
     pub notice: Option<String>,
 }
 
@@ -80,7 +83,7 @@ pub fn backup_before_compression(
         return None;
     }
     let outcome = backup::before_compression(&state.data_dir, version, free_space);
-    backup::after_compression_backup(&state.storage.lock().unwrap(), &outcome);
+    backup::after_compression_backup(&state.storage.lock().unwrap(), version, &outcome);
     Some(outcome)
 }
 
@@ -132,15 +135,16 @@ mod tests {
         assert!(matches!(outcome, Outcome::Saved(_)), "{outcome:?}");
         backup::after_compression_backup(
             &state.storage.lock().unwrap(),
+            "2.5.0",
             &Outcome::Failed("disk full".into()),
         );
         let s = status(&state);
         assert_eq!(s.count, 1);
-        assert_eq!(s.notice.as_deref(), Some("failed"));
+        assert_eq!(s.notice.as_deref(), Some("compression_failed"));
         // Serialized the way the frontend reads it.
         assert_eq!(
             serde_json::to_value(&s).unwrap(),
-            serde_json::json!({ "count": 1, "notice": "failed" })
+            serde_json::json!({ "count": 1, "notice": "compression_failed" })
         );
 
         backup::dismiss_notice(&state.storage.lock().unwrap());
@@ -194,11 +198,33 @@ mod tests {
             matches!(outcome, Some(Outcome::NoSpace { .. })),
             "{outcome:?}"
         );
-        assert_eq!(status(&state).notice.as_deref(), Some("space"));
+        assert_eq!(status(&state).notice.as_deref(), Some("compression_space"));
         assert_eq!(status(&state).count, 0);
         // Still owed: the next launch tries again.
         assert!(backup::compression_backup_due(
             &state.storage.lock().unwrap()
         ));
+    }
+
+    /// The user dismisses the notice and the next launch's compression
+    /// backup is skipped again: the same app version does not tell them twice.
+    #[test]
+    fn a_dismissed_notice_stays_dismissed_when_the_compression_backup_is_skipped_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let tight = |_: &Path| Some(1024);
+        assert!(backup_before_compression(&state, "2.5.0", &tight).is_some());
+        assert_eq!(status(&state).notice.as_deref(), Some("compression_space"));
+        backup::dismiss_notice(&state.storage.lock().unwrap());
+
+        // Launch after launch: still owed, still skipped, never raised again.
+        for _ in 0..3 {
+            let again = backup_before_compression(&state, "2.5.0", &tight);
+            assert!(matches!(again, Some(Outcome::NoSpace { .. })), "{again:?}");
+            assert_eq!(status(&state).notice, None);
+        }
+        // A new app version is a new upgrade and tells again.
+        assert!(backup_before_compression(&state, "2.5.1", &tight).is_some());
+        assert_eq!(status(&state).notice.as_deref(), Some("compression_space"));
     }
 }

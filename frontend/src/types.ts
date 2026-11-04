@@ -887,10 +887,12 @@ export interface SweepReport {
 }
 
 /** `library_status` and the `library:upgrade` event (src-tauri startup.rs).
- *  `done` / `total` are progress units — a fraction, not meetings; both are 0
- *  until the upgrade's first report, and stay 0 during the backup. `step` is
- *  what the open is doing while `phase` is "upgrading": saving a backup of
- *  the library first, then the schema upgrade (absent = "upgrade"). */
+ *  In the upgrade step `done` / `total` are progress units — a fraction, not
+ *  meetings; both are 0 until its first report. The backup step has no
+ *  progress of its own: `done` stays 0 and `total` is the number of bytes
+ *  being copied. `step` is what the open is doing while `phase` is
+ *  "upgrading": saving a backup of the library first, then the schema upgrade
+ *  (absent = "upgrade"). */
 export interface LibraryStatus {
   phase: "ready" | "upgrading" | "failed";
   step?: "backup" | "upgrade";
@@ -899,11 +901,13 @@ export interface LibraryStatus {
 }
 
 /** `backup_status` and the `backup:status` event (src-tauri backups.rs):
- *  how many library backups are on disk, and why the one-time notice is due
- *  ("space" = not enough free disk space, "failed" = any other reason). */
+ *  how many library backups are on disk, and why the one-time notice is due:
+ *  "space" (not enough free disk space) or "failed" (any other reason) for
+ *  the copy before an upgrade, "compression_space" / "compression_failed" for
+ *  the copy before the recordings are compressed. */
 export interface BackupStatus {
   count: number;
-  notice: "space" | "failed" | null;
+  notice: "space" | "failed" | "compression_space" | "compression_failed" | null;
 }
 
 export interface DiskEncryption {

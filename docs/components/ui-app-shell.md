@@ -8,7 +8,7 @@ The React entry point, the `App` orchestrator that owns almost all cross-feature
 
 ## Files it owns
 - `frontend/src/main.tsx` — entry: installs devMock (dev only), the link guard, then `LibraryGate` around `ConfirmProvider`, `App` and `CloudConsentOnLaunch`.
-- `frontend/src/components/LibraryGate.tsx` — the startup gate: asks `library_status` before anything else mounts, and shows the "Saving a backup of your library…" step (indeterminate `ProgressBar`) and then the "Upgrading your library" screen (determinate `ProgressBar`, one line of copy) while the backend backs up and upgrades the library in the background.
+- `frontend/src/components/LibraryGate.tsx` — the startup gate: asks `library_status` before anything else mounts, and shows the "Saving a backup of your library…" step (indeterminate `ProgressBar`, plus after 3 s a line with the size being copied and the time so far, from `backupModel.backupStepHint`) and then the "Upgrading your library" screen (determinate `ProgressBar`, one line of copy) while the backend backs up and upgrades the library in the background.
 - `frontend/src/App.tsx` — orchestrator (1,159 lines): state, event listeners, polling, wiring of every screen.
 - `frontend/src/api.ts` — typed `invoke` wrappers (105) and the `fotw:llm-settings-changed` window event.
 - `frontend/src/devMock.ts` — fake Tauri IPC for port-1420 QA and the jsdom App/RecordingBar/ImportQueue tests.

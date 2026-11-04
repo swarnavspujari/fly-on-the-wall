@@ -105,11 +105,13 @@
      ?fotwMockUpgrade=hold → stays at 40 % (screenshots)
      ?fotwMockUpgrade=fail → stops at 70 % with "failed"
      ?fotwMockUpgrade=backup → shows "Saving a backup of your library…"
-                             for ~3 s, then runs like =1
+                             for ~6 s (with the size and time hint after 3 s),
+                             then runs like =1
      ?fotwMockUpgrade=backuphold → stays on the backup step (screenshots)
    Library backups (backup_status): fotwMockBackups = N sets the count
-   (default 2); fotwMockBackupNotice = space | failed shows the one-time
-   "No backup of your library was saved" notice until dismissed.
+   (default 2); fotwMockBackupNotice = space | failed | compression_space |
+   compression_failed shows the one-time "No backup of your library was
+   saved" notice until dismissed.
 
    QA hook: fotwMockEmit(event, payload) fires a mock backend event at the
    app's listeners (pipeline:progress, model:progress, …) from the console.
@@ -2887,7 +2889,8 @@ const mockLibrary = {
   phase: mockUpgradeMode ? "upgrading" : "ready",
   step: mockBackupFirst ? "backup" : "upgrade",
   done: 0,
-  total: mockUpgradeMode && !mockBackupFirst ? 900 : 0,
+  // the backup step's total is the size being copied, in bytes (made up)
+  total: mockBackupFirst ? 1_500_000_000 : mockUpgradeMode ? 900 : 0,
 };
 function runMockUpgrade(emit: (event: string, payload: unknown) => void) {
   if (!mockUpgradeMode) return;
@@ -2899,7 +2902,7 @@ function runMockUpgrade(emit: (event: string, payload: unknown) => void) {
       mockLibrary.total = 900;
       emit("library:upgrade", { ...mockLibrary });
       runMockUpgradeBar(emit);
-    }, 3000);
+    }, 6000);
     return;
   }
   runMockUpgradeBar(emit);
@@ -3025,7 +3028,13 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return {
         count: Number(mockFlag("fotwMockBackups") ?? 2),
         notice:
-          !mockBackupNoticeDismissed && (notice === "space" || notice === "failed") ? notice : null,
+          !mockBackupNoticeDismissed &&
+          (notice === "space" ||
+            notice === "failed" ||
+            notice === "compression_space" ||
+            notice === "compression_failed")
+            ? notice
+            : null,
       };
     }
     case "dismiss_backup_notice":

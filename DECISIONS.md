@@ -409,3 +409,19 @@ Running log of technical decisions, newest last. Format: date — decision — w
   content folders and the data-dir scans (self-heal, the portability backfill) never look in
   it; deleting a note does not rewrite older backups, which is stated in Settings and the
   docs. Restoring is manual, with the app closed ([app-backups](docs/components/app-backups.md)).
+- **2026-11-04 — Backup retention keeps the copy from before a schema change, and the notice
+  stays dismissed.** Review of the backup feature found that "keep the newest 3" evicts the
+  copy from before the v3 migration after three routine updates (a backup is taken at every
+  version change), which is the one copy a bad migration needs. Retention now also keeps the
+  newest backup of each of the latest three schema versions (read from the SQLite header, so
+  no database is opened), at most five files in practice. We keep the newest copy of a schema
+  rather than the oldest: it is the library as it was right before the change. Counting
+  looks at the file, not just its name: a truncated or stub file takes no slot, and is left
+  alone (it is the user's only look at what went wrong). Costs: a deleted note stays in that
+  copy longer, which Settings and the docs say. New names are always stamped after the
+  newest existing one, so a clock set back can't make the newest backup sort as old. The
+  low-disk notice used to come back every launch after dismissal (the compression job's own
+  backup stays owed and raised it again): it is now raised once per app version
+  (`backup.notice_version`), and the compression job's wording no longer claims anything was
+  upgraded. The startup screen shows the size being copied and the time so far after 3 s,
+  since a 1 GB copy reports no progress.
