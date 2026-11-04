@@ -371,7 +371,13 @@ jobs:
           # updater (happened on v2.3.0 when notarization failed).
           prerelease: true
           make_latest: false
-          generate_release_notes: true
+          # Changelog from ONE leg only. When the release already exists,
+          # softprops (v2.6.2) keeps its body and, with this flag on, appends
+          # a freshly generated changelog to it, so four legs gave four copies
+          # (v2.4.0, v2.5.0). Legs with it off never touch the body. Exactly
+          # one copy results whichever leg creates the release first.
+          # Re-running the Windows leg after this step succeeded adds a copy.
+          generate_release_notes: ${{ matrix.name == 'windows-x64' }}
           files: dist-upload/*
           fail_on_unmatched_files: true
 
