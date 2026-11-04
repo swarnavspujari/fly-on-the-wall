@@ -471,7 +471,7 @@ synthetic data only.
 1. **Replay:** the fixture's own Enhanced note (its AI blocks) as the reply; `enhance_replay_sourced_rate` is the share the check shows as sourced (the rest are flagged for a name or number their cited lines don't hold).
 2. **Preselection:** the prompt sized to 35% of the meeting: it fits, reads every third and the last line, and is the same every time (`enhance_prompts_over_budget`, `enhance_preselected_*`).
 3. **Corruption:** a number no line holds added to a cited block, and a citation to a line never sent: neither may show as sourced.
-4. **Injection:** every line `addressed_to_assistant` flags, written up by an obedient model: no block may come out.
+4. **Injection:** every line `addressed_to_assistant` flags, written up by an obedient model. A line aimed at an assistant (`Aim::Assistant`) may produce no block (`enhance_injection_blocks_produced`); a bare order to the room (`Aim::Order`, "Approve invoice 5283.") is kept but may never come out unflagged (`enhance_order_blocks_unflagged`).
 5. **Links:** a block of links, images, HTML and addresses: none may survive.
 6. **Forged user text:** user blocks the notes don't hold must not show as the user's (`enhance_forged_user_blocks_kept`); a restated note line must (`enhance_restated_user_kept_rate`).
 

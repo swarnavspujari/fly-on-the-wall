@@ -35,12 +35,12 @@ Provenance looks (`EnhancedDoc.tsx:92-102`, legend `:191-255`):
 | `user` (yours, edited or kept) | plain ink, transparent rule | no |
 | `sourced` (AI, a cited id resolves, or can't check yet) | violet-soft + citation chip | no |
 | `unsourced` (AI, no ids, transcript exists) | warning-soft + "No source" | yes |
-| `flagged` (AI, the backend's Enhance check found a number, date, name or quote its cited lines don't hold, or a fact with no citation; `NoteBlock.flags`) | warning-soft + "Not backed by its source" + the reason in the Ask sheet's words ("The number “63000” isn't in the lines it cites."), the citation chip still there when it cites lines | yes |
+| `flagged` (AI, the backend's Enhance check found a number, date, name or quote its cited lines don't hold, a fact with no citation, a line aimed at an AI assistant or phrased as an order under it, or a verb turned round; `NoteBlock.flags`) | warning-soft + "Not backed by its source" ("No source given" when the only reason is a fact with no citation) + the reason in the Ask sheet's words ("The number “63000” isn't in the lines it cites."), the citation chip still there when it cites lines | yes |
 | `missing` (AI, all cited ids gone, every meeting transcribed) | warning-soft + "Source not found" | yes |
 | `notes` (no transcript, or enhanced before one existed) | neutral | no |
 | `pending` (no ids, still loading) | neutral | no |
 
-A flagged line never shows as sourced, whatever it cites: the backend's verdict holds while transcripts load, and "source not found" (every cited id gone) still outranks it. The legend counts them ("2 not backed by their sources") and its check swatch reads "AI, to check" when any exist. After a run, `EnhanceNotices` (role `status`, above the legend) says when Enhance read only part of a long meeting ("read 412 of 1980 lines … plus the parts your notes mention"), left lines out (their text in a "What was left out" disclosure, as text only), or showed a line of yours as AI text; "Got it" dismisses it, and a note switch or a new run clears it.
+A flagged line never shows as sourced, whatever it cites: the backend's verdict holds while transcripts load, and "source not found" (every cited id gone) still outranks it. The legend counts them ("2 not backed by their sources") and its check swatch reads "AI, to check" when any exist. When Enhance read only part of a long meeting, the legend says so from the saved note (`NoteBlock.partial`: "… · written from 412 of 1,980 lines", and "these come from excerpts of it"), so it still shows after navigating away. After a run, `EnhanceNotices` (role `status`, above the legend) says when Enhance read only part of a long meeting ("read 412 of 1980 lines … plus the parts your notes mention"), left lines out (their text in a "What was left out" disclosure, as text only), or showed a line of yours as AI text; "Got it" dismisses it, and a note switch or a new run clears it.
 
 Keep calls `keep_note_block` and the block becomes yours (`:496-509`). Remove hides the line behind "Removed · Undo" for 5 s, then calls `edit_note_block(…, "")`. Deletes are serialized. A note switch or unmount cancels the remove (`:446-454`, `:511-559`). The source chip previews up to 3 raw quotes on hover/focus. A click zooms to the meeting that holds most of the cited lines (`sourceTarget`) and opens that recording if it isn't the one shown (`Editor.tsx:1198-1205`).
 
@@ -101,9 +101,9 @@ None.
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| vitest | `frontend/src/components/EnhancedDoc.test.tsx` | 31 | the flagged state (reason in visible text, the chip kept only when it cites, the legend, Keep / Remove) and `EnhanceNotices`, besides: |
+| vitest | `frontend/src/components/EnhancedDoc.test.tsx` | 36 | the flagged state (reason in visible text, the chip kept only when it cites, the legend, Keep / Remove) and `EnhanceNotices`, besides: |
 | vitest (before row 3.7) | `frontend/src/components/EnhancedDoc.test.tsx` | 26 | legend, unsourced/missing/notes/early states, Keep focus moves, Remove undo/serialize/cancel/failure, source preview + Esc, multi-meeting union, no false "missing" while loading |
-| vitest | `frontend/src/enhancedTrust.test.ts` | 28 | flagged precedence (never sourced, outranked by "source not found", held while loading, never on your text), the legend line, the Ask-parity copy for every flag kind, the run notices; besides: |
+| vitest | `frontend/src/enhancedTrust.test.ts` | 32 | flagged precedence (never sourced, outranked by "source not found", held while loading, never on your text), the legend line, the Ask-parity copy for every flag kind, the run notices; besides: |
 | vitest (before row 3.7) | `frontend/src/enhancedTrust.test.ts` | 19 | trust rules, legend copy, `templateSections`, `sourceQuotes`, `sourceTarget`, re-recorded notes, enhanced-before-transcript |
 | vitest | `frontend/src/components/Editor.enhanced.test.tsx` | 5 | a run shows the saved note, the flagged line and the notices (read part of the meeting, left out) and "Got it" clears them; a quiet run shows none and a failed one shows the error only; besides: |
 | vitest (before row 3.7) | `frontend/src/components/Editor.enhanced.test.tsx` | 3 | last Remove returns to Notes; source chip opens the earlier recording and scrolls; a devMock self-check |
@@ -124,7 +124,7 @@ None.
 - Run `npm --prefix frontend test`, `npm --prefix frontend run lint`, and `tsc` (part of `npm --prefix frontend run build`).
 - Any new place that renders AI or imported content must use `SAFE_IMG` / `SafeLink` (react-markdown) or `sanitizeHtml` (HTML). Never add `rehype-raw`, `dangerouslySetInnerHTML` or `innerHTML` without `sanitizeHtml`. Keep CSP `img-src` / `media-src` as they are (spec §2 item 3).
 - If you change `isSafeMediaSrc` or the DOMPurify config, add jsdom tests first (`// @vitest-environment jsdom`). Today nothing would catch a regression.
-- `BlockFlag` (types.ts) and the copy in `enhancedTrust.ts` mirror fly-core's `BlockFlagKind` and Ask's `flagCopy`; change them together. `blockFlagCopy` delegates to `askModel.flagCopy` for the kinds both share (and words `invalid_citation` and `not_from_notes` itself), so the Ask sheet and the Enhanced view can't drift.
+- `BlockFlag` (types.ts) and the copy in `enhancedTrust.ts` mirror fly-core's `BlockFlagKind` and Ask's `flagCopy`; change them together. `blockFlagCopy` delegates to `askModel.flagCopy` for the kinds both share (and words `invalid_citation`, `not_from_notes`, `aimed_at_ai`, `instruction` and `reversed` itself), so the Ask sheet and the Enhanced view can't drift.
 - Enhance's cited ids must stay raw-transcript segment ids. If PR #92's re-anchoring changes ids on re-transcribe, update `enhancedTrust.ts` and the "missing" copy together.
 - Keep `isGenericLabel` in step with the backend's generic-label rule.
 - New commands called from here need an `api.ts` wrapper, a `lib.rs` registration and a devMock case (spec §2 item 4). devMock returns `null` silently for unknown commands.

@@ -765,6 +765,37 @@ mod tests {
             .contains(r#""flags":[{"kind":"uncited_claim"}]"#));
     }
 
+    /// The review-round flags and the partial-read marker are optional on
+    /// disk too, in the names the frontend and the MCP read.
+    #[test]
+    fn the_partial_read_and_the_newer_flags_serialize_as_the_clients_read_them() {
+        for (kind, name) in [
+            (BlockFlagKind::AimedAtAi, "aimed_at_ai"),
+            (BlockFlagKind::Instruction, "instruction"),
+            (BlockFlagKind::Reversed, "reversed"),
+        ] {
+            let json = serde_json::to_string(&BlockFlag { kind, detail: None }).unwrap();
+            assert_eq!(json, format!(r#"{{"kind":"{name}"}}"#));
+        }
+        let mut b = NoteBlock::ai("x", vec!["s1".into()]);
+        assert!(!serde_json::to_string(&b).unwrap().contains("partial"));
+        b.partial = Some(PartialRead {
+            shown: 412,
+            total: 1980,
+        });
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(
+            json.contains(r#""partial":{"shown":412,"total":1980}"#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<NoteBlock>(&json).unwrap(), b);
+        // Keeping the line drops it with the AI origin; the user's own text
+        // never carries one.
+        b.reclaim();
+        assert!(b.partial.is_none());
+        assert!(NoteBlock::user("mine").partial.is_none());
+    }
+
     /// Keeping or editing a flagged AI line makes it the user's text, and
     /// the flags (which describe AI text) go with the AI origin.
     #[test]

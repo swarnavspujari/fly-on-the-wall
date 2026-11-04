@@ -860,6 +860,8 @@ fn restates_notes(markdown: &str, p: &Prepared) -> bool {
     let mine = Source {
         text: &scratchpad,
         speaker: "",
+        // (an invite sets the title: it vouches for nothing a `user` block says)
+        title: "",
     };
     if !claims::unsupported(&claim_text(markdown, p), &[mine]).is_empty() {
         return false;
@@ -1742,6 +1744,8 @@ fn judge(md: &str, evidence: &[&Sent], invalid: usize, p: &Prepared) -> Vec<Bloc
     let notes = Source {
         text: &notes_text,
         speaker: "",
+        // (the note's title is part of `notes_text` already)
+        title: "",
     };
     if evidence.is_empty() {
         // Nothing cited: only a number, date or quote makes that a problem
@@ -1768,6 +1772,7 @@ fn judge(md: &str, evidence: &[&Sent], invalid: usize, p: &Prepared) -> Vec<Bloc
         .map(|(s, text)| Source {
             text,
             speaker: &s.speaker,
+            title: "",
         })
         .collect();
     sources.push(notes);
