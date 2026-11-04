@@ -63,7 +63,7 @@ tauri-plugin-single-instance = "2"
 # which is allow. Same version, features and targets tauri-plugin-dialog
 # already builds, so no new crate.
 [target.'cfg(any(windows, target_os = "macos", target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
-rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
+rfd = { version = "0.17", default-features = false, features = ["common-controls-v6", "gtk3"] }
 
 # Recording compression runs on a background-priority thread (CPU + I/O).
 # Same windows version fly-audio already builds; only a feature is added.
