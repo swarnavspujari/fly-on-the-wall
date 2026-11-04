@@ -112,6 +112,7 @@
    app's listeners (pipeline:progress, model:progress, …) from the console.
    ============================================================ */
 
+import MODEL_TABLE from "./localModels.table.json";
 import { WHISPER_ENGINE_ID } from "./types";
 import {
   customServerHost,
@@ -832,15 +833,23 @@ const asrSettings = {
   },
 };
 
+// fotwMockModelOffer = "1": an existing install on Ollama with no model of its
+// own pick (the old default), so the one-time offer can be previewed.
+// fotwMockRam = "8" | "12" | "16" | "32" (default 32): this computer's memory.
+const mockModelOffer =
+  typeof localStorage !== "undefined" && localStorage.getItem("fotwMockModelOffer") === "1";
+// fotwMockDefaultModel = "qwen3.5:9b": a new install pinned to that model.
+const mockPinnedDefault =
+  (typeof localStorage !== "undefined" && localStorage.getItem("fotwMockDefaultModel")) || null;
 const llmSettings = {
-  provider: "anthropic",
+  provider: mockModelOffer || mockPinnedDefault ? "ollama" : "anthropic",
   providers: [
     {
       id: "ollama",
-      default_model: "llama3.1",
+      default_model: mockPinnedDefault ?? "llama3.1",
       is_local: true,
       has_key: true,
-      model: "llama3.1",
+      model: mockModelOffer || mockPinnedDefault ? null : "llama3.1",
       base_url: "http://localhost:11434",
     },
     {
@@ -1203,6 +1212,7 @@ const mockUiSettings: Record<string, string> = initialUiSettings();
 /** Tests: put the get/set_app_setting store back to its starting state, so a
  *  consent one test gives can't leak into the next. */
 export function resetMockAppSettings() {
+  mockOfferDismissed = null;
   for (const k of Object.keys(mockUiSettings)) delete mockUiSettings[k];
   Object.assign(mockUiSettings, initialUiSettings());
 }
@@ -1286,6 +1296,92 @@ function meetingPrivacy(meetingId: string) {
     meeting_id: meetingId,
     ...p,
     keep_local_from_folder: folder != null && mockLocalFolders.has(folder),
+  };
+}
+
+/* ---- local model advice (local_models.rs) ---- */
+// The table is the backend's: localModels.table.json, which a Rust test keeps
+// equal to CANDIDATES. The rule is mirrored (cut-offs are each row's
+// min_ram_gb; an Ollama too old for a model takes it away).
+//   fotwMockRam = "8" | "12" | "16" | "32" (default 32): this computer's memory.
+//   fotwMockOllamaVersion = "0.16.9": an Ollama too old for qwen3.5.
+//   fotwMockDiskFull = "1": the next download is refused for lack of room.
+type MockModelRow = (typeof MODEL_TABLE)[number];
+const MOCK_MODEL_TABLE: MockModelRow[] = MODEL_TABLE;
+const mockOllamaVersion = () => mockFlag("fotwMockOllamaVersion") || "0.40.13";
+/** A version at least `min`; unknown, unreadable or 0.0.0 (a dev build) counts as yes. */
+function mockVersionAtLeast(have: string, min: number[]): boolean {
+  const v = have.split(/[-+]/)[0].split(".").map(Number);
+  if (v.length < 2 || v.some(Number.isNaN) || v.every((n) => n === 0)) return true;
+  for (let i = 0; i < 3; i++) {
+    const a = v[i] ?? 0;
+    if (a !== min[i]) return a > min[i];
+  }
+  return true;
+}
+/** The backend's match (ollama.rs same_model): a bare name matches any tag of
+ *  its family; two explicit tags must be identical. */
+function mockSameModel(a: string, b: string): boolean {
+  if (a === b) return true;
+  const ab = a.split(":")[0];
+  const bb = b.split(":")[0];
+  return (a === ab || b === bb) && ab === bb;
+}
+const mockGb = (b: number) => `${(b / 1_000_000_000).toFixed(1)} GB`;
+let mockOfferDismissed: string | null = null;
+function mockLocalModelAdvice() {
+  const flag = Number(mockFlag("fotwMockRam"));
+  const ram = Number.isFinite(flag) && flag > 0 ? flag - 0.3 : 31.7;
+  const version = mockOllamaVersion();
+  const supports = (c: MockModelRow) => mockVersionAtLeast(version, c.min_ollama);
+  const ideal =
+    MOCK_MODEL_TABLE.find((c) => ram >= c.min_ram_gb) ??
+    MOCK_MODEL_TABLE[MOCK_MODEL_TABLE.length - 1];
+  // Too old an Ollama for the ideal model: the best one it can pull.
+  const rec = supports(ideal)
+    ? ideal
+    : (MOCK_MODEL_TABLE.filter((c) => c.rank <= ideal.rank && supports(c)).find(
+        (c) => ram >= c.min_ram_gb,
+      ) ??
+      MOCK_MODEL_TABLE.find(supports) ??
+      MOCK_MODEL_TABLE[1]);
+  const heldFor = (c: MockModelRow) => ({
+    model: c.model,
+    needs_ollama: c.min_ollama.join("."),
+    have_ollama: version,
+  });
+  const ollama = llmSettings.providers.find((p) => p.id === "ollama")!;
+  const current = MOCK_MODEL_TABLE.find((c) => c.model === ollama.default_model);
+  const offer =
+    llmSettings.provider === "ollama" &&
+    !ollama.model &&
+    current &&
+    rec.rank > current.rank &&
+    mockOfferDismissed !== rec.model
+      ? { model: rec.model, download_bytes: rec.download_bytes }
+      : null;
+  return {
+    ram_gb: Math.round(ram * 10) / 10,
+    ollama_version: version,
+    recommended: rec.model,
+    held_back: supports(ideal) ? null : heldFor(ideal),
+    default_model: ollama.default_model,
+    default_blocked: current && !supports(current) ? heldFor(current) : null,
+    explicit_model: ollama.model,
+    offer,
+    models: MOCK_MODEL_TABLE.map((c) => ({
+      model: c.model,
+      download_bytes: c.download_bytes,
+      memory_gb: c.memory_gb,
+      ram_class_gb: c.ram_class_gb,
+      fits: ram >= c.min_ram_gb,
+      recommended: c.model === rec.model,
+      needs_newer_ollama: supports(c) ? null : c.min_ollama.join("."),
+      measured: c.measured,
+    })),
+    measured_on:
+      "Measured on one test laptop (4 GB graphics memory, 32 GB RAM, Ollama 0.40) while other programs were running. Your computer will differ.",
+    doc_url: "https://github.com/swarnavspujari/fly-on-the-wall/blob/main/docs/ASK-MODEL-BENCH.md",
   };
 }
 
@@ -3281,10 +3377,39 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         models: o.models.map((m) => ({ ...m, used_for: mockOllamaUsedFor(m.name) })),
       };
     }
+    case "local_model_advice":
+      return mockLocalModelAdvice();
+    case "dismiss_local_model_offer": {
+      const model = String(args.model);
+      if (!MOCK_MODEL_TABLE.some((c) => c.model === model))
+        throw `'${model}' isn't one of the offered models`;
+      mockOfferDismissed = model;
+      return null;
+    }
+    case "use_local_model": {
+      const model = String(args.model);
+      if (!MOCK_MODEL_TABLE.some((c) => c.model === model))
+        throw `'${model}' isn't one of the offered models`;
+      const ollama = llmSettings.providers.find((p) => p.id === "ollama");
+      if (ollama) ollama.model = model;
+      return null;
+    }
     case "ollama_pull": {
       const o = ollamaState();
       const name = String(args.model);
-      if (!o.models.some((m) => m.name.split(":")[0] === name.split(":")[0]))
+      const offered = MOCK_MODEL_TABLE.find(
+        (c) => c.model === name || (!name.includes(":") && c.model.split(":")[0] === name),
+      );
+      const here = o.models.some((m) => mockSameModel(m.name, name));
+      // Ollama's own refusal when its version doesn't have the model.
+      if (offered && !mockVersionAtLeast(mockOllamaVersion(), offered.min_ollama))
+        throw "pull model manifest: 412: The model you are attempting to pull requires a newer version of Ollama.";
+      // The backend's room check (local_models.rs check_room), before the pull.
+      if (offered && !here && mockFlag("fotwMockDiskFull") === "1") {
+        const need = offered.download_bytes + 2_000_000_000;
+        throw `Not enough free disk space for ${offered.model}. It needs about ${mockGb(need)} free (a ${mockGb(offered.download_bytes)} download plus 2.0 GB to spare) and this drive has 3.1 GB. Free up space (Settings › Your files and privacy shows what the app keeps), or choose a smaller model.`;
+      }
+      if (!here)
         o.models.push({ name: name.includes(":") ? name : `${name}:latest`, size: 4_700_000_000 });
       return null;
     }

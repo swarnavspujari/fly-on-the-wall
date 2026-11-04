@@ -16,7 +16,7 @@ Policy and construction (`llm_commands.rs`):
 
 | Item | Line | Used by |
 |---|---|---|
-| `PROVIDERS: &[(id, default_model, is_local)]` (`ollama`, `openai`, `anthropic`, `nim`) | 17-27 | `build_provider`, `get_llm_settings`, `ollama.rs:255` |
+| `PROVIDERS: &[(id, default_model, is_local)]` (`ollama`, `openai`, `anthropic`, `nim`). The `ollama` row's model is only the legacy fallback: the default for Ollama is pinned per install in `local_models::effective_default` ([app-ollama](app-ollama.md)) | 17-27 | `build_provider`, `get_llm_settings`, `ollama.rs:255` |
 | `enum DataScope { NoMeetingData, Note(&str), Meeting(&str) }` | 501-510 | every caller of `build_provider` |
 | `build_provider(&AppState, DataScope) -> Result<Box<dyn LLMProvider>, String>` | 569-575 (delegates) | Enhance, polish, extraction, Test connection |
 | `build_provider_with_reach(&AppState, DataScope) -> Result<BuiltProvider{provider, on_device}, String>` (the one constructor; `build_provider` calls it) | after `build_provider` | Ask (`on_device` decides Keep-local visibility in the harness), `build_provider` |
@@ -34,7 +34,7 @@ Policy and construction (`llm_commands.rs`):
 Extraction (`extraction.rs`): `build_extraction_prompt` (78-112), `extraction_items_schema` (117-133), `parse_extraction_response` (153-160), `validate_items` (165-221), `extract_items(&dyn LLMProvider, …)` (225-266, pure w.r.t. storage), `run_extraction(&AppState, meeting_id)` (271-309), `extract_after_transcribe` (313-325, best-effort; called from `scheduler.rs:219` and `asr_commands.rs:161`).
 
 #### `build_provider`: what runs, in order (`llm_commands.rs:569-653`)
-1. Lock storage (573). Read `llm.provider`, default `ollama` (581). Read `llm.<provider>.model` (else the `PROVIDERS` default) and `llm.<provider>.base_url` (587-588).
+1. Lock storage (573). Read `llm.provider`, default `ollama` (581). Read `llm.<provider>.model` (else the `PROVIDERS` default; for `ollama`, the default pinned for this install, `local_models::effective_default`) and `llm.<provider>.base_url` (587-588).
 2. **Base-URL re-check at use:** if a base URL is stored and the provider isn't `anthropic`, `validate_base_url` (592-594). Fails with "base URL for … must use https:// …".
 3. `is_local` = provider is `ollama` in `PROVIDERS` (599-601). An unknown provider id counts as not local.
 4. `consented` = setting `consent.cloud_llm.<provider>` == `"true"` (602). Only `request_cloud_consent` writes that row, after a click on allow in a native dialog; the webview can read it but not set it (comment at 595-598; [app-settings-consent](app-settings-consent.md#consent-flow)).

@@ -6,6 +6,8 @@
 ## Purpose
 `models.rs` is the artifact manager: every sidecar binary (whisper.cpp, the Vulkan whisper build, sherpa-onnx, ffmpeg, Ollama) and every model weight (whisper ggml files, pyannote, CAM++) is downloaded on first use into `<data_dir>`, streamed with progress, accepted only if its SHA-256 matches a pin in source, and extracted in-process with path, link and size checks. `gpu.rs` decides, per machine and model, whether post-meeting transcription runs on the pinned Vulkan build (Windows), based on a one-time measured benchmark; any GPU failure pins the machine back to CPU. `hw.rs` detects RAM, cores and GPU to recommend an ASR tier. `model_cleanup.rs` reports what each downloaded artifact takes on disk and whether the saved settings use it, and deletes the unused ones plus download leftovers (Settings › Models on this computer).
 
+The default **local LLM** (Ollama) is a separate rule from the ASR tier here: it follows installed memory, not `hw.rs`'s `recommended_tier`, and lives in `local_models.rs` ([app-ollama](app-ollama.md), [LOCAL-MODEL-DEFAULT](../LOCAL-MODEL-DEFAULT.md)): 15 GB or more → `qwen3.5:9b`, 11–15 GB → `llama3.1`, below → `qwen3.5:4b`, never switching an existing install.
+
 ## Files it owns
 - `src-tauri/src/models.rs` — artifact registry and pins (`TOOLS` per OS, `MODELS`), `ensure*`, `tool_installed`, `find_on_path`, `best_installed_asr_model`, download / verify / mirror fallback, staged install, pruning, `sweep_stale_downloads`, in-process zip / tar extraction; 34 tests.
 - `src-tauri/src/gpu.rs` — `asr.use_gpu` / `asr.gpu_bench` settings, `GpuBench`, `record_runtime_failure`, `is_apple_silicon` (macOS), `plan` + benchmark (Windows). No tests.

@@ -498,6 +498,61 @@ export interface OllamaStatus {
   models: OllamaModel[];
 }
 
+/** What was measured for a local model (local_models.rs; the one table). */
+export interface LocalModelMeasured {
+  /** Of the questions the meetings answer, the share answered with a source. */
+  sourced_pct: number;
+  /** Of the questions the meetings don't answer, the share it declined. */
+  declines_pct: number;
+  /** Median seconds per answer, rounded to 5 (on one busy test laptop). */
+  seconds: number;
+  /** How much longer notes, cleanup and action items after a meeting take
+   *  than with llama3.1, in tenths ([15, 25] = 1.5 to 2.5 times); null when
+   *  it is no slower. */
+  background_slower: [number, number] | null;
+}
+
+export interface LocalModelRow {
+  model: string;
+  download_bytes: number;
+  /** Memory held while answering, in GB. */
+  memory_gb: number;
+  /** The computer class it is recommended from: 8, 12 or 16 (GB of memory). */
+  ram_class_gb: number;
+  /** This computer has the memory it is recommended from. */
+  fits: boolean;
+  /** The pick for this computer. */
+  recommended: boolean;
+  /** The running Ollama is older than the model needs ("0.17.5"). */
+  needs_newer_ollama: string | null;
+  measured: LocalModelMeasured;
+}
+
+export interface LocalModelOffer {
+  model: string;
+  download_bytes: number;
+}
+
+export interface LocalModelAdvice {
+  ram_gb: number;
+  ollama_version: string | null;
+  recommended: string;
+  /** A better model is held back by an Ollama that is too old. */
+  held_back: { model: string; needs_ollama: string; have_ollama: string } | null;
+  /** What an install with no explicit pick uses. */
+  default_model: string;
+  /** That default needs a newer Ollama than the one running (its download
+   *  would fail); null otherwise. */
+  default_blocked: { model: string; needs_ollama: string; have_ollama: string } | null;
+  explicit_model: string | null;
+  /** One-time offer for an existing install; null when there is none. */
+  offer: LocalModelOffer | null;
+  models: LocalModelRow[];
+  /** "Measured on one test laptop … Your computer will differ." */
+  measured_on: string;
+  doc_url: string;
+}
+
 export interface LlmSettingsUpdate {
   provider: string;
   model: string | null;

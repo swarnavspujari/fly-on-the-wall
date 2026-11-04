@@ -53,6 +53,7 @@ import type {
   MeetingPrivacy,
   Note,
   NoteSummary,
+  LocalModelAdvice,
   OllamaStatus,
   ModelStorageReport,
   DeleteOutcome,
@@ -290,6 +291,13 @@ export const api = {
   // Deletes a local model; the backend refuses to delete the model the app
   // is currently configured to use.
   ollamaDelete: (model: string) => invoke<void>("ollama_delete", { model }),
+
+  // The default local model for this computer, the offer for an existing
+  // install, and what was measured (local_models.rs). Never switches a model
+  // by itself: `useLocalModel` is the user's click, after the download.
+  localModelAdvice: () => invoke<LocalModelAdvice>("local_model_advice"),
+  dismissLocalModelOffer: (model: string) => invoke<void>("dismiss_local_model_offer", { model }),
+  useLocalModel: (model: string) => invoke<void>("use_local_model", { model }),
 
   // calendars
   getCalendarSettings: () => invoke<CalendarStatus>("get_calendar_settings"),
