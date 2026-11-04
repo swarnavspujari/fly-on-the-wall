@@ -515,6 +515,19 @@ pub fn record_consent_skip(state: &AppState, meeting_id: &str, error: &str) -> b
     skipped
 }
 
+/// Background cleanup / extraction for `meeting_id` reached the model and it
+/// didn't deliver (it took too long, or got stuck before listing anything):
+/// remember the meeting like a consent skip, so the same notice offers to run
+/// it again. Only for a model that was reached; a provider that isn't set up
+/// stays quiet.
+pub fn record_incomplete(state: &AppState, meeting_id: &str) {
+    state
+        .consent_skipped
+        .lock()
+        .unwrap()
+        .insert(meeting_id.to_string());
+}
+
 /// Meetings whose cleanup / action items were skipped for missing consent
 /// this session (the notice catches up on these at mount; later changes
 /// arrive as `llm:consent-skips` events with the same list).

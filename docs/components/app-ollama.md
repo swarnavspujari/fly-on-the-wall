@@ -97,7 +97,7 @@ None. Ollama needs no key.
 - **A user-run server is never managed or stopped.** Spawn only when the default root is silent; a custom base URL is never managed; only the child we spawned is killed. Module doc `ollama.rs:1-5`; enforced at `ollama.rs:81-89`, `ollama.rs:136-142`.
 - **The managed child must not outlive the app.** `lib.rs:202-211` ("must not outlive the app"). Holds only for a clean exit (see the orphan cases above).
 - **Everything the app stores lives under `<data_dir>`**, including pulled models (`ollama.rs:21-23`; `state.rs:135-140` "spec §10").
-- **Ollama is installed on demand, never bundled.** DECISIONS.md 2026-07-02 ("Ollama is installed on demand, not bundled"); the 1.5 GB pin is opt-in (`models.rs:103-117`).
+- **Ollama is installed on demand, never bundled.** DECISIONS.md 2026-07-02 ("Ollama is installed on demand, not bundled"); the 1.6 GB pin (v0.40.13 on Windows) is opt-in (`models.rs:103-117`).
 - **Local by default.** DECISIONS.md 2026-07-01 ("Ollama is the default provider"). Remote Ollama hosts are handled by the callers' Keep-local rules (`embeddings.rs:166-172`, `llm_commands.rs:539`).
 - **Search never spawns a server or pulls on the query path** (`embeddings.rs:78-88`).
 - **You can't delete the model the app is using** (`ollama.rs:240-269`).

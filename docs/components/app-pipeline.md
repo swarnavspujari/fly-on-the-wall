@@ -4,11 +4,12 @@
 > In flight: PR #92 (draft, v2.5): storage schema v3 changes what `save_transcript` writes (per-segment `transcript_segments`/`segments_fts`, `citation_locators` re-anchored on re-transcribe). `run_with` and `re_diarize_with` call it unchanged, but re-diarize's "segment ids never change" contract becomes load-bearing for citations. #86 (merged) added a dormant Parakeet engine to [fly-asr](fly-asr.md). The chain below leads with Parakeet tiers only when the internal `asr.engine` flag (or `FLYONTHEWALL_ASR_ENGINE`) says `parakeet` and the meeting is transcribed as English (`use_parakeet`, `parakeet_tiers`). Otherwise it is unchanged.
 
 ## Purpose
-Turns a meeting's recorded WAVs into a saved, diarized transcript, then runs the best-effort AI pass (transcript cleanup, then item extraction). Jobs live in a persistent queue (`transcription_jobs`). One worker drains it, one job at a time, and never starts a job while audio or screen capture is active. Also owns the transcript read/edit commands, attendee confirmation, "Re-analyze speakers" with one-level undo, the ASR settings, and cooperative cancel.
+Turns a meeting's recorded WAVs into a saved, diarized transcript, then queues the best-effort AI pass (transcript cleanup, then item extraction). Jobs live in a persistent queue (`transcription_jobs`). One worker drains it, one job at a time, and never starts a job while audio or screen capture is active. The AI pass is not part of that queue: a finished job only queues its pass (`ai_queue.rs`), and a second worker runs the passes one at a time, also never while a capture is active, so a slow or runaway model delays the next pass and never the next transcription. Also owns the transcript read/edit commands, attendee confirmation, "Re-analyze speakers" with one-level undo, the ASR settings, and cooperative cancel.
 
 ## Files it owns
 - `src-tauri/src/pipeline.rs`: `run_with` (full pipeline), `re_diarize_with`, the ASR fallback chain (`GuardedAsr`), local tier planning, speaker-count hint, progress detail strings.
-- `src-tauri/src/scheduler.rs`: job queue worker (`tick`, `spawn`), retry/permanent/cancel classification, `ai_pass`, consent-skip re-runs, `cancel`, `last_failure`, startup `recover`, the `pipeline:progress` emitter.
+- `src-tauri/src/scheduler.rs`: job queue worker (`tick`, `handle_tick`, `spawn`), retry/permanent/cancel classification, the AI worker (`run_next_ai_job`, `ai_pass`), consent-skip re-runs, `cancel`, `last_failure`, startup `recover`, the `pipeline:progress` emitter.
+- `src-tauri/src/ai_queue.rs`: the queue of AI passes (`AiQueue`, one entry per meeting, one pass running at a time), shared through `AppState::ai_queue`. In memory, but `scheduler::persist_ai_queue` saves the running and waiting passes to the backend-only settings row `ai.pending_passes` after every change and `recover_ai_passes` queues them again at startup (a meeting that is gone or has no transcript is dropped; meetings that never had a pass are not invented). Kinds: `AfterTranscription` (cleanup then extraction), `ConsentRerun`, `ExtractOnly` (after re-analyze or undo, through `scheduler::queue_extraction`).
 - `src-tauri/src/asr_commands.rs`: the transcript, attendee, re-diarize, stage and ASR-settings commands. `download_model` in this file belongs to [app-models-gpu](app-models-gpu.md).
 - `src-tauri/src/commands.rs:327-342`: `cancel_transcription`, a thin wrapper over `import_commands::cancel_staged_transcription`.
 
@@ -23,7 +24,7 @@ Turns a meeting's recorded WAVs into a saved, diarized transcript, then runs the
 | `pipeline::{PipelineProgress, StageSink, ReDiarizeOutcome, TierKind, MIC_SPEAKER_KEY = "mic", ERR_NO_RECORDING_FILES, sidecar_threads}` | `pipeline.rs:26`, `pipeline.rs:100-111`, `pipeline.rs:139-144`, `pipeline.rs:718-722`, `pipeline.rs:906-910` | scheduler, import, tests |
 | `scheduler::enqueue(state, on_stage, meeting_id)` (idempotent) | `scheduler.rs:56-68` | `transcribe_meeting`, `import_transcribe` (`import_commands.rs:745`) |
 | `scheduler::tick` / `Tick::{Idle, RecordingActive, Completed, Cancelled, Retrying, GaveUp}` | `scheduler.rs:34-151` | `spawn` loop; tests |
-| `scheduler::spawn(app)` | `scheduler.rs:156-201` | `startup.rs:248` (app setup) |
+| `scheduler::spawn(app)` (starts the transcription worker and the AI worker) | `scheduler.rs` | `startup.rs:248` (app setup) |
 | `scheduler::cancel(state, on_stage, meeting_id) -> Result<bool>` | `scheduler.rs:306-344` | `delete_note` (`commands.rs:296`), `cancel_staged_transcription` (`import_commands.rs:369`) |
 | `scheduler::{finish_cancelled, emit_cancelled (crate), recover, stage_emitter, last_failure, retry_consent_skipped, recording_active (crate)}` | `scheduler.rs:237-470` | import, `llm_commands.rs:476` (`retry_consent_skipped`), `privacy.rs:259`, `privacy.rs:405` (`recording_active`) |
 | `scheduler::{MAX_ATTEMPTS = 3, WAITING_STAGE = "waiting"}` | `scheduler.rs:24-26` | tests, UI stage handling |
@@ -68,7 +69,7 @@ All are registered in `src-tauri/src/lib.rs` (`cancel_transcription` at `lib.rs:
 | `diarizing` | false | `pipeline.rs:565`, `:643`, `:848` | |
 | `aligning` | false | `pipeline.rs:601`, `:646`, `:661`, `:770`, `:859` | |
 | `saving` | false | `pipeline.rs:688`, `:864` | |
-| `polishing` | false | `scheduler.rs:390` (AI pass) | the UI fetches the fresh raw transcript here (`App.tsx:437-448`) |
+| `polishing` | false | `queue_ai_pass` when a pass is queued (event only), and `polish_after_transcribe` when cleanup starts (event and the `pipeline_stage` marker) | the UI fetches the fresh raw transcript here (`App.tsx:437-448`). Only the running cleanup holds the marker; a pass waiting its turn does not, so it never counts as busy (background yield, re-analyze, "delete everything") |
 | `done` / `error` | true | `emit_final` (`scheduler.rs:494-502`), `re_diarize_meeting` (`asr_commands.rs:124-130`) | `error` carries the message |
 | `cancelled` | true | `emit_cancelled` (`scheduler.rs:369-377`) | terminal, neither success nor error. The UI drops back to idle and re-reads the import queue (`App.tsx:384-399`). This string is load-bearing; don't rename it. |
 
@@ -177,8 +178,8 @@ A GPU tier failure pins that model to CPU for later meetings. A cloud failure ne
 - `speaker_hint` (spec §2 item 7) has no CI test. Only the ignored `rediarize_e2e` exercises confirmed vs unconfirmed counts.
 - `run_with` never gets past its early-error paths in CI. Settings→engine routing, keep-local wiring (that `GroqEngine` is not built), scratch placement and cleanup, cross-talk split, the cancel gates and save are covered only by ignored tests.
 - `pipeline_e2e` still asserts `track.16k.wav` is absent from the meeting folder (`tests/pipeline_e2e.rs:266-269`). Intermediates moved to scratch, so this can't fail, and scratch cleanup is unverified.
-- Nothing times out. `run_with`, the Groq HTTP call and the sidecars have no time limit, so a hang stalls the single worker and Cancel can't interrupt it. The AI pass runs inline before the next job, for up to 2 × `POLISH_TIMEOUT` (20 min, `scheduler.rs:172`, `:382`).
-- The `spawn` loop (retry delay, the `Completed` → `ai_pass` → `done` ordering, `embed_notify`) and the cancel unwind (`Tick::Cancelled` → `finish_cancelled` → purge) have no test.
+- Transcription itself has no time limit. `run_with`, the Groq HTTP call and the sidecars never time out, so a hang stalls the single worker and Cancel can't interrupt it. The AI pass no longer runs in that worker: it is queued (`ai_queue`) and run by its own worker, so a slow or hung model costs the passes behind it (cleanup is bounded by `POLISH_TIMEOUT`, 10 min for the whole step; extraction by per-batch limits, `extraction::BatchLimits`), and never a transcription. A re-transcribe of a meeting whose own pass is running waits for that pass. A local model that falls into a repetition loop is cut off early instead (see [app-llm](app-llm.md)).
+- The cancel unwind (`Tick::Cancelled` → `finish_cancelled` → purge) has no test. The `spawn` loops are covered through their tauri-free cores: `handle_tick` (a finished job only queues its pass), `run_next_ai_job` (the `done` event, `embed_notify`, compression nudge, recording gate) and `tick` (waits only for its own meeting's running pass), in `scheduler.rs` tests.
 - Deleting a note while its meeting is `polishing`, or mid-re-diarize: `scheduler::cancel` reports running, `delete_note` skips the purge (`commands.rs:305-314`), and nothing purges later. The meeting row, transcript and recordings folder are orphaned (inferred from code).
 - `relabel_speaker` and `edit_transcript_segment` don't check for a running re-transcribe, which then overwrites them (inferred).
 - `asr.language` has no writer.

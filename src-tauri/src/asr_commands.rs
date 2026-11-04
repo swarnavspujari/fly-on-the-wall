@@ -153,13 +153,12 @@ pub fn revert_speaker_assignment(
     Ok(transcript)
 }
 
-/// Best-effort background re-extraction after a speaker-assignment change —
-/// mirrors the scheduler's post-transcription chaining, never blocks the UI.
+/// Best-effort background re-extraction after a speaker-assignment change.
+/// It takes its turn in the AI worker's queue (the post-transcription pass
+/// runs there too), so it never overlaps a pass of the same meeting, and never
+/// blocks the UI.
 fn spawn_extraction(app: tauri::AppHandle, meeting_id: String) {
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        crate::extraction::extract_after_transcribe(&state, &meeting_id).await;
-    });
+    scheduler::queue_extraction(&app.state::<AppState>(), &meeting_id);
 }
 
 /// Whether an undo of the last re-diarize is available, and for how it

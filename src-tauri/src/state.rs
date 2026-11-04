@@ -44,11 +44,17 @@ pub struct AppState {
     /// optimistic "Listening…" forever.
     pub live_status: Mutex<Option<crate::live::LiveStatus>>,
     /// Meetings whose post-transcription cleanup / item extraction was refused
-    /// because the cloud provider has no recorded consent or no API key yet.
+    /// because the cloud provider has no recorded consent or no API key yet,
+    /// or was stopped because the model took too long or got stuck
+    /// (`llm_commands::record_incomplete`).
     /// In memory only: the app's notice offers to run them once the user
-    /// allows the provider or adds the key
-    /// (`llm_commands::retry_consent_skipped`).
+    /// allows the provider or adds the key, or right away for a model that
+    /// was stopped (`llm_commands::retry_consent_skipped`).
     pub consent_skipped: Mutex<std::collections::BTreeSet<String>>,
+    /// Passes (transcript cleanup + item extraction) waiting to run after a
+    /// transcription, and the one running. Drained by its own worker so a
+    /// slow model never holds up the transcription queue (ai_queue.rs).
+    pub ai_queue: crate::ai_queue::AiQueue,
     /// Meetings self-heal restored this launch and set to Keep local because
     /// their manifest didn't record the setting. In memory only: the app's
     /// notice asks the user to review them
@@ -98,18 +104,66 @@ impl Drop for ForegroundAi<'_> {
     }
 }
 
+/// The running app's version: what the backup step records as the library's
+/// last-opened-by and compares against on the next launch.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Open the library the way a launch does: the pre-upgrade backup first (see
+/// `fly_storage::backup`), then the open that runs any schema step, then the
+/// record of what the backup step did. The backup can't stop the open: every
+/// problem in it is an outcome for the notice, never an error here.
+/// `on_backup` is called once if a backup is about to be taken.
+pub fn open_library(
+    data_dir: &Path,
+    progress: &mut dyn FnMut(UpgradeProgress),
+    on_backup: &mut dyn FnMut(),
+) -> anyhow::Result<Storage> {
+    open_library_with(
+        data_dir,
+        APP_VERSION,
+        &crate::audio_store::free_space,
+        OpenRetry::STARTUP,
+        progress,
+        on_backup,
+    )
+}
+
+fn open_library_with(
+    data_dir: &Path,
+    version: &str,
+    free_space: &dyn Fn(&Path) -> Option<u64>,
+    retry: OpenRetry,
+    progress: &mut dyn FnMut(UpgradeProgress),
+    on_backup: &mut dyn FnMut(),
+) -> anyhow::Result<Storage> {
+    let outcome = fly_storage::backup::before_open(data_dir, version, free_space, on_backup);
+    // Retries a transient open failure before it is treated as fatal: twice
+    // the startup "database disk image is malformed" error came from an
+    // external process interfering at the moment of open and cleared within
+    // seconds (see the db-corruption incident). Only after the retries are
+    // exhausted does the caller reach the startup error dialog.
+    let storage = Storage::open_with_retry_and_progress(data_dir, retry, progress)?;
+    fly_storage::backup::after_open(&storage, version, &outcome);
+    Ok(storage)
+}
+
 impl AppState {
     pub fn init() -> anyhow::Result<Self> {
         let (data_dir, secrets) = Self::prepare()?;
-        Self::init_with(data_dir, secrets)
+        let storage = open_library(&data_dir, &mut |_| {}, &mut || {})?;
+        tracing::info!(dir = %data_dir.display(), "storage ready");
+        Ok(Self::with_storage(storage, data_dir, secrets))
     }
 
     /// [`init`](Self::init) for the background startup open (startup.rs):
-    /// the same open, reporting the one-time schema step's progress.
-    pub fn init_with_progress(progress: &mut dyn FnMut(UpgradeProgress)) -> anyhow::Result<Self> {
+    /// the same open, reporting the backup step and the one-time schema
+    /// step's progress.
+    pub fn init_with_progress(
+        progress: &mut dyn FnMut(UpgradeProgress),
+        on_backup: &mut dyn FnMut(),
+    ) -> anyhow::Result<Self> {
         let (data_dir, secrets) = Self::prepare()?;
-        let storage =
-            Storage::open_with_retry_and_progress(&data_dir, OpenRetry::STARTUP, progress)?;
+        let storage = open_library(&data_dir, progress, on_backup)?;
         tracing::info!(dir = %data_dir.display(), "storage ready");
         Ok(Self::with_storage(storage, data_dir, secrets))
     }
@@ -128,13 +182,10 @@ impl AppState {
         Ok((data_dir, secrets))
     }
 
-    /// Composition with explicit data dir + secret store — used by tests.
+    /// Composition with explicit data dir + secret store — used by tests. It
+    /// skips the backup step (a launch's [`open_library`] takes it), so a
+    /// test's settings table holds only what the test put there.
     pub fn init_with(data_dir: PathBuf, secrets: Arc<dyn SecretStore>) -> anyhow::Result<Self> {
-        // Retry a transient open failure before treating it as fatal: twice the
-        // startup "database disk image is malformed" error came from an external
-        // process interfering at the moment of open and cleared within seconds
-        // (see the db-corruption incident). Only after the retries are exhausted
-        // does the caller reach the startup error dialog.
         let storage = Storage::open_with_retry(&data_dir, OpenRetry::STARTUP)?;
         tracing::info!(dir = %data_dir.display(), "storage ready");
         Ok(Self::with_storage(storage, data_dir, secrets))
@@ -154,6 +205,7 @@ impl AppState {
             ollama: Mutex::new(None),
             live_status: Mutex::new(None),
             consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
+            ai_queue: Default::default(),
             recovered_kept_local: Mutex::new(Vec::new()),
             consent_prompt: tokio::sync::Mutex::new(Default::default()),
             embed_notify: tokio::sync::Notify::new(),
@@ -290,6 +342,132 @@ fn copy_secrets(old: &dyn SecretStore, new: &dyn SecretStore, keys: &[&str]) {
 mod tests {
     use super::*;
     use fly_secrets::MemorySecretStore;
+    use fly_storage::backup;
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    const QUICK_RETRY: OpenRetry = OpenRetry {
+        attempts: 2,
+        backoff: Duration::from_millis(1),
+    };
+
+    /// A library as a v2 build leaves it: just enough schema for the open
+    /// to treat it as an upgrade.
+    fn v2_library(dir: &Path) {
+        let conn = rusqlite::Connection::open(dir.join("flyonthewall.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL, folder_id TEXT,
+                                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             CREATE TABLE meetings (id TEXT PRIMARY KEY, title TEXT NOT NULL, note_id TEXT NOT NULL);
+             INSERT INTO notes VALUES ('n1', 'Weekly sync', NULL, '2026-01-01', '2026-01-01');
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+
+    /// Launch the way `open_library` does, recording which step reported
+    /// when.
+    fn launch(
+        dir: &Path,
+        version: &str,
+        free_space: &dyn Fn(&Path) -> Option<u64>,
+    ) -> (anyhow::Result<Storage>, Vec<&'static str>) {
+        let steps = RefCell::new(Vec::new());
+        let opened = open_library_with(
+            dir,
+            version,
+            free_space,
+            QUICK_RETRY,
+            &mut |_| steps.borrow_mut().push("upgrade"),
+            &mut || steps.borrow_mut().push("backup"),
+        );
+        (opened, steps.into_inner())
+    }
+
+    #[test]
+    fn an_upgrading_launch_saves_one_backup_before_the_schema_step_and_a_second_makes_none() {
+        let dir = tempfile::tempdir().unwrap();
+        v2_library(dir.path());
+
+        let (opened, steps) = launch(dir.path(), "2.5.0", &|_| Some(u64::MAX));
+        let storage = opened.unwrap();
+        // the gate hears about the backup first, then the upgrade's progress
+        assert_eq!(steps.first(), Some(&"backup"), "{steps:?}");
+        assert_eq!(steps.iter().filter(|s| **s == "backup").count(), 1);
+        assert!(steps.contains(&"upgrade"), "{steps:?}");
+
+        let backups = backup::list(dir.path());
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].label, "schema2");
+        let copy = rusqlite::Connection::open_with_flags(
+            &backups[0].path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let v: i64 = copy
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 2, "the backup is the library as it was");
+        // and the library itself moved on, recording who opened it
+        assert_eq!(
+            storage
+                .get_setting(backup::LAST_RUN_VERSION_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("2.5.0")
+        );
+        assert_eq!(backup::pending_notice(&storage), None);
+        drop(storage);
+
+        // Same version again: no backup step, no new file.
+        let (opened, steps) = launch(dir.path(), "2.5.0", &|_| Some(u64::MAX));
+        drop(opened.unwrap());
+        assert!(!steps.contains(&"backup"), "{steps:?}");
+        assert_eq!(backup::list(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn a_launch_short_of_disk_space_still_opens_and_leaves_one_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        v2_library(dir.path());
+
+        let (opened, _) = launch(dir.path(), "2.5.0", &|_| Some(1024));
+        let storage = opened.unwrap();
+        assert!(backup::list(dir.path()).is_empty());
+        assert_eq!(
+            backup::pending_notice(&storage),
+            Some(backup::NoticeKind::NoSpace)
+        );
+        // upgraded regardless
+        assert_eq!(
+            storage
+                .get_setting(backup::LAST_RUN_VERSION_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("2.5.0")
+        );
+    }
+
+    #[test]
+    fn a_corrupt_library_still_reaches_the_open_error_without_a_panic_or_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("flyonthewall.db"), b"definitely not sqlite").unwrap();
+        let (opened, steps) = launch(dir.path(), "2.5.0", &|_| Some(u64::MAX));
+        assert!(opened.is_err(), "the startup dialog is what reports this");
+        assert!(!steps.contains(&"backup"), "{steps:?}");
+        assert!(backup::list(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_fresh_install_opens_without_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (opened, steps) = launch(dir.path(), "2.5.0", &|_| Some(u64::MAX));
+        let storage = opened.unwrap();
+        assert!(steps.is_empty(), "{steps:?}");
+        assert!(!dir.path().join(backup::BACKUP_DIR).exists());
+        // and compression owes it nothing either
+        assert!(!backup::compression_backup_due(&storage));
+    }
 
     #[test]
     fn move_legacy_dir_moves_when_new_absent() {

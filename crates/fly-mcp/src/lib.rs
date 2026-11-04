@@ -2310,6 +2310,54 @@ mod tests {
         assert!(lazy.is_open());
     }
 
+    /// The app saves copies of the database in `<data dir>/backups/`. The
+    /// server reads `flyonthewall.db` and nothing else, and pointed at the
+    /// backups folder itself it refuses rather than creating a library there.
+    #[test]
+    fn the_server_never_opens_a_library_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        storage
+            .create_note("Only in the live library", None)
+            .unwrap();
+        drop(storage);
+        let backups = dir.path().join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        // A backup that would fail (or answer differently) if anything read it.
+        std::fs::write(
+            backups.join("flyonthewall-2.4.0-20261101T120000Z.db"),
+            b"not a database",
+        )
+        .unwrap();
+
+        let lazy = LazyServer::new(dir.path().to_path_buf());
+        assert!(lazy.is_open());
+        let search = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_notes","arguments":{"query":"live"}}});
+        let resp: serde_json::Value =
+            serde_json::from_str(&lazy.handle_message(&search.to_string()).unwrap()).unwrap();
+        assert_ne!(resp["result"]["isError"], true, "{resp}");
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Only in the live library"),
+            "{resp}"
+        );
+
+        // `--data-dir <data>/backups`: unavailable, and nothing is created.
+        let aimed = LazyServer::new(backups.clone());
+        assert!(!aimed.is_open());
+        let resp: serde_json::Value =
+            serde_json::from_str(&aimed.handle_message(&search.to_string()).unwrap()).unwrap();
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("backups"));
+        let entries: Vec<_> = std::fs::read_dir(&backups).unwrap().flatten().collect();
+        assert_eq!(entries.len(), 1, "no library was created beside the backup");
+    }
+
     #[test]
     fn list_folders_never_reveals_a_local_ancestor() {
         let dir = tempfile::tempdir().unwrap();

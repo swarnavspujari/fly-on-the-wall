@@ -37,6 +37,7 @@ import type {
   ConnectorSaveResult,
   ConnectorsOverview,
   ConnectorTestResult,
+  BackupStatus,
   DiskEncryption,
   EnhanceReply,
   ImportStaged,
@@ -157,6 +158,11 @@ export const api = {
   storageReport: () => invoke<StorageReport>("storage_report"),
   /** The one-time "recordings compressed" notice was seen. */
   dismissCompressNotice: () => invoke<void>("dismiss_compress_notice"),
+  /** Library backups (saved before an upgrade): how many, and the one-time
+   *  "couldn't save a backup" notice. */
+  backupStatus: () => invoke<BackupStatus>("backup_status"),
+  dismissBackupNotice: () => invoke<void>("dismiss_backup_notice"),
+  revealBackupsDir: () => invoke<void>("reveal_backups_dir"),
   /** Opt-in video storage: start a job (the UI confirms first). */
   startVideoJob: (kind: VideoJobKind) => invoke<VideoJobStatus>("start_video_job", { kind }),
   cancelVideoJob: () => invoke<void>("cancel_video_job"),

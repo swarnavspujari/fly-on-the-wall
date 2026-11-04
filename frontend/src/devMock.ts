@@ -99,6 +99,12 @@
                              bar to 100 % in ~6 s, then "ready" mounts the app
      ?fotwMockUpgrade=hold → stays at 40 % (screenshots)
      ?fotwMockUpgrade=fail → stops at 70 % with "failed"
+     ?fotwMockUpgrade=backup → shows "Saving a backup of your library…"
+                             for ~3 s, then runs like =1
+     ?fotwMockUpgrade=backuphold → stays on the backup step (screenshots)
+   Library backups (backup_status): fotwMockBackups = N sets the count
+   (default 2); fotwMockBackupNotice = space | failed shows the one-time
+   "No backup of your library was saved" notice until dismissed.
 
    QA hook: fotwMockEmit(event, payload) fires a mock backend event at the
    app's listeners (pipeline:progress, model:progress, …) from the console.
@@ -1217,6 +1223,8 @@ let mockRetentionDays: number | null = null;
 // fotwMockCompressFailed = "1" ends the pass with one failed and one
 // skipped meeting. Sizes are made up.
 let mockCompressNoticeDismissed = false;
+// Library backups (backups.rs): see the header for the toggles.
+let mockBackupNoticeDismissed = false;
 // Opt-in video job (video_store.rs). fotwMockVideoJob = working | paused |
 // done shows a run of that state. Sizes are made up.
 let mockImportPolicy: "keep" | "audio_only" = "keep";
@@ -2842,13 +2850,29 @@ const mockUpgradeMode =
   typeof location !== "undefined"
     ? new URLSearchParams(location.search).get("fotwMockUpgrade")
     : null;
+const mockBackupFirst = mockUpgradeMode === "backup" || mockUpgradeMode === "backuphold";
 const mockLibrary = {
   phase: mockUpgradeMode ? "upgrading" : "ready",
+  step: mockBackupFirst ? "backup" : "upgrade",
   done: 0,
-  total: mockUpgradeMode ? 900 : 0,
+  total: mockUpgradeMode && !mockBackupFirst ? 900 : 0,
 };
 function runMockUpgrade(emit: (event: string, payload: unknown) => void) {
   if (!mockUpgradeMode) return;
+  if (mockUpgradeMode === "backuphold") return;
+  if (mockBackupFirst) {
+    // the backup has no measure of its own; then the upgrade starts
+    window.setTimeout(() => {
+      mockLibrary.step = "upgrade";
+      mockLibrary.total = 900;
+      emit("library:upgrade", { ...mockLibrary });
+      runMockUpgradeBar(emit);
+    }, 3000);
+    return;
+  }
+  runMockUpgradeBar(emit);
+}
+function runMockUpgradeBar(emit: (event: string, payload: unknown) => void) {
   const stopAt = mockUpgradeMode === "hold" ? 360 : mockUpgradeMode === "fail" ? 630 : 900;
   const t = window.setInterval(() => {
     mockLibrary.done = Math.min(stopAt, mockLibrary.done + 30);
@@ -2963,6 +2987,19 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mockStorageReport();
     case "dismiss_compress_notice":
       mockCompressNoticeDismissed = true;
+      return null;
+    case "backup_status": {
+      const notice = mockFlag("fotwMockBackupNotice");
+      return {
+        count: Number(mockFlag("fotwMockBackups") ?? 2),
+        notice:
+          !mockBackupNoticeDismissed && (notice === "space" || notice === "failed") ? notice : null,
+      };
+    }
+    case "dismiss_backup_notice":
+      mockBackupNoticeDismissed = true;
+      return null;
+    case "reveal_backups_dir":
       return null;
     case "start_video_job":
       mockVideoKind = args.kind as "audio_only" | "shrink_screen";

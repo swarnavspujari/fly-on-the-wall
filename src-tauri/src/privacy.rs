@@ -856,8 +856,15 @@ pub fn record_pending_wipe(storage: &Storage) {
 }
 
 /// Content folders deleted right away (before the restart) — the most
-/// sensitive files, gone even if the user never restarts.
-const CONTENT_DIRS: &[&str] = &["recordings", "notes", "attachments", "transcripts"];
+/// sensitive files, gone even if the user never restarts. `backups` holds
+/// whole copies of the library database, so it goes with them.
+const CONTENT_DIRS: &[&str] = &[
+    "recordings",
+    "notes",
+    "attachments",
+    "transcripts",
+    fly_storage::backup::BACKUP_DIR,
+];
 
 /// "Delete all my data": empties the database in place, removes recordings,
 /// notes, attachments and transcripts now, deletes every keychain entry the
@@ -944,7 +951,12 @@ fn perform_delete_all(
         .erase_all_content()
         .map_err(err_str);
     apply_erase(&mut report, erased);
-    let files = wipe_data_dir(&data_dir, true, Some(CONTENT_DIRS));
+    // A backup being written would outlive the folder it is written into:
+    // wait for it, then remove the folder.
+    let files = {
+        let _no_backup_in_flight = fly_storage::backup::lock();
+        wipe_data_dir(&data_dir, true, Some(CONTENT_DIRS))
+    };
     report.removed = files.removed;
     report.failed = files.failed;
     report.secrets_failed = delete_owned_secrets(&[state.secrets.as_ref(), legacy_secrets]);
@@ -1261,12 +1273,14 @@ mod tests {
             "logs",
             "models/asr",
             "bin",
+            "backups",
         ] {
             std::fs::create_dir_all(p.join(d)).unwrap();
         }
         for f in [
             "flyonthewall.db",
             "flyonthewall.db-wal",
+            "backups/flyonthewall-2.4.0-20261101T120000Z.db",
             "recordings/m1/recording.mic.wav",
             "notes/a.md",
             "attachments/n1/x.pdf",
@@ -1440,10 +1454,22 @@ mod tests {
         }
         std::fs::create_dir_all(dir.path().join("recordings/m")).unwrap();
         std::fs::write(dir.path().join("recordings/m/a.wav"), b"x").unwrap();
+        // A backup holds a whole copy of the library, "Confidential" included.
+        let saved = fly_storage::backup::before_compression(dir.path(), "2.5.0", &|_| None);
+        assert!(
+            matches!(saved, fly_storage::backup::Outcome::Saved(_)),
+            "{saved:?}"
+        );
+        assert_eq!(fly_storage::backup::list(dir.path()).len(), 1);
 
         let report = perform_delete_all(&state, false, &legacy).unwrap();
 
         assert!(report.restart_required);
+        assert!(
+            !dir.path().join("backups").exists(),
+            "Delete all must take the backups with it"
+        );
+        assert!(fly_storage::backup::list(dir.path()).is_empty());
         assert!(report.db_erased && report.db_checkpointed);
         assert!(report.clean(), "{report:?}");
         assert!(report.secrets_failed.is_empty());

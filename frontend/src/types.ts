@@ -873,11 +873,22 @@ export interface SweepReport {
 
 /** `library_status` and the `library:upgrade` event (src-tauri startup.rs).
  *  `done` / `total` are progress units — a fraction, not meetings; both are 0
- *  until the upgrade's first report. */
+ *  until the upgrade's first report, and stay 0 during the backup. `step` is
+ *  what the open is doing while `phase` is "upgrading": saving a backup of
+ *  the library first, then the schema upgrade (absent = "upgrade"). */
 export interface LibraryStatus {
   phase: "ready" | "upgrading" | "failed";
+  step?: "backup" | "upgrade";
   done: number;
   total: number;
+}
+
+/** `backup_status` and the `backup:status` event (src-tauri backups.rs):
+ *  how many library backups are on disk, and why the one-time notice is due
+ *  ("space" = not enough free disk space, "failed" = any other reason). */
+export interface BackupStatus {
+  count: number;
+  notice: "space" | "failed" | null;
 }
 
 export interface DiskEncryption {

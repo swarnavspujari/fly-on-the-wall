@@ -386,9 +386,10 @@ pub async fn connect(
                 .take()
                 .ok_or_else(|| SessionError::Spawn("no stdin".into()))?;
             let tail = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+            let mut reader = None;
             if let Some(mut err) = child.stderr.take() {
                 let tail = tail.clone();
-                tokio::spawn(async move {
+                reader = Some(tokio::spawn(async move {
                     use tokio::io::AsyncReadExt;
                     let mut buf = [0u8; 1024];
                     while let Ok(n) = err.read(&mut buf).await {
@@ -401,7 +402,7 @@ pub async fn connect(
                             t.pop_front();
                         }
                     }
-                });
+                }));
             }
             match connect_io(stdout, stdin).await {
                 Ok(mut conn) => {
@@ -414,6 +415,12 @@ pub async fn connect(
                     let exited = tokio::time::timeout(Duration::from_millis(500), child.wait())
                         .await
                         .is_ok();
+                    // The exit can be seen before the reader has drained the
+                    // pipe, so wait for it to reach end of file. Bounded: a
+                    // grandchild may still hold stderr open.
+                    if let (true, Some(r)) = (exited, reader) {
+                        let _ = tokio::time::timeout(Duration::from_millis(500), r).await;
+                    }
                     let text = {
                         let t = tail.lock().unwrap();
                         let bytes: Vec<u8> = t.iter().copied().collect();

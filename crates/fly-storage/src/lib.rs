@@ -18,9 +18,14 @@
 //!   transcripts/…                     — legacy fallback for transcripts whose
 //!                                       meeting folder is unresolvable
 //!   attachments/<note_id>/…           — attached files, referenced relatively
+//!   backups/flyonthewall-<label>-<UTC stamp>.db
+//!                                     — copies of the database saved before an
+//!                                       update changes it (backup.rs); the
+//!                                       newest 3, never scanned or opened
 
 mod atomic;
 mod attachments;
+pub mod backup;
 mod cache;
 pub mod citations;
 pub mod embeddings;
@@ -246,6 +251,9 @@ impl Storage {
         data_dir: &Path,
         progress: &mut dyn FnMut(UpgradeProgress),
     ) -> Result<Self> {
+        // A folder of backups is not a library: creating one beside them
+        // would leave two things in there that look like the app's data.
+        backup::refuse_backup_dir(data_dir)?;
         std::fs::create_dir_all(data_dir)?;
         for sub in ["notes", "transcripts", "attachments", "recordings"] {
             std::fs::create_dir_all(data_dir.join(sub))?;
@@ -336,6 +344,7 @@ impl Storage {
     /// it; newer: this binary is out of date).
     pub fn open_existing(data_dir: &Path) -> Result<Self> {
         use rusqlite::OpenFlags;
+        backup::refuse_backup_dir(data_dir)?;
         let db = data_dir.join(Self::DB_FILE);
         if !db.is_file() {
             return Err(StorageError::NotFound(

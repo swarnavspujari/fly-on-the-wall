@@ -1,0 +1,116 @@
+[
+  {
+    "kind": "figure",
+    "text": "March 14th is the launch date",
+    "owner": null,
+    "status": null,
+    "speaker_key": "spk_0",
+    "segment_ids": ["8e46cf73-e9ac-4f6f-a0c9-487dd7eb2292"]
+  },
+  {
+    "kind": "figure",
+    "text": "February 2nd is the deadline for the security review report",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_0",
+    "segment_ids": ["6c011bc1-9a89-4f2b-beee-6646629db557"]
+  },
+  {
+    "kind": "action_item",
+    "text": "Priya Raman will deliver the security review report by February 2nd",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_0",
+    "segment_ids": ["6c011bc1-9a89-4f2b-beee-6646629db557"]
+  },
+  {
+    "kind": "action_item",
+    "text": "Priya Raman will send a summary by next Friday",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["2d2d1d17-f6ed-4f8b-a3f0-c6b7dae42064"]
+  },
+  {
+    "kind": "question",
+    "text": "Do we need a second data center for the launch?",
+    "owner": null,
+    "status": null,
+    "speaker_key": "spk_0",
+    "segment_ids": ["557fb3d6-7e91-49ad-aad7-2c378abe688f"]
+  },
+  {
+    "kind": "decision",
+    "text": "We decided to use Postgres for the main database",
+    "owner": null,
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["ca0ad6d7-bf1a-42c8-a87b-e1de2ac1895e"]
+  },
+  {
+    "kind": "action_item",
+    "text": "Priya Raman will send a summary by next Friday",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["2d2d1d17-f6ed-4f8b-a3f0-c6b7dae42064"]
+  },
+  {
+    "kind": "action_item",
+    "text": "I will handle the vendor shortlist",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["2d2d1d17-f6ed-4f8b-a3f0-c6b7dae42064"]
+  },
+  {
+    "kind": "action_item",
+    "text": "I will compare three vendors and send a summary by next Friday",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["2d2d1d17-f6ed-4f8b-a3f0-c6b7dae42064"]
+  },
+  {
+    "kind": "action_item",
+    "text": "I will handle the vendor shortlist",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["2d2d1d17-f6ed-4f8b-a3f0-c6b7dae42064"]
+  },
+  {
+    "kind": "action_item",
+    "text": "I will compare three vendors and send a summary by next Friday",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["2d2d1d17-f6ed-4f8b-a3f0-c6b7dae42064"]
+  },
+  {
+    "kind": "action_item",
+    "text": "I will handle the vendor shortlist",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["2d2d1d17-f6ed-4f8b-a3f0-c6b7dae42064"]
+  },
+  {
+    "kind": "action_item",
+    "text": "I will compare three vendors and send a summary by next Friday",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["2d2d1d17-f6ed-4f8b-a3f0-c6b7dae42064"]
+  },
+  {
+    "kind": "action_item",
+    "text": "I will handle the vendor shortlist",
+    "owner": "Priya Raman",
+    "status": null,
+    "speaker_key": "spk_1",
+    "segment_ids": ["2d2d1d17-f6ed-4f8b-a3f0-c6b7dae42064"]
+  },
+  {
+    "kind": "action_item",
+    "text": "I will handle the vendor shortlist"

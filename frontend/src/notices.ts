@@ -16,6 +16,8 @@ export const NOTICE_PRIORITY = {
   pipeline: 2,
   consentSkips: 1.5,
   recoveredKeptLocal: 1.2,
+  /** The pre-upgrade library backup was skipped or failed (once). */
+  noBackup: 1.1,
   update: 1,
   /** One-time "recordings compressed": good news, never urgent. */
   compressed: 0.5,

@@ -78,6 +78,8 @@ libc = "0.2"
 fly-audio = { workspace = true, features = ["testtone"] }
 tempfile = "3"
 async-trait.workspace = true
+# state.rs builds a v2-era library file to launch against
+rusqlite.workspace = true
 
 # tests/ask_live.rs (ignored) runs the Ask harness on the evals' fixture
 # corpus and records replays with their RecordingProvider. Behind a feature

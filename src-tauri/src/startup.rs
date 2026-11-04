@@ -12,6 +12,11 @@
 //! `app.state::<AppState>()` that can run before [`finish`] (the exit
 //! handler uses `try_state`; commands taking `State<AppState>` return an
 //! error instead of panicking).
+//!
+//! The copy of the database that precedes an upgrade
+//! ([`fly_storage::backup`]) is the first step of that open and reads the
+//! whole file, so a launch that will take one goes down the same path, and
+//! the status says which step it is in ([`LibraryStep`]).
 
 use std::sync::Mutex;
 
@@ -35,11 +40,23 @@ pub enum LibraryPhase {
     Failed,
 }
 
+/// What the open is doing while the phase is `upgrading`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LibraryStep {
+    /// Saving a backup of the library before the upgrade changes it.
+    Backup,
+    /// The one-time schema step (progress in `done` / `total`).
+    Upgrade,
+}
+
 /// `done` / `total` are progress units (a fraction for a determinate bar,
-/// not meetings); both are 0 until the step's first report.
+/// not meetings); both are 0 until the upgrade step's first report (and stay
+/// 0 during the backup, which has no measure of its own).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LibraryStatus {
     pub phase: LibraryPhase,
+    pub step: LibraryStep,
     pub done: u64,
     pub total: u64,
 }
@@ -47,9 +64,19 @@ pub struct LibraryStatus {
 impl LibraryStatus {
     const READY: Self = Self {
         phase: LibraryPhase::Ready,
+        step: LibraryStep::Upgrade,
         done: 0,
         total: 0,
     };
+
+    fn upgrading(step: LibraryStep, done: u64, total: u64) -> Self {
+        Self {
+            phase: LibraryPhase::Upgrading,
+            step,
+            done,
+            total,
+        }
+    }
 }
 
 /// Managed from the start of `setup`, so [`library_status`] works before
@@ -75,21 +102,21 @@ pub fn library_status(app: AppHandle) -> LibraryStatus {
         Some(gate) => *gate.0.lock().unwrap_or_else(|e| e.into_inner()),
         // Only before `setup` has run.
         None if app.try_state::<AppState>().is_some() => LibraryStatus::READY,
-        None => LibraryStatus {
-            phase: LibraryPhase::Upgrading,
-            done: 0,
-            total: 0,
-        },
+        None => LibraryStatus::upgrading(LibraryStep::Upgrade, 0, 0),
     }
 }
 
-/// True when opening the data dir will run a slow one-time schema step.
-/// Any error (no data dir, unreadable file) says no: the synchronous open
-/// then reports it through the startup dialog exactly as before.
-pub fn upgrade_pending() -> bool {
-    let Ok(dir) = state::prepared_data_dir() else {
-        return false;
-    };
+/// The first step of a slow open, or `None` when the open is quick and may
+/// run synchronously: a backup of the library is due (an app-version change,
+/// or a schema step about to run), or the one-time schema step is. Any error
+/// (no data dir, unreadable file) says no: the synchronous open then reports
+/// it through the startup dialog exactly as before.
+pub fn slow_open_step() -> Option<LibraryStep> {
+    let dir = state::prepared_data_dir().ok()?;
+    if fly_storage::backup::is_due(&dir, state::APP_VERSION) {
+        tracing::info!("library backup due: opening in the background");
+        return Some(LibraryStep::Backup);
+    }
     match fly_storage::Storage::pending_upgrade(&dir) {
         Ok(Some(p)) => {
             tracing::info!(
@@ -97,25 +124,22 @@ pub fn upgrade_pending() -> bool {
                 transcripts = p.transcripts,
                 "library upgrade pending: opening in the background"
             );
-            true
+            Some(LibraryStep::Upgrade)
         }
-        Ok(None) => false,
+        Ok(None) => None,
         Err(e) => {
             tracing::warn!(error = %e, "library upgrade check failed; opening normally");
-            false
+            None
         }
     }
 }
 
 /// Open the library on a worker thread, reporting progress, then [`finish`]
 /// startup. A failure reaches the same dialog and exit as the synchronous
-/// path.
-pub fn open_in_background(app: AppHandle) {
-    let gate = LibraryGate(Mutex::new(LibraryStatus {
-        phase: LibraryPhase::Upgrading,
-        done: 0,
-        total: 0,
-    }));
+/// path. `first` is the step the screen shows until the open reports one
+/// ([`slow_open_step`]).
+pub fn open_in_background(app: AppHandle, first: LibraryStep) {
+    let gate = LibraryGate(Mutex::new(LibraryStatus::upgrading(first, 0, 0)));
     app.manage(gate);
     tauri::async_runtime::spawn_blocking(move || {
         let gate = app.state::<LibraryGate>();
@@ -123,16 +147,17 @@ pub fn open_in_background(app: AppHandle) {
         // error dialog too, not leave "Upgrading" on screen forever: this
         // task's handle is dropped, so nobody else would see it.
         let opened = catch_panic(|| {
-            let app_state = AppState::init_with_progress(&mut |p| {
-                gate.set(
-                    &app,
-                    LibraryStatus {
-                        phase: LibraryPhase::Upgrading,
-                        done: p.done,
-                        total: p.total,
-                    },
-                )
-            })?;
+            let app_state = AppState::init_with_progress(
+                &mut |p| {
+                    gate.set(
+                        &app,
+                        LibraryStatus::upgrading(LibraryStep::Upgrade, p.done, p.total),
+                    )
+                },
+                // The backup comes before the upgrade; the first upgrade
+                // report moves the screen on.
+                &mut || gate.set(&app, LibraryStatus::upgrading(LibraryStep::Backup, 0, 0)),
+            )?;
             finish(&app, app_state);
             Ok(())
         });
@@ -143,6 +168,7 @@ pub fn open_in_background(app: AppHandle) {
                     &app,
                     LibraryStatus {
                         phase: LibraryPhase::Failed,
+                        step: first,
                         done: 0,
                         total: 0,
                     },
@@ -184,7 +210,8 @@ pub fn storage_failed(app: &AppHandle, e: &anyhow::Error) -> ! {
              Your recordings, notes, and transcripts are separate \
              files and are intact in the app data folder. Close any \
              other program that may be using the database (or restore \
-             a backup of flyonthewall.db) and start the app again."
+             a copy from the backups folder inside the app data folder) \
+             and start the app again."
         ))
         .kind(MessageDialogKind::Error)
         .title("Fly on the Wall can't start")
@@ -318,14 +345,14 @@ mod tests {
 
     #[test]
     fn library_status_serializes_as_the_frontend_expects() {
-        let upgrading = LibraryStatus {
-            phase: LibraryPhase::Upgrading,
-            done: 3,
-            total: 9,
-        };
+        let upgrading = LibraryStatus::upgrading(LibraryStep::Upgrade, 3, 9);
         assert_eq!(
             serde_json::to_value(upgrading).unwrap(),
-            serde_json::json!({ "phase": "upgrading", "done": 3, "total": 9 })
+            serde_json::json!({ "phase": "upgrading", "step": "upgrade", "done": 3, "total": 9 })
+        );
+        assert_eq!(
+            serde_json::to_value(LibraryStatus::upgrading(LibraryStep::Backup, 0, 0)).unwrap(),
+            serde_json::json!({ "phase": "upgrading", "step": "backup", "done": 0, "total": 0 })
         );
         assert_eq!(
             serde_json::to_value(LibraryStatus::READY).unwrap()["phase"],
