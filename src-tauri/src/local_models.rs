@@ -171,8 +171,10 @@ pub fn total_ram_gb() -> f64 {
 }
 
 /// A reading below this is "couldn't tell" (no computer has 1 GB; sysinfo
-/// reports 0 when it can't read memory). Nothing is pinned or offered on it:
-/// the default stays `llama3.1` and the next launch tries again.
+/// reports 0 when it can't read memory). Nothing is pinned or offered on it,
+/// and the default stays `llama3.1`. That launch still writes the hardware
+/// cache, so the next one counts as an existing install: it pins `llama3.1`
+/// and, if the reading is good by then, shows the one-time offer.
 pub const RAM_UNKNOWN_BELOW_GB: f64 = 1.0;
 
 pub fn ram_known(ram_gb: f64) -> bool {
@@ -338,16 +340,35 @@ pub fn installed_in(dirs: &[std::path::PathBuf]) -> Vec<&'static str> {
         .collect()
 }
 
+/// Where the Linux package runs Ollama as a service: its own `ollama` user's
+/// home, which a desktop session never sees as `~`.
+const LINUX_SERVICE_STORE: &str = "/usr/share/ollama/.ollama/models";
+
+/// Ollama's own default stores on this OS: `~/.ollama/models`, and on Linux
+/// the service user's folder above.
+fn default_stores() -> Vec<std::path::PathBuf> {
+    let mut stores = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        stores.push(home.join(".ollama").join("models"));
+    }
+    if cfg!(target_os = "linux") {
+        stores.push(std::path::PathBuf::from(LINUX_SERVICE_STORE));
+    }
+    stores
+}
+
+fn custom_store() -> Option<std::path::PathBuf> {
+    std::env::var_os("OLLAMA_MODELS")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 /// Where this computer's Ollama keeps models: the app's own folder (the
-/// managed server), `OLLAMA_MODELS`, and Ollama's default (`~/.ollama/models`).
+/// managed server), `OLLAMA_MODELS`, and Ollama's defaults ([`default_stores`]).
 fn models_dirs(data_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut dirs = vec![data_dir.join("models").join("ollama")];
-    if let Some(custom) = std::env::var_os("OLLAMA_MODELS").filter(|v| !v.is_empty()) {
-        dirs.push(custom.into());
-    }
-    if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".ollama").join("models"));
-    }
+    dirs.extend(custom_store());
+    dirs.extend(default_stores());
     dirs
 }
 
@@ -367,8 +388,10 @@ pub fn installed_on_disk(data_dir: &std::path::Path) -> Vec<&'static str> {
 ///   unless an offered model is already downloaded (a library wiped with
 ///   "delete all my data" leaves Ollama's models alone): then that model, the
 ///   recommended one if it is there, else the best that fits;
-/// * memory unreadable → nothing is pinned (`llama3.1` meanwhile), and the
-///   next launch tries again.
+/// * memory unreadable → nothing is pinned this launch (`llama3.1` meanwhile).
+///   The launch writes the hardware cache, so the next one is an existing
+///   install: it pins `llama3.1`, and the offer carries the better model if
+///   the reading is good by then.
 ///
 /// `on_disk` is [`installed_on_disk`].
 pub fn migrate_default(
@@ -562,43 +585,164 @@ fn gb(bytes: u64) -> String {
 }
 
 /// Whether a pull of `model` has the disk room it needs, given the free
-/// bytes where the models go (None = can't tell: not refused). Only the
-/// offered models have a known size; any other name isn't checked.
-pub fn check_room(model: &str, free: Option<u64>) -> CmdResult<()> {
+/// bytes where the models go (None = can't tell: not refused) and how much of
+/// it an interrupted pull already wrote there ([`partial_bytes`]), which a
+/// resumed pull doesn't download again. Only the offered models have a known
+/// size; any other name isn't checked.
+pub fn check_room(model: &str, free: Option<u64>, resumable: u64) -> CmdResult<()> {
     let (Some(c), Some(free)) = (candidate(model), free) else {
         return Ok(());
     };
-    let need = c.download_bytes.saturating_add(PULL_MARGIN_BYTES);
+    // The partial files on disk may belong to another model's dropped pull
+    // (they can't be told apart), so the credit never exceeds this download.
+    let left = c.download_bytes.saturating_sub(resumable);
+    let need = left.saturating_add(PULL_MARGIN_BYTES);
     if free >= need {
         return Ok(());
     }
+    let download = if resumable > 0 {
+        format!("{} still to download of {}", gb(left), gb(c.download_bytes))
+    } else {
+        format!("a {} download", gb(c.download_bytes))
+    };
     Err(format!(
-        "Not enough free disk space for {}. It needs about {} free (a {} download plus {} to spare) and this drive has {}. Free up space (Settings › Your files and privacy shows what the app keeps), or choose a smaller model.",
+        "Not enough free disk space for {}. It needs about {} free ({download} plus {} to spare) and this drive has {}. Free up space (Settings › Your files and privacy shows what the app keeps), or choose a smaller model.",
         c.model,
         gb(need),
-        gb(c.download_bytes),
         gb(PULL_MARGIN_BYTES),
         gb(free)
     ))
 }
 
-/// The folder whose drive a pull fills: the app's own models folder for the
-/// server this app manages, else `OLLAMA_MODELS` or Ollama's default for a
-/// user-run local one; None for a server on another computer.
-pub fn pull_target_dir(state: &AppState, root: &str, managed: bool) -> Option<std::path::PathBuf> {
-    if !crate::llm_commands::is_loopback_url(root) {
+/// Bytes an interrupted pull already wrote under `models_dir`, which a resume
+/// keeps. Ollama downloads a layer into a sparse `blobs/<digest>-partial`
+/// (its length is the whole layer, so it says nothing about progress) and
+/// records each chunk's progress in a small `<digest>-partial-<n>` JSON with a
+/// `Completed` byte count. Those counts are what the disk really holds.
+///
+/// A record without its data file beside it is stale and not counted, and
+/// anything unreadable counts as nothing (the pull then just has to fit in
+/// full).
+pub fn partial_bytes(models_dir: &std::path::Path) -> u64 {
+    let blobs = models_dir.join("blobs");
+    let Ok(entries) = std::fs::read_dir(&blobs) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let (blob, n) = name.rsplit_once("-partial-")?;
+            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            if !blobs.join(format!("{blob}-partial")).is_file() {
+                return None;
+            }
+            // A record is a few dozen bytes; anything bigger isn't one.
+            if e.metadata().ok()?.len() > 4096 {
+                return None;
+            }
+            let record: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()?;
+            record
+                .as_object()?
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("completed"))?
+                .1
+                .as_u64()
+        })
+        .fold(0, u64::saturating_add)
+}
+
+/// A folder that looks like an Ollama store: it exists and holds `manifests/`
+/// (a running server creates it at startup, so a real store has it).
+fn is_store(dir: &std::path::Path) -> bool {
+    dir.join("manifests").is_dir()
+}
+
+/// Where a user-run server keeps its models, as far as this process can tell:
+/// `custom` (`OLLAMA_MODELS`) when set, else the first of Ollama's `defaults`
+/// that is a store. Only a folder that [`is_store`] is trusted, and a set but
+/// unusable `OLLAMA_MODELS` isn't second-guessed by a default (the server
+/// likely reads the same variable). None means "can't tell": the pull isn't
+/// checked rather than measured against the wrong drive. A relocated store
+/// this process can't see (the Ollama app's "Model location", a service's
+/// environment) lands here too whenever no visible folder is a store.
+fn user_store(
+    custom: Option<std::path::PathBuf>,
+    defaults: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    match custom {
+        Some(dir) => is_store(&dir).then_some(dir),
+        None => defaults.iter().find(|d| is_store(d)).cloned(),
+    }
+}
+
+/// Where a pull lands. The app's own models folder for the server this app
+/// manages (authoritative: nothing the user set elsewhere applies to it); a
+/// user-run local server's store ([`user_store`]); None for a server on
+/// another computer.
+fn target_dir(
+    local: bool,
+    managed: bool,
+    data_dir: &std::path::Path,
+    custom: Option<std::path::PathBuf>,
+    defaults: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    if !local {
         return None;
     }
     if managed {
-        return Some(state.data_dir.join("models").join("ollama"));
+        return Some(data_dir.join("models").join("ollama"));
     }
-    // A user-run server keeps models in OLLAMA_MODELS (if set) or in
-    // Ollama's default under the home folder.
-    std::env::var_os("OLLAMA_MODELS")
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".ollama").join("models")))
-        .or_else(|| Some(state.data_dir.clone()))
+    user_store(custom, defaults)
+}
+
+/// The folder whose drive a pull fills, None when that isn't known ([`target_dir`]).
+pub fn pull_target_dir(state: &AppState, root: &str, managed: bool) -> Option<std::path::PathBuf> {
+    target_dir(
+        crate::llm_commands::is_loopback_url(root),
+        managed,
+        &state.data_dir,
+        custom_store(),
+        &default_stores(),
+    )
+}
+
+/// A Windows extended-length path (`\\?\C:\x`, what `canonicalize` returns)
+/// as the plain `C:\x` that the disk list's mount points are written in. A
+/// network path (`\\?\UNC\…`) has no drive to measure and stays as it is.
+fn without_verbatim(path: std::path::PathBuf) -> std::path::PathBuf {
+    let plain = path
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
+        .map(std::path::PathBuf::from);
+    plain.unwrap_or(path)
+}
+
+/// `dir` with every link, junction and symlink on the way resolved, so the
+/// drive that is measured is the one the files land on. A tail that doesn't
+/// exist yet (a store the first pull creates) is kept as it is under its
+/// nearest existing parent.
+fn resolve_dir(dir: &std::path::Path) -> std::path::PathBuf {
+    let mut probe = dir;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(probe) {
+            let tail = dir.strip_prefix(probe).unwrap_or(std::path::Path::new(""));
+            return without_verbatim(real.join(tail));
+        }
+        match probe.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => probe = parent,
+            _ => return dir.to_path_buf(),
+        }
+    }
+}
+
+/// Free bytes on the drive that `dir` really lives on; None when unknown.
+pub fn free_bytes_at(dir: &std::path::Path) -> Option<u64> {
+    crate::audio_store::free_space(&resolve_dir(dir))
 }
 
 #[tauri::command]
@@ -969,8 +1113,8 @@ mod tests {
     fn a_pull_is_refused_when_the_disk_cannot_hold_it() {
         // 6.6 GB download + 2 GB margin = 8.6 GB for the 9B.
         let need = 6_600_000_000 + PULL_MARGIN_BYTES;
-        assert!(check_room("qwen3.5:9b", Some(need)).is_ok());
-        let err = check_room("qwen3.5:9b", Some(need - 1)).unwrap_err();
+        assert!(check_room("qwen3.5:9b", Some(need), 0).is_ok());
+        let err = check_room("qwen3.5:9b", Some(need - 1), 0).unwrap_err();
         assert!(
             err.starts_with("Not enough free disk space for qwen3.5:9b."),
             "{err}"
@@ -987,15 +1131,238 @@ mod tests {
         // Plain words, no codes.
         assert!(!err.contains("bytes") && !err.contains("ENOSPC"));
         // Each offered model's own size.
-        assert!(check_room("llama3.1", Some(4_920_000_000 + PULL_MARGIN_BYTES)).is_ok());
-        assert!(check_room("llama3.1", Some(4_920_000_000)).is_err());
-        assert!(check_room("qwen3.5:4b", Some(3_330_000_000 + PULL_MARGIN_BYTES)).is_ok());
-        assert!(check_room("qwen3.5:4b", Some(1_000_000_000)).is_err());
+        assert!(check_room("llama3.1", Some(4_920_000_000 + PULL_MARGIN_BYTES), 0).is_ok());
+        assert!(check_room("llama3.1", Some(4_920_000_000), 0).is_err());
+        assert!(check_room("qwen3.5:4b", Some(3_330_000_000 + PULL_MARGIN_BYTES), 0).is_ok());
+        assert!(check_room("qwen3.5:4b", Some(1_000_000_000), 0).is_err());
         // A tag-insensitive name is the same model.
-        assert!(check_room("llama3.1:latest", Some(1)).is_err());
+        assert!(check_room("llama3.1:latest", Some(1), 0).is_err());
         // Can't tell the free space, or not a model we know the size of: not refused.
-        assert!(check_room("qwen3.5:9b", None).is_ok());
-        assert!(check_room("some-custom-model", Some(1)).is_ok());
+        assert!(check_room("qwen3.5:9b", None, 0).is_ok());
+        assert!(check_room("some-custom-model", Some(1), 0).is_ok());
+    }
+
+    /// A pull that dropped at 5 GB of 6.6 only needs the other 1.6 GB (plus
+    /// the margin), not the whole download again.
+    #[test]
+    fn a_resumed_pull_is_only_charged_for_what_is_left() {
+        let have = 5_000_000_000;
+        // 1.6 GB left + 2.0 GB to spare = 3.6 GB.
+        let need = 1_600_000_000 + PULL_MARGIN_BYTES;
+        assert!(check_room("qwen3.5:9b", Some(need), have).is_ok());
+        // The same drive refuses it from scratch (8.6 GB), which is the old behaviour.
+        assert!(check_room("qwen3.5:9b", Some(need), 0).is_err());
+        assert!(check_room("qwen3.5:9b", Some(4_000_000_000), have).is_ok());
+        // Still refused below what is left, in words that say it is a resume.
+        let err = check_room("qwen3.5:9b", Some(need - 1), have).unwrap_err();
+        for part in [
+            "about 3.6 GB free",
+            "1.6 GB still to download of 6.6 GB",
+            "2.0 GB to spare",
+        ] {
+            assert!(err.contains(part), "{part} in {err}");
+        }
+        // Another model's dropped pull can't make this one free: the credit
+        // stops at this download's size.
+        assert!(check_room("qwen3.5:9b", Some(PULL_MARGIN_BYTES), u64::MAX).is_ok());
+        assert!(check_room("qwen3.5:9b", Some(PULL_MARGIN_BYTES - 1), u64::MAX).is_err());
+    }
+
+    fn write(path: &std::path::Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// What Ollama leaves behind when a pull drops: a sparse data file plus a
+    /// small JSON record per chunk with its `Completed` bytes.
+    #[test]
+    fn partial_bytes_add_up_what_ollama_already_wrote() {
+        let store = tempfile::tempdir().unwrap();
+        let blobs = store.path().join("blobs");
+        assert_eq!(partial_bytes(store.path()), 0, "no blobs folder");
+
+        // One layer, three chunks (the key's case doesn't matter).
+        write(&blobs.join("sha256-aaa-partial"), "x");
+        write(
+            &blobs.join("sha256-aaa-partial-0"),
+            r#"{"N":0,"Offset":0,"Size":100,"Completed":100}"#,
+        );
+        write(
+            &blobs.join("sha256-aaa-partial-1"),
+            r#"{"N":1,"Offset":100,"Size":100,"Completed":40}"#,
+        );
+        write(
+            &blobs.join("sha256-aaa-partial-10"),
+            r#"{"n":10,"offset":200,"size":100,"completed":5}"#,
+        );
+        // A second layer.
+        write(&blobs.join("sha256-bbb-partial"), "x");
+        write(
+            &blobs.join("sha256-bbb-partial-0"),
+            r#"{"N":0,"Offset":0,"Size":50,"Completed":10}"#,
+        );
+        assert_eq!(partial_bytes(store.path()), 100 + 40 + 5 + 10);
+
+        // Not counted: a record whose data file is gone, one that isn't JSON
+        // or has no count, a name that isn't a chunk number, a finished blob.
+        write(
+            &blobs.join("sha256-ccc-partial-0"),
+            r#"{"N":0,"Size":9,"Completed":999}"#,
+        );
+        write(&blobs.join("sha256-ddd-partial"), "x");
+        write(&blobs.join("sha256-ddd-partial-0"), "not json");
+        write(&blobs.join("sha256-eee-partial"), "x");
+        write(&blobs.join("sha256-eee-partial-0"), r#"{"N":0,"Size":9}"#);
+        write(&blobs.join("sha256-fff-partial"), "x");
+        write(&blobs.join("sha256-fff-partial-x"), r#"{"Completed":777}"#);
+        write(&blobs.join("sha256-ggg"), "finished layer");
+        assert_eq!(partial_bytes(store.path()), 155);
+    }
+
+    /// A store this process can't see is skipped, not measured on the wrong
+    /// drive; a folder is trusted only when it has `manifests/`.
+    #[test]
+    fn a_user_run_store_is_trusted_only_when_it_looks_like_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = |name: &str| {
+            let d = tmp.path().join(name);
+            std::fs::create_dir_all(d.join("manifests")).unwrap();
+            d
+        };
+        let (relocated, home) = (store("relocated"), store("home"));
+        let bare = tmp.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let missing = tmp.path().join("missing");
+
+        let homes = std::slice::from_ref(&home);
+
+        // OLLAMA_MODELS wins when it is a store.
+        assert_eq!(
+            user_store(Some(relocated.clone()), homes),
+            Some(relocated.clone())
+        );
+        // Set but not a store (no folder, or an empty one): skip the check,
+        // and don't guess a default the server may not be using.
+        assert_eq!(user_store(Some(missing.clone()), homes), None);
+        assert_eq!(user_store(Some(bare.clone()), homes), None);
+        // Not set: the first default that is a store.
+        assert_eq!(
+            user_store(None, &[missing.clone(), bare.clone(), home.clone()]),
+            Some(home.clone())
+        );
+        // Nothing visible is a store (a relocated one this process can't
+        // see): can't tell.
+        assert_eq!(user_store(None, &[missing, bare]), None);
+        assert_eq!(user_store(None, &[]), None);
+    }
+
+    #[test]
+    fn the_managed_store_stays_authoritative() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(other.join("manifests")).unwrap();
+        let managed = data.join("models").join("ollama");
+        // The app's own folder, even before it exists and whatever the user
+        // set for a server of their own.
+        assert_eq!(
+            target_dir(
+                true,
+                true,
+                &data,
+                Some(other.clone()),
+                std::slice::from_ref(&other)
+            ),
+            Some(managed)
+        );
+        // A user-run local server: its store, or nothing.
+        assert_eq!(
+            target_dir(true, false, &data, Some(other.clone()), &[]),
+            Some(other.clone())
+        );
+        assert_eq!(target_dir(true, false, &data, None, &[]), None);
+        // Another computer: never measured here.
+        assert_eq!(
+            target_dir(false, true, &data, Some(other.clone()), &[other]),
+            None
+        );
+    }
+
+    #[test]
+    fn extended_length_paths_are_written_plain_for_the_disk_list() {
+        let plain = |s: &str| without_verbatim(std::path::PathBuf::from(s));
+        assert_eq!(
+            plain(r"\\?\C:\Users\x\models"),
+            std::path::Path::new(r"C:\Users\x\models")
+        );
+        // No drive to measure on a network path; anything else is untouched.
+        assert_eq!(
+            plain(r"\\?\UNC\srv\share\m"),
+            std::path::Path::new(r"\\?\UNC\srv\share\m")
+        );
+        assert_eq!(plain(r"D:\models"), std::path::Path::new(r"D:\models"));
+        assert_eq!(
+            plain("/usr/share/ollama"),
+            std::path::Path::new("/usr/share/ollama")
+        );
+    }
+
+    /// A directory symlink (Unix) or junction (Windows, no privilege needed).
+    /// False when the platform refuses.
+    fn make_dir_link(target: &std::path::Path, link: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            // Backslashes only: mklink reads "/x" as a switch.
+            let win = |p: &std::path::Path| p.to_string_lossy().replace('/', "\\");
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(win(link))
+                .arg(win(target))
+                .output()
+                .is_ok_and(|o| o.status.success())
+        }
+    }
+
+    /// The store that is a link to another drive is measured where it really
+    /// is, and the path handed to the disk list is a plain one.
+    #[test]
+    fn the_store_is_resolved_through_a_link_before_free_space_is_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("big-drive");
+        std::fs::create_dir_all(real.join("models").join("manifests")).unwrap();
+        let link = tmp.path().join("home-link");
+        if !make_dir_link(&real, &link) {
+            eprintln!("skipped: this platform refused to make a link");
+            return;
+        }
+        let want = without_verbatim(std::fs::canonicalize(&real).unwrap());
+
+        let resolved = resolve_dir(&link.join("models"));
+        assert_eq!(resolved, want.join("models"));
+        assert_ne!(resolved, link.join("models"), "the link was followed");
+        // A tail that doesn't exist yet is kept under its resolved parent.
+        assert_eq!(
+            resolve_dir(&link.join("models").join("not").join("yet")),
+            want.join("models").join("not").join("yet")
+        );
+        assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
+        // And the link is a store through the same eyes.
+        assert!(is_store(&link.join("models")));
+    }
+
+    #[test]
+    fn the_linux_service_store_is_searched_on_linux_only() {
+        let service = std::path::PathBuf::from("/usr/share/ollama/.ollama/models");
+        let on_linux = cfg!(target_os = "linux");
+        assert_eq!(default_stores().contains(&service), on_linux);
+        assert_eq!(
+            models_dirs(std::path::Path::new("data")).contains(&service),
+            on_linux
+        );
     }
 
     #[test]
@@ -1003,13 +1370,18 @@ mod tests {
         assert!(!ram_known(0.0) && !ram_known(0.9) && ram_known(1.0));
         assert_eq!(recommend(0.0, None).model, "llama3.1", "the safe default");
         // A fresh install on an unreadable computer isn't pinned to the 4B
-        // forever: nothing is written, the default stays llama3.1, and the
-        // next launch (with a reading) pins.
+        // forever: nothing is written and the default stays llama3.1.
         let (_d, s) = storage();
         assert_eq!(migrate_default(&s, 0.0, &[]), None);
         assert_eq!(effective_default(&s), "llama3.1");
+        // That launch also writes the hardware cache, so the next one is an
+        // existing install: it pins llama3.1 (not the recommendation), and
+        // the better model comes as the one-time offer, once the reading is
+        // good.
+        s.set_setting(crate::hw::CACHE_KEY, "x").unwrap();
+        assert_eq!(migrate_default(&s, 31.7, &[]).as_deref(), Some("llama3.1"));
         assert_eq!(
-            migrate_default(&s, 31.7, &[]).as_deref(),
+            offer(&s, 31.7, None).map(|o| o.model).as_deref(),
             Some("qwen3.5:9b")
         );
         // An existing install needs no reading to keep what it runs.
