@@ -2116,6 +2116,8 @@ fn sentence_content(tokens: &[String]) -> Vec<&str> {
                 && !STOP.contains(w)
                 && !w.contains('\'')
                 && !is_negative(w)
+                // (where something stands, not what it is about)
+                && !matches!(*w, "yet" | "still")
                 && w.chars().all(char::is_alphabetic)
         })
         .collect()
@@ -2185,20 +2187,40 @@ fn is_state_negation(tokens: &[String]) -> bool {
     })
 }
 
-/// The block's sentences that are not open items (a state report against a
-/// source that is still planning it): the verb-pair guard reads those only.
-fn without_open_items(block: &str, pool: &[String]) -> String {
-    let pool_forward = pool
+/// Whether `other` is a close clause for a block clause with these content
+/// words: it holds all of them (two or more), or three or more and two thirds.
+fn close_clause(words: &[&str], other: &[String]) -> bool {
+    let shared = words
         .iter()
-        .flat_map(|t| clause_tokens(t))
-        .any(|c| is_forward(&c));
+        .filter(|w| other.iter().any(|t| same_word(w, t)))
+        .count();
+    shared >= 2 && (shared == words.len() || (shared >= 3 && shared * 3 >= words.len() * 2))
+}
+
+/// A block clause that reports where something stands: "yet", "still",
+/// "pending" or "open" in it, or a state negation ("not finalized").
+fn is_open_item(tokens: &[String]) -> bool {
+    has_open_word(tokens) || is_state_negation(tokens)
+}
+
+/// The block's sentences minus its open items that the source is still
+/// planning: an open item is dropped from the verb-pair guard only when a
+/// source clause that is close to it is forward-looking. Against a source
+/// that states the thing as settled ("The supplier confirmed on the phone.")
+/// an open item ("not confirmed yet") is still read, so "yet" cannot be
+/// added to a flipped sentence to get it past the guard.
+fn without_open_items(block: &str, pool: &[String]) -> String {
+    let theirs: Vec<Vec<String>> = pool.iter().flat_map(|t| clause_tokens(t)).collect();
     block
         .split(['.', '!', '?', ';', '\n'])
         .filter(|sentence| {
-            let tokens: Vec<Vec<String>> = sentence_tokens(sentence);
-            !tokens
-                .iter()
-                .any(|t| has_open_word(t) || (pool_forward && is_state_negation(t)))
+            !clause_tokens(sentence).iter().any(|mine| {
+                let words = sentence_content(mine);
+                is_open_item(mine)
+                    && theirs
+                        .iter()
+                        .any(|other| is_forward(other) && close_clause(&words, other))
+            })
         })
         .collect::<Vec<_>>()
         .join(". ")
@@ -2213,33 +2235,23 @@ fn without_open_items(block: &str, pool: &[String]) -> String {
 ///
 /// Where something stands is not a flip. "Budget not finalized." against
 /// "Let's finalize the budget on Monday." is the open item a summary should
-/// state: a clause with "yet", "still", "pending" or "open" is not judged,
-/// and a state report ("not finalized", "has not arrived") is not judged
-/// against a source clause that is planning or scheduling it.
+/// state: an open item ("yet", "still", "pending", "open", or a state report
+/// such as "not finalized" or "has not arrived") is not judged against a close
+/// source clause that is planning or scheduling it. It is judged against a
+/// close clause that states the thing as settled, whatever words it has.
 fn polarity_flips(block: &str, pool: &[String]) -> bool {
     let theirs: Vec<Vec<String>> = pool.iter().flat_map(|t| clause_tokens(t)).collect();
     clause_tokens(block).iter().any(|mine| {
         let words = sentence_content(mine);
-        if words.len() < 2 || has_open_word(mine) {
+        if words.len() < 2 {
             return false;
         }
-        let state = is_state_negation(mine);
+        let open = is_open_item(mine);
         // (an even count is a double negative: "did not decline" says yes)
         let negated = mine.iter().filter(|t| is_negative(t)).count() % 2 == 1;
         let (mut agree, mut disagree) = (false, false);
         for other in &theirs {
-            if state && is_forward(other) {
-                continue;
-            }
-            let shared = words
-                .iter()
-                .filter(|w| other.iter().any(|t| same_word(w, t)))
-                .count();
-            // Close: all of the block sentence's words are in it, or at least
-            // three and two thirds of them.
-            let close = shared >= 2
-                && (shared == words.len() || (shared >= 3 && shared * 3 >= words.len() * 2));
-            if !close {
+            if !close_clause(&words, other) || (open && is_forward(other)) {
                 continue;
             }
             if (other.iter().filter(|t| is_negative(t)).count() % 2 == 1) == negated {

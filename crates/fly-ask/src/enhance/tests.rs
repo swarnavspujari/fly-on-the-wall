@@ -1893,6 +1893,21 @@ fn an_open_item_against_a_plan_is_not_a_flip() {
         "The supplier is confirmed.",
         "The supplier is not confirmed."
     ));
+    // An open word excuses nothing by itself: against a source that states
+    // the thing as settled the block is read, so "yet" can't be added to a
+    // flipped sentence to get it past the check.
+    assert!(flipped_against(
+        "The supplier confirmed on the phone.",
+        "The supplier is not confirmed yet."
+    ));
+    assert!(flipped_against(
+        "The quote was approved by the board.",
+        "The quote is still not approved."
+    ));
+    assert!(flipped_against(
+        "Tomas sent the draft.",
+        "Tomas has not sent the draft."
+    ));
     assert!(flipped_against(
         "Tomas will send the draft by Friday.",
         "Tomas will not send the draft by Friday."
