@@ -57,6 +57,7 @@ Three layers:
 | [app-calendar](app-calendar.md) | `calendar_commands.rs`, `calendar_defaults.rs` | Calendar connect/disconnect, upcoming meetings, starting a meeting from an event. |
 | [app-privacy](app-privacy.md) | `privacy.rs` | Keep local, participant notice, audio retention, "Delete all my data", disk-encryption check. |
 | [app-audio-store](app-audio-store.md) | `audio_store.rs`, `video_store.rs` | Recording storage v2: lossless FLAC compression job, format-blind readers, playback rebuild, Settings › Storage report; the opt-in video choices (imported videos → audio only, screen recordings → visually lossless). |
+| [app-backups](app-backups.md) | `backups.rs`, `fly-storage` `backup.rs` | The automatic backup of the library database before an update changes it (once per app-version change and before the first compression pass), retention of the newest 3, the free-space rule, the one-time notice, the Settings row, and how to restore. |
 | [app-models-gpu](app-models-gpu.md) | `models.rs`, `model_cleanup.rs`, `gpu.rs`, `hw.rs`, `download_model` | Pinned model and tool downloads, model cleanup ("Free up space"), GPU verdict, hardware detection. |
 | [app-ollama](app-ollama.md) | `ollama.rs` | Managed `ollama serve` child, model pull and delete, status. |
 | [app-mcp-sidecar](app-mcp-sidecar.md) | `commands.rs` (`mcp_config`), `scripts/prepare-sidecars.mjs`, `externalBin` | Shipping and wiring the MCP binary. |
@@ -222,6 +223,7 @@ Each of the 140 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) 
 | [app-calendar](app-calendar.md) | 8 |
 | [app-screen-recording](app-screen-recording.md) | 5 |
 | [app-privacy](app-privacy.md) | 12 |
+| [app-backups](app-backups.md) | 3 (added after this count was taken) |
 | [app-mcp-sidecar](app-mcp-sidecar.md) | 1 |
 | [app-updater](app-updater.md) | 0 (plugin-provided) |
 | [app-connectors](app-connectors.md) | 20 |

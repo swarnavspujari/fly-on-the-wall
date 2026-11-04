@@ -1069,6 +1069,13 @@ fn run_pass(app: &tauri::AppHandle, state: &AppState) {
         s.bytes_done = 0;
         s.kept_files = kept_files;
     });
+    // Compression rewrites rows and manifests once it has converted audio:
+    // an install that never had a backup (the startup one was skipped, or it
+    // predates backups) gets one before the first pass that has work. The
+    // storage lock is not held; recordings are not part of it.
+    if !plan.is_empty() && !store.halted.load(Ordering::SeqCst) {
+        crate::backups::before_first_compression_pass(app);
+    }
     let mut pass_saved = 0u64;
     for (id, _) in &plan {
         if store.halted.load(Ordering::SeqCst) {
