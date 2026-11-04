@@ -55,10 +55,6 @@ const LINES_SHARE: f64 = 0.92;
 const SLACK_CHARS: usize = 400;
 /// Salient terms of the notes read (a long scratchpad names many).
 const MAX_TOPIC_TERMS: usize = 120;
-/// A word that this many ordinary lines of the meeting use is part of how
-/// the meeting talks, not something a block can only have taken from an
-/// injected line.
-const COMMONPLACE_LINES: usize = 2;
 /// Words of time, quantity and place that any line may use: sharing one with
 /// an injected line proves nothing.
 const GENERIC_WORDS: &[&str] = &[
@@ -2172,17 +2168,6 @@ fn borrows_from_aimed(md: &str, evidence: &[&Sent], p: &Prepared) -> bool {
         support.extend(content_words(&s.speaker));
     }
     let backed = |w: &String| support.iter().any(|s| same_word(w, s));
-    // A word the meeting's ordinary lines use over and over ("today") says
-    // nothing about where a block got it.
-    let everywhere = |w: &String| {
-        p.sent
-            .iter()
-            .filter(|s| {
-                s.aim == Aim::People && content_words(&s.text).iter().any(|t| same_word(w, t))
-            })
-            .count()
-            > COMMONPLACE_LINES
-    };
     p.sent
         .iter()
         .filter(|s| s.aim != Aim::People && !evidence.iter().any(|e| e.id == s.id))
@@ -2195,7 +2180,6 @@ fn borrows_from_aimed(md: &str, evidence: &[&Sent], p: &Prepared) -> bool {
                 !GENERIC_WORDS.contains(&w.as_str())
                     && payload.iter().any(|t| same_word(w, t))
                     && !backed(w)
-                    && !everywhere(w)
             })
         })
 }
