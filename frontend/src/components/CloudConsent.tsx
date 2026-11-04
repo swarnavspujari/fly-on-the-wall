@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, LLM_SETTINGS_CHANGED_EVENT } from "../api";
 import { providerName } from "../askModel";
-import type { LlmProviderInfo } from "../types";
+import type { CutOffCounts } from "../notices";
+import type { CutOffMeetings, LlmProviderInfo } from "../types";
 
 /* Cloud consent: the one place the app asks before a cloud provider first
    gets meeting content. Settings, Ask's Runs on, the launch check and the
@@ -90,10 +91,11 @@ export function CloudConsentOnLaunch() {
 export interface ConsentSkips {
   /** Meetings waiting (0 once dismissed, or while the re-run starts). */
   count: number;
-  /** Meetings the model stopped short of (took too long, looped, listed
-   *  only part): they run again with the rest, but the notice words them
-   *  differently. Same dismissal and re-run rules as `count`. */
-  cutOff: number;
+  /** Meetings the model stopped short of (action items that took too long,
+   *  looped or were listed only in part; a cleanup that took too long): they
+   *  run again with the rest, but the notice words them differently. Same
+   *  dismissal and re-run rules as `count`. */
+  cutOff: CutOffCounts;
   /** Who needs the OK, or null when the saved provider doesn't (allowed
    *  meanwhile, or local now): then running them is all that's left. */
   vendor: string | null;
@@ -115,7 +117,7 @@ export interface ConsentSkips {
 export function useConsentSkips(): ConsentSkips {
   const ask = useCloudConsent();
   const [skipped, setSkipped] = useState<string[]>([]);
-  const [cutOff, setCutOff] = useState<string[]>([]);
+  const [cutOff, setCutOff] = useState<CutOffMeetings>({ items: [], cleanup: [] });
   const [vendor, setVendor] = useState<string | null>(null);
   const [keyVendor, setKeyVendor] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
@@ -136,15 +138,15 @@ export function useConsentSkips(): ConsentSkips {
       })
       .catch(() => {});
     const unlistens: (() => void)[] = [];
-    const follow = (event: string, set: (ids: string[]) => void) =>
-      listen<string[]>(event, (e) => set(e.payload))
+    const follow = <T,>(event: string, set: (payload: T) => void) =>
+      listen<T>(event, (e) => set(e.payload))
         .then((un) => {
           if (live) unlistens.push(un);
           else un();
         })
         .catch(() => {});
-    follow("llm:consent-skips", setSkipped);
-    follow("llm:ai-cut-off", setCutOff);
+    follow<string[]>("llm:consent-skips", setSkipped);
+    follow<CutOffMeetings>("llm:ai-cut-off", setCutOff);
     return () => {
       live = false;
       unlistens.forEach((un) => un());
@@ -154,7 +156,8 @@ export function useConsentSkips(): ConsentSkips {
   // Who to name: the saved provider, unless it's local or already allowed.
   // Read again whenever the provider or a consent changes (Settings, Ask),
   // so the copy never names a provider that no longer needs the OK.
-  const waiting = skipped.length > 0 || cutOff.length > 0;
+  const cutOffMeetings = new Set([...cutOff.items, ...cutOff.cleanup]).size;
+  const waiting = skipped.length > 0 || cutOffMeetings > 0;
   const [settingsVersion, setSettingsVersion] = useState(0);
   useEffect(() => {
     const changed = () => setSettingsVersion((v) => v + 1);
@@ -192,7 +195,7 @@ export function useConsentSkips(): ConsentSkips {
       if (!(await ask(s.providers, s.provider))) return;
       await api.retryConsentSkipped();
       setSkipped([]);
-      setCutOff([]);
+      setCutOff({ items: [], cleanup: [] });
     } catch {
       /* the backend still refuses without consent; the notice stays */
     } finally {
@@ -202,7 +205,9 @@ export function useConsentSkips(): ConsentSkips {
 
   return {
     count: dismissed ? 0 : skipped.length,
-    cutOff: dismissed ? 0 : cutOff.length,
+    cutOff: dismissed
+      ? { items: 0, cleanup: 0, meetings: 0 }
+      : { items: cutOff.items.length, cleanup: cutOff.cleanup.length, meetings: cutOffMeetings },
     vendor,
     keyVendor,
     busy,

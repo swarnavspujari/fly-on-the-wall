@@ -57,35 +57,64 @@ describe("consentSkipsCopy", () => {
   it("only a missing key sends the button to Settings", () => {
     expect(consentSkipsCopy(1, "OpenAI", "OpenAI").needsKey).toBe(true);
     expect(consentSkipsCopy(1, "OpenAI").needsKey).toBe(false);
-    expect(consentSkipsCopy(0, null, "OpenAI", 2).needsKey).toBe(false);
+    expect(consentSkipsCopy(0, null, "OpenAI", cut(2, 0)).needsKey).toBe(false);
   });
 
   it("meetings the model stopped short of have their own wording", () => {
     // They may have a cleaned transcript and some items, so it doesn't say
     // they "kept the raw transcript".
-    const c = consentSkipsCopy(0, null, null, 3);
+    const c = consentSkipsCopy(0, null, null, cut(3, 0));
     expect(c.title).toBe("Some action items couldn't be read");
     expect(c.cause).toBe(
       "The AI model didn't finish reading 3 meetings, so some action items may be missing. You can run them again.",
     );
     expect(c.action).toBe("Run them now");
-    expect(consentSkipsCopy(0, "Anthropic", "Anthropic", 1).cause).toContain(
+    expect(consentSkipsCopy(0, "Anthropic", "Anthropic", cut(1, 0)).cause).toContain(
       "didn't finish reading 1 meeting,",
     );
   });
 
+  it("a cleanup that didn't finish is not worded as unread action items", () => {
+    const c = consentSkipsCopy(0, null, null, cut(0, 2));
+    expect(c.title).toBe("A transcript cleanup didn't finish");
+    expect(c.cause).toBe(
+      "The AI model didn't finish cleaning up 2 meetings, so their transcripts are still the raw text. You can run them again.",
+    );
+    expect(c.cause).not.toContain("action items");
+    expect(c.action).toBe("Run them now");
+    expect(consentSkipsCopy(0, null, null, cut(0, 1)).cause).toBe(
+      "The AI model didn't finish cleaning up 1 meeting, so its transcript is still the raw text. You can run it again.",
+    );
+  });
+
+  it("both kinds at once say both", () => {
+    // 3 different meetings: 2 whose cleanup didn't finish, 2 whose items
+    // weren't all read, one of them in both
+    const c = consentSkipsCopy(0, null, null, { items: 2, cleanup: 2, meetings: 3 });
+    expect(c.title).toBe("Some AI work didn't finish");
+    expect(c.cause).toBe(
+      "The AI model didn't finish cleaning up 2 meetings or reading 2 meetings for action items, so some transcripts are still raw and some action items may be missing. You can run them again.",
+    );
+  });
+
   it("next to a consent skip they are one more sentence, and the blocker leads", () => {
-    const c = consentSkipsCopy(2, "Anthropic", null, 1);
+    const c = consentSkipsCopy(2, "Anthropic", null, cut(1, 0));
     expect(c.title).toBe("Transcript cleanup and action items were skipped");
     expect(c.cause).toBe(
-      "Anthropic needs your OK before it gets meeting content, so 2 meetings kept the raw transcript and got no action items. 1 more meeting was only partly read.",
+      "Anthropic needs your OK before it gets meeting content, so 2 meetings kept the raw transcript and got no action items. 1 more meeting was only partly processed.",
     );
     expect(c.action).toBe("Review and allow");
-    expect(consentSkipsCopy(1, null, null, 2).cause).toBe(
-      "1 meeting kept the raw transcript and got no action items. You can run them now. 2 more meetings were only partly read.",
+    expect(consentSkipsCopy(1, null, null, cut(0, 2)).cause).toBe(
+      "1 meeting kept the raw transcript and got no action items. You can run them now. 2 more meetings were only partly processed.",
     );
   });
 });
+
+/** Counts for `n` meetings whose action items, and `m` whose cleanup, stopped
+ *  short (no meeting on both lists). */
+function cut(n: number, m: number) {
+  return { items: n, cleanup: m, meetings: n + m };
+}
 
 describe("systemAudioCopy", () => {
   it("macOS: the stale-grant fix, with tccutil under details", () => {

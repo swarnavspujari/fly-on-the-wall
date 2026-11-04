@@ -515,7 +515,7 @@ pub fn record_consent_skip(state: &AppState, meeting_id: &str, error: &str) -> b
     skipped
 }
 
-/// Background cleanup / extraction for `meeting_id` reached the model and it
+/// Background item extraction for `meeting_id` reached the model and it
 /// didn't deliver (it took too long, got stuck, or listed only part of the
 /// meeting): remember the meeting so the app's notice offers to run it again.
 /// Only for a model that was reached; a provider that isn't set up stays
@@ -528,20 +528,41 @@ pub fn record_incomplete(state: &AppState, meeting_id: &str) {
         .insert(meeting_id.to_string());
 }
 
+/// [`record_incomplete`] for the transcript cleanup, which took too long: the
+/// transcript stays raw. The notice words it separately.
+pub fn record_cleanup_incomplete(state: &AppState, meeting_id: &str) {
+    state
+        .cleanup_incomplete
+        .lock()
+        .unwrap()
+        .insert(meeting_id.to_string());
+}
+
 /// Forget what an earlier run recorded about `meeting_id` (a run that decides
 /// it afresh, or a meeting that is gone).
 pub fn clear_skips(state: &AppState, meeting_id: &str) {
     state.consent_skipped.lock().unwrap().remove(meeting_id);
     state.ai_incomplete.lock().unwrap().remove(meeting_id);
+    state.cleanup_incomplete.lock().unwrap().remove(meeting_id);
 }
 
-/// The two lists the app's notice is built from.
+/// The meetings the model was reached for and stopped short of, by what it
+/// stopped short of. Payload of `llm:ai-cut-off` and `ai_cut_off_meetings`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CutOff {
+    /// Action items it couldn't finish reading.
+    pub items: Vec<String>,
+    /// Transcript cleanup that took too long.
+    pub cleanup: Vec<String>,
+}
+
+/// The lists the app's notice is built from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AiSkips {
     /// Refused for missing cloud consent or a missing key.
     pub consent: Vec<String>,
     /// Reached the model, which stopped short.
-    pub cut_off: Vec<String>,
+    pub cut_off: CutOff,
 }
 
 pub fn current_skips(state: &AppState) -> AiSkips {
@@ -550,7 +571,10 @@ pub fn current_skips(state: &AppState) -> AiSkips {
     };
     AiSkips {
         consent: list(&state.consent_skipped),
-        cut_off: list(&state.ai_incomplete),
+        cut_off: CutOff {
+            items: list(&state.ai_incomplete),
+            cleanup: list(&state.cleanup_incomplete),
+        },
     }
 }
 
@@ -573,7 +597,7 @@ pub fn consent_skipped_meetings(state: State<'_, AppState>) -> Vec<String> {
 /// Meetings whose cleanup / action items the model stopped short of this
 /// session (same catch-up and `llm:ai-cut-off` events).
 #[tauri::command]
-pub fn ai_cut_off_meetings(state: State<'_, AppState>) -> Vec<String> {
+pub fn ai_cut_off_meetings(state: State<'_, AppState>) -> CutOff {
     current_skips(&state).cut_off
 }
 

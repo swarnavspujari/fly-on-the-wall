@@ -214,7 +214,7 @@ export default function AppNotices({
   // ask for it here, then run them. Also the meetings the model stopped
   // short of, which run again the same way. Not urgent, so it waits out a
   // recording.
-  if ((skips.count > 0 || skips.cutOff > 0) && !recordingActive) {
+  if ((skips.count > 0 || skips.cutOff.meetings > 0) && !recordingActive) {
     const copy = consentSkipsCopy(skips.count, skips.vendor, skips.keyVendor, skips.cutOff);
     notices.push({
       id: "consent-skips",

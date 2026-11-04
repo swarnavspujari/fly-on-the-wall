@@ -48,6 +48,7 @@ import type {
   Folder,
   LlmSettings,
   LlmSettingsUpdate,
+  CutOffMeetings,
   RecoveredMeeting,
   Meeting,
   MeetingPrivacy,
@@ -256,10 +257,11 @@ export const api = {
   // consent this session (updates arrive as "llm:consent-skips"), and the
   // re-run once the provider is allowed (background; returns how many).
   consentSkippedMeetings: () => invoke<string[]>("consent_skipped_meetings"),
-  // Meetings whose cleanup / action items the model stopped short of this
-  // session (took too long, looped, listed only part; updates arrive as
-  // "llm:ai-cut-off"). The same re-run covers them.
-  aiCutOffMeetings: () => invoke<string[]>("ai_cut_off_meetings"),
+  // Meetings the model was reached for and stopped short of this session
+  // (updates arrive as "llm:ai-cut-off"): `items` took too long, looped or
+  // were listed only in part; `cleanup` took too long. The same re-run covers
+  // them.
+  aiCutOffMeetings: () => invoke<CutOffMeetings>("ai_cut_off_meetings"),
   retryConsentSkipped: () => invoke<number>("retry_consent_skipped"),
   // Meetings self-heal restored this launch with Keep local set because their
   // privacy setting couldn't be confirmed (updates: "privacy:recovered-kept-local").

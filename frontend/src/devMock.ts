@@ -53,8 +53,11 @@
      fotwMockConsentSkips = "1"    → the backend skipped m1's cleanup and
                                      action items for missing consent (the
                                      notice with "Review and allow")
-     fotwMockAiCutOff = "1"        → the model stopped short of m1 (the notice
-                                     "Some action items couldn't be read")
+     fotwMockAiCutOff = "1" | "cleanup" | "both" → the model stopped short
+                                     of m1's action items ("1"), its cleanup
+                                     ("cleanup") or both (the notice "Some
+                                     action items couldn't be read" / "A
+                                     transcript cleanup didn't finish")
      fotwMockRecoveredKeptLocal = "1" → self-heal restored m1 and set it to
                                      Keep local (the review notice)
      fotwMockAskError = keep_local | consent | no_key | auth | ollama_missing |
@@ -121,6 +124,7 @@ import {
 } from "./settingsModel";
 import type {
   ArtifactUsage,
+  CutOffMeetings,
   Connector,
   ConnectorCallLogEntry,
   ConnectorCallProposal,
@@ -1851,7 +1855,11 @@ function mockMissingKey(): string | null {
 let mockConsentSkips: string[] = mockFlag("fotwMockConsentSkips") === "1" ? ["m1"] : [];
 // Meetings the model stopped short of (a loop, a stall, part of the meeting
 // listed): the same re-run covers them, the notice words them differently.
-let mockAiCutOff: string[] = mockFlag("fotwMockAiCutOff") === "1" ? ["m1"] : [];
+const mockCutOffFlag = mockFlag("fotwMockAiCutOff");
+let mockAiCutOff: CutOffMeetings = {
+  items: mockCutOffFlag === "1" || mockCutOffFlag === "both" ? ["m1"] : [],
+  cleanup: mockCutOffFlag === "cleanup" || mockCutOffFlag === "both" ? ["m1"] : [],
+};
 
 /* ---- recovered meetings kept local ---- */
 // fotwMockRecoveredKeptLocal = "1": self-heal restored n1's meeting and set it
@@ -1862,9 +1870,9 @@ let mockRecoveredKeptLocal: { meeting_id: string; note_id: string; title: string
     ? [{ meeting_id: "m1", note_id: "n1", title: noteMeta[0].title }]
     : [];
 function mockRetryConsentSkipped(): number {
-  const ids = [...mockConsentSkips, ...mockAiCutOff];
+  const ids = [...new Set([...mockConsentSkips, ...mockAiCutOff.items, ...mockAiCutOff.cleanup])];
   mockConsentSkips = [];
-  mockAiCutOff = [];
+  mockAiCutOff = { items: [], cleanup: [] };
   mockEmit("llm:ai-cut-off", mockAiCutOff);
   ids.forEach((id, i) => {
     setTimeout(() => {
@@ -3212,7 +3220,7 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "consent_skipped_meetings":
       return [...mockConsentSkips];
     case "ai_cut_off_meetings":
-      return [...mockAiCutOff];
+      return { items: [...mockAiCutOff.items], cleanup: [...mockAiCutOff.cleanup] };
     case "retry_consent_skipped":
       return mockRetryConsentSkipped();
     case "request_cloud_consent":
