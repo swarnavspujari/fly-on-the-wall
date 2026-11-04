@@ -14,6 +14,7 @@ use crate::model::{Note, NoteBlock, Template, Transcript, TranscriptSegment};
 use crate::prompt_profile::PromptProfile;
 
 /// System + user prompt, plus the index→segment-id map for source mapping.
+#[derive(Debug, Clone)]
 pub struct EnhancePrompt {
     pub system: String,
     pub user: String,
@@ -95,24 +96,80 @@ pub fn fence_safe(text: &str) -> String {
     out
 }
 
+/// One thing the transcript part of an Enhance prompt shows, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shown {
+    /// The segment at this position in `Transcript::segments`.
+    Segment(usize),
+    /// A run of segments left out (a meeting too long for the model's
+    /// context), `ms` of meeting between the lines on either side.
+    Gap { segments: usize, ms: u64 },
+}
+
+/// The prompt with the whole transcript in it, every segment numbered by its
+/// position (the numbers the model cites).
 pub fn build_enhance_prompt(
     note: &Note,
     transcript: Option<&Transcript>,
     template: &Template,
     profile: &PromptProfile,
 ) -> EnhancePrompt {
+    let all: Vec<Shown> = transcript
+        .map(|t| (0..t.segments.len()).map(Shown::Segment).collect())
+        .unwrap_or_default();
+    build_enhance_prompt_with(note, transcript, template, profile, &all)
+}
+
+/// How long a gap marker says a run of lines lasted.
+fn gap_duration(ms: u64) -> String {
+    match (ms + 30_000) / 60_000 {
+        0 => "under a minute".to_string(),
+        1 => "about a minute".to_string(),
+        m => format!("about {m} minutes"),
+    }
+}
+
+/// The prompt showing only `shown` of the transcript. The numbers the model
+/// cites count the segments shown (0, 1, 2…), not the transcript's own
+/// positions, and `segment_ids[n]` is the id of number `n`: a citation can
+/// only name a line the model was given. With every segment shown in order
+/// this is exactly [`build_enhance_prompt`]; a [`Shown::Gap`] adds a marker
+/// line and tells the model it is reading excerpts.
+pub fn build_enhance_prompt_with(
+    note: &Note,
+    transcript: Option<&Transcript>,
+    template: &Template,
+    profile: &PromptProfile,
+    shown: &[Shown],
+) -> EnhancePrompt {
     let mut segment_ids = Vec::new();
+    let mut excerpts = false;
     let transcript_text = match transcript {
         Some(t) => {
             let mut out = String::new();
-            for seg in &t.segments {
-                let idx = segment_ids.len();
-                segment_ids.push(seg.id.clone());
-                out.push_str(&format!(
-                    "[{idx}] {}: {}\n",
-                    fence_safe(&t.label_for(&seg.speaker_key)),
-                    fence_safe(seg.text.trim())
-                ));
+            for part in shown {
+                match *part {
+                    Shown::Segment(pos) => {
+                        let Some(seg) = t.segments.get(pos) else {
+                            continue;
+                        };
+                        let idx = segment_ids.len();
+                        segment_ids.push(seg.id.clone());
+                        out.push_str(&format!(
+                            "[{idx}] {}: {}\n",
+                            fence_safe(&t.label_for(&seg.speaker_key)),
+                            fence_safe(seg.text.trim())
+                        ));
+                    }
+                    Shown::Gap { segments, ms } => {
+                        excerpts = true;
+                        out.push_str(&format!(
+                            "(… {segments} line{} left out, {} …)\n",
+                            if segments == 1 { "" } else { "s" },
+                            gap_duration(ms)
+                        ));
+                    }
+                }
             }
             out
         }
@@ -137,8 +194,13 @@ pub fn build_enhance_prompt(
     } else {
         // Long data first, the ask last (Anthropic long-context guidance);
         // XML fences mark both as data, not instructions.
+        let heading = if excerpts {
+            "TRANSCRIPT (numbered segments; the meeting is too long to show in full, so these are excerpts and each gap is marked)"
+        } else {
+            "TRANSCRIPT (numbered segments)"
+        };
         format!(
-            "TRANSCRIPT (numbered segments):\n<transcript>\n{}</transcript>\n\nMY NOTES (raw scratchpad):\n<my_notes>\n{}\n</my_notes>\n\nMerge my notes with the transcript into the JSON block array described above.",
+            "{heading}:\n<transcript>\n{}</transcript>\n\nMY NOTES (raw scratchpad):\n<my_notes>\n{}\n</my_notes>\n\nMerge my notes with the transcript into the JSON block array described above.",
             transcript_text, fence_safe(&note.scratchpad)
         )
     };
@@ -171,17 +233,112 @@ pub fn enhance_blocks_schema() -> serde_json::Value {
 
 #[derive(Deserialize)]
 struct RawBlock {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     kind: String,
     markdown: String,
+    /// Whatever the model wrote for `sources`: a list of numbers when it
+    /// followed the contract. Read leniently (`source_numbers`) so one odd
+    /// value costs that citation, never the whole reply.
     #[serde(default)]
-    sources: Vec<usize>,
+    sources: serde_json::Value,
 }
 
-/// Parse the LLM's block array; tolerate fences/prose around the JSON, and
-/// salvage the complete blocks of an array truncated mid-flight (a capped
-/// response — e.g. adaptive thinking eating the token budget — must degrade
-/// to "the tail is missing", never to raw JSON pasted into the note).
+/// A block as the model wrote it, before any check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawEnhanceBlock {
+    /// `"type": "user"`: the model says it restates the user's own notes.
+    pub user: bool,
+    /// Trimmed, never empty.
+    pub markdown: String,
+    /// The segment numbers it cited, in order. `None` is a value that is
+    /// not a whole number and can't name a line.
+    pub sources: Vec<Option<usize>>,
+}
+
+/// What a model reply holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedEnhance {
+    /// The JSON block array (or its salvaged complete prefix).
+    Blocks(Vec<RawEnhanceBlock>),
+    /// Not JSON at all: the reply's paragraphs.
+    Prose(Vec<String>),
+    /// Clearly an attempt at the JSON contract with nothing recoverable.
+    Unusable,
+}
+
+/// One cited number. Whole numbers, and strings of one (`"3"`, `"[3]"`,
+/// `"seg:3"`), name a line; anything else (a negative, a fraction, words)
+/// doesn't.
+fn source_number(v: &serde_json::Value) -> Option<usize> {
+    match v {
+        serde_json::Value::Number(n) => n.as_u64().map(|n| n as usize),
+        serde_json::Value::String(s) => {
+            let t = s.trim().trim_matches(|c| c == '[' || c == ']').trim();
+            let t = t.strip_prefix("seg:").unwrap_or(t).trim();
+            t.parse::<usize>().ok()
+        }
+        _ => None,
+    }
+}
+
+fn source_numbers(v: &serde_json::Value) -> Vec<Option<usize>> {
+    match v {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::Array(items) => items.iter().map(source_number).collect(),
+        // `"sources": 3` or `"sources": "1, 2"`: tolerate the shape.
+        serde_json::Value::String(s) if s.contains(',') => s
+            .split(',')
+            .map(|p| source_number(&serde_json::Value::String(p.to_string())))
+            .collect(),
+        other => vec![source_number(other)],
+    }
+}
+
+/// Read a reply into blocks without judging them; tolerates fences and
+/// prose around the JSON, and salvages the complete blocks of an array
+/// truncated mid-flight (a capped response — e.g. adaptive thinking eating
+/// the token budget — must degrade to "the tail is missing", never to raw
+/// JSON pasted into the note).
+///
+/// [`ParsedEnhance::Unusable`] means the output was clearly attempting the
+/// JSON contract but nothing usable could be recovered — the caller must
+/// treat that as a failure the user sees, not save it. The prose fallback
+/// only applies to genuinely non-JSON answers.
+pub fn parse_enhance_output(llm_output: &str) -> ParsedEnhance {
+    if let Some(raw) = try_parse_raw(llm_output) {
+        let blocks: Vec<RawEnhanceBlock> = raw
+            .into_iter()
+            .filter(|b| !b.markdown.trim().is_empty())
+            .map(|b| RawEnhanceBlock {
+                user: b.kind == "user",
+                markdown: b.markdown.trim().to_string(),
+                sources: if b.kind == "user" {
+                    Vec::new()
+                } else {
+                    source_numbers(&b.sources)
+                },
+            })
+            .collect();
+        if !blocks.is_empty() {
+            return ParsedEnhance::Blocks(blocks);
+        }
+    }
+    if looks_like_block_json(llm_output) {
+        return ParsedEnhance::Unusable;
+    }
+    ParsedEnhance::Prose(
+        llm_output
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Parse the LLM's block array into note blocks, mapping each cited number
+/// to a segment id (a number with no segment is dropped). No other check:
+/// the app's Enhance goes through fly-ask's `enhance` instead.
 ///
 /// Returns an EMPTY vec when the output was clearly attempting the JSON
 /// contract but nothing usable could be recovered — the caller must treat
@@ -189,46 +346,37 @@ struct RawBlock {
 /// output as untraced AI paragraphs) only applies to genuinely non-JSON
 /// answers.
 pub fn parse_enhanced_blocks(llm_output: &str, segment_ids: &[String]) -> Vec<NoteBlock> {
-    if let Some(blocks) = try_parse_json(llm_output, segment_ids) {
-        if !blocks.is_empty() {
-            return blocks;
-        }
-    }
-    if looks_like_block_json(llm_output) {
-        return Vec::new();
-    }
-    llm_output
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|p| NoteBlock::ai(p, vec![]))
-        .collect()
-}
-
-fn try_parse_json(output: &str, segment_ids: &[String]) -> Option<Vec<NoteBlock>> {
-    let start = output.find('[')?;
-    let raw: Vec<RawBlock> = output
-        .rfind(']')
-        .filter(|end| *end > start)
-        .and_then(|end| serde_json::from_str(&output[start..=end]).ok())
-        .or_else(|| salvage_truncated_array(&output[start..]))?;
-    Some(
-        raw.into_iter()
-            .filter(|b| !b.markdown.trim().is_empty())
+    match parse_enhance_output(llm_output) {
+        ParsedEnhance::Blocks(raw) => raw
+            .into_iter()
             .map(|b| {
-                if b.kind == "user" {
-                    NoteBlock::user(b.markdown.trim())
+                if b.user {
+                    NoteBlock::user(b.markdown)
                 } else {
                     let sources = b
                         .sources
                         .into_iter()
-                        .filter_map(|i| segment_ids.get(i).cloned())
+                        .filter_map(|i| i.and_then(|i| segment_ids.get(i)).cloned())
                         .collect();
-                    NoteBlock::ai(b.markdown.trim(), sources)
+                    NoteBlock::ai(b.markdown, sources)
                 }
             })
             .collect(),
-    )
+        ParsedEnhance::Prose(paragraphs) => paragraphs
+            .into_iter()
+            .map(|p| NoteBlock::ai(p, vec![]))
+            .collect(),
+        ParsedEnhance::Unusable => Vec::new(),
+    }
+}
+
+fn try_parse_raw(output: &str) -> Option<Vec<RawBlock>> {
+    let start = output.find('[')?;
+    output
+        .rfind(']')
+        .filter(|end| *end > start)
+        .and_then(|end| serde_json::from_str(&output[start..=end]).ok())
+        .or_else(|| salvage_truncated_array(&output[start..]))
 }
 
 /// Largest parseable prefix of a block array cut off mid-flight: one forward
@@ -810,6 +958,123 @@ mod tests {
     fn prose_preamble_before_truncated_fence_yields_no_blocks() {
         let out = "Here are the blocks:\n```json\n[\n {\"type\": \"ai\", \"ma";
         assert!(parse_enhanced_blocks(out, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_prompt_can_show_part_of_a_transcript() {
+        let tpl = Template {
+            id: "t".into(),
+            name: "General".into(),
+            system_prompt: "sys".into(),
+            structure_hint: "## Summary".into(),
+            built_in: true,
+        };
+        let mut t = transcript();
+        t.segments.push(TranscriptSegment {
+            id: "seg-c".into(),
+            speaker_key: "mic".into(),
+            start_ms: 2000,
+            end_ms: 3000,
+            text: "third line".into(),
+            words: vec![],
+        });
+        let note = note_with_scratchpad("- x");
+        // Everything shown is the whole prompt, unchanged.
+        let all = build_enhance_prompt(
+            &note,
+            Some(&t),
+            &tpl,
+            &crate::prompt_profile::DEFAULT_PROFILE,
+        );
+        let same = build_enhance_prompt_with(
+            &note,
+            Some(&t),
+            &tpl,
+            &crate::prompt_profile::DEFAULT_PROFILE,
+            &[Shown::Segment(0), Shown::Segment(1), Shown::Segment(2)],
+        );
+        assert_eq!(
+            (&all.system, &all.user, &all.segment_ids),
+            (&same.system, &same.user, &same.segment_ids)
+        );
+        assert!(all.user.contains("TRANSCRIPT (numbered segments):"));
+        assert!(!all.user.contains("excerpts"));
+
+        // A gap is marked, the model is told it reads excerpts, and the
+        // numbers it cites count the lines shown.
+        let part = build_enhance_prompt_with(
+            &note,
+            Some(&t),
+            &tpl,
+            &crate::prompt_profile::DEFAULT_PROFILE,
+            &[
+                Shown::Segment(0),
+                Shown::Gap {
+                    segments: 1,
+                    ms: 90_000,
+                },
+                Shown::Segment(2),
+            ],
+        );
+        assert_eq!(part.segment_ids, vec!["seg-a", "seg-c"]);
+        assert!(part.user.contains(
+            "[0] You: we should approve the budget
+"
+        ));
+        assert!(part.user.contains(
+            "(… 1 line left out, about 2 minutes …)
+"
+        ));
+        assert!(part.user.contains("[1] You: third line"));
+        assert!(part.user.contains("excerpts"));
+        assert!(!part.user.contains("[2] "));
+    }
+
+    #[test]
+    fn sources_are_read_leniently_so_one_odd_value_costs_one_citation() {
+        let out = r#"[
+          {"type":"ai","markdown":"a","sources":[0,"1","seg:2","[3]",-1,1.5,"x",null,{"n":1}]},
+          {"type":"ai","markdown":"b","sources":"0, 1"},
+          {"type":"ai","markdown":"c","sources":2},
+          {"type":"ai","markdown":"d"},
+          {"type":"user","markdown":"e","sources":[0]},
+          {"markdown":"f"}
+        ]"#;
+        let ParsedEnhance::Blocks(b) = parse_enhance_output(out) else {
+            panic!("blocks")
+        };
+        assert_eq!(
+            b[0].sources,
+            vec![
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                None,
+                None,
+                None,
+                None,
+                None
+            ]
+        );
+        assert_eq!(b[1].sources, vec![Some(0), Some(1)]);
+        assert_eq!(b[2].sources, vec![Some(2)]);
+        assert!(b[3].sources.is_empty());
+        assert!(
+            b[4].user && b[4].sources.is_empty(),
+            "a user block cites nothing"
+        );
+        assert!(!b[5].user, "no type is an AI block");
+        // The mapping to ids drops what names no line.
+        let ids: Vec<String> = ["s0", "s1"].map(String::from).into();
+        let blocks = parse_enhanced_blocks(out, &ids);
+        assert_eq!(
+            match &blocks[0].origin {
+                BlockOrigin::Ai { source_segment_ids } => source_segment_ids.clone(),
+                _ => vec![],
+            },
+            vec!["s0", "s1"]
+        );
     }
 
     // -----------------------------------------------------------------------

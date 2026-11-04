@@ -38,6 +38,7 @@ import type {
   ConnectorsOverview,
   ConnectorTestResult,
   DiskEncryption,
+  EnhanceReply,
   ImportStaged,
   LibraryStatus,
   ScreenStatus,
@@ -212,7 +213,7 @@ export const api = {
 
   // enhance / ask / templates / LLM settings
   enhanceNote: (noteId: string, templateId: string) =>
-    invoke<Note>("enhance_note", { noteId, templateId }),
+    invoke<EnhanceReply>("enhance_note", { noteId, templateId }),
   editNoteBlock: (noteId: string, blockId: string, markdown: string) =>
     invoke<Note>("edit_note_block", { noteId, blockId, markdown }),
   // The Ask harness: a validated answer (sentences with citations and

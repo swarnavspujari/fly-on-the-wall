@@ -70,6 +70,25 @@ pub struct SuiteConfig {
     pub der_tolerance: Option<f64>,
 }
 
+impl SuiteConfig {
+    /// A suite with no entry in `thresholds.toml`: it runs and reports, and
+    /// gates nothing.
+    pub fn report_only() -> Self {
+        Self {
+            status: Status::ReportOnly,
+            baseline_tolerance: None,
+            gates: BTreeMap::new(),
+            tracked: BTreeMap::new(),
+            k: None,
+            embedder: None,
+            real_embedder: None,
+            tiers: BTreeMap::new(),
+            group_floor: None,
+            der_tolerance: None,
+        }
+    }
+}
+
 /// Which way is better for a tracked metric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

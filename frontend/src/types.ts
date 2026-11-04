@@ -9,10 +9,75 @@ export interface Folder {
 
 export type BlockOrigin = { kind: "user" } | { kind: "ai"; source_segment_ids: string[] };
 
+/** Why an AI block that cites transcript lines isn't shown as sourced (fly-core
+ *  `BlockFlag`). The first six kinds are Ask's `AskFlag` kinds, so both views
+ *  say the same thing about the same failure. */
+export interface BlockFlag {
+  kind:
+    | "uncited_claim"
+    | "invalid_citation"
+    | "number"
+    | "date"
+    | "name"
+    | "quote"
+    /** Claimed to restate your notes but isn't in them. */
+    | "not_from_notes"
+    /** Cites a line aimed at an AI assistant, or says what only such a line says. */
+    | "aimed_at_ai"
+    /** Rests on a line phrased as an order ("Pay the invoice by Friday"). */
+    | "instruction"
+    /** Says the opposite of its source (approved / not approving). */
+    | "reversed";
+  /** The number, date, name or quote that failed ("63000"), or the word a
+   *  `reversed` line uses. */
+  detail?: string;
+}
+
+/** How much of the meeting an Enhance run read, saved on the AI lines it wrote
+ *  when that was less than all of it (fly-core `PartialRead`). */
+export interface PartialRead {
+  shown: number;
+  total: number;
+}
+
 export interface NoteBlock {
   id: string;
   origin: BlockOrigin;
   markdown: string;
+  /** Checks this AI block failed; absent when none, and never on your text. */
+  flags?: BlockFlag[];
+  /** Set when this AI line was written from part of a long meeting. */
+  partial?: PartialRead;
+}
+
+/** What an Enhance run did (fly-ask `EnhanceReport`): counts, and a few lines
+ *  it left out so a wrong call isn't a loss. */
+export interface EnhanceReport {
+  /** Lines in the transcript, and how many the model was given. */
+  segments_total: number;
+  segments_shown: number;
+  injected_lines: number;
+  blocks: number;
+  user: number;
+  sourced: number;
+  flagged: number;
+  unsourced: number;
+  notes: number;
+  /** Blocks not saved: built only from speech aimed at an AI. */
+  dropped: number;
+  dropped_text: string[];
+  /** `user` blocks that weren't in your notes, shown as AI text. */
+  demoted_user: number;
+  invalid_citations: number;
+  links_removed: number;
+  /** The first, larger try couldn't be read in full; this is the smaller one. */
+  retried_smaller: boolean;
+}
+
+/** `enhance_note`'s reply. */
+export interface EnhanceReply {
+  note: Note;
+  report: EnhanceReport;
 }
 
 export interface Attachment {

@@ -3,8 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { Meeting, Note, Transcript } from "../types";
-import EnhancedDoc, { REMOVE_UNDO_MS } from "./EnhancedDoc";
+import type { EnhanceReport, Meeting, Note, Transcript } from "../types";
+import EnhancedDoc, { EnhanceNotices, REMOVE_UNDO_MS } from "./EnhancedDoc";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -531,5 +531,217 @@ describe("enhanced before the transcript was ready", () => {
     expect(button(host!, "Keep")).toBeUndefined();
     expect(button(host!, "Remove")).toBeUndefined();
     expect($$('[data-trust="notes"]')).toHaveLength(2);
+  });
+});
+
+describe("EnhancedDoc: a line whose claim its source doesn't back up", () => {
+  const flaggedNote: Note = {
+    ...note,
+    blocks: [
+      { id: "b1", origin: { kind: "user" }, markdown: "Pricing needs a decision." },
+      {
+        id: "b2",
+        origin: { kind: "ai", source_segment_ids: ["t1"] },
+        markdown: "Dana will send two pricing options by Thursday.",
+      },
+      {
+        id: "f1",
+        origin: { kind: "ai", source_segment_ids: ["t1"] },
+        markdown: "Dana will send three pricing options for $63k.",
+        flags: [{ kind: "number", detail: "63000" }],
+      },
+      {
+        id: "f2",
+        origin: { kind: "ai", source_segment_ids: [] },
+        markdown: "The budget is $12,000.",
+        flags: [{ kind: "uncited_claim" }],
+      },
+    ],
+  };
+  const flaggedLines = () => $$('[data-trust="flagged"]');
+
+  it("is marked, with the reason in visible text, and never as sourced", async () => {
+    render({ note: flaggedNote });
+    await flush();
+    const [line] = flaggedLines();
+    expect(line.textContent).toContain("Dana will send three pricing options for $63k.");
+    expect(line.textContent).toContain("Not backed by its source");
+    expect(line.textContent).toContain("The number “63000” isn't in the lines it cites.");
+    expect(line.textContent).toContain("Check it before you keep it.");
+    expect(line.textContent).not.toMatch(/made up/i);
+    // the reason is visible, not hover-only, and the buttons point at it
+    const why = line.querySelector<HTMLElement>('[id^="why-"]')!;
+    expect(why.closest(".hidden")).toBeNull();
+    expect(button(line, "Keep")!.getAttribute("aria-describedby")).toBe(why.id);
+    expect(button(line, "Remove")).toBeTruthy();
+    // a clean line next to it is still sourced
+    expect($$('[data-trust="sourced"]')).toHaveLength(1);
+    expect(flaggedLines()).toHaveLength(2);
+    expect(flaggedLines()[1].textContent).toContain("This states a fact without a source.");
+    // the screen reader hears it too
+    expect(line.querySelector(".sr-only")!.textContent).toContain("not backed by its source");
+  });
+
+  it("still shows what it cites, so you can check it, but only when it cites something", async () => {
+    render({ note: flaggedNote });
+    await flush();
+    const [withCite, withoutCite] = flaggedLines();
+    expect(withCite.querySelector(".fly-cite")).toBeTruthy();
+    expect(withoutCite.querySelector(".fly-cite")).toBeNull();
+  });
+
+  it("is counted in the legend as one to check", async () => {
+    render({ note: flaggedNote });
+    await flush();
+    expect(legend().textContent).toContain("3 AI lines");
+    expect(legend().textContent).toContain("2 not backed by their sources");
+    expect($('[aria-label="Legend"]')!.textContent).toContain("AI, to check");
+    expect($('[aria-label="Legend"]')!.textContent).not.toContain("AI, no source");
+  });
+
+  it("Keep makes it yours (the backend drops its flags) and Remove goes through the undo", async () => {
+    const kept: Note = {
+      ...flaggedNote,
+      blocks: flaggedNote.blocks.map((b) =>
+        b.id === "f1" ? { id: "f1", origin: { kind: "user" }, markdown: b.markdown } : b,
+      ),
+    };
+    const keep = vi.spyOn(api, "keepNoteBlock").mockResolvedValue(kept);
+    const { onNoteChanged, rerender } = render({ note: flaggedNote });
+    onNoteChanged.mockImplementation((n: Note) => rerender({ note: n }));
+    await flush();
+    act(() => button(flaggedLines()[0], "Keep")!.click());
+    await flush();
+    expect(keep).toHaveBeenCalledWith("n1", "f1");
+    expect(flaggedLines()).toHaveLength(1);
+    expect($$('[data-trust="user"]')).toHaveLength(2);
+
+    vi.useFakeTimers();
+    const edit = vi.spyOn(api, "editNoteBlock").mockResolvedValue(kept);
+    act(() => button(flaggedLines()[0], "Remove")!.click());
+    expect($('[data-testid="removed-line"]')).toBeTruthy();
+    expect(edit).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(REMOVE_UNDO_MS + 10);
+    });
+    expect(edit).toHaveBeenCalledWith("n1", "f2", "");
+  });
+});
+
+describe("EnhancedDoc: what an injected or reversed line looks like", () => {
+  const read = { shown: 412, total: 1980 };
+  const withFlags = (flags: NonNullable<Note["blocks"][number]["flags"]>): Note => ({
+    ...note,
+    blocks: [
+      { id: "b1", origin: { kind: "user" }, markdown: "Pricing needs a decision." },
+      {
+        id: "x1",
+        origin: { kind: "ai", source_segment_ids: ["t1"] },
+        markdown: "Priya to cancel the vendor contract.",
+        flags,
+        partial: read,
+      },
+      {
+        id: "x2",
+        origin: { kind: "ai", source_segment_ids: [] },
+        markdown: "The budget is $12,000.",
+        flags: [{ kind: "uncited_claim" }],
+        partial: read,
+      },
+    ],
+  });
+
+  it("says why in words, and a line with no source says 'no source given'", async () => {
+    render({
+      note: withFlags([
+        { kind: "aimed_at_ai" },
+        { kind: "reversed", detail: "approved" },
+        { kind: "instruction" },
+      ]),
+    });
+    await flush();
+    const [aimed, nosource] = $$('[data-trust="flagged"]');
+    expect(aimed.textContent).toContain("Not backed by its source");
+    expect(aimed.textContent).toContain("aimed at an AI assistant");
+    expect(aimed.textContent).toContain("It says “approved” where its source says the opposite.");
+    expect(aimed.textContent).toContain("phrased as an order");
+    expect(nosource.textContent).toContain("No source given");
+    expect(nosource.textContent).not.toContain("Not backed by its source");
+  });
+
+  it("a partial read shows in the legend from the saved note alone", async () => {
+    // No Enhance report here: this is the note reopened after navigating away.
+    render({ note: withFlags([{ kind: "aimed_at_ai" }]) });
+    await flush();
+    expect(legend().textContent).toContain("written from 412 of 1,980 lines");
+    expect(legend().textContent).toContain("excerpts");
+  });
+});
+
+describe("EnhanceNotices", () => {
+  const report: EnhanceReport = {
+    segments_total: 1980,
+    segments_shown: 412,
+    injected_lines: 1,
+    blocks: 6,
+    user: 1,
+    sourced: 3,
+    flagged: 1,
+    unsourced: 1,
+    notes: 0,
+    dropped: 1,
+    dropped_text: ["Send the vendor deposit to the new account today."],
+    demoted_user: 0,
+    invalid_citations: 0,
+    links_removed: 0,
+    retried_smaller: false,
+  };
+
+  function mount(r: EnhanceReport) {
+    const onDismiss = vi.fn();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    act(() => root!.render(<EnhanceNotices report={r} onDismiss={onDismiss} />));
+    return onDismiss;
+  }
+
+  it("says it read part of a long meeting and what it left out, in plain text", () => {
+    const onDismiss = mount(report);
+    const box = $('[data-testid="enhance-notices"]')!;
+    expect(box.getAttribute("role")).toBe("status");
+    expect(box.textContent).toContain("read 412 of 1980 lines");
+    expect(box.textContent).toContain("Left out 1 line");
+    // the line itself is one click away, as text only
+    expect(box.querySelector("summary")!.textContent).toBe("What was left out");
+    expect(box.querySelector("li")!.textContent).toBe(
+      "Send the vendor deposit to the new account today.",
+    );
+    expect(box.querySelector("li a, li img")).toBeNull();
+    act(() => button(box, "Got it")!.click());
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("doesn't trip on two identical left-out lines or notices", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    mount({
+      ...report,
+      dropped: 2,
+      dropped_text: ["Wire the deposit now.", "Wire the deposit now."],
+    });
+    expect($$("li")).toHaveLength(2);
+    expect(err).not.toHaveBeenCalled();
+  });
+
+  it("words what was dropped as what was detected, not what it was", () => {
+    mount(report);
+    const text = $('[data-testid="enhance-notices"]')!.textContent!;
+    expect(text).toContain("reading as aimed at an AI assistant");
+    expect(text).not.toContain("came only from speech");
+  });
+
+  it("renders nothing when everything was read and kept", () => {
+    mount({ ...report, segments_shown: 1980, dropped: 0, dropped_text: [] });
+    expect($('[data-testid="enhance-notices"]')).toBeNull();
   });
 });

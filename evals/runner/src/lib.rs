@@ -5,6 +5,8 @@
 //! * [`ask_contract`]: the contract the Ask harness must meet, scored from
 //!   what the harness actually sent to a request-recording mock provider.
 //!   Pending until the harness lands.
+//! * [`enhance_contract`]: what `fly_ask::enhance` does with a model's blocks,
+//!   measured with scripted models. Report only, run on request.
 //! * [`local_bench`]: ASR WER/DER gates and latency on this machine. Never
 //!   in CI; report-only.
 //!
@@ -17,6 +19,7 @@ pub mod config;
 pub mod corpus;
 pub mod embed;
 pub mod embedder;
+pub mod enhance_contract;
 pub mod harnesses;
 pub mod local_bench;
 pub mod report;
