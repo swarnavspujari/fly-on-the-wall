@@ -20,6 +20,16 @@ export function upgradePercent(s: LibraryStatus): number {
  *  moves the bar back. */
 function merge(prev: LibraryStatus | null, next: LibraryStatus): LibraryStatus {
   if (prev?.phase === "ready") return prev;
+  // The backup comes first: a late answer from before the upgrade step began
+  // doesn't take the screen back to it.
+  if (
+    prev?.phase === "upgrading" &&
+    next.phase === "upgrading" &&
+    prev.step === "upgrade" &&
+    next.step === "backup"
+  ) {
+    return prev;
+  }
   if (
     prev?.phase === "upgrading" &&
     next.phase === "upgrading" &&
@@ -88,6 +98,7 @@ export default function LibraryGate({ children }: { children: ReactNode }) {
 
 function UpgradeScreen({ status }: { status: LibraryStatus }) {
   const failed = status.phase === "failed";
+  const backingUp = !failed && status.step === "backup";
   const pct = upgradePercent(status);
   return (
     <main className="grid min-h-screen place-items-center bg-bg p-6">
@@ -100,15 +111,25 @@ function UpgradeScreen({ status }: { status: LibraryStatus }) {
             className="font-display text-[22px] font-bold text-text"
             style={{ margin: "0 0 8px" }}
           >
-            {failed ? "Your library couldn't be upgraded" : "Upgrading your library"}
+            {failed
+              ? "Your library couldn't be upgraded"
+              : backingUp
+                ? "Saving a backup of your library…"
+                : "Upgrading your library"}
           </h1>
           <p className="text-[13.5px] leading-[1.55] text-text-2" style={{ margin: "0 0 20px" }}>
             {failed
               ? "Fly on the Wall will show what happened in a separate message. Your notes and recordings are safe."
-              : "Fly on the Wall is rebuilding its search index. This happens once, and your notes are safe."}
+              : backingUp
+                ? "Fly on the Wall saves a copy of your notes before it updates them, so you can go back. This happens once per update."
+                : "Fly on the Wall is rebuilding its search index. This happens once, and your notes are safe."}
           </p>
         </div>
-        {!failed && (
+        {/* The backup has no measure of its own: an indeterminate bar. */}
+        {backingUp && (
+          <ProgressBar value={null} size="md" aria-labelledby="library-upgrade-title" />
+        )}
+        {!failed && !backingUp && (
           <>
             <ProgressBar value={pct} size="md" aria-labelledby="library-upgrade-title" />
             <p

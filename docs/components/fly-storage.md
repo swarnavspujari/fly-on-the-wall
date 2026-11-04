@@ -30,7 +30,8 @@ The app's persistence layer. A bundled SQLite file (WAL, FTS5, `secure_delete`) 
 - `crates/fly-storage/src/privacy.rs` — Keep local, participants notified, retention, `erase_all_content`.
 - `crates/fly-storage/src/recovery.rs` — manifest v3, `note.json`, self-heal, portability backfill.
 - `crates/fly-storage/src/recording_store.rs` — recording storage v2 hooks: in-memory folder leases (renames skip a leased meeting), `meetings_with_stored_audio`, `recording_file_in_folder` (a path is a plain file directly inside a contained meeting folder), `replace_meeting_recording` (manifest first, then `recording_json`). See [app-audio-store](app-audio-store.md).
-- `crates/fly-storage/tests/storage_safety.rs`, `crates/fly-storage/tests/migration_v2.rs`, `crates/fly-storage/tests/migration_v3.rs` — integration tests.
+- `crates/fly-storage/src/backup.rs` — the automatic pre-upgrade database backup (`<data_dir>/backups/`): the pre-open check, `VACUUM INTO` through a read-only connection, verification, retention of 3, the settings rows, the notice state, and `refuse_backup_dir` (called by `Storage::open` and `open_existing`). Nothing else in this crate reads or writes `backups/`. See [app-backups](app-backups.md).
+- `crates/fly-storage/tests/storage_safety.rs`, `crates/fly-storage/tests/migration_v2.rs`, `crates/fly-storage/tests/migration_v3.rs`, `crates/fly-storage/tests/backup.rs` — integration tests.
 
 ## Surface area
 ### Public API

@@ -390,3 +390,22 @@ Running log of technical decisions, newest last. Format: date — decision — w
   reads on one snapshot. Visibility
   is never cached: each search asks SQL which chunk ids it may see. ANN is deferred until
   libraries reach ~100k chunks.
+- **2026-11-03 — The library database is backed up automatically before an update changes it.**
+  A beta upgrade of a real library found that 2.5.0 migrates it (schema v3 in `Storage::open`,
+  the re-embed backfill, the compression job's manifest and row rewrites) with no copy of the
+  old database; the fix was "copy `flyonthewall.db` by hand". Now, once per app-version change
+  (and whenever a schema step is about to run, and once before the compression job's first
+  pass on an install that has no backup), `fly_storage::backup` writes `VACUUM INTO` a temp
+  file through a read-only connection (a consistent snapshot with the WAL folded in, no free
+  pages, no lock on the app's writer), syncs it, checks it with `quick_check` and its
+  `user_version`, then renames it to `backups/flyonthewall-<label>-<UTC stamp>.db`; the newest 3
+  are kept and only exact-pattern names are ever deleted. The "version it was" is a settings row
+  read before the open (`app.last_run_version`), so a restored backup is judged on its own
+  content; builds before this record none, so the first launch over v2.4 is labelled
+  `schema2`. Less than `max(2 × database, 200 MB)` free, or any failure, skips it with a log
+  line and a one-time notice; the open is never blocked or failed by it. Recordings are not
+  copied (compression is lossless and verified; a copy would be tens of GB). Backups hold
+  whole copies of the library, so "Delete all my data" removes the folder with the other
+  content folders and the data-dir scans (self-heal, the portability backfill) never look in
+  it; deleting a note does not rewrite older backups, which is stated in Settings and the
+  docs. Restoring is manual, with the app closed ([app-backups](docs/components/app-backups.md)).

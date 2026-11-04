@@ -8,7 +8,7 @@ The React entry point, the `App` orchestrator that owns almost all cross-feature
 
 ## Files it owns
 - `frontend/src/main.tsx` — entry: installs devMock (dev only), the link guard, then `LibraryGate` around `ConfirmProvider`, `App` and `CloudConsentOnLaunch`.
-- `frontend/src/components/LibraryGate.tsx` — the startup gate: asks `library_status` before anything else mounts, and shows the "Upgrading your library" screen (determinate `ProgressBar`, one line of copy) while the backend upgrades the library in the background.
+- `frontend/src/components/LibraryGate.tsx` — the startup gate: asks `library_status` before anything else mounts, and shows the "Saving a backup of your library…" step (indeterminate `ProgressBar`) and then the "Upgrading your library" screen (determinate `ProgressBar`, one line of copy) while the backend backs up and upgrades the library in the background.
 - `frontend/src/App.tsx` — orchestrator (1,159 lines): state, event listeners, polling, wiring of every screen.
 - `frontend/src/api.ts` — typed `invoke` wrappers (105) and the `fotw:llm-settings-changed` window event.
 - `frontend/src/devMock.ts` — fake Tauri IPC for port-1420 QA and the jsdom App/RecordingBar/ImportQueue tests.
@@ -66,7 +66,7 @@ The React entry point, the `App` orchestrator that owns almost all cross-feature
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
-| `library:upgrade` | listens, `LibraryGate.tsx` (registered before `library_status` is called; dropped on unmount) | `{phase, done, total}` (`LibraryStatus`, `types.ts`) | `src-tauri/src/startup.rs:64-67` (background open only) |
+| `library:upgrade` | listens, `LibraryGate.tsx` (registered before `library_status` is called; dropped on unmount) | `{phase, step, done, total}` (`LibraryStatus`, `types.ts`; `step` is `backup` or `upgrade`) | `src-tauri/src/startup.rs:64-67` (background open only) |
 | `pipeline:progress` | listens, `frontend/src/App.tsx:373-449` | `{meeting_id, stage, detail, done, error}` | `src-tauri/src/scheduler.rs:457-466` (`stage_emitter`), `src-tauri/src/pipeline.rs:103-131`; terminal `"done"`/`"error"` `scheduler.rs:494-502`, `"cancelled"` `scheduler.rs:369-377`, `"waiting"` `scheduler.rs:472-490`, `"polishing"` `scheduler.rs:390` |
 | `note:attachments` | listens, `frontend/src/App.tsx` | `{note_id}` | `video_store.rs` (an imported video became its audio): the open note's attachments are refreshed, never its text |
 | `model:progress` | listens, `frontend/src/App.tsx:450` | `{id, downloaded, total, stage, error}` (`src-tauri/src/models.rs:389-395`) | `asr_commands.rs:118,412`, `scheduler.rs:162`, `ollama.rs:303`, `embeddings.rs:136`, `import_commands.rs:277`, `screen_commands.rs:95,182`, `live.rs:105` |
@@ -84,7 +84,7 @@ Children subscribe to `import:progress` ([ui-import](ui-import.md)), `live:segme
 | `consent.recording_notice_accepted` | R `App.tsx:268,282`; W `App.tsx:1135` | yes (`consent.`) | First-run recording notice accepted; also gates the macOS probe. |
 | `localStorage["flyonthewall.notes-cache.v1"]` | R `App.tsx:70`; W `App.tsx:238` | n/a (browser) | Last "All notes" list ([ui-home](ui-home.md)). |
 | `localStorage["fotw-theme"]` | R/W `theme.ts:12-61`; R `frontend/index.html:13` | n/a | `system` / `light` / `dark`. |
-| devMock query string `?fotwMockUpgrade=1` / `hold` / `fail` (read at load) | R `devMock.ts` | n/a | `library_status` starts `upgrading` and `library:upgrade` events walk the bar to `ready` in about 6 s (`hold`: stays at 40 %; `fail`: ends `failed` at 70 %). Without it, `library_status` is `ready`. |
+| devMock query string `?fotwMockUpgrade=1` / `hold` / `fail` / `backup` / `backuphold` (read at load; the last two start on the backup step, `backup` moving on to the upgrade after about 3 s) | R `devMock.ts` | n/a | `library_status` starts `upgrading` and `library:upgrade` events walk the bar to `ready` in about 6 s (`hold`: stays at 40 %; `fail`: ends `failed` at 70 %). Without it, `library_status` is `ready`. |
 | devMock toggles (`localStorage`, read per call unless noted) | R `devMock.ts` | n/a | `fotwMockRecording` (also written by the mock on start/stop, `:1271`, `:1539`), `fotwMockFirstRun`, `fotwMockNoTranscript`, `fotwMockEngineMissing`, `fotwMockEngineUnmanaged`, `fotwMockTapDenied`, `fotwMockEncryption`, `fotwMockAudioDeleted`, `fotwMockOllama`, `fotwMockGpuBench` (load time), `fotwMockUpdate`, `fotwMockImportFail`, `fotwMockImportPipelineFail`, `fotwMockRecWarning`, `fotwMockNoAttendees`, `fotwMockConsentReset` (load time), `fotwMockConsentSkips` (load time), `fotwMockAskError`, `fotwMockCalendar` (`none` read at install), `fotwMockNoNotes`, `fotwMockRetentionHeld`, `fotwMockWipeDbBusy`. The last four are missing from the header list (`devMock.ts:11-70`). QA hook: `window.fotwMockEmit(event, payload)` (`devMock.ts:1670-1672`). |
 
 ### Database

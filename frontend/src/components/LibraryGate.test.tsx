@@ -116,6 +116,40 @@ describe("LibraryGate", () => {
     expect(appShown()).toBe(true);
   });
 
+  it("shows the backup step first, with a bar that has no percentage, then the upgrade", async () => {
+    libraryStatus.mockResolvedValue({ phase: "upgrading", step: "backup", done: 0, total: 0 });
+    await render();
+    expect(appShown()).toBe(false);
+    expect(heading()).toBe("Saving a backup of your library…");
+    expect(host!.textContent).toContain("saves a copy of your notes before it updates them");
+    expect(host!.querySelector('[role="progressbar"]')).not.toBeNull();
+    expect(percent()).toBeNull();
+    expect(host!.textContent).not.toContain("%");
+
+    await emit({ phase: "upgrading", step: "upgrade", done: 3, total: 9 });
+    expect(heading()).toBe("Upgrading your library");
+    expect(percent()).toBe("33");
+
+    await emit({ phase: "ready", step: "upgrade", done: 0, total: 0 });
+    expect(appShown()).toBe(true);
+  });
+
+  it("a late answer from the backup step doesn't take the screen back to it", async () => {
+    libraryStatus.mockResolvedValueOnce({ phase: "upgrading", step: "backup", done: 0, total: 0 });
+    libraryStatus.mockResolvedValue({ phase: "upgrading", step: "backup", done: 0, total: 0 });
+    await render();
+    await emit({ phase: "upgrading", step: "upgrade", done: 4, total: 9 });
+    await settle(LIBRARY_POLL_MS);
+    expect(heading()).toBe("Upgrading your library");
+    expect(percent()).toBe("44");
+  });
+
+  it("a backend that sends no step is the upgrade step", async () => {
+    libraryStatus.mockResolvedValue({ phase: "upgrading", done: 2, total: 9 });
+    await render();
+    expect(heading()).toBe("Upgrading your library");
+  });
+
   it("never moves the bar back on a late answer", async () => {
     libraryStatus.mockResolvedValueOnce({ phase: "upgrading", done: 1, total: 9 });
     libraryStatus.mockResolvedValue({ phase: "upgrading", done: 3, total: 9 });

@@ -22,9 +22,9 @@ The process entry point and the only place platform implementations are chosen. 
 ## Surface area
 ### Public API
 - `pub fn run()` (`lib.rs:29`), called by `main.rs:4`.
-- `pub struct AppState` (`state.rs:15-58`), `AppState::init()` (`:61-64`), `AppState::init_with_progress(&mut dyn FnMut(UpgradeProgress))` for the background open (`:66-74`), `AppState::init_with(data_dir, secrets)` for tests (`:90-100`), `secrets_arc()` (`:123-125`). `init` and `init_with_progress` share `prepare()` (data dir + legacy keychain copy, `:76-88`).
+- `pub struct AppState` (`state.rs:15-58`), `AppState::init()` (`:61-64`), `AppState::init_with_progress(&mut dyn FnMut(UpgradeProgress), &mut dyn FnMut())` for the background open (the second callback fires once if a backup is about to be taken), `AppState::init_with(data_dir, secrets)` for tests (it skips the backup step), `secrets_arc()`. `init` and `init_with_progress` share `prepare()` (data dir + legacy keychain copy) and `state::open_library` (backup → open with retry → record), with `state::APP_VERSION`.
 - `pub fn prepared_data_dir()` (`state.rs:147-152`); `pub(crate) const LEGACY_KEYCHAIN_SERVICE = "com.looma.notetaker"` (`:131`, also used by `privacy.rs:808`).
-- `startup` (crate-private module): `upgrade_pending()` (`startup.rs:89-108`), `open_in_background(AppHandle)` (`:113-150`), `storage_failed(&AppHandle, &anyhow::Error) -> !` (`:152-172`), `finish(&AppHandle, AppState)` (`:177-255`), `LibraryGate` (`:57-68`), `LibraryStatus { phase, done, total }` / `LibraryPhase` (`:27-53`), `UPGRADE_EVENT = "library:upgrade"` (`:25`).
+- `startup` (crate-private module): `slow_open_step() -> Option<LibraryStep>` (was `upgrade_pending`), `open_in_background(AppHandle, LibraryStep)`, `storage_failed(&AppHandle, &anyhow::Error) -> !`, `finish(&AppHandle, AppState)`, `LibraryGate`, `LibraryStatus { phase, step, done, total }` / `LibraryPhase` / `LibraryStep { Backup, Upgrade }`, `UPGRADE_EVENT = "library:upgrade"`.
 - `logging::init(Option<&Path>)`, `logging::LOGS_DIR = "logs"` (`logging.rs:19`, `:29`).
 - `nav_guard::is_app_url`, `nav_guard::init` (`nav_guard.rs:14`, `:32`); `commands::is_openable_external_url` (`commands.rs:575-580`, also used by the nav guard).
 
@@ -66,9 +66,9 @@ Observed lock nesting: `recording` → `storage` (`recording.rs:134-140`), `reco
 
 **Startup sequence**
 Before the builder (`lib.rs:35-42`): `prepared_data_dir()` (legacy move) → `privacy::startup` (instance lock, finish a pending "Delete all my data") → `logging::init`.
-In `setup` (`lib.rs:69-92`), after the two plugins: `startup::upgrade_pending()` asks `Storage::pending_upgrade` (read-only) whether the open will run the one-time schema step. Any error counts as "no".
-- **No upgrade (every normal launch): synchronous, as before.** `manage(LibraryGate::ready())` → `AppState::init` (on failure: `storage_failed`, the error dialog, `exit(1)`) → `finish`.
-- **Upgrade pending: background.** `open_in_background` manages an `upgrading` gate and returns from `setup` at once, so the window paints. On a `spawn_blocking` thread: `AppState::init_with_progress` (the same open with retry, reporting `UpgradeProgress`) → each report updates the gate and emits `library:upgrade` → `finish` → gate `ready` + event. On failure: gate `failed` + event, then the same `storage_failed` dialog and exit.
+In `setup` (`lib.rs`), after the two plugins: `startup::slow_open_step()` asks, read-only, whether this launch will take a library backup (`fly_storage::backup::is_due`: the app version changed or a schema step is pending, see [app-backups](app-backups.md)) and then `Storage::pending_upgrade` whether the open will run the one-time schema step. Any error counts as "no".
+- **Nothing to back up or upgrade (every normal launch): synchronous, as before.** `manage(LibraryGate::ready())` → `AppState::init` (on failure: `storage_failed`, the error dialog, `exit(1)`) → `finish`.
+- **A backup or an upgrade pending: background.** `open_in_background(app, first_step)` manages an `upgrading` gate and returns from `setup` at once, so the window paints. On a `spawn_blocking` thread: `AppState::init_with_progress` → `state::open_library`: `backup::before_open` (reports the `backup` step through its callback just before the copy starts) → the open with retry (reporting `UpgradeProgress`, the `upgrade` step) → `backup::after_open` records what the backup step did. Each report updates the gate and emits `library:upgrade` → `finish` → gate `ready` + event. On failure: gate `failed` + event, then the same `storage_failed` dialog and exit. The synchronous path runs the same `open_library` (its backup step needs no progress), so a launch that is NOT due for a backup pays one read-only check.
 
 `finish` (`startup.rs:177-255`), the same on both paths and in today's order: asset scope → `migrate_anthropic_model`, `reset_unseen_cloud_consent`, `record_pending_wipe` (under the storage lock) → disk-encryption check → `manage(AppState)` → off-thread: hardware detection, stale-download sweep (1 h), recording self-heal → `scheduler::spawn`, `embeddings::spawn`, `privacy::spawn_retention`, `audio_store::spawn` (recording compression, its own low-priority thread, first pass ~2 min after launch).
 
@@ -77,7 +77,7 @@ In `setup` (`lib.rs:69-92`), after the two plugins: `startup::upgrade_pending()`
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
 |---|---|---|---|
-| `library_status` | — (takes `AppHandle`, never `State<AppState>`, so it works before the library is open) | `LibraryStatus { phase: "ready" \| "upgrading" \| "failed", done, total }` (`startup.rs:72-84`). `done`/`total` are progress units, both 0 until the first report. | `ui-app-shell` (`LibraryGate.tsx`, before `<App/>` mounts), via `api.libraryStatus` |
+| `library_status` | — (takes `AppHandle`, never `State<AppState>`, so it works before the library is open) | `LibraryStatus { phase: "ready" \| "upgrading" \| "failed", step: "backup" \| "upgrade", done, total }` (`startup.rs`). `step` says whether the open is saving the pre-upgrade backup or running the schema step. `done`/`total` are progress units, both 0 until the first upgrade report (and during the backup). | `ui-app-shell` (`LibraryGate.tsx`, before `<App/>` mounts), via `api.libraryStatus` |
 | `ping` | — | `String` ("pong") | None (devMock only) |
 | `app_info` | — | `Result<AppInfo { version, data_dir, os, appimage }, String>` | `ui-app-shell` (`App.tsx:259`, gates auto-update), `ui-settings` (`SettingsModal.tsx:377`), via `api.appInfo` |
 | `reveal_data_dir` | — | `Result<(), String>` | `ui-settings` (`SettingsModal.tsx:2093`), `ui-editor` (`Editor.tsx:1264`, fallback), via `api.revealDataDir` |
@@ -87,7 +87,7 @@ In `setup` (`lib.rs:69-92`), after the two plugins: `startup::upgrade_pending()`
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
-| `library:upgrade` | Emits (`startup.rs:64-67`, from `open_in_background` only) | `LibraryStatus` (same shape as `library_status`) on every throttled progress report (about every 100 ms), then once `ready` or `failed` | `ui-app-shell` (`LibraryGate.tsx`, listens before it calls `library_status`) |
+| `library:upgrade` | Emits (`startup.rs`, from `open_in_background` only) | `LibraryStatus` (same shape as `library_status`): once with `step: "backup"` when the copy starts, then on every throttled progress report (about every 100 ms) with `step: "upgrade"`, then once `ready` or `failed` | `ui-app-shell` (`LibraryGate.tsx`, listens before it calls `library_status`) |
 | (Tauri) `RunEvent::Exit` | Listens (`lib.rs`) | — | Calls `ollama::shutdown` (only when `AppState` exists, `try_state`) and `connectors::shutdown` (stops stdio connector programs; nothing to do before startup finishes) |
 
 ### Settings keys
@@ -139,7 +139,7 @@ Startup itself makes no requests. Background workers started here (embeddings �
 | Kind | File | Tests | Covers |
 |---|---|---|---|
 | unit | `src-tauri/src/state.rs` | 4 | Legacy folder move (moves, never clobbers, fresh-install no-op); legacy secret copy fills only missing keys |
-| unit | `src-tauri/src/startup.rs` | 1 | `LibraryStatus` JSON shape (`phase` lowercase, `done`, `total`), which `LibraryGate.tsx` reads |
+| unit | `src-tauri/src/startup.rs` | 1 | `LibraryStatus` JSON shape (`phase` and `step` lowercase, `done`, `total`), which `LibraryGate.tsx` reads |
 | unit | `src-tauri/src/logging.rs` | 3 | Appender writes into `logs/`; lexical scan of every log call in `src-tauri/src` and `crates/`; panic payload text |
 | unit | `src-tauri/src/nav_guard.rs` | 3 | `is_app_url` allow/deny lists; `is_openable_external_url` |
 | integration | `src-tauri/tests/scheduling.rs` (and others) | — | Use `AppState::init_with` with a temp dir + `MemorySecretStore` |

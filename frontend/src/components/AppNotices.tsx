@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
-import { AudioLines, CircleAlert, HardDrive, Lock, Sparkles } from "lucide-react";
+import { Archive, AudioLines, CircleAlert, HardDrive, Lock, Sparkles } from "lucide-react";
 import { useEffect, useState } from "react";
+import { backupNoticeCopy } from "../backupModel";
 import {
   NOTICE_PRIORITY,
   appErrorCopy,
@@ -14,6 +15,7 @@ import { pipelineFailureCopy, selectPipelineNotice } from "../pipelineNotice";
 import type { Updater } from "../updater";
 import { compressNoticeCopy } from "../storageModel";
 import { recoveredKeptLocalCopy, useRecoveredKeptLocal } from "./useRecoveredKeptLocal";
+import { useBackupNotice } from "./BackupNotice";
 import { useConsentSkips } from "./CloudConsent";
 import { useCompressNotice } from "./CompressNotice";
 import SystemAudioNotice from "./SystemAudioNotice";
@@ -76,6 +78,7 @@ export default function AppNotices({
   const notices: StackedNotice[] = [];
   const skips = useConsentSkips();
   const compressed = useCompressNotice();
+  const noBackup = useBackupNotice();
   const recovered = useRecoveredKeptLocal();
   const [audioLost, dismissAudioLost] = useAudioLost();
 
@@ -288,6 +291,28 @@ export default function AppNotices({
               </Button>
             </>
           }
+        >
+          {copy.cause}
+        </Notice>
+      ),
+    });
+  }
+
+  // The pre-upgrade backup was skipped or failed (once; the library was
+  // upgraded anyway). Waits out a recording.
+  if (noBackup.kind !== null && !recordingActive) {
+    const copy = backupNoticeCopy(noBackup.kind);
+    notices.push({
+      id: "no-backup",
+      priority: NOTICE_PRIORITY.noBackup,
+      node: (
+        <Notice
+          tone="warning"
+          icon={<Archive size={18} strokeWidth={1.75} />}
+          title={copy.title}
+          steps={copy.steps}
+          onDismiss={noBackup.dismiss}
+          dismissLabel="Dismiss"
         >
           {copy.cause}
         </Notice>

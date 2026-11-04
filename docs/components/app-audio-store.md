@@ -129,6 +129,7 @@ Skipped files (no audio track, already shrunk, already compact, a failed check, 
 - **Outbound:** [fly-audio](fly-audio.md) (`flac`, `derive`, `mix::read_audio_mono`), [fly-storage](fly-storage.md) (leases, `replace_meeting_recording`, `recording_file_in_folder`, `meetings_with_stored_audio`, jobs, privacy, settings, scratch paths), [fly-core](fly-core.md) (`RecordingRef`), `windows` / `libc` (thread priority), `sysinfo` (free disk space).
 
 ## Invariants
+- Before its first pass that has work, an install that has no backup from before compression gets one (`backups::before_first_compression_pass`, once per run of the app, no storage lock held). It never blocks the pass: a skipped or failed backup raises the one-time notice and compression goes on. See [app-backups](app-backups.md).
 - **A WAV is deleted only after a proof made in the same run:** its FLAC decodes (independent decoder) to exactly its samples, or (derived files) the file regenerates exactly from the sources as stored.
 - **Nothing is ever converted from a WAV that isn't in the layout capture writes** (`inspect_pcm16_wav`): an unfinalized header, extra chunks, trailing bytes, other bit depths stay WAV.
 - **The manifest is written before `recording_json`, and both before any delete.**

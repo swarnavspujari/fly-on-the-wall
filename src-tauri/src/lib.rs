@@ -4,6 +4,7 @@
 pub mod ask_approvals;
 mod asr_commands;
 pub mod audio_store;
+pub mod backups;
 mod calendar_commands;
 mod calendar_defaults;
 mod commands;
@@ -80,11 +81,12 @@ pub fn run() {
                 app.handle().plugin(tauri_plugin_process::init())?;
             }
             let handle = app.handle().clone();
-            // A first launch after a schema update can take tens of seconds
-            // on a large library: open it off the main thread so the window
-            // shows the upgrade screen instead of freezing (startup.rs).
-            if startup::upgrade_pending() {
-                startup::open_in_background(handle);
+            // A first launch after an update can take tens of seconds on a
+            // large library (the backup, then the schema step): open it off
+            // the main thread so the window shows the upgrade screen
+            // instead of freezing (startup.rs).
+            if let Some(step) = startup::slow_open_step() {
+                startup::open_in_background(handle, step);
                 return Ok(());
             }
             app.manage(startup::LibraryGate::ready());
@@ -143,6 +145,9 @@ pub fn run() {
             audio_store::prepare_playback,
             audio_store::storage_report,
             audio_store::dismiss_compress_notice,
+            backups::backup_status,
+            backups::dismiss_backup_notice,
+            backups::reveal_backups_dir,
             video_store::start_video_job,
             video_store::cancel_video_job,
             video_store::set_import_video_policy,
