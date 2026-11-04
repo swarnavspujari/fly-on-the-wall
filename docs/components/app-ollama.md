@@ -7,8 +7,9 @@
 Runs the local LLM runtime for the default "ollama" provider (Enhance, Ask, polish, extraction) and for semantic-search embeddings. The runtime is an opt-in download through the artifact manager ([app-models-gpu](app-models-gpu.md)). When nothing answers at the default address, the app spawns its own `ollama serve` child and kills it on exit. It also reports status and pulls / deletes models through Ollama's HTTP API. A server the user runs themselves (desktop app, service, custom URL) is always respected and never stopped.
 
 ## Files it owns
-- `src-tauri/src/local_models.rs` — the default local model: the memory rule (`recommend`), the one static table of measured numbers (`CANDIDATES`), the once-only pin (`migrate_default`), the one-time offer (`offer`, `dismiss_offer`), the explicit pick (`choose_model`) and the three commands below. 14 + 2 tests. Rationale and numbers: [LOCAL-MODEL-DEFAULT](../LOCAL-MODEL-DEFAULT.md).
-- `src-tauri/src/ollama.rs` — root URL, `server_alive`, `ensure_running` (spawn), `shutdown`, `ollama_status` / `ollama_pull` / `ollama_delete`, `pull_model` stream parser, 2 tests.
+- `src-tauri/src/local_models.rs` — the default local model: the memory rule (`recommend`), the one static table of measured numbers (`CANDIDATES`), the once-only pin (`migrate_default`), the one-time offer (`offer`, `dismiss_offer`), the explicit pick (`choose_model`), the models already on the disk (`models_dirs`, `installed_on_disk`), the disk-room check before a pull (`check_room`, `pull_target_dir`) and the three commands below. 26 tests. Rationale and numbers: [LOCAL-MODEL-DEFAULT](../LOCAL-MODEL-DEFAULT.md).
+- `frontend/src/localModels.table.json` — the table `CANDIDATES` serializes to, generated (`FLY_BLESS_TABLE=1`, a Rust test keeps it equal); `devMock.ts` and the frontend tests read it.
+- `src-tauri/src/ollama.rs` — root URL, `server_alive`, `server_version`, `ensure_running` (spawn), `shutdown`, `ollama_status` / `ollama_pull` / `ollama_delete`, `pull_model` stream parser, 2 tests.
 - `src-tauri/src/state.rs:37-39`, `state.rs:113` — the `AppState.ollama: Mutex<Option<Child>>` field (the rest of `state.rs` belongs to [app-shell](app-shell.md)).
 - `src-tauri/src/lib.rs:169-171` (command registration) and `lib.rs:202-211` (the `RunEvent::Exit` hook that calls `shutdown`).
 
@@ -28,10 +29,10 @@ Callers of `ensure_running`: `llm_commands::ensure_provider_ready` when `llm.pro
 | Command | Arguments | Returns | Called from (UI) |
 |---|---|---|---|
 | `ollama_status` | none | `Result<OllamaStatus, String>` | `ui-settings` (`SettingsModal.tsx:366`, on open and after every Ollama action), via `api.ollamaStatus` (`api.ts:198`) |
-| `local_model_advice` | none | `Result<Advice, String>`: this computer's memory, the running Ollama's version, the recommended model (and any held back by an old Ollama), the pinned default, the explicit pick, the one-time offer (or null) and the measured table | `ui-settings` (`SettingsModal.tsx` `loadOllama`, on open and after every Ollama action), via `api.localModelAdvice` |
+| `local_model_advice` | none | `Result<Advice, String>`: this computer's memory, the running Ollama's version, the recommended model (and any held back by an old Ollama), the pinned default (and `default_blocked` when the running Ollama can't pull it), the explicit pick, the one-time offer (or null; never for a cloud provider, an explicit pick, unreadable memory or an Ollama on another computer) and the measured table | `ui-settings` (`SettingsModal.tsx` `loadOllama`, on open and after every Ollama action), via `api.localModelAdvice` |
 | `dismiss_local_model_offer` | `model: String` (an offered model) | `Result<(), String>`; writes `llm.ollama.offer_dismissed`, so that model is never offered again | `ui-settings` ("Not now"), via `api.dismissLocalModelOffer` |
 | `use_local_model` | `model: String` (an offered model) | `Result<(), String>`; writes the explicit `llm.ollama.model`. The UI calls it only after `ollama_pull` finished | `ui-settings` ("Download and switch", "Use"), via `api.useLocalModel` |
-| `ollama_pull` | `model: String` | `Result<(), String>`; progress on `model:progress` with id `ollama:<model>` | `ui-settings` (`SettingsModal.tsx:624`, download / guided swap), via `api.ollamaPull` (`api.ts:201`) |
+| `ollama_pull` | `model: String` | `Result<(), String>`; progress on `model:progress` with id `ollama:<model>`. For an offered model that isn't on the disk yet, it first checks the free space where the models go (`local_models::check_room`: the download plus 2.0 GB) and returns a plain "Not enough free disk space for …" instead of starting; unreadable free space, a model already here, an unlisted model and a server on another computer aren't checked | `ui-settings` (`SettingsModal.tsx:624`, download / guided swap), via `api.ollamaPull` (`api.ts:201`) |
 | `ollama_delete` | `model: String` | `Result<(), String>`; refuses the model the app is configured to use, and the search embedding model (`embeddings::EMBED_MODEL`) | `ui-settings` (`SettingsModal.tsx:652`, after an in-app confirm), via `api.ollamaDelete` (`api.ts:204`) |
 
 How status is computed (`ollama.rs:171-188`): `running` = `/api/version` answered 2xx within 1.5 s; `models` = `/api/tags` (3 s timeout) only when running, else empty (errors become empty); `installed` = managed probe `bin/ollama/ollama[.exe]` exists or `ollama` is on PATH; `can_install` = this OS has an `ollama-bin` artifact (Windows, macOS); `managed` = the app holds a child handle (a child that already exited still counts until the next `ensure_running` reaps it); `base_url` = `root_url`.
@@ -41,6 +42,8 @@ How status is computed (`ollama.rs:171-188`): `running` = `/api/version` answere
 The runtime install itself is `download_model("ollama-bin")` ([app-models-gpu](app-models-gpu.md)).
 
 devMock mirrors all three (`devMock.ts:1341-1364`) with drift: `can_install` is always `true` (the backend says `false` on Linux), `running` equals `installed`, `ollama_delete` never refuses the in-use model (the UI hides that button instead, `SettingsModal.tsx:1629-1642`), and `ollama_pull` emits no `model:progress`.
+
+devMock mirrors the three model commands too, on the shared `localModels.table.json`. Flags (localStorage): `fotwMockModelOffer=1` (an existing install on `llama3.1` that is offered the 9B), `fotwMockDefaultModel=qwen3.5:9b` (a new install pinned to it), `fotwMockRam` (`8`, `12`, `16`, `32`; default 32), `fotwMockOllamaVersion` (for example `0.16.9`, too old for `qwen3.5`: the model is held back, a pinned 9B is blocked and `ollama_pull` fails with Ollama's "requires a newer version" message) and `fotwMockDiskFull=1` (the next download is refused with the backend's disk-room message). Drift: the mock's `ollama_pull` for a model it has refused never touches its model list.
 
 ### Events
 | Event | Emits / listens | Payload | Counterpart |
@@ -53,7 +56,7 @@ devMock mirrors all three (`devMock.ts:1341-1364`) with drift: `can_install` is 
 | `llm.ollama.base_url` | R | No (written by `set_llm_settings`, [app-settings-consent](app-settings-consent.md)) | Custom server URL; non-empty means "user-run, never manage" |
 | `llm.provider` | R (`ollama_delete`) | No | In-use check |
 | `llm.ollama.model` | R (`ollama_delete`, `local_models`), W (`use_local_model`) | No | The user's explicit model. Always wins, never offered over |
-| `llm.ollama.default_model` | R, W once (`local_models::migrate_default` at startup) | No | The model an install with no explicit pick uses: the recommendation for a new install, `llama3.1` for an existing one. Never rewritten |
+| `llm.ollama.default_model` | R, W once (`local_models::migrate_default` at startup, given the models already on the disk) | No | The model an install with no explicit pick uses: the recommendation for a new install (an already-downloaded model wins over a second download), `llama3.1` for an existing one or when `llama3.1` is already on the disk; nothing written while memory is unreadable. Never rewritten |
 | `llm.ollama.offer_dismissed` | R, W (`dismiss_local_model_offer`) | No | The model whose one-time offer the user declined |
 | env `OLLAMA_MODELS` (set on the child) | W | n/a | `<data_dir>/models/ollama` (`ollama.rs:106`) |
 
@@ -107,6 +110,8 @@ None. Ollama needs no key.
 | Kind | File | Tests | Covers |
 |---|---|---|---|
 | unit | `src-tauri/src/ollama.rs` | 2 | `same_model` tag-insensitive matching; `normalize_root` (`/`, `/v1`, whitespace) |
+| unit | `src-tauri/src/local_models.rs` | 26 | the memory cut-offs at their boundaries, the Ollama version gate (incl. `0.0.0`), the once-only pin (new, existing, explicit, `llama3.1` on the disk, unknown memory), the offer's conditions (cloud provider, explicit pick, dismissed, remote Ollama, not-better rank), the pinned-default-blocked case, the disk-room check and its message, the table's sanity (numbers only) and its equality with `localModels.table.json`, and `build_provider` / the delete guard following the pinned default |
+| vitest | `frontend/src/localModels.test.ts`, `components/LocalModelChoices.test.tsx`, `components/SettingsModal.test.tsx` | 45 | the plain-words copy (numbers only, the after-a-meeting cost line only where it applies), the offer and picker states, "Download and switch" order (download, then switch), a failed or refused download switching nothing (Ollama's "newer version" refusal as "update Ollama", the disk message as written), a blocked pinned default with a disabled Download, another size of the same family (`qwen3.5:4b` here, `:9b` pinned) not counting as downloaded or in use, and the dev mock's table, cut-offs, version and disk flags |
 | vitest | `frontend/src/components/SettingsModal.test.tsx` ("deleting a local model asks first, and Cancel keeps it") | 1 | UI confirm flow and the in-use row has no Delete button; backend replaced by a spy |
 | ignored e2e/harness | `src-tauri/tests/llm_bench.rs` | 1 | Talks to a running Ollama for the LLM bench; never spawns the managed server |
 | manual | `docs/TESTING.md:72`, `docs/TESTING.md:92` | — | Provider switch incl. Ollama; actionable message with Ollama not running |
@@ -118,7 +123,7 @@ None. Ollama needs no key.
 - No test pins that the embedding worker may spawn the server under a cloud provider (behavior that contradicts the `ensure_running` comment "when the selected provider is 'ollama'", `ollama.rs:77-78`).
 
 ## Changing it safely
-- Run `cargo test -p fly-app --lib ollama`.
+- Run `cargo test -p fly-app --lib ollama` and `cargo test -p fly-app --lib local_models`. After editing `CANDIDATES`, regenerate the shared table with `FLY_BLESS_TABLE=1 cargo test -p fly-app --lib the_shared_table_matches_the_product_table` and commit it.
 - Keep `OllamaStatus` in step with `frontend/src/types.ts:288-299` and `devMock.ts:1341-1350`.
 - Any new spawn path must store the `Child` in `AppState.ollama` so `shutdown` can find it. If you fix the orphan cases: a Windows Job Object with kill-on-close, plus `tauri_plugin_updater::Builder::on_before_exit(|| ollama::shutdown(..))` for the update path.
 - Don't call `ensure_running` from a query or UI-latency path; use `server_alive`.

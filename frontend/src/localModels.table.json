@@ -1,0 +1,62 @@
+[
+  {
+    "download_bytes": 6600000000,
+    "measured": {
+      "background_slower": [
+        15,
+        25
+      ],
+      "declines_pct": 94,
+      "seconds": 30,
+      "sourced_pct": 83
+    },
+    "memory_gb": 6.2,
+    "min_ollama": [
+      0,
+      17,
+      5
+    ],
+    "min_ram_gb": 15.0,
+    "model": "qwen3.5:9b",
+    "ram_class_gb": 16,
+    "rank": 2
+  },
+  {
+    "download_bytes": 4920000000,
+    "measured": {
+      "background_slower": null,
+      "declines_pct": 75,
+      "seconds": 25,
+      "sourced_pct": 62
+    },
+    "memory_gb": 5.8,
+    "min_ollama": [
+      0,
+      0,
+      0
+    ],
+    "min_ram_gb": 11.0,
+    "model": "llama3.1",
+    "ram_class_gb": 12,
+    "rank": 1
+  },
+  {
+    "download_bytes": 3330000000,
+    "measured": {
+      "background_slower": null,
+      "declines_pct": 56,
+      "seconds": 20,
+      "sourced_pct": 65
+    },
+    "memory_gb": 3.6,
+    "min_ollama": [
+      0,
+      17,
+      5
+    ],
+    "min_ram_gb": 7.0,
+    "model": "qwen3.5:4b",
+    "ram_class_gb": 8,
+    "rank": 1
+  }
+]

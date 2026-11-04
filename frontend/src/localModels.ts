@@ -20,6 +20,16 @@ export function measuredLine(m: LocalModelMeasured): string {
   );
 }
 
+/** "15" tenths → "1.5". */
+const tenths = (n: number) => (n / 10).toFixed(1).replace(/\.0$/, "");
+
+/** What the work after a meeting costs, when it costs more than llama3.1. */
+export function slowerLine(m: LocalModelMeasured): string | null {
+  if (!m.background_slower) return null;
+  const [lo, hi] = m.background_slower;
+  return `Notes and cleanup after a meeting take about ${tenths(lo)}–${tenths(hi)} times as long as with llama3.1.`;
+}
+
 /** What the model asks of the computer. */
 export function memoryLine(row: LocalModelRow): string {
   return `Uses about ${Math.round(row.memory_gb)} GB of memory while answering. Suits computers with ${row.ram_class_gb} GB or more.`;
@@ -34,6 +44,34 @@ export function offerTitle(model: string, bytes: number): string {
 export function heldBackNote(h: NonNullable<LocalModelAdvice["held_back"]>): string {
   const have = h.have_ollama ? ` This computer has ${h.have_ollama}.` : "";
   return `${h.model} needs Ollama ${h.needs_ollama} or newer.${have} Update Ollama to use it.`;
+}
+
+/** The pinned default needs a newer Ollama than the one running: say so
+ *  next to the Download button instead of letting the pull fail. */
+export function blockedNote(advice: LocalModelAdvice | null, effective: string): string | null {
+  const b = advice?.default_blocked;
+  if (!b || !sameModel(b.model, effective)) return null;
+  return heldBackNote(b);
+}
+
+/** A pull's error in words a person can act on. Ollama's own refusal for a
+ *  model its version doesn't have becomes "update Ollama"; anything else is
+ *  shown as it came. */
+export function friendlyPullError(
+  e: unknown,
+  model: string,
+  advice: LocalModelAdvice | null,
+): string {
+  const raw = String(e);
+  if (!/newer version of Ollama/i.test(raw)) return raw;
+  const row = rowFor(advice, model);
+  const needs = row?.needs_newer_ollama;
+  const have = advice?.ollama_version;
+  return (
+    `${model} needs ${needs ? `Ollama ${needs} or newer` : "a newer Ollama"}.` +
+    (have ? ` This computer has ${have}.` : "") +
+    " Update Ollama (ollama.com), then try again."
+  );
 }
 
 /** Tag-insensitive match, as the backend: a bare name matches any tag of its

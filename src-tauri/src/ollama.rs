@@ -345,6 +345,17 @@ pub async fn ollama_pull(app: tauri::AppHandle, model: String) -> CmdResult<()> 
     let state = app.state::<AppState>();
     ensure_running(&state).await?;
     let root = root_url(&state);
+    // Refuse a pull the disk can't hold before gigabytes of it land: not for
+    // a model that is already here, nor for a server on another computer.
+    let already_here = list_models(&root)
+        .await
+        .is_ok_and(|have| have.iter().any(|m| same_model(&m.name, &model)));
+    if !already_here {
+        let managed = state.ollama.lock().unwrap().is_some();
+        let free = crate::local_models::pull_target_dir(&state, &root, managed)
+            .and_then(|dir| crate::audio_store::free_space(&dir));
+        crate::local_models::check_room(&model, free)?;
+    }
     let emit = {
         let app = app.clone();
         move |p: models::ModelProgress| {

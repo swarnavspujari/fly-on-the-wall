@@ -9,6 +9,7 @@ import {
   offerTitle,
   rowFor,
   sizeLabel,
+  slowerLine,
 } from "../localModels";
 import { openExternal } from "../safeContent";
 import type { LocalModelAdvice, OllamaModel } from "../types";
@@ -63,6 +64,11 @@ export function LocalModelOffer({ advice, installed, busy, onAccept, onDismiss }
           <p className="mt-1 text-text-3" style={SMALL}>
             {memoryLine(row)} You keep using your current model until you switch.
           </p>
+          {slowerLine(row.measured) && (
+            <p className="mt-1 text-text-3" style={SMALL}>
+              {slowerLine(row.measured)}
+            </p>
+          )}
         </>
       )}
       <MeasuredCaption advice={advice} />
@@ -127,6 +133,11 @@ export function LocalModelChoices({ advice, installed, effective, busy, onUse }:
                 {memoryLine(row)}
                 {!row.fits && " This computer has less memory than that."}
               </p>
+              {slowerLine(row.measured) && (
+                <p className="text-text-3" style={SMALL}>
+                  {slowerLine(row.measured)}
+                </p>
+              )}
               {row.needs_newer_ollama && (
                 <p className="text-warning-text" style={SMALL}>
                   Needs Ollama {row.needs_newer_ollama} or newer

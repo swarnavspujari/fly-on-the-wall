@@ -49,8 +49,8 @@ pub const BENCH_DOC_URL: &str =
 /// Honest label for every number below (docs/ASK-MODEL-BENCH.md §2): one
 /// laptop, other work running, so speeds are indicative and quality isn't
 /// affected by that.
-pub const MEASURED_ON: &str = "Measured on one test laptop (4 GB graphics memory, 32 GB RAM) \
-     while other programs were running. Your computer will differ.";
+pub const MEASURED_ON: &str = "Measured on one test laptop (4 GB graphics memory, 32 GB RAM, \
+     Ollama 0.40) while other programs were running. Your computer will differ.";
 
 /// What was measured for a model: 60 answerable and 16 unanswerable
 /// questions from the evals' synthetic corpus, on main with the claim-check
@@ -66,11 +66,15 @@ pub struct Measured {
     /// Median time per answer, rounded to 5 s. Contended: other sessions
     /// were compiling on the machine, the small models more than the big.
     pub seconds: u8,
+    /// How much longer notes, cleanup and action items take after a meeting
+    /// than with `llama3.1`, in tenths (`[15, 25]` = 1.5 to 2.5 times), from
+    /// the `llm_bench` contract pass. None when it is no slower.
+    pub background_slower: Option<[u8; 2]>,
 }
 
 /// One model the app offers. The ONE static table of benchmark numbers in
 /// product code: the UI reads it through `local_model_advice`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct Candidate {
     pub model: &'static str,
     /// Higher is better quality, as measured. `llama3.1` and `qwen3.5:4b`
@@ -81,7 +85,7 @@ pub struct Candidate {
     pub download_bytes: u64,
     /// Memory held while answering, measured at the context window the app
     /// asks for (weights plus KV cache).
-    pub memory_gb: f32,
+    pub memory_gb: f64,
     /// Installed memory (as the OS reports it, in GB) from which this model
     /// is recommended. See [`recommend`] for the arithmetic.
     pub min_ram_gb: f64,
@@ -112,6 +116,7 @@ pub const CANDIDATES: &[Candidate] = &[
             sourced_pct: 83,
             declines_pct: 94,
             seconds: 30,
+            background_slower: Some([15, 25]),
         },
     },
     Candidate {
@@ -128,6 +133,7 @@ pub const CANDIDATES: &[Candidate] = &[
             sourced_pct: 62,
             declines_pct: 75,
             seconds: 25,
+            background_slower: None,
         },
     },
     Candidate {
@@ -144,6 +150,7 @@ pub const CANDIDATES: &[Candidate] = &[
             sourced_pct: 65,
             declines_pct: 56,
             seconds: 20,
+            background_slower: None,
         },
     },
 ];
@@ -155,11 +162,21 @@ fn candidate(model: &str) -> Option<&'static Candidate> {
 }
 
 /// Installed memory in GB, as the OS reports it (a "16 GB" computer reads
-/// 15.2–16.0). Memory only, on purpose; see [`recommend`].
+/// 15.2–16.0). Memory only, on purpose; see [`recommend`]. 0 when the OS
+/// won't say.
 pub fn total_ram_gb() -> f64 {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
     sys.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0
+}
+
+/// A reading below this is "couldn't tell" (no computer has 1 GB; sysinfo
+/// reports 0 when it can't read memory). Nothing is pinned or offered on it:
+/// the default stays `llama3.1` and the next launch tries again.
+pub const RAM_UNKNOWN_BELOW_GB: f64 = 1.0;
+
+pub fn ram_known(ram_gb: f64) -> bool {
+    ram_gb >= RAM_UNKNOWN_BELOW_GB
 }
 
 fn parse_version(v: &str) -> Option<[u32; 3]> {
@@ -172,10 +189,13 @@ fn parse_version(v: &str) -> Option<[u32; 3]> {
 }
 
 /// Whether a running server of `version` has a model that needs `min`. An
-/// unknown (server not running) or unreadable version counts as yes: the
-/// pull says so itself if it can't.
+/// unknown (server not running), unreadable or `0.0.0` version (what a
+/// development build of Ollama reports) counts as yes: the pull says so
+/// itself if it can't.
 fn supports(version: Option<&str>, min: [u32; 3]) -> bool {
-    version.and_then(parse_version).is_none_or(|v| v >= min)
+    version
+        .and_then(parse_version)
+        .is_none_or(|v| v == [0, 0, 0] || v >= min)
 }
 
 /// A better model exists for this computer but the running Ollama is too old
@@ -206,7 +226,8 @@ pub struct Recommendation {
 ///   of each model on it and still met the floors; a bigger GPU only makes
 ///   answers faster, and every computer with 8 GB or more of graphics memory
 ///   already has 16 GB or more of RAM. A computer without a GPU is slower
-///   and the speed line says so; its model fits all the same.
+///   (the caption under the numbers says yours will differ); its model
+///   fits all the same.
 /// * *Apple Silicon* shares one pool, so installed memory is the figure to
 ///   use, and it is the same rule. The numbers understate a Mac's speed: its
 ///   GPU runs the whole model.
@@ -215,6 +236,13 @@ pub struct Recommendation {
 ///   (docs/ASK-MODEL-BENCH.md §9), and `gemma4:12b-it-qat` meets the same
 ///   floors but is 35% slower and 1.8 GB bigger.
 pub fn recommend(ram_gb: f64, ollama_version: Option<&str>) -> Recommendation {
+    // Memory unreadable: no claim about this computer; the safe default.
+    if !ram_known(ram_gb) {
+        return Recommendation {
+            model: LEGACY_DEFAULT,
+            held_back: None,
+        };
+    }
     let ideal = CANDIDATES
         .iter()
         .find(|c| ram_gb >= c.min_ram_gb)
@@ -268,7 +296,8 @@ pub fn explicit_model(storage: &fly_storage::Storage) -> Option<String> {
 }
 
 /// Whether this library was in use before the default depended on memory:
-/// notes, an accepted first-run notice, or any provider setting. A brand
+/// notes, an accepted first-run notice, any provider setting, or a trace of a
+/// previous launch (the hardware cache, the v2.4 consent migration). A brand
 /// new install has none of them.
 fn existing_install(storage: &fly_storage::Storage) -> bool {
     storage
@@ -279,26 +308,97 @@ fn existing_install(storage: &fly_storage::Storage) -> bool {
             "llm.provider",
             EXPLICIT_KEY,
             "llm.ollama.base_url",
+            crate::hw::CACHE_KEY,
+            crate::llm_commands::CLOUD_CONSENT_RESET_FLAG,
         ]
         .iter()
         .any(|k| get(storage, k).is_some())
 }
 
+/// The Ollama manifest of `model` under a models folder: `llama3.1` is
+/// `manifests/registry.ollama.ai/library/llama3.1/latest`, `qwen3.5:9b` is
+/// `.../library/qwen3.5/9b`.
+fn manifest_of(models_dir: &std::path::Path, model: &str) -> std::path::PathBuf {
+    let (name, tag) = model.split_once(':').unwrap_or((model, "latest"));
+    models_dir
+        .join("manifests")
+        .join("registry.ollama.ai")
+        .join("library")
+        .join(name)
+        .join(tag)
+}
+
+/// Offered models that are already downloaded under any of `dirs` (best
+/// first, as in [`CANDIDATES`]).
+pub fn installed_in(dirs: &[std::path::PathBuf]) -> Vec<&'static str> {
+    CANDIDATES
+        .iter()
+        .filter(|c| dirs.iter().any(|d| manifest_of(d, c.model).is_file()))
+        .map(|c| c.model)
+        .collect()
+}
+
+/// Where this computer's Ollama keeps models: the app's own folder (the
+/// managed server), `OLLAMA_MODELS`, and Ollama's default (`~/.ollama/models`).
+fn models_dirs(data_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![data_dir.join("models").join("ollama")];
+    if let Some(custom) = std::env::var_os("OLLAMA_MODELS").filter(|v| !v.is_empty()) {
+        dirs.push(custom.into());
+    }
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".ollama").join("models"));
+    }
+    dirs
+}
+
+/// Offered models already on this computer's disk (for the first-launch pin).
+pub fn installed_on_disk(data_dir: &std::path::Path) -> Vec<&'static str> {
+    installed_in(&models_dirs(data_dir))
+}
+
 /// Pin the default once, at the first launch that knows about it. Returns
 /// the pinned model when this call wrote it.
 ///
-/// * an explicit choice or an existing install → [`LEGACY_DEFAULT`] (what it
-///   was already running; an explicit choice that is later cleared falls back
-///   to it too, never to a model the user never saw);
-/// * a brand new install → the recommendation for this computer's memory.
-pub fn migrate_default(storage: &fly_storage::Storage, ram_gb: f64) -> Option<String> {
+/// * an explicit choice, an existing install, or `llama3.1` already on the
+///   disk → [`LEGACY_DEFAULT`] (what it was already running; an explicit
+///   choice that is later cleared falls back to it too, never to a model the
+///   user never saw);
+/// * a brand new install → the recommendation for this computer's memory,
+///   unless an offered model is already downloaded (a library wiped with
+///   "delete all my data" leaves Ollama's models alone): then that model, the
+///   recommended one if it is there, else the best that fits;
+/// * memory unreadable → nothing is pinned (`llama3.1` meanwhile), and the
+///   next launch tries again.
+///
+/// `on_disk` is [`installed_on_disk`].
+pub fn migrate_default(
+    storage: &fly_storage::Storage,
+    ram_gb: f64,
+    on_disk: &[&str],
+) -> Option<String> {
     if get(storage, DEFAULT_KEY).is_some() {
         return None;
     }
-    let pick = if explicit_model(storage).is_some() || existing_install(storage) {
+    let pick = if explicit_model(storage).is_some()
+        || existing_install(storage)
+        || on_disk.contains(&LEGACY_DEFAULT)
+    {
         LEGACY_DEFAULT
+    } else if !ram_known(ram_gb) {
+        tracing::warn!("memory unreadable: the default local model isn't pinned this launch");
+        return None;
     } else {
-        recommend(ram_gb, None).model
+        let rec = recommend(ram_gb, None).model;
+        if on_disk.is_empty() || on_disk.contains(&rec) {
+            rec
+        } else {
+            on_disk
+                .iter()
+                .copied()
+                .find(|m| candidate(m).is_some_and(|c| ram_gb >= c.min_ram_gb))
+                .or_else(|| on_disk.first().copied())
+                .unwrap_or(rec)
+        }
     };
     match storage.set_setting(DEFAULT_KEY, pick) {
         Ok(()) => {
@@ -330,7 +430,14 @@ pub fn offer(
     ollama_version: Option<&str>,
 ) -> Option<Offer> {
     let provider = get(storage, "llm.provider").unwrap_or_else(|| "ollama".into());
-    if provider != "ollama" || explicit_model(storage).is_some() {
+    if provider != "ollama" || explicit_model(storage).is_some() || !ram_known(ram_gb) {
+        return None;
+    }
+    // A custom or remote server is sized by ITS memory, not this computer's:
+    // a model sized for this one would be pulled onto the other box.
+    if get(storage, "llm.ollama.base_url")
+        .is_some_and(|u| !crate::llm_commands::is_loopback_url(&u))
+    {
         return None;
     }
     let rec = recommend(ram_gb, ollama_version);
@@ -354,7 +461,7 @@ pub fn offer(
 pub struct ModelRow {
     pub model: &'static str,
     pub download_bytes: u64,
-    pub memory_gb: f32,
+    pub memory_gb: f64,
     pub ram_class_gb: u8,
     /// This computer has the memory the model is recommended from.
     pub fits: bool,
@@ -374,11 +481,27 @@ pub struct Advice {
     pub held_back: Option<HeldBack>,
     /// What an install with no explicit choice uses (pinned).
     pub default_model: String,
+    /// The pinned default needs a newer Ollama than the one running (a fresh
+    /// install pinned before the version was known): its download would fail.
+    pub default_blocked: Option<HeldBack>,
     pub explicit_model: Option<String>,
     pub offer: Option<Offer>,
     pub models: Vec<ModelRow>,
     pub measured_on: &'static str,
     pub doc_url: &'static str,
+}
+
+/// `model` needs a newer Ollama than `ollama_version`.
+fn blocked(model: &str, ollama_version: Option<&str>) -> Option<HeldBack> {
+    let c = candidate(model)?;
+    (!supports(ollama_version, c.min_ollama)).then(|| {
+        let [a, b, p] = c.min_ollama;
+        HeldBack {
+            model: c.model.to_string(),
+            needs_ollama: format!("{a}.{b}.{p}"),
+            have_ollama: ollama_version.unwrap_or_default().to_string(),
+        }
+    })
 }
 
 pub fn advice(storage: &fly_storage::Storage, ram_gb: f64, ollama_version: Option<&str>) -> Advice {
@@ -389,6 +512,7 @@ pub fn advice(storage: &fly_storage::Storage, ram_gb: f64, ollama_version: Optio
         recommended: rec.model.to_string(),
         held_back: rec.held_back.clone(),
         default_model: effective_default(storage),
+        default_blocked: blocked(&effective_default(storage), ollama_version),
         explicit_model: explicit_model(storage),
         offer: offer(storage, ram_gb, ollama_version),
         models: CANDIDATES
@@ -398,7 +522,7 @@ pub fn advice(storage: &fly_storage::Storage, ram_gb: f64, ollama_version: Optio
                 download_bytes: c.download_bytes,
                 memory_gb: c.memory_gb,
                 ram_class_gb: c.ram_class_gb,
-                fits: ram_gb >= c.min_ram_gb,
+                fits: !ram_known(ram_gb) || ram_gb >= c.min_ram_gb,
                 recommended: c.model == rec.model,
                 needs_newer_ollama: (!supports(ollama_version, c.min_ollama)).then(|| {
                     let [a, b, p] = c.min_ollama;
@@ -427,6 +551,54 @@ pub fn choose_model(storage: &fly_storage::Storage, model: &str) -> CmdResult<()
     storage
         .set_setting(EXPLICIT_KEY, c.model)
         .map_err(|e| e.to_string())
+}
+
+/// Room kept free beyond a download's own size (Ollama stages the blobs,
+/// then writes the manifest, and the computer needs air).
+pub const PULL_MARGIN_BYTES: u64 = 2_000_000_000;
+
+fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+}
+
+/// Whether a pull of `model` has the disk room it needs, given the free
+/// bytes where the models go (None = can't tell: not refused). Only the
+/// offered models have a known size; any other name isn't checked.
+pub fn check_room(model: &str, free: Option<u64>) -> CmdResult<()> {
+    let (Some(c), Some(free)) = (candidate(model), free) else {
+        return Ok(());
+    };
+    let need = c.download_bytes.saturating_add(PULL_MARGIN_BYTES);
+    if free >= need {
+        return Ok(());
+    }
+    Err(format!(
+        "Not enough free disk space for {}. It needs about {} free (a {} download plus {} to spare) and this drive has {}. Free up space (Settings › Your files and privacy shows what the app keeps), or choose a smaller model.",
+        c.model,
+        gb(need),
+        gb(c.download_bytes),
+        gb(PULL_MARGIN_BYTES),
+        gb(free)
+    ))
+}
+
+/// The folder whose drive a pull fills: the app's own models folder for the
+/// server this app manages, else `OLLAMA_MODELS` or Ollama's default for a
+/// user-run local one; None for a server on another computer.
+pub fn pull_target_dir(state: &AppState, root: &str, managed: bool) -> Option<std::path::PathBuf> {
+    if !crate::llm_commands::is_loopback_url(root) {
+        return None;
+    }
+    if managed {
+        return Some(state.data_dir.join("models").join("ollama"));
+    }
+    // A user-run server keeps models in OLLAMA_MODELS (if set) or in
+    // Ollama's default under the home folder.
+    std::env::var_os("OLLAMA_MODELS")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".ollama").join("models")))
+        .or_else(|| Some(state.data_dir.clone()))
 }
 
 #[tauri::command]
@@ -486,7 +658,7 @@ mod tests {
         for c in CANDIDATES {
             assert_eq!(recommend(c.min_ram_gb, None).model, c.model, "{}", c.model);
             assert!(c.ram_class_gb as f64 >= c.min_ram_gb, "{}", c.model);
-            assert!(c.min_ram_gb > c.memory_gb as f64 + 3.0, "{}", c.model);
+            assert!(c.min_ram_gb > c.memory_gb + 3.0, "{}", c.model);
         }
     }
 
@@ -535,14 +707,17 @@ mod tests {
     fn a_fresh_install_is_pinned_to_the_recommendation_once() {
         let (_d, s) = storage();
         assert_eq!(effective_default(&s), "llama3.1", "before the migration");
-        assert_eq!(migrate_default(&s, 31.7).as_deref(), Some("qwen3.5:9b"));
+        assert_eq!(
+            migrate_default(&s, 31.7, &[]).as_deref(),
+            Some("qwen3.5:9b")
+        );
         assert_eq!(effective_default(&s), "qwen3.5:9b");
         // Once: a later run on a bigger or smaller computer changes nothing.
-        assert_eq!(migrate_default(&s, 8.0), None);
+        assert_eq!(migrate_default(&s, 8.0, &[]), None);
         assert_eq!(effective_default(&s), "qwen3.5:9b");
         // A small computer's fresh install gets the fitting model.
         let (_d, s) = storage();
-        migrate_default(&s, 7.7);
+        migrate_default(&s, 7.7, &[]);
         assert_eq!(effective_default(&s), "qwen3.5:4b");
     }
 
@@ -559,7 +734,7 @@ mod tests {
             let (_d, s) = storage();
             s.set_setting(k, v).unwrap();
             assert_eq!(
-                migrate_default(&s, 64.0).as_deref(),
+                migrate_default(&s, 64.0, &[]).as_deref(),
                 Some("llama3.1"),
                 "{k}"
             );
@@ -568,7 +743,7 @@ mod tests {
         // Notes in the library count too.
         let (_d, s) = storage();
         s.create_note("A note", None).unwrap();
-        assert_eq!(migrate_default(&s, 64.0).as_deref(), Some("llama3.1"));
+        assert_eq!(migrate_default(&s, 64.0, &[]).as_deref(), Some("llama3.1"));
     }
 
     #[test]
@@ -577,7 +752,7 @@ mod tests {
         s.set_setting("llm.ollama.model", "mistral").unwrap();
         // Pinned legacy underneath, so clearing the choice later can't land
         // on a model the user never saw.
-        assert_eq!(migrate_default(&s, 64.0).as_deref(), Some("llama3.1"));
+        assert_eq!(migrate_default(&s, 64.0, &[]).as_deref(), Some("llama3.1"));
         assert_eq!(explicit_model(&s).as_deref(), Some("mistral"));
         // And no offer, on any memory.
         assert_eq!(offer(&s, 64.0, None), None);
@@ -590,7 +765,7 @@ mod tests {
     fn an_existing_install_is_offered_a_better_model_never_switched() {
         let (_d, s) = storage();
         s.set_setting("llm.provider", "ollama").unwrap();
-        migrate_default(&s, 32.0);
+        migrate_default(&s, 32.0, &[]);
         // Never switched: still llama3.1.
         assert_eq!(effective_default(&s), "llama3.1");
         let o = offer(&s, 32.0, Some("0.40.13")).unwrap();
@@ -609,11 +784,11 @@ mod tests {
     #[test]
     fn nothing_is_offered_to_a_fresh_install_or_a_cloud_user() {
         let (_d, s) = storage();
-        migrate_default(&s, 32.0); // pinned to the 9B itself
+        migrate_default(&s, 32.0, &[]); // pinned to the 9B itself
         assert_eq!(offer(&s, 32.0, None), None);
         let (_d, s) = storage();
         s.set_setting("llm.provider", "anthropic").unwrap();
-        migrate_default(&s, 32.0);
+        migrate_default(&s, 32.0, &[]);
         assert_eq!(
             offer(&s, 32.0, None),
             None,
@@ -625,7 +800,7 @@ mod tests {
     fn dismissing_the_offer_is_for_that_model_only() {
         let (_d, s) = storage();
         s.set_setting("llm.provider", "ollama").unwrap();
-        migrate_default(&s, 32.0);
+        migrate_default(&s, 32.0, &[]);
         assert!(offer(&s, 32.0, None).is_some());
         dismiss_offer(&s, "qwen3.5:9b").unwrap();
         assert_eq!(offer(&s, 32.0, None), None, "dismissed");
@@ -643,7 +818,7 @@ mod tests {
     fn accepting_makes_an_explicit_choice_that_ends_the_offer() {
         let (_d, s) = storage();
         s.set_setting("llm.provider", "ollama").unwrap();
-        migrate_default(&s, 32.0);
+        migrate_default(&s, 32.0, &[]);
         choose_model(&s, "qwen3.5:9b").unwrap();
         assert_eq!(explicit_model(&s).as_deref(), Some("qwen3.5:9b"));
         assert_eq!(offer(&s, 32.0, None), None);
@@ -682,7 +857,7 @@ mod tests {
     fn advice_describes_this_computer_and_marks_the_recommendation() {
         let (_d, s) = storage();
         s.set_setting("llm.provider", "ollama").unwrap();
-        migrate_default(&s, 16.0);
+        migrate_default(&s, 16.0, &[]);
         let a = advice(&s, 15.7, Some("0.40.13"));
         assert_eq!(a.recommended, "qwen3.5:9b");
         assert_eq!(a.default_model, "llama3.1");
@@ -739,7 +914,7 @@ mod tests {
         assert_eq!((id, model.as_str()), ("ollama", "llama3.1"));
         // A fresh install pinned to the 9B.
         let (_, model, s, _d) = build(&|st| {
-            migrate_default(st, 31.7);
+            migrate_default(st, 31.7, &[]);
         });
         assert_eq!(model, "qwen3.5:9b");
         // The settings screen and the in-use guard agree with the provider.
@@ -747,19 +922,19 @@ mod tests {
         // An existing install on a big computer is pinned to what it ran.
         let (_, model, _s, _d) = build(&|st| {
             st.set_setting("llm.provider", "ollama").unwrap();
-            migrate_default(st, 64.0);
+            migrate_default(st, 64.0, &[]);
         });
         assert_eq!(model, "llama3.1", "never switched by the pin");
         // An explicit pick beats the pin, on any memory.
         let (_, model, _s, _d) = build(&|st| {
-            migrate_default(st, 64.0);
+            migrate_default(st, 64.0, &[]);
             st.set_setting("llm.ollama.model", "qwen3.5:4b").unwrap();
         });
         assert_eq!(model, "qwen3.5:4b");
         // Clicking a model (use_local_model) is that explicit pick.
         let (_, model, _s, _d) = build(&|st| {
             st.set_setting("llm.provider", "ollama").unwrap();
-            migrate_default(st, 64.0);
+            migrate_default(st, 64.0, &[]);
             choose_model(st, "qwen3.5:9b").unwrap();
         });
         assert_eq!(model, "qwen3.5:9b");
@@ -772,7 +947,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let secrets = std::sync::Arc::new(fly_secrets::MemorySecretStore::default());
         let state = crate::state::AppState::init_with(dir.path().to_path_buf(), secrets).unwrap();
-        migrate_default(&state.storage.lock().unwrap(), 31.7);
+        migrate_default(&state.storage.lock().unwrap(), 31.7, &[]);
         assert_eq!(
             crate::ollama::selected_model(&state).as_deref(),
             Some("qwen3.5:9b")
@@ -787,6 +962,238 @@ mod tests {
             crate::ollama::selected_model(&state),
             None,
             "a cloud provider uses none"
+        );
+    }
+
+    #[test]
+    fn a_pull_is_refused_when_the_disk_cannot_hold_it() {
+        // 6.6 GB download + 2 GB margin = 8.6 GB for the 9B.
+        let need = 6_600_000_000 + PULL_MARGIN_BYTES;
+        assert!(check_room("qwen3.5:9b", Some(need)).is_ok());
+        let err = check_room("qwen3.5:9b", Some(need - 1)).unwrap_err();
+        assert!(
+            err.starts_with("Not enough free disk space for qwen3.5:9b."),
+            "{err}"
+        );
+        for part in [
+            "about 8.6 GB free",
+            "a 6.6 GB download",
+            "2.0 GB to spare",
+            "has 8.6 GB",
+        ] {
+            assert!(err.contains(part), "{part} in {err}");
+        }
+        assert!(err.contains("choose a smaller model"));
+        // Plain words, no codes.
+        assert!(!err.contains("bytes") && !err.contains("ENOSPC"));
+        // Each offered model's own size.
+        assert!(check_room("llama3.1", Some(4_920_000_000 + PULL_MARGIN_BYTES)).is_ok());
+        assert!(check_room("llama3.1", Some(4_920_000_000)).is_err());
+        assert!(check_room("qwen3.5:4b", Some(3_330_000_000 + PULL_MARGIN_BYTES)).is_ok());
+        assert!(check_room("qwen3.5:4b", Some(1_000_000_000)).is_err());
+        // A tag-insensitive name is the same model.
+        assert!(check_room("llama3.1:latest", Some(1)).is_err());
+        // Can't tell the free space, or not a model we know the size of: not refused.
+        assert!(check_room("qwen3.5:9b", None).is_ok());
+        assert!(check_room("some-custom-model", Some(1)).is_ok());
+    }
+
+    #[test]
+    fn unreadable_memory_pins_nothing_and_offers_nothing() {
+        assert!(!ram_known(0.0) && !ram_known(0.9) && ram_known(1.0));
+        assert_eq!(recommend(0.0, None).model, "llama3.1", "the safe default");
+        // A fresh install on an unreadable computer isn't pinned to the 4B
+        // forever: nothing is written, the default stays llama3.1, and the
+        // next launch (with a reading) pins.
+        let (_d, s) = storage();
+        assert_eq!(migrate_default(&s, 0.0, &[]), None);
+        assert_eq!(effective_default(&s), "llama3.1");
+        assert_eq!(
+            migrate_default(&s, 31.7, &[]).as_deref(),
+            Some("qwen3.5:9b")
+        );
+        // An existing install needs no reading to keep what it runs.
+        let (_d, s) = storage();
+        s.set_setting("llm.provider", "ollama").unwrap();
+        assert_eq!(migrate_default(&s, 0.0, &[]).as_deref(), Some("llama3.1"));
+        // No offer on a reading that isn't one, and no row claims a misfit.
+        assert_eq!(offer(&s, 0.0, None), None);
+        assert!(advice(&s, 0.0, None).models.iter().all(|m| m.fits));
+    }
+
+    #[test]
+    fn traces_of_an_earlier_launch_make_an_install_existing() {
+        // A v2.4 library with nothing else: the hardware cache is written by
+        // every launch, and the v2.4 consent migration by the first v2.4 one.
+        for key in [
+            crate::hw::CACHE_KEY,
+            crate::llm_commands::CLOUD_CONSENT_RESET_FLAG,
+        ] {
+            let (_d, s) = storage();
+            s.set_setting(key, "x").unwrap();
+            assert_eq!(
+                migrate_default(&s, 64.0, &[]).as_deref(),
+                Some("llama3.1"),
+                "{key}"
+            );
+        }
+        // llama3.1 already downloaded: that is what it has been running.
+        let (_d, s) = storage();
+        assert_eq!(
+            migrate_default(&s, 64.0, &["llama3.1"]).as_deref(),
+            Some("llama3.1")
+        );
+        assert_eq!(effective_default(&s), "llama3.1");
+    }
+
+    #[test]
+    fn a_fresh_library_pins_a_model_that_is_already_on_the_disk() {
+        // After "delete all my data" Ollama's models are still there.
+        let pin = |ram: f64, on_disk: &[&str]| {
+            let (_d, s) = storage();
+            migrate_default(&s, ram, on_disk);
+            effective_default(&s)
+        };
+        assert_eq!(
+            pin(32.0, &[]),
+            "qwen3.5:9b",
+            "nothing downloaded: the recommendation"
+        );
+        assert_eq!(
+            pin(32.0, &["qwen3.5:4b"]),
+            "qwen3.5:4b",
+            "what is there, not a 6.6 GB download"
+        );
+        assert_eq!(
+            pin(32.0, &["qwen3.5:9b", "qwen3.5:4b"]),
+            "qwen3.5:9b",
+            "the recommendation if it is there"
+        );
+        assert_eq!(
+            pin(12.0, &["qwen3.5:9b", "qwen3.5:4b"]),
+            "qwen3.5:4b",
+            "the best that fits"
+        );
+        assert_eq!(
+            pin(8.0, &["qwen3.5:9b"]),
+            "qwen3.5:9b",
+            "only what there is"
+        );
+    }
+
+    #[test]
+    fn manifests_on_disk_say_which_offered_models_are_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let put = |root: &std::path::Path, rel: &str| {
+            let p = root.join("manifests/registry.ollama.ai/library").join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "{}").unwrap();
+        };
+        assert!(installed_in(&[dir.path().to_path_buf()]).is_empty());
+        put(dir.path(), "llama3.1/latest");
+        put(other.path(), "qwen3.5/9b");
+        put(other.path(), "qwen3.5/27b"); // not an offered model
+        let both = [dir.path().to_path_buf(), other.path().to_path_buf()];
+        assert_eq!(
+            installed_in(&both),
+            vec!["qwen3.5:9b", "llama3.1"],
+            "best first"
+        );
+        assert_eq!(installed_in(&both[..1]), vec!["llama3.1"]);
+        // A folder that doesn't exist is no model.
+        assert!(installed_in(&[std::path::PathBuf::from("/no/such/models")]).is_empty());
+    }
+
+    #[test]
+    fn another_computers_ollama_is_never_offered_this_computers_model() {
+        let (_d, s) = storage();
+        s.set_setting("llm.provider", "ollama").unwrap();
+        migrate_default(&s, 32.0, &[]);
+        assert!(offer(&s, 32.0, None).is_some());
+        // Sized by THIS computer's memory, it would land 6.6 GB on the other box.
+        s.set_setting("llm.ollama.base_url", "http://gpu-box.example.net:11434")
+            .unwrap();
+        assert_eq!(offer(&s, 32.0, None), None);
+        // Another port on this computer is still this computer.
+        s.set_setting("llm.ollama.base_url", "http://127.0.0.1:11500")
+            .unwrap();
+        assert!(offer(&s, 32.0, None).is_some());
+        s.set_setting("llm.ollama.base_url", "http://localhost:11434")
+            .unwrap();
+        assert!(offer(&s, 32.0, None).is_some());
+        // A custom base URL also marks an existing install: no fresh 9B pin.
+        let (_d, s) = storage();
+        s.set_setting("llm.ollama.base_url", "http://gpu-box.example.net:11434")
+            .unwrap();
+        assert_eq!(migrate_default(&s, 64.0, &[]).as_deref(), Some("llama3.1"));
+    }
+
+    #[test]
+    fn a_pinned_default_the_running_ollama_cannot_pull_is_flagged() {
+        let (_d, s) = storage();
+        migrate_default(&s, 32.0, &[]); // pinned before the version was known
+        assert_eq!(effective_default(&s), "qwen3.5:9b");
+        let a = advice(&s, 32.0, Some("0.16.9"));
+        let b = a.default_blocked.expect("flagged");
+        assert_eq!(
+            (
+                b.model.as_str(),
+                b.needs_ollama.as_str(),
+                b.have_ollama.as_str()
+            ),
+            ("qwen3.5:9b", "0.17.5", "0.16.9")
+        );
+        // Not when it can run, when the version is unknown, or for a dev build.
+        assert!(advice(&s, 32.0, Some("0.40.13")).default_blocked.is_none());
+        assert!(advice(&s, 32.0, None).default_blocked.is_none());
+        assert!(advice(&s, 32.0, Some("0.0.0")).default_blocked.is_none());
+        // llama3.1 can always be pulled.
+        let (_d, s) = storage();
+        s.set_setting("llm.provider", "ollama").unwrap();
+        migrate_default(&s, 32.0, &[]);
+        assert!(advice(&s, 32.0, Some("0.1.0")).default_blocked.is_none());
+    }
+
+    #[test]
+    fn a_development_build_of_ollama_is_not_too_old() {
+        assert!(supports(Some("0.0.0"), [0, 17, 5]));
+        assert!(recommend(16.0, Some("0.0.0")).held_back.is_none());
+        assert!(
+            !supports(Some("0.0.1"), [0, 17, 5]),
+            "a real old version still is"
+        );
+    }
+
+    #[test]
+    fn only_the_9b_is_slower_for_the_work_after_a_meeting() {
+        let slower: Vec<_> = CANDIDATES
+            .iter()
+            .filter_map(|c| c.measured.background_slower.map(|x| (c.model, x)))
+            .collect();
+        assert_eq!(slower, vec![("qwen3.5:9b", [15, 25])]);
+    }
+
+    /// The dev mock and the frontend tests read the same table
+    /// (frontend/src/localModels.table.json); this keeps it equal to the
+    /// product's. Regenerate with FLY_BLESS_TABLE=1.
+    #[test]
+    fn the_shared_table_matches_the_product_table() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../frontend/src/localModels.table.json"
+        );
+        let want = serde_json::to_value(CANDIDATES).unwrap();
+        if std::env::var_os("FLY_BLESS_TABLE").is_some() {
+            std::fs::write(path, serde_json::to_string_pretty(&want).unwrap() + "\n").unwrap();
+            return;
+        }
+        let got: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("localModels.table.json"))
+                .unwrap();
+        assert_eq!(
+            got, want,
+            "frontend/src/localModels.table.json differs from CANDIDATES: FLY_BLESS_TABLE=1 cargo test -p fly-app --lib local_models"
         );
     }
 }

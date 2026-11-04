@@ -506,6 +506,10 @@ export interface LocalModelMeasured {
   declines_pct: number;
   /** Median seconds per answer, rounded to 5 (on one busy test laptop). */
   seconds: number;
+  /** How much longer notes, cleanup and action items after a meeting take
+   *  than with llama3.1, in tenths ([15, 25] = 1.5 to 2.5 times); null when
+   *  it is no slower. */
+  background_slower: [number, number] | null;
 }
 
 export interface LocalModelRow {
@@ -537,6 +541,9 @@ export interface LocalModelAdvice {
   held_back: { model: string; needs_ollama: string; have_ollama: string } | null;
   /** What an install with no explicit pick uses. */
   default_model: string;
+  /** That default needs a newer Ollama than the one running (its download
+   *  would fail); null otherwise. */
+  default_blocked: { model: string; needs_ollama: string; have_ollama: string } | null;
   explicit_model: string | null;
   /** One-time offer for an existing install; null when there is none. */
   offer: LocalModelOffer | null;

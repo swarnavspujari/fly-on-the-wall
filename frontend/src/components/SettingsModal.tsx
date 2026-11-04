@@ -37,7 +37,7 @@ import { useCloudConsent } from "./CloudConsent";
 import { useConfirm } from "./confirm";
 import ConnectorsSection from "./ConnectorsSection";
 import { LocalModelChoices, LocalModelOffer } from "./LocalModelChoices";
-import { rowFor, showOffer, sizeLabel } from "../localModels";
+import { blockedNote, friendlyPullError, rowFor, showOffer, sizeLabel } from "../localModels";
 import ModelsOnComputer from "./ModelsOnComputer";
 import PrivacySection from "./PrivacySection";
 import BackupRow from "./BackupRow";
@@ -666,7 +666,7 @@ export default function SettingsModal({
         if (old && !sameOllamaModel(old.name, model)) setDeleteOffer(old);
       }
     } catch (e) {
-      setOllamaMsg(String(e));
+      setOllamaMsg(friendlyPullError(e, model, advice));
     } finally {
       setOllamaBusy(null);
       loadOllama().catch(console.error);
@@ -710,7 +710,7 @@ export default function SettingsModal({
       const old = from && !sameOllamaModel(from, model) ? installedOllamaModel(from) : null;
       if (old) setDeleteOffer(old);
     } catch (e) {
-      setOllamaMsg(String(e));
+      setOllamaMsg(friendlyPullError(e, model, advice));
     } finally {
       setOllamaBusy(null);
       setPullingModel(null);
@@ -1040,9 +1040,8 @@ export default function SettingsModal({
 
   /* Ollama (local provider) */
   const effOllamaModel = (llmModel || provider?.default_model || "llama3.1").trim();
-  const ollamaModelReady = !!ollama?.models.some(
-    (m) => m.name === effOllamaModel || m.name.split(":")[0] === effOllamaModel.split(":")[0],
-  );
+  // Tag-aware, as the backend: qwen3.5:4b being here doesn't make qwen3.5:9b ready.
+  const ollamaModelReady = !!ollama?.models.some((m) => sameOllamaModel(m.name, effOllamaModel));
   // Progress for the runtime install or the model pull.
   const ollamaProg =
     modelProgress &&
@@ -1066,6 +1065,8 @@ export default function SettingsModal({
       : ollama.installed
         ? "Server off. It starts automatically when needed."
         : "Not installed.";
+  // The pinned default needs a newer Ollama than the one running.
+  const blocked = blockedNote(advice, effOllamaModel);
   const localModelHelper = !ollama
     ? "Checking Ollama…"
     : !ollama.installed
@@ -1611,9 +1612,7 @@ export default function SettingsModal({
                                     // The backend names what uses it (saved
                                     // Ask/Enhance model, search embeddings);
                                     // the typed, unsaved model counts too.
-                                    const picked =
-                                      m.name === effOllamaModel ||
-                                      m.name.split(":")[0] === effOllamaModel.split(":")[0];
+                                    const picked = sameOllamaModel(m.name, effOllamaModel);
                                     const usedFor =
                                       m.used_for ?? (picked ? "Used for Ask and Enhance." : null);
                                     return (
@@ -1820,7 +1819,7 @@ export default function SettingsModal({
                                 <Button
                                   variant="primary"
                                   size="sm"
-                                  disabled={ollamaBusy !== null}
+                                  disabled={ollamaBusy !== null || !!blocked}
                                   onClick={() => void pullOllamaModel(effOllamaModel)}
                                 >
                                   {ollamaBusy === "pull"
@@ -1831,6 +1830,11 @@ export default function SettingsModal({
                             </>
                           }
                         >
+                          {blocked && !ollamaModelReady && (
+                            <p className="mb-2 text-warning-text" role="status" style={SMALL}>
+                              {blocked}
+                            </p>
+                          )}
                           {advice && showOffer(advice, !!ollama?.installed, llmProvider) && (
                             <div className="mb-2">
                               <LocalModelOffer

@@ -16,6 +16,7 @@ import {
   type MockInstance,
 } from "vitest";
 import { api } from "../api";
+import TABLE from "../localModels.table.json";
 import { RESTART_REQUIRED_EVENT } from "../privacy";
 import type { Updater } from "../updater";
 import { ConfirmProvider } from "./confirm";
@@ -736,7 +737,12 @@ describe("Settings › the local model for this computer", () => {
     fits: true,
     recommended: true,
     needs_newer_ollama: null,
-    measured: { sourced_pct: 83, declines_pct: 94, seconds: 30 },
+    measured: {
+      sourced_pct: 83,
+      declines_pct: 94,
+      seconds: 30,
+      background_slower: [15, 25] as [number, number],
+    },
     ...over,
   });
   const advice = (over: Record<string, unknown> = {}) => ({
@@ -745,6 +751,7 @@ describe("Settings › the local model for this computer", () => {
     recommended: "qwen3.5:9b",
     held_back: null,
     default_model: "llama3.1",
+    default_blocked: null,
     explicit_model: null,
     offer: { model: "qwen3.5:9b", download_bytes: 6_600_000_000 },
     models: [
@@ -755,7 +762,7 @@ describe("Settings › the local model for this computer", () => {
         memory_gb: 5.8,
         ram_class_gb: 12,
         recommended: false,
-        measured: { sourced_pct: 62, declines_pct: 75, seconds: 25 },
+        measured: { sourced_pct: 62, declines_pct: 75, seconds: 25, background_slower: null },
       }),
     ],
     measured_on:
@@ -849,6 +856,88 @@ describe("Settings › the local model for this computer", () => {
     expect(use).not.toHaveBeenCalled();
   });
 
+  // An Ollama too old for the 9B: its row says so, and the advice names the gap.
+  const oldOllama = () =>
+    advice({
+      ollama_version: "0.16.9",
+      held_back: { model: "qwen3.5:9b", needs_ollama: "0.17.5", have_ollama: "0.16.9" },
+      models: [
+        row({ needs_newer_ollama: "0.17.5" }),
+        row({ model: "llama3.1", download_bytes: 4_920_000_000, recommended: false }),
+      ],
+    });
+
+  it("an Ollama refusal for a version it lacks says to update Ollama", async () => {
+    // The app couldn't read Ollama's version (so it held nothing back); Ollama
+    // itself then refuses the download. The refusal becomes plain advice.
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(advice({ ollama_version: "" }));
+    vi.spyOn(api, "ollamaPull").mockRejectedValue(
+      "pull model manifest: 412: The model you are attempting to pull requires a newer version of Ollama.",
+    );
+    const use = vi.spyOn(api, "useLocalModel");
+    await openLocal();
+    await click(byText("button", "Download and switch (6.6 GB)"));
+    expect(use).not.toHaveBeenCalled();
+    expect(host!.textContent).toContain(
+      "qwen3.5:9b needs a newer Ollama. Update Ollama (ollama.com), then try again.",
+    );
+    expect(host!.textContent).not.toContain("pull model manifest");
+  });
+
+  it("an Ollama known to be too old gets no download button for the model it can't run", async () => {
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(oldOllama());
+    await openLocal();
+    const nine = $('[data-model="qwen3.5:9b"]')!;
+    expect(nine.textContent).toContain("Needs Ollama 0.17.5 or newer (this computer has 0.16.9).");
+    expect(nine.querySelector("button")).toBeNull();
+  });
+
+  it("the app's own disk-space message is shown as it came, and switches nothing", async () => {
+    const disk =
+      "Not enough free disk space for qwen3.5:9b. It needs about 8.6 GB free (a 6.6 GB download plus 2.0 GB to spare) and this drive has 3.1 GB. Free up space, or choose a smaller model.";
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(advice());
+    vi.spyOn(api, "ollamaPull").mockRejectedValue(disk);
+    const use = vi.spyOn(api, "useLocalModel");
+    await openLocal();
+    await click(byText("button", "Download and switch (6.6 GB)"));
+    expect(use).not.toHaveBeenCalled();
+    expect(host!.textContent).toContain(disk);
+    expect(offerCard()).not.toBeNull(); // still there to try again
+  });
+
+  it("a pinned default the running Ollama can't pull says so and offers no doomed download", async () => {
+    const llm = await api.getLlmSettings();
+    vi.spyOn(api, "getLlmSettings").mockResolvedValue({
+      ...llm,
+      provider: "ollama",
+      providers: llm.providers.map((p) =>
+        p.id === "ollama" ? { ...p, default_model: "qwen3.5:9b", model: null } : p,
+      ),
+    });
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(
+      advice({
+        ...oldOllama(),
+        offer: null,
+        default_model: "qwen3.5:9b",
+        default_blocked: { model: "qwen3.5:9b", needs_ollama: "0.17.5", have_ollama: "0.16.9" },
+      }),
+    );
+    const pull = vi.spyOn(api, "ollamaPull");
+    await open();
+    expect(host!.textContent).toContain(
+      "qwen3.5:9b needs Ollama 0.17.5 or newer. This computer has 0.16.9. Update Ollama to use it.",
+    );
+    const download = byText("button", "Download qwen3.5:9b (6.6 GB)") as HTMLButtonElement;
+    expect(download.disabled).toBe(true);
+    expect(pull).not.toHaveBeenCalled();
+  });
+
+  it("shows the after-a-meeting cost on the offer card", async () => {
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(advice());
+    await openLocal();
+    expect(offerCard()!.textContent).toContain("take about 1.5–2.5 times as long as with llama3.1");
+  });
+
   it("no offer for a cloud provider, or when the backend has none", async () => {
     vi.spyOn(api, "localModelAdvice").mockResolvedValue(advice());
     await open();
@@ -896,14 +985,121 @@ describe("Settings › the local model for this computer", () => {
     expect(byText("button", "Download qwen3.5:9b (6.6 GB)")).not.toBeNull();
     expect(pull).not.toHaveBeenCalled();
   });
+
+  it("another size of the same family is not the pinned model: not ready, not in use", async () => {
+    // qwen3.5:4b is on the disk, the pinned default is qwen3.5:9b. The backend
+    // matches tags exactly when both are explicit, and so must this screen:
+    // otherwise it says "ready" with no Download, and Ask can't find the model.
+    const llm = await api.getLlmSettings();
+    vi.spyOn(api, "getLlmSettings").mockResolvedValue({
+      ...llm,
+      provider: "ollama",
+      providers: llm.providers.map((p) =>
+        p.id === "ollama" ? { ...p, default_model: "qwen3.5:9b", model: null } : p,
+      ),
+    });
+    const status = await api.ollamaStatus();
+    vi.spyOn(api, "ollamaStatus").mockResolvedValue({
+      ...status,
+      installed: true,
+      running: true,
+      models: [
+        { name: "llama3.1:latest", size: 4_920_000_000, used_for: null },
+        { name: "qwen3.5:4b", size: 3_330_000_000, used_for: null },
+      ],
+    });
+    vi.spyOn(api, "localModelAdvice").mockResolvedValue(
+      advice({ offer: null, default_model: "qwen3.5:9b" }),
+    );
+    await open();
+    expect(host!.textContent).toContain("qwen3.5:9b isn't downloaded yet.");
+    expect(host!.textContent).not.toContain("qwen3.5:9b is ready.");
+    expect(byText("button", "Download qwen3.5:9b (6.6 GB)")).not.toBeNull();
+    await click($('[aria-labelledby="settings-h-ai"] .fly-sgroup-more'));
+    const four = $$(".fly-srow-below > div > div").find((r) =>
+      r.textContent?.startsWith("qwen3.5:4b"),
+    )!;
+    expect(four.textContent).not.toContain("in use");
+    expect([...four.querySelectorAll("button")].some((b) => b.textContent === "Delete")).toBe(true);
+  });
+
+  it("the dev mock keeps the two sizes apart too", async () => {
+    // Pulling the 9B with the 4B on the disk adds the 9B (it used to be skipped
+    // because the family matched).
+    const names = async () => (await api.ollamaStatus()).models.map((m) => m.name);
+    // (an earlier test may have deleted the 4B; leave the mock as it was found)
+    const had4b = (await names()).includes("qwen3.5:4b");
+    if (!had4b) await api.ollamaPull("qwen3.5:4b");
+    expect(await names()).not.toContain("qwen3.5:9b");
+    await api.ollamaPull("qwen3.5:9b");
+    expect(await names()).toEqual(expect.arrayContaining(["qwen3.5:4b", "qwen3.5:9b"]));
+    await api.ollamaDelete("qwen3.5:9b");
+    if (!had4b) await api.ollamaDelete("qwen3.5:4b");
+  });
 });
 
 describe("dev mock › local model advice mirrors the backend", () => {
+  afterEach(() => {
+    for (const k of ["fotwMockRam", "fotwMockOllamaVersion", "fotwMockDiskFull"])
+      localStorage.removeItem(k);
+  });
+
   it("names the offered models only", async () => {
     const a = await api.localModelAdvice();
     expect(a.models.map((m) => m.model)).toEqual(["qwen3.5:9b", "llama3.1", "qwen3.5:4b"]);
     expect(a.models.filter((m) => m.recommended)).toHaveLength(1);
     await expect(api.useLocalModel("gemma4:12b-it-qat")).rejects.toContain("isn't one of");
     await expect(api.dismissLocalModelOffer("rm -rf")).rejects.toContain("isn't one of");
+  });
+
+  it("its table is the backend's table, not a copy that can drift", async () => {
+    // localModels.table.json is generated from local_models.rs CANDIDATES and
+    // pinned equal by a Rust test; the mock reads the same file.
+    const a = await api.localModelAdvice();
+    expect(a.models.map((m) => [m.model, m.download_bytes, m.measured])).toEqual(
+      TABLE.map((c) => [c.model, c.download_bytes, c.measured]),
+    );
+    // The 9B is the one that costs more after a meeting; llama3.1 and the 4B don't.
+    expect(a.models.map((m) => m.measured.background_slower)).toEqual([[15, 25], null, null]);
+  });
+
+  it("recommends by memory at the cut-offs, and never by anything else", async () => {
+    const pick = async (gb: string) => {
+      localStorage.setItem("fotwMockRam", gb);
+      return (await api.localModelAdvice()).recommended;
+    };
+    expect(await pick("32")).toBe("qwen3.5:9b");
+    expect(await pick("16")).toBe("qwen3.5:9b");
+    expect(await pick("12")).toBe("llama3.1");
+    expect(await pick("8")).toBe("qwen3.5:4b");
+  });
+
+  it("an Ollama too old for the 9B holds it back, blocks a pinned 9B and refuses its download", async () => {
+    localStorage.setItem("fotwMockOllamaVersion", "0.16.9");
+    const a = await api.localModelAdvice();
+    expect(a.held_back).toEqual({
+      model: "qwen3.5:9b",
+      needs_ollama: "0.17.5",
+      have_ollama: "0.16.9",
+    });
+    expect(a.recommended).toBe("llama3.1");
+    expect(a.models.find((m) => m.model === "qwen3.5:9b")!.needs_newer_ollama).toBe("0.17.5");
+    expect(a.models.find((m) => m.model === "llama3.1")!.needs_newer_ollama).toBeNull();
+    // Ollama's own words, which the Settings screen turns into "update Ollama".
+    await expect(api.ollamaPull("qwen3.5:9b")).rejects.toMatch(/newer version of Ollama/);
+  });
+
+  it("a development build of Ollama (0.0.0) is not held back", async () => {
+    localStorage.setItem("fotwMockOllamaVersion", "0.0.0");
+    const a = await api.localModelAdvice();
+    expect(a.held_back).toBeNull();
+    expect(a.models.every((m) => m.needs_newer_ollama === null)).toBe(true);
+  });
+
+  it("a full drive refuses the download with the backend's words before anything starts", async () => {
+    localStorage.setItem("fotwMockDiskFull", "1");
+    await expect(api.ollamaPull("qwen3.5:9b")).rejects.toMatch(
+      /Not enough free disk space for qwen3\.5:9b\. It needs about 8\.6 GB free \(a 6\.6 GB download plus 2\.0 GB to spare\)/,
+    );
   });
 });

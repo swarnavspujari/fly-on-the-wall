@@ -240,7 +240,11 @@ pub fn finish(app: &AppHandle, app_state: AppState) {
         // The default local model follows this computer's memory: a new
         // install is pinned to it once, an existing install to the model it
         // already uses. Never a switch (local_models.rs).
-        crate::local_models::migrate_default(&storage, crate::local_models::total_ram_gb());
+        crate::local_models::migrate_default(
+            &storage,
+            crate::local_models::total_ram_gb(),
+            &crate::local_models::installed_on_disk(&app_state.data_dir),
+        );
         // Consents recorded while the prompt couldn't show are void.
         llm_commands::reset_unseen_cloud_consent(&storage);
         privacy::record_pending_wipe(&storage);

@@ -16,7 +16,7 @@ const row = (over: Partial<LocalModelRow> = {}): LocalModelRow => ({
   fits: true,
   recommended: true,
   needs_newer_ollama: null,
-  measured: { sourced_pct: 83, declines_pct: 94, seconds: 30 },
+  measured: { sourced_pct: 83, declines_pct: 94, seconds: 30, background_slower: [15, 25] },
   ...over,
 });
 
@@ -26,6 +26,7 @@ const advice = (over: Partial<LocalModelAdvice> = {}): LocalModelAdvice => ({
   recommended: "qwen3.5:9b",
   held_back: null,
   default_model: "llama3.1",
+  default_blocked: null,
   explicit_model: null,
   offer: { model: "qwen3.5:9b", download_bytes: 6_600_000_000 },
   models: [
@@ -36,7 +37,7 @@ const advice = (over: Partial<LocalModelAdvice> = {}): LocalModelAdvice => ({
       memory_gb: 5.8,
       ram_class_gb: 12,
       recommended: false,
-      measured: { sourced_pct: 62, declines_pct: 75, seconds: 25 },
+      measured: { sourced_pct: 62, declines_pct: 75, seconds: 25, background_slower: null },
     }),
     row({
       model: "qwen3.5:4b",
@@ -44,7 +45,7 @@ const advice = (over: Partial<LocalModelAdvice> = {}): LocalModelAdvice => ({
       memory_gb: 3.6,
       ram_class_gb: 8,
       recommended: false,
-      measured: { sourced_pct: 65, declines_pct: 56, seconds: 20 },
+      measured: { sourced_pct: 65, declines_pct: 56, seconds: 20, background_slower: null },
     }),
   ],
   measured_on:
@@ -96,6 +97,33 @@ describe("LocalModelOffer", () => {
     // And nothing changes until the click.
     expect(text).toContain("You keep using your current model until you switch.");
     for (const jargon of ["grounded", "tier", "refusal"]) expect(text).not.toContain(jargon);
+  });
+
+  it("says what the work after a meeting costs, only when it costs more", () => {
+    const el = render(
+      <LocalModelOffer
+        advice={advice()}
+        installed={[]}
+        busy={false}
+        onAccept={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    expect(el.textContent).toContain(
+      "Notes and cleanup after a meeting take about 1.5–2.5 times as long as with llama3.1.",
+    );
+    act(() => root!.unmount());
+    host!.remove();
+    const none = render(
+      <LocalModelOffer
+        advice={advice({ offer: { model: "llama3.1", download_bytes: 4_920_000_000 } })}
+        installed={[]}
+        busy={false}
+        onAccept={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    expect(none.textContent).not.toContain("times as long");
   });
 
   it("downloads only on the click, and 'Not now' is its own answer", () => {
@@ -191,6 +219,15 @@ describe("LocalModelChoices", () => {
     expect(rowEl(el, "llama3.1").textContent).not.toContain("recommended for this computer");
     expect(rowEl(el, "qwen3.5:4b").textContent).toContain("Declines what it can’t answer: 56%");
     expect(el.textContent).toContain("Measured on one test laptop");
+  });
+
+  it("puts the after-a-meeting cost on the model that has one, and only there", () => {
+    const el = choices();
+    expect(rowEl(el, "qwen3.5:9b").textContent).toContain(
+      "take about 1.5–2.5 times as long as with llama3.1",
+    );
+    expect(rowEl(el, "llama3.1").textContent).not.toContain("times as long");
+    expect(rowEl(el, "qwen3.5:4b").textContent).not.toContain("times as long");
   });
 
   it("marks the model in use and offers the others", () => {
