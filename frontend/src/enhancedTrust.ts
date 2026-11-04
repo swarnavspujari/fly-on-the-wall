@@ -152,9 +152,17 @@ export function trustLine(s: TrustSummary, cited: CitedTranscript): string {
   return s.partial && s.ai > 0 ? `${line} · ${partialCopy(s.partial)}` : line;
 }
 
-/** "written from 412 of 1,980 lines": a partial read must never look whole. */
+/** "written from 412 of 1,980 lines": a partial read must never look whole.
+ *  A reply that stopped at the AI's length limit says so too, whether the
+ *  whole meeting was read or only part of it. */
 export function partialCopy(p: PartialRead): string {
-  return `written from ${p.shown.toLocaleString("en-US")} of ${p.total.toLocaleString("en-US")} lines`;
+  const read = p.shown < p.total;
+  if (!p.cut_off) {
+    return `written from ${p.shown.toLocaleString("en-US")} of ${p.total.toLocaleString("en-US")} lines`;
+  }
+  return read
+    ? `written from ${p.shown.toLocaleString("en-US")} of ${p.total.toLocaleString("en-US")} lines, and cut off at the AI's length limit`
+    : "cut off at the AI's length limit, so later points may be missing";
 }
 
 function baseTrustLine(s: TrustSummary, cited: CitedTranscript): string {
@@ -184,7 +192,9 @@ export const EARLY_COPY =
 /** The legend's second line. */
 export function trustSubline(s: TrustSummary, cited: CitedTranscript): string {
   const line = baseTrustSubline(s, cited);
-  return s.partial
+  // Only a read of part of the meeting comes from excerpts; a reply cut off
+  // after reading all of it is said in the line above.
+  return s.partial && s.partial.shown < s.partial.total
     ? `The meeting was longer than your model can read at once, so these come from excerpts of it. ${line}`
     : line;
 }
@@ -252,8 +262,9 @@ export function flaggedCopy(flags: BlockFlag[]): { label: string; why: string } 
 }
 
 /** What a finished Enhance tells you beyond the note itself: that it read
- *  part of a long meeting, left something out, or didn't show a line as
- *  yours. Nothing when it read everything and kept everything. */
+ *  part of a long meeting, stopped writing at its length limit, left
+ *  something out, or didn't show a line as yours. Nothing when it read
+ *  everything, finished and kept everything. */
 export function enhanceNotices(r: EnhanceReport): string[] {
   const out: string[] = [];
   if (r.segments_total > 0 && r.segments_shown < r.segments_total) {
@@ -262,6 +273,11 @@ export function enhanceNotices(r: EnhanceReport): string[] {
         (r.retried_smaller
           ? " Your model ran out of memory at the larger size, so it read less."
           : ""),
+    );
+  }
+  if (r.output_cut) {
+    out.push(
+      "The AI's reply was cut off at its length limit, so later points may be missing. The whole transcript is in the Transcript tab.",
     );
   }
   if (r.dropped > 0) {

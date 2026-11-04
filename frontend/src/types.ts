@@ -34,10 +34,15 @@ export interface BlockFlag {
 }
 
 /** How much of the meeting an Enhance run read, saved on the AI lines it wrote
- *  when that was less than all of it (fly-core `PartialRead`). */
+ *  when that was less than all of it, or when the AI's reply was cut off at its
+ *  length limit (fly-core `PartialRead`). `shown` equals `total` for a whole
+ *  read. */
 export interface PartialRead {
   shown: number;
   total: number;
+  /** The AI's reply stopped at its length limit, so later points may be
+   *  missing. Absent when it finished. */
+  cut_off?: boolean;
 }
 
 export interface NoteBlock {
@@ -46,7 +51,8 @@ export interface NoteBlock {
   markdown: string;
   /** Checks this AI block failed; absent when none, and never on your text. */
   flags?: BlockFlag[];
-  /** Set when this AI line was written from part of a long meeting. */
+  /** Set when this AI line was written from part of a long meeting, or the
+   *  AI's reply was cut off at its length limit. */
   partial?: PartialRead;
 }
 
@@ -72,6 +78,9 @@ export interface EnhanceReport {
   links_removed: number;
   /** The first, larger try couldn't be read in full; this is the smaller one. */
   retried_smaller: boolean;
+  /** The AI's reply stopped at its length limit: the lines kept are the ones it
+   *  finished, and later points may be missing. */
+  output_cut?: boolean;
 }
 
 /** `enhance_note`'s reply. */

@@ -7,6 +7,7 @@ import {
   enhancedBeforeTranscript,
   flaggedCopy,
   needsReview,
+  partialCopy,
   sourceQuotes,
   sourceTarget,
   templateSections,
@@ -102,6 +103,36 @@ describe("a partial read stays on the note", () => {
     expect(trustSubline(s, ready)).toContain("excerpts");
     // The same without a transcript to check against.
     expect(trustLine(trustSummary(partialBlocks, none), none)).toContain("of 1,980 lines");
+  });
+
+  it("says a reply cut off at its length limit, on a whole read and on a partial one", () => {
+    // Whole read, reply stopped short: no "excerpts", and what is missing.
+    const whole = { shown: 5, total: 5, cut_off: true };
+    expect(partialCopy(whole)).toBe(
+      "cut off at the AI's length limit, so later points may be missing",
+    );
+    const wholeBlocks = [user("a"), { ...ai("b", ["t1"]), partial: whole }];
+    const s = trustSummary(wholeBlocks, ready);
+    expect(trustLine(s, ready)).toBe(
+      "1 AI line · all sourced · cut off at the AI's length limit, so later points may be missing",
+    );
+    expect(trustSubline(s, ready)).not.toContain("excerpts");
+    // Part of the meeting read and the reply stopped short: both are said.
+    const part = { ...read, cut_off: true };
+    expect(partialCopy(part)).toBe(
+      "written from 412 of 1,980 lines, and cut off at the AI's length limit",
+    );
+    const partBlocks = [user("a"), { ...ai("b", ["t1"]), partial: part }];
+    const p = trustSummary(partBlocks, ready);
+    expect(trustLine(p, ready)).toBe(
+      "1 AI line · all sourced · written from 412 of 1,980 lines, and cut off at the AI's length limit",
+    );
+    expect(trustSubline(p, ready)).toContain("excerpts");
+  });
+
+  it("keeps the old words when the reply finished", () => {
+    expect(partialCopy(read)).toBe("written from 412 of 1,980 lines");
+    expect(partialCopy({ ...read, cut_off: false })).toBe("written from 412 of 1,980 lines");
   });
 
   it("is absent for a whole read, and nothing is said for your own text", () => {
@@ -385,6 +416,22 @@ describe("what a finished Enhance tells you", () => {
       report({ segments_total: 1980, segments_shown: 150, retried_smaller: true }),
     );
     expect(again).toContain("ran out of memory");
+  });
+
+  it("says when the AI's reply was cut off at its length limit, and where the whole meeting is", () => {
+    const [n] = enhanceNotices(report({ output_cut: true }));
+    expect(n).toBe(
+      "The AI's reply was cut off at its length limit, so later points may be missing. The whole transcript is in the Transcript tab.",
+    );
+    // Said once, after the partial-read notice when both happen.
+    const both = enhanceNotices(
+      report({ segments_total: 1980, segments_shown: 412, output_cut: true }),
+    );
+    expect(both).toHaveLength(2);
+    expect(both[0]).toContain("read 412 of 1980 lines");
+    expect(both[1]).toContain("cut off at its length limit");
+    // A finished reply says nothing.
+    expect(enhanceNotices(report({ output_cut: false }))).toEqual([]);
   });
 
   it("says what it left out, one or several", () => {

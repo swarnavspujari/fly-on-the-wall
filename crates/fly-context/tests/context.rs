@@ -617,6 +617,7 @@ fn a_flagged_enhanced_block_is_not_offered_as_sourced() {
     flagged.partial = Some(PartialRead {
         shown: 40,
         total: 63,
+        cut_off: false,
     });
     f.storage
         .update_note_blocks(
@@ -644,6 +645,66 @@ fn a_flagged_enhanced_block_is_not_offered_as_sourced() {
     );
     assert!(line.contains("lines to check: b030"), "{line}");
     assert_eq!(after.text.matches("40 of 63 transcript lines").count(), 1);
+}
+
+/// An Enhance reply that stopped at the model's length limit says so in the
+/// note's text and JSON, on a whole read and on a partial one. A note
+/// without it reads exactly as before.
+#[test]
+fn a_cut_off_enhanced_note_says_so() {
+    use fly_core::PartialRead;
+    let f = fixture();
+    let ctx = Context::new(&f.storage, Visibility::ShareableOnly);
+    let args = json!({"note_id": f.budget_note, "kind": "enhanced"});
+    let write = |read: PartialRead| {
+        let mut b = NoteBlock::ai("- Budget set at $8,400", vec!["b030".into()]);
+        b.partial = Some(read);
+        f.storage.update_note_blocks(&f.budget_note, &[b]).unwrap();
+        call(&ctx, "get_note", &args, None).unwrap()
+    };
+    let whole = write(PartialRead {
+        shown: 63,
+        total: 63,
+        cut_off: true,
+    });
+    assert!(
+        whole
+            .text
+            .contains("(cut off at the AI's length limit, so later points may be missing)"),
+        "{}",
+        whole.text
+    );
+    assert!(!whole.text.contains("transcript lines"), "{}", whole.text);
+    assert_eq!(whole.json["enhanced"][0]["partial"]["cut_off"], true);
+
+    let part = write(PartialRead {
+        shown: 40,
+        total: 63,
+        cut_off: true,
+    });
+    assert!(
+        part.text.contains(
+            "(written from part of the meeting: 40 of 63 transcript lines, and cut off at \
+             the AI's length limit, so later points may be missing)"
+        ),
+        "{}",
+        part.text
+    );
+
+    // Not cut: the line it always had, and no `cut_off` in the JSON.
+    let read = write(PartialRead {
+        shown: 40,
+        total: 63,
+        cut_off: false,
+    });
+    assert!(
+        read.text
+            .contains("(written from part of the meeting: 40 of 63 transcript lines)"),
+        "{}",
+        read.text
+    );
+    assert!(!read.text.contains("cut off"), "{}", read.text);
+    assert!(read.json["enhanced"][0]["partial"].get("cut_off").is_none());
 }
 
 /// The privacy contract: under ShareableOnly no path returns keep-local

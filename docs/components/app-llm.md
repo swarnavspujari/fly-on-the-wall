@@ -77,7 +77,7 @@ devMock copies these strings by hand (`frontend/src/devMock.ts:931-950`).
 ### Tauri commands
 | Command | Arguments | Returns | Called from (UI) |
 |---|---|---|---|
-| `enhance_note` | `note_id: String, template_id: String` | `Result<EnhanceReply { note, report }, String>` | `ui-editor` (`Editor.tsx` `enhance`), via `api.enhanceNote`. `report` is fly-ask's `EnhanceReport`: how much of a long meeting was read, what was left out, flagged and unsourced counts |
+| `enhance_note` | `note_id: String, template_id: String` | `Result<EnhanceReply { note, report }, String>` | `ui-editor` (`Editor.tsx` `enhance`), via `api.enhanceNote`. `report` is fly-ask's `EnhanceReport`: how much of a long meeting was read, whether the reply was cut off at the model's length limit (`output_cut`), what was left out, flagged and unsourced counts |
 | `polish_transcript` | `meeting_id: String` | `Result<PolishResult, String>` | none (`api.polishTranscript` exists at `api.ts:135`, no component calls it; the AI pass calls `run_polish` directly) |
 | `edit_note_block` | `note_id: String, block_id: String, markdown: String` | `Result<Note, String>` | `ui-editor` (`EnhancedDoc.tsx:525,565`; empty markdown deletes the block), via `api.editNoteBlock` |
 | `keep_note_block` | `note_id: String, block_id: String` | `Result<Note, String>` | `ui-editor` (`EnhancedDoc.tsx:501`), via `api.keepNoteBlock` |

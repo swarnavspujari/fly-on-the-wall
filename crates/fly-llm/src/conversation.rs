@@ -219,6 +219,11 @@ pub struct Usage {
     /// again with the server's default, which may have cut the prompt.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub context_fallback: bool,
+    /// The reply stopped at the `max_tokens` limit (Ollama `done_reason`
+    /// "length", OpenAI `finish_reason` "length", Anthropic `stop_reason`
+    /// "max_tokens"), so the text may end before the model was done.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub output_cut: bool,
 }
 
 /// Sum two reports; a field stays `None` only when both are `None`.
@@ -238,6 +243,7 @@ impl std::ops::Add for Usage {
             cache_read_tokens: sum(self.cache_read_tokens, other.cache_read_tokens),
             cache_write_tokens: sum(self.cache_write_tokens, other.cache_write_tokens),
             context_fallback: self.context_fallback || other.context_fallback,
+            output_cut: self.output_cut || other.output_cut,
         }
     }
 }

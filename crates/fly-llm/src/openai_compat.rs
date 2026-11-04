@@ -129,13 +129,20 @@ impl LLMProvider for OpenAiCompatProvider {
 
     async fn chat_with_usage(&self, req: ChatRequest) -> Result<(String, Usage)> {
         if !self.is_ollama() {
-            return Ok((self.chat(req).await?, Usage::default()));
+            let body = openai_chat_body(&self.model, &req);
+            let text = self.openai_post(&reqwest::Client::new(), &body).await?;
+            let usage = Usage {
+                output_cut: completion_output_cut(&text),
+                ..Usage::default()
+            };
+            return Ok((parse_chat_completion(&text)?, usage));
         }
         let (text, fallback) = self.chat_ollama_native_checked(&req).await?;
         let mut usage = parse_native_response(&text)
             .map(|r| r.usage)
             .unwrap_or_default();
         usage.context_fallback = fallback;
+        // `output_cut` comes with the rest of the usage (`ollama_usage`).
         Ok((parse_native_chat(&text)?, usage))
     }
 
@@ -807,6 +814,7 @@ fn ollama_usage(v: &Value) -> Usage {
             .get("eval_count")
             .and_then(|n| n.as_u64())
             .map(|n| n as u32),
+        output_cut: v.get("done_reason").and_then(|r| r.as_str()) == Some("length"),
         ..Usage::default()
     }
 }
@@ -934,6 +942,20 @@ pub fn parse_chat_completion(json_text: &str) -> Result<String> {
         .ok_or_else(|| LlmError::Provider("response had no message content".into()))
 }
 
+/// Whether a legacy chat-completions reply stopped at the token limit
+/// (`finish_reason` "length"). A body that doesn't parse says no: the text
+/// parse that follows reports the real problem.
+fn completion_output_cut(json_text: &str) -> bool {
+    serde_json::from_str::<Value>(json_text)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/choices/0/finish_reason")
+                .and_then(|r| r.as_str())
+                .map(|r| r == "length")
+        })
+        .unwrap_or(false)
+}
+
 fn openai_finish(reason: Option<&str>, saw_tool: bool) -> Result<StopReason> {
     Ok(match reason {
         Some("length") => StopReason::MaxTokens,
@@ -956,6 +978,7 @@ fn openai_usage(v: &Value) -> Usage {
         cache_read_tokens: u("/usage/prompt_tokens_details/cached_tokens"),
         cache_write_tokens: None,
         context_fallback: false,
+        output_cut: false,
     }
 }
 
@@ -1003,10 +1026,12 @@ pub fn parse_openai_response(json_text: &str) -> Result<ChatResponse> {
         choice.get("finish_reason").and_then(|r| r.as_str()),
         saw_tool,
     )?;
+    let mut usage = openai_usage(&v);
+    usage.output_cut = stop_reason == StopReason::MaxTokens;
     Ok(ChatResponse {
         blocks,
         stop_reason,
-        usage: openai_usage(&v),
+        usage,
     })
 }
 
@@ -1024,10 +1049,10 @@ pub(crate) struct OpenAiSse {
 impl OpenAiSse {
     fn done_event(&mut self) -> Result<StreamEvent> {
         self.done = true;
-        Ok(StreamEvent::Done {
-            stop_reason: openai_finish(self.finish.as_deref(), !self.ids.is_empty())?,
-            usage: self.usage,
-        })
+        let stop_reason = openai_finish(self.finish.as_deref(), !self.ids.is_empty())?;
+        let mut usage = self.usage;
+        usage.output_cut = stop_reason == StopReason::MaxTokens;
+        Ok(StreamEvent::Done { stop_reason, usage })
     }
 }
 
@@ -1496,11 +1521,13 @@ mod tests {
         assert_eq!(uses[1].2, &json!({"meeting_id": "m1"}));
         assert_eq!(r.usage.input_tokens, Some(120));
         assert_eq!(r.usage.output_tokens, Some(9));
+        assert!(!r.usage.output_cut);
 
         let cut = r#"{"message":{"role":"assistant","content":"The bud"},"done":true,"done_reason":"length"}"#;
         let r = parse_native_response(cut).unwrap();
         assert_eq!(r.stop_reason, StopReason::MaxTokens);
         assert_eq!(r.text(), "The bud");
+        assert!(r.usage.output_cut);
     }
 
     #[test]
@@ -1513,9 +1540,116 @@ mod tests {
         assert_eq!(r.tool_uses()[0].0, "call_abc");
         assert_eq!(r.tool_uses()[0].2, &json!({"query": "x"}));
         assert_eq!(r.usage.input_tokens, Some(50));
+        assert!(!r.usage.output_cut);
         let filtered =
             r#"{"choices":[{"message":{"content":""},"finish_reason":"content_filter"}]}"#;
         assert!(parse_openai_response(filtered).is_err());
+        let cut = r#"{"choices":[{"message":{"content":"The bud"},"finish_reason":"length"}]}"#;
+        assert!(parse_openai_response(cut).unwrap().usage.output_cut);
+    }
+
+    #[test]
+    fn a_stream_cut_at_the_token_limit_says_so_in_its_usage() {
+        let ollama = "{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"done\":false}\n\
+             {\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"length\"}";
+        let r = decode_all(OllamaNdjson::default(), ollama).unwrap();
+        assert_eq!(r.stop_reason, StopReason::MaxTokens);
+        assert!(r.usage.output_cut);
+        let openai = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\
+             data: [DONE]";
+        let r = decode_all(OpenAiSse::default(), openai).unwrap();
+        assert_eq!(r.stop_reason, StopReason::MaxTokens);
+        assert!(r.usage.output_cut);
+        let done = openai.replace("\"length\"", "\"stop\"");
+        assert!(
+            !decode_all(OpenAiSse::default(), &done)
+                .unwrap()
+                .usage
+                .output_cut
+        );
+    }
+
+    /// A loopback server that answers one request with `body` as JSON, and
+    /// the base URL to reach it (no mocking crate in this workspace).
+    fn serve_json_once(body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            // Read the whole request so the client has finished sending.
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = s.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                let len = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if buf.len() >= head_end + 4 + len {
+                    break;
+                }
+            }
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.write_all(reply.as_bytes());
+        });
+        format!("http://{addr}")
+    }
+
+    fn text_req() -> ChatRequest {
+        ChatRequest {
+            effort: None,
+            messages: vec![crate::ChatMessage::user("Write the notes.")],
+            temperature: Some(0.2),
+            max_tokens: Some(64),
+            thinking: ThinkingMode::Default,
+            format: None,
+        }
+    }
+
+    /// The text path Enhance uses reports a reply that stopped at its
+    /// token limit, on both wire formats, and nothing otherwise.
+    #[tokio::test]
+    async fn chat_with_usage_reports_a_reply_cut_at_the_token_limit() {
+        let cut = r#"{"message":{"role":"assistant","content":"[{\"a\":1},"},"done":true,"done_reason":"length","prompt_eval_count":30,"eval_count":64}"#;
+        let p = OpenAiCompatProvider::ollama(Some(serve_json_once(cut)), "m".into());
+        let (text, usage) = p.chat_with_usage(text_req()).await.unwrap();
+        assert_eq!(text, "[{\"a\":1},");
+        assert!(usage.output_cut && !usage.context_fallback);
+        assert_eq!(usage.output_tokens, Some(64));
+
+        let done =
+            r#"{"message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop"}"#;
+        let p = OpenAiCompatProvider::ollama(Some(serve_json_once(done)), "m".into());
+        let (text, usage) = p.chat_with_usage(text_req()).await.unwrap();
+        assert_eq!(text, "ok");
+        assert!(!usage.output_cut);
+
+        let mut p = OpenAiCompatProvider::openai("k".into(), "m".into());
+        let cut = r#"{"choices":[{"message":{"content":"[{\"a\":1},"},"finish_reason":"length"}]}"#;
+        p.base_url = format!("{}/v1", serve_json_once(cut));
+        let (text, usage) = p.chat_with_usage(text_req()).await.unwrap();
+        assert_eq!(text, "[{\"a\":1},");
+        assert!(usage.output_cut);
+
+        let done = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+        p.base_url = format!("{}/v1", serve_json_once(done));
+        let (text, usage) = p.chat_with_usage(text_req()).await.unwrap();
+        assert_eq!(text, "ok");
+        assert!(!usage.output_cut);
     }
 
     fn decode_all<D: LineDecoder>(mut d: D, text: &str) -> Result<ChatResponse> {

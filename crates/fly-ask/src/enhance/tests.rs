@@ -931,6 +931,35 @@ fn fell_back(text: &str) -> Result<(String, Usage), LlmError> {
     ))
 }
 
+/// A reply the model stopped writing at its token limit.
+fn cut_at_the_limit(text: &str) -> Result<(String, Usage), LlmError> {
+    Ok((
+        text.to_string(),
+        Usage {
+            output_cut: true,
+            ..Usage::default()
+        },
+    ))
+}
+
+/// A finished reply of three blocks, one of them the user's own.
+fn three_blocks() -> String {
+    reply(&[
+        ("ai", "Glass was ordered.", &[0]),
+        ("user", "- glass order", &[]),
+        ("ai", "Tomas will confirm the supplier by Friday.", &[2]),
+    ])
+}
+
+/// The same three finished blocks, then the start of a fourth: where a
+/// token limit leaves the block array.
+fn cut_off_reply() -> String {
+    format!(
+        "{},{{\"type\":\"ai\",\"markdown\":\"The permit renew",
+        three_blocks().trim_end_matches(']')
+    )
+}
+
 #[async_trait::async_trait]
 impl LLMProvider for Scripted {
     fn id(&self) -> &'static str {
@@ -1096,6 +1125,103 @@ async fn a_fallback_to_a_smaller_context_is_truncation() {
     .unwrap_err();
     assert_eq!(e, EnhanceError::Truncated);
     assert_eq!(model.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn a_reply_cut_at_its_length_limit_keeps_its_blocks_and_says_so() {
+    let (n, t, tpl) = (note("- glass order"), small(), template());
+
+    // The whole meeting was read but the reply stopped short: the finished
+    // blocks are saved, and every AI block (not the user's own) carries it.
+    let model = Scripted::new(vec![cut_at_the_limit(&cut_off_reply())]);
+    let done = enhance(
+        &model,
+        request(&n, Some(&t), &tpl, &DEFAULT_PROFILE, 1_000_000, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(done.blocks.len(), 3, "{:?}", done.blocks);
+    assert!(done.report.output_cut);
+    let read = PartialRead {
+        shown: 4,
+        total: 4,
+        cut_off: true,
+    };
+    assert_eq!(done.blocks[0].partial, Some(read));
+    assert_eq!(done.blocks[1].partial, None, "their own words were not cut");
+    assert_eq!(done.blocks[2].partial, Some(read));
+    assert!(serde_json::to_string(&done.blocks[0])
+        .unwrap()
+        .contains(r#""partial":{"shown":4,"total":4,"cut_off":true}"#));
+
+    // Part of a long meeting was read and the reply stopped short: the
+    // counts are what was read, and both facts are on the block.
+    let (n, t) = (note("- glass order"), long());
+    let p = prep(&n, Some(&t), 30_000);
+    assert!(!p.is_whole());
+    let model = Scripted::new(vec![cut_at_the_limit(&cut_off_reply())]);
+    let done = enhance(
+        &model,
+        request(&n, Some(&t), &tpl, &DEFAULT_PROFILE, 30_000, None),
+    )
+    .await
+    .unwrap();
+    assert!(done.report.output_cut);
+    let read = PartialRead {
+        shown: p.segments_shown() as u32,
+        total: 600,
+        cut_off: true,
+    };
+    assert_eq!(done.blocks[0].partial, Some(read));
+    assert_eq!(done.blocks[1].partial, None);
+    assert_eq!(done.blocks[2].partial, Some(read));
+
+    // Nothing usable before the cut is still an error, not an empty note.
+    let (n, t) = (note(""), small());
+    let model = Scripted::new(vec![cut_at_the_limit(
+        r#"[{"type":"ai","markdown":"The perm"#,
+    )]);
+    let e = enhance(
+        &model,
+        request(&n, Some(&t), &tpl, &DEFAULT_PROFILE, 1_000_000, None),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e, EnhanceError::Unusable);
+}
+
+#[tokio::test]
+async fn a_reply_that_finished_leaves_no_cut_on_the_note() {
+    let (n, t, tpl) = (note("- glass order"), small(), template());
+    let model = Scripted::new(vec![read_in_full(&three_blocks())]);
+    let done = enhance(
+        &model,
+        request(&n, Some(&t), &tpl, &DEFAULT_PROFILE, 1_000_000, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(done.blocks.len(), 3);
+    assert!(!done.report.output_cut);
+    for b in &done.blocks {
+        assert_eq!(b.partial, None);
+        assert!(!serde_json::to_string(b).unwrap().contains("partial"));
+    }
+
+    // A long meeting read in part, with a reply that finished: the same
+    // marker as before, with no `cut_off` in it.
+    let (n, t) = (note("- glazing"), long());
+    let model = Scripted::new(vec![read_in_full(&three_blocks())]);
+    let done = enhance(
+        &model,
+        request(&n, Some(&t), &tpl, &DEFAULT_PROFILE, 30_000, None),
+    )
+    .await
+    .unwrap();
+    assert!(!done.report.output_cut);
+    let read = done.blocks[0].partial.expect("a partial read");
+    assert!(!read.cut_off && read.shown < read.total);
+    let json = serde_json::to_string(&done.blocks[0]).unwrap();
+    assert!(!json.contains("cut_off"), "{json}");
 }
 
 #[tokio::test]
@@ -1407,6 +1533,7 @@ fn a_partial_read_is_saved_on_the_ai_blocks_and_a_whole_one_is_not() {
     let read = PartialRead {
         shown: p.segments_shown() as u32,
         total: 600,
+        cut_off: false,
     };
     assert_eq!(c.blocks[0].partial, Some(read));
     assert_eq!(c.blocks[1].partial, None, "their own words were not read");
