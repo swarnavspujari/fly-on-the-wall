@@ -929,6 +929,7 @@ pub async fn enhance_with(
         invalid_citations = r.invalid_citations,
         links_removed = r.links_removed,
         retried_smaller = r.retried_smaller,
+        output_cut = r.output_cut,
         "enhance checked"
     );
     let note = storage

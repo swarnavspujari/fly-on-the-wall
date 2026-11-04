@@ -1624,6 +1624,20 @@ mod tests {
     /// token limit, on both wire formats, and nothing otherwise.
     #[tokio::test]
     async fn chat_with_usage_reports_a_reply_cut_at_the_token_limit() {
+        // The provider's HTTP client honours proxy variables, which would
+        // send this loopback request to the proxy instead of the fake server.
+        const PROXY_VARS: [&str; 6] = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ];
+        if PROXY_VARS.iter().any(|k| std::env::var_os(k).is_some()) {
+            eprintln!("skipped: a proxy is set in the environment");
+            return;
+        }
         let cut = r#"{"message":{"role":"assistant","content":"[{\"a\":1},"},"done":true,"done_reason":"length","prompt_eval_count":30,"eval_count":64}"#;
         let p = OpenAiCompatProvider::ollama(Some(serve_json_once(cut)), "m".into());
         let (text, usage) = p.chat_with_usage(text_req()).await.unwrap();

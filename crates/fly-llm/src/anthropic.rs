@@ -975,9 +975,12 @@ pub fn parse_messages_response_checked(json_text: &str, strict: bool) -> Result<
     parse_messages_text(json_text, strict).map(|(text, _)| text)
 }
 
-/// [`parse_messages_response_checked`] plus the usage: `output_cut` is set
-/// when the reply stopped at the token limit but has text and isn't strict
-/// (the plain reply is returned as far as it got).
+/// [`parse_messages_response_checked`] plus the usage. `output_cut` is set
+/// when the reply stopped at the token limit (`max_tokens`) or because the
+/// context window filled (`model_context_window_exceeded`), and the text
+/// is returned as far as it got. Only `max_tokens` is an error, when
+/// `strict` (a cut schema answer) or when there is no text, so a strict
+/// `model_context_window_exceeded` reply with text comes back flagged.
 pub fn parse_messages_text(json_text: &str, strict: bool) -> Result<(String, Usage)> {
     let v: serde_json::Value = serde_json::from_str(json_text)
         .map_err(|e| LlmError::Provider(format!("bad JSON from provider: {e}")))?;
@@ -1494,6 +1497,10 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(4096));
         // Cut and strict is still the error it was.
         assert!(parse_messages_text(cut, true).is_err());
+        // A full context window is flagged too, and (as before) is not an
+        // error even when strict.
+        let full = r#"{"content":[{"type":"text","text":"[{\"a\":1},"}],"stop_reason":"model_context_window_exceeded"}"#;
+        assert!(parse_messages_text(full, true).unwrap().1.output_cut);
         // Finished: no flag.
         let done = r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}"#;
         assert!(!parse_messages_text(done, false).unwrap().1.output_cut);

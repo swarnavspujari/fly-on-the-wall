@@ -100,10 +100,10 @@ The crate never logs keys or bodies. Its one `tracing::warn!` logs only the mode
 ## Tests
 | Kind | File | Tests | Covers |
 |---|---|---|---|
-| unit | `crates/fly-llm/src/anthropic.rs` | 35 | per-model body shaping (temperature, thinking, effort, structured output, fallbacks, strict tools, forced choice), relax-after-400 as a pure fn, response/refusal/truncation parsing, SSE decoder, capability/builder agreement |
+| unit | `crates/fly-llm/src/anthropic.rs` | 37 | per-model body shaping (temperature, thinking, effort, structured output, fallbacks, strict tools, forced choice), relax-after-400 as a pure fn, response/refusal/truncation parsing, SSE decoder, capability/builder agreement |
 | ignored e2e/harness | `crates/fly-llm/src/anthropic.rs` | 1 | `anthropic_tool_round_trip_live` (needs `ANTHROPIC_API_KEY`) |
 | unit | `crates/fly-llm/src/golden.rs` | 1 | 105 legacy `chat()` bodies byte-for-byte (data in `tests/golden/legacy_bodies.jsonl`) |
-| unit | `crates/fly-llm/src/openai_compat.rs` | 21 | Ollama native body / `think` / `num_ctx`, OpenAI / NIM bodies and strict schema, tool-call parsing, NDJSON and SSE decoders, `/api/show` parsing |
+| unit | `crates/fly-llm/src/openai_compat.rs` | 23 | Ollama native body / `think` / `num_ctx`, OpenAI / NIM bodies and strict schema, tool-call parsing, NDJSON and SSE decoders, `/api/show` parsing |
 | ignored e2e/harness | `crates/fly-llm/src/openai_compat.rs` | 2 | `ollama_num_ctx_marker_live`, `ollama_tool_loop_live` (need a running Ollama) |
 | unit | `crates/fly-llm/src/repair.rs` | 6 | text-written tool calls (llama, qwen, fenced, OpenAI shape), malformed cases |
 | unit | `crates/fly-llm/src/stream.rs` | 8 | line framing (split UTF-8, CRLF, cap), replay/collect, accumulator, cut stream |

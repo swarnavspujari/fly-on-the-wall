@@ -276,8 +276,10 @@ export function enhanceNotices(r: EnhanceReport): string[] {
     );
   }
   if (r.output_cut) {
+    // A note with no transcript has nothing to point to.
     out.push(
-      "The AI's reply was cut off at its length limit, so later points may be missing. The whole transcript is in the Transcript tab.",
+      "The AI's reply was cut off at its length limit, so later points may be missing." +
+        (r.segments_total > 0 ? " The whole transcript is in the Transcript tab." : ""),
     );
   }
   if (r.dropped > 0) {

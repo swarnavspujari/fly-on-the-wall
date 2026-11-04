@@ -103,7 +103,7 @@ None.
 |---|---|---|---|
 | vitest | `frontend/src/components/EnhancedDoc.test.tsx` | 36 | the flagged state (reason in visible text, the chip kept only when it cites, the legend, Keep / Remove) and `EnhanceNotices`, besides: |
 | vitest (before row 3.7) | `frontend/src/components/EnhancedDoc.test.tsx` | 26 | legend, unsourced/missing/notes/early states, Keep focus moves, Remove undo/serialize/cancel/failure, source preview + Esc, multi-meeting union, no false "missing" while loading |
-| vitest | `frontend/src/enhancedTrust.test.ts` | 32 | flagged precedence (never sourced, outranked by "source not found", held while loading, never on your text), the legend line, the Ask-parity copy for every flag kind, the run notices; besides: |
+| vitest | `frontend/src/enhancedTrust.test.ts` | 36 | flagged precedence (never sourced, outranked by "source not found", held while loading, never on your text), the legend line, the Ask-parity copy for every flag kind, the run notices; besides: |
 | vitest (before row 3.7) | `frontend/src/enhancedTrust.test.ts` | 19 | trust rules, legend copy, `templateSections`, `sourceQuotes`, `sourceTarget`, re-recorded notes, enhanced-before-transcript |
 | vitest | `frontend/src/components/Editor.enhanced.test.tsx` | 5 | a run shows the saved note, the flagged line and the notices (read part of the meeting, left out) and "Got it" clears them; a quiet run shows none and a failed one shows the error only; besides: |
 | vitest (before row 3.7) | `frontend/src/components/Editor.enhanced.test.tsx` | 3 | last Remove returns to Notes; source chip opens the earlier recording and scrolls; a devMock self-check |

@@ -221,7 +221,8 @@ pub struct Usage {
     pub context_fallback: bool,
     /// The reply stopped at the `max_tokens` limit (Ollama `done_reason`
     /// "length", OpenAI `finish_reason` "length", Anthropic `stop_reason`
-    /// "max_tokens"), so the text may end before the model was done.
+    /// "max_tokens" or "model_context_window_exceeded"), so the text may end
+    /// before the model was done.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub output_cut: bool,
 }

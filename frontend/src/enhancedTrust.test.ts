@@ -434,6 +434,13 @@ describe("what a finished Enhance tells you", () => {
     expect(enhanceNotices(report({ output_cut: false }))).toEqual([]);
   });
 
+  it("doesn't point to a transcript when the note has none", () => {
+    // Written from the notes alone: no meeting, so nothing in the Transcript tab.
+    expect(
+      enhanceNotices(report({ segments_total: 0, segments_shown: 0, output_cut: true })),
+    ).toEqual(["The AI's reply was cut off at its length limit, so later points may be missing."]);
+  });
+
   it("says what it left out, one or several", () => {
     expect(enhanceNotices(report({ dropped: 1 }))).toEqual([
       "Left out 1 line that rested only on a transcript line reading as aimed at an AI assistant. Nothing in it was acted on. The text is below, in case it was meant for the meeting.",
