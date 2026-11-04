@@ -53,6 +53,8 @@
      fotwMockConsentSkips = "1"    → the backend skipped m1's cleanup and
                                      action items for missing consent (the
                                      notice with "Review and allow")
+     fotwMockAiCutOff = "1"        → the model stopped short of m1 (the notice
+                                     "Some action items couldn't be read")
      fotwMockRecoveredKeptLocal = "1" → self-heal restored m1 and set it to
                                      Keep local (the review notice)
      fotwMockAskError = keep_local | consent | no_key | auth | ollama_missing |
@@ -1849,6 +1851,9 @@ function mockMissingKey(): string | null {
 // "polishing" → done events, and a meeting stays skipped while the saved
 // cloud provider still has no key (as in the backend).
 let mockConsentSkips: string[] = mockFlag("fotwMockConsentSkips") === "1" ? ["m1"] : [];
+// Meetings the model stopped short of (a loop, a stall, part of the meeting
+// listed): the same re-run covers them, the notice words them differently.
+let mockAiCutOff: string[] = mockFlag("fotwMockAiCutOff") === "1" ? ["m1"] : [];
 
 /* ---- recovered meetings kept local ---- */
 // fotwMockRecoveredKeptLocal = "1": self-heal restored n1's meeting and set it
@@ -1859,8 +1864,10 @@ let mockRecoveredKeptLocal: { meeting_id: string; note_id: string; title: string
     ? [{ meeting_id: "m1", note_id: "n1", title: noteMeta[0].title }]
     : [];
 function mockRetryConsentSkipped(): number {
-  const ids = mockConsentSkips;
+  const ids = [...mockConsentSkips, ...mockAiCutOff];
   mockConsentSkips = [];
+  mockAiCutOff = [];
+  mockEmit("llm:ai-cut-off", mockAiCutOff);
   ids.forEach((id, i) => {
     setTimeout(() => {
       const base = { meeting_id: id, detail: null, error: null };
@@ -3213,6 +3220,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     }
     case "consent_skipped_meetings":
       return [...mockConsentSkips];
+    case "ai_cut_off_meetings":
+      return [...mockAiCutOff];
     case "retry_consent_skipped":
       return mockRetryConsentSkipped();
     case "request_cloud_consent":

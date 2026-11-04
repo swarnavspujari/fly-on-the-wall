@@ -53,6 +53,38 @@ describe("consentSkipsCopy", () => {
     );
     expect(c.action).toBe("Run them now");
   });
+
+  it("only a missing key sends the button to Settings", () => {
+    expect(consentSkipsCopy(1, "OpenAI", "OpenAI").needsKey).toBe(true);
+    expect(consentSkipsCopy(1, "OpenAI").needsKey).toBe(false);
+    expect(consentSkipsCopy(0, null, "OpenAI", 2).needsKey).toBe(false);
+  });
+
+  it("meetings the model stopped short of have their own wording", () => {
+    // They may have a cleaned transcript and some items, so it doesn't say
+    // they "kept the raw transcript".
+    const c = consentSkipsCopy(0, null, null, 3);
+    expect(c.title).toBe("Some action items couldn't be read");
+    expect(c.cause).toBe(
+      "The AI model didn't finish reading 3 meetings, so some action items may be missing. You can run them again.",
+    );
+    expect(c.action).toBe("Run them now");
+    expect(consentSkipsCopy(0, "Anthropic", "Anthropic", 1).cause).toContain(
+      "didn't finish reading 1 meeting,",
+    );
+  });
+
+  it("next to a consent skip they are one more sentence, and the blocker leads", () => {
+    const c = consentSkipsCopy(2, "Anthropic", null, 1);
+    expect(c.title).toBe("Transcript cleanup and action items were skipped");
+    expect(c.cause).toBe(
+      "Anthropic needs your OK before it gets meeting content, so 2 meetings kept the raw transcript and got no action items. 1 more meeting was only partly read.",
+    );
+    expect(c.action).toBe("Review and allow");
+    expect(consentSkipsCopy(1, null, null, 2).cause).toBe(
+      "1 meeting kept the raw transcript and got no action items. You can run them now. 2 more meetings were only partly read.",
+    );
+  });
 });
 
 describe("systemAudioCopy", () => {

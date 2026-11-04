@@ -44,13 +44,18 @@ pub struct AppState {
     /// optimistic "Listening…" forever.
     pub live_status: Mutex<Option<crate::live::LiveStatus>>,
     /// Meetings whose post-transcription cleanup / item extraction was refused
-    /// because the cloud provider has no recorded consent or no API key yet,
-    /// or was stopped because the model took too long or got stuck
-    /// (`llm_commands::record_incomplete`).
+    /// because the cloud provider has no recorded consent or no API key yet
+    /// (`llm_commands::record_consent_skip`).
     /// In memory only: the app's notice offers to run them once the user
-    /// allows the provider or adds the key, or right away for a model that
-    /// was stopped (`llm_commands::retry_consent_skipped`).
+    /// allows the provider or adds the key (`llm_commands::retry_consent_skipped`).
     pub consent_skipped: Mutex<std::collections::BTreeSet<String>>,
+    /// Meetings whose cleanup / item extraction reached the model and was
+    /// stopped short: it took too long, got stuck in a loop, or listed only
+    /// part of the meeting (`llm_commands::record_incomplete`). Kept apart
+    /// from `consent_skipped` because the notice says something else about
+    /// them (some items couldn't be read; the transcript may well be cleaned),
+    /// but "Run them now" runs both lists.
+    pub ai_incomplete: Mutex<std::collections::BTreeSet<String>>,
     /// Passes (transcript cleanup + item extraction) waiting to run after a
     /// transcription, and the one running. Drained by its own worker so a
     /// slow model never holds up the transcription queue (ai_queue.rs).
@@ -206,6 +211,7 @@ impl AppState {
             ollama: Mutex::new(None),
             live_status: Mutex::new(None),
             consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
+            ai_incomplete: Mutex::new(std::collections::BTreeSet::new()),
             ai_queue: Default::default(),
             recovered_kept_local: Mutex::new(Vec::new()),
             consent_prompt: tokio::sync::Mutex::new(Default::default()),

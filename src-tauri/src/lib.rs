@@ -185,6 +185,7 @@ pub fn run() {
             llm_commands::set_llm_settings,
             llm_commands::test_llm_connection,
             llm_commands::consent_skipped_meetings,
+            llm_commands::ai_cut_off_meetings,
             llm_commands::retry_consent_skipped,
             llm_commands::request_cloud_consent,
             extraction::extract_meeting_items,
