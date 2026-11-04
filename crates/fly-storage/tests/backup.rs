@@ -689,11 +689,24 @@ fn the_copy_from_before_the_schema_change_survives_a_run_of_version_bumps() {
     drop(open_and_record(dir.path(), "2.5.0", &outcome));
 
     // Routine updates, more than enough to push it out of a plain newest-3.
+    // They run back to back, so on a fast machine several land in the same
+    // second of the clock: the order must not depend on that. Every backup is
+    // stamped after the one before it (never the same name, never replacing
+    // one), and the listing puts the newest first, by the stamp in the name.
     let mut routine = Vec::new();
+    let mut last_stamp = pre_migration.taken_at.clone();
     for patch in 1..=6 {
         let version = format!("2.5.{patch}");
         let outcome = before(dir.path(), &version);
-        routine.push(saved(outcome.clone()).name);
+        let file = saved(outcome.clone());
+        assert!(
+            file.taken_at > last_stamp,
+            "{} was not stamped after {last_stamp}",
+            file.name
+        );
+        last_stamp = file.taken_at.clone();
+        assert_eq!(backup::list(dir.path())[0].name, file.name);
+        routine.push(file.name);
         drop(open_and_record(dir.path(), &version, &outcome));
         let left = backup_files(dir.path());
         assert!(

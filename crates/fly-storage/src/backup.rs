@@ -543,6 +543,10 @@ fn stamp_time(stamp: &str) -> Option<DateTime<Utc>> {
 /// back must not file the newest backup as an old one; and the rename must
 /// never replace a backup.
 fn unique_name(dir: &Path, label: &str, now: DateTime<Utc>) -> String {
+    // Stamps are whole seconds, so compare in whole seconds: a `now` a few
+    // hundred milliseconds into the newest stamp's second must move on to the
+    // next one, not reuse it.
+    let now = DateTime::from_timestamp(now.timestamp(), 0).unwrap_or(now);
     let mut at = match list_in(dir).first().and_then(|f| stamp_time(&f.taken_at)) {
         Some(newest) if newest >= now => newest + ChronoDuration::seconds(1),
         _ => now,
@@ -575,6 +579,14 @@ fn copy_verified(db: &Path, partial: &Path, final_path: &Path, busy: Duration) -
         .open(partial)?
         .sync_all()?;
     verify(partial, user_version, busy)?;
+    // A backup is never replaced. Names are unique in the folder
+    // (`unique_name`, under the backup lock), so only a file that appeared
+    // since could clash; and a rename would silently overwrite it on Unix.
+    if final_path.exists() {
+        return Err(StorageError::Invalid(
+            "a backup with this name already exists".into(),
+        ));
+    }
     rename_with_retry(partial, final_path)?;
     sync_dir(final_path.parent());
     Ok(())
@@ -956,8 +968,18 @@ mod tests {
     fn a_new_backup_is_stamped_after_every_one_already_there() {
         let dir = tempfile::tempdir().unwrap();
         let mut last = String::new();
-        // a clock that stands still, then one set back an hour
-        for (i, now) in [at(0), at(0), at(0), at(-3600)].into_iter().enumerate() {
+        // A fast machine: the next backup comes a fraction of a second into
+        // the newest stamp's second (stamps are whole seconds, so it must not
+        // reuse that second); then a clock that stands still, and one set
+        // back an hour.
+        let now_ish = [
+            at(0),
+            at(0) + ChronoDuration::milliseconds(400),
+            at(0) + ChronoDuration::milliseconds(999),
+            at(0),
+            at(-3600),
+        ];
+        for (i, now) in now_ish.into_iter().enumerate() {
             let name = unique_name(dir.path(), &format!("2.5.{i}"), now);
             let stamp = parse_name(&name).unwrap().1.to_owned();
             assert!(stamp > last, "{stamp} should come after {last}");
@@ -965,6 +987,6 @@ mod tests {
             last = stamp;
         }
         let listed: Vec<_> = list_in(dir.path()).into_iter().map(|f| f.label).collect();
-        assert_eq!(listed, ["2.5.3", "2.5.2", "2.5.1", "2.5.0"]);
+        assert_eq!(listed, ["2.5.4", "2.5.3", "2.5.2", "2.5.1", "2.5.0"]);
     }
 }
