@@ -27,7 +27,8 @@ When the harness's requests no longer match `requests_fingerprint`, the
 replay is stale: it isn't scored, and `stale_replays` (gated at 0) fails the
 suite until it's re-recorded.
 
-None exist yet. They're recorded with
-`RecordingProvider::wrap(provider, on_device)` and `to_replay(...)` once the
-Ask harness lands (README, "Recording replays"), on this synthetic corpus
-only, and added with the user's approval.
+None are committed. They're recorded with
+`RecordingProvider::wrap(provider, on_device)` and `to_replay(...)` where real
+providers are built (README, "Recording replays"), on this synthetic corpus
+only, and added only with the user's approval: a committed model's replays
+become a gated group (`replay:<model>@<tier>`) in the required suite.

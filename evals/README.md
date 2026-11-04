@@ -293,7 +293,7 @@ must-cite meeting counted as a hit, so the gap between the two shows how
 much notes crowd out. They are report-only: the thresholds loader refuses
 any gate on an `evidence_*` metric.
 
-### ask_contract (pending, CI)
+### ask_contract (required, CI)
 
 The contract the Ask harness must meet. The harness-facing types are in
 `runner/src/ask_contract/api.rs`; the recording provider and replay files in
@@ -403,10 +403,24 @@ request only appends to the one before, so a prompt cache can reuse it) and
   recorded real-model replies, replayed through the same mock in CI (spec
   §4.2a #14).
 
-**Status: pending.** No harness exists yet, so the suite loads and validates
-every scenario, script and replay, runs the scorer self-check, and reports
-`no harness registered`. Its metrics count toward nothing until the user
-approves flipping it to `required` in `thresholds.toml`.
+**Status: required.** The fly-ask harness is registered
+(`runner/src/harnesses.rs`), so the suite loads and validates every
+scenario, script and replay, runs the scorer self-check, then runs the
+harness on all of them. Every global gate and every tier's quality floors
+(for each group with enough scenarios, today `auto@S`, `auto@M` and
+`auto@C`) are absolute under `--strict`; `--gate security` and
+`--gate quality` gate as the table under [Gating](#gating) says. The
+committed baseline is `baselines/ask_contract.json`, a copy of a run's
+`target/evals/ask_contract.json`. It holds counts, rates and the
+per-scenario rows (no timings: mocks answer instantly, and the runner
+doesn't write them), so it is the same on every run.
+
+The user approved the flip, on the scripted scenarios only: no
+real-model replays are committed (`suites/ask_contract/replays/` holds only
+its README), so no `replay:<model>@<tier>` group exists, and no tier floor
+or other gate in `thresholds.toml` changed with it. Whether to commit
+real-model replays, and what to do about the tier-S floors those would
+have to meet, are separate decisions for the user.
 
 **Scorer self-check.** Every run first scores two test doubles
 (`runner/src/ask_contract/probes.rs`; neither is the harness). A strict probe
@@ -444,11 +458,11 @@ frames shown while streaming, timings (first token, total) and the run log.
 - `Err` from `ask` is a harness bug; model and provider failures are an
   `Ok` answer with `AskOutcome::ModelFailed`.
 
-Registering it means adding the harness crate as a dependency of `fly-evals`,
+Registering a harness means adding its crate as a dependency of `fly-evals`,
 a small adapter in `runner/src/harnesses.rs`, and the crate to the allowed
-path crates in `evals.yml`'s dependency-graph check, then flipping
-`ask_contract` to `required`. That's an eval change: it needs the user's
-approval.
+path crates in `evals.yml`'s dependency-graph check. fly-ask is registered
+that way. Registering a different harness, or flipping a suite's `status`,
+is an eval change: it needs the user's approval.
 
 #### Recording replays
 

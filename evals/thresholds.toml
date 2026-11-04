@@ -70,10 +70,12 @@ must_cite_coverage = { min = 0.75 }
 keep_local_leaks = { max = 0 }
 
 # Contract for the Ask harness (spec v2.5 item 3.3): scripted and replayed
-# model outputs through a request-recording mock provider. Pending until the
-# harness lands and the user approves flipping it to required.
+# model outputs through a request-recording mock provider. Required since
+# the user approved flipping it, on its scripted scenarios only (no
+# real-model replays are committed). The baseline is
+# evals/baselines/ask_contract.json.
 [ask_contract]
-status = "pending"
+status = "required"
 baseline_tolerance = 0.0
 
 # Every scenario, whatever its tier or group.
