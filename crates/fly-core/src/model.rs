@@ -61,12 +61,19 @@ pub enum BlockFlagKind {
 
 /// How much of the meeting an Enhance run read, saved on the blocks it
 /// wrote when it was less than all of it (a long meeting that didn't fit
-/// the model's context), so a partial note never looks complete.
+/// the model's context), or when the AI's reply was cut off at its length
+/// limit, so a partial note never looks complete.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PartialRead {
     /// Transcript lines the model was given, and lines in the meeting.
+    /// Equal when it read the whole meeting (and the reply was cut off).
     pub shown: u32,
     pub total: u32,
+    /// The AI's reply stopped at its length limit, so later points may be
+    /// missing. Absent on disk when false, and in notes saved before this
+    /// existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cut_off: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,8 +95,9 @@ pub struct NoteBlock {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<BlockFlag>,
     /// Set on the AI blocks of an Enhance run that read only part of the
-    /// meeting. Absent for a whole read, for the user's own text, and in
-    /// notes saved before this existed.
+    /// meeting, or whose reply was cut off at its length limit. Absent for a
+    /// whole, finished run, for the user's own text, and in notes saved
+    /// before this existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial: Option<PartialRead>,
 }
@@ -782,10 +790,30 @@ mod tests {
         b.partial = Some(PartialRead {
             shown: 412,
             total: 1980,
+            cut_off: false,
+        });
+        let json = serde_json::to_string(&b).unwrap();
+        // No cut: the same bytes as before the field existed.
+        assert!(
+            json.contains(r#""partial":{"shown":412,"total":1980}"#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<NoteBlock>(&json).unwrap(), b);
+        // A note saved before `cut_off` existed loads unchanged.
+        let old = json.clone();
+        assert_eq!(
+            serde_json::from_str::<NoteBlock>(&old).unwrap().partial,
+            b.partial
+        );
+        // A cut-off reply says so, on a whole read too.
+        b.partial = Some(PartialRead {
+            shown: 1980,
+            total: 1980,
+            cut_off: true,
         });
         let json = serde_json::to_string(&b).unwrap();
         assert!(
-            json.contains(r#""partial":{"shown":412,"total":1980}"#),
+            json.contains(r#""partial":{"shown":1980,"total":1980,"cut_off":true}"#),
             "{json}"
         );
         assert_eq!(serde_json::from_str::<NoteBlock>(&json).unwrap(), b);

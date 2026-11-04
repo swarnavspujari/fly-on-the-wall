@@ -929,6 +929,7 @@ pub async fn enhance_with(
         invalid_citations = r.invalid_citations,
         links_removed = r.links_removed,
         retried_smaller = r.retried_smaller,
+        output_cut = r.output_cut,
         "enhance checked"
     );
     let note = storage
@@ -2867,6 +2868,8 @@ mod enhance_tests {
         model: &'static str,
         reply: String,
         fell_back: bool,
+        /// The reply stopped at the model's token limit.
+        cut: bool,
         store: Option<Arc<Mutex<fly_storage::Storage>>>,
         sent: Mutex<Vec<fly_llm::ChatRequest>>,
         store_free: Mutex<Vec<bool>>,
@@ -2879,6 +2882,7 @@ mod enhance_tests {
                 model: "llama3.1",
                 reply: reply.into(),
                 fell_back: false,
+                cut: false,
                 store: None,
                 sent: Mutex::new(Vec::new()),
                 store_free: Mutex::new(Vec::new()),
@@ -2915,6 +2919,7 @@ mod enhance_tests {
                 self.reply.clone(),
                 Usage {
                     context_fallback: self.fell_back,
+                    output_cut: self.cut,
                     ..Usage::default()
                 },
             ))
@@ -3067,6 +3072,7 @@ mod enhance_tests {
         let read = fly_core::PartialRead {
             shown: done.report.segments_shown,
             total: 2_500,
+            cut_off: false,
         };
         assert_eq!(done.note.blocks[0].partial, Some(read));
         let again = store.lock().unwrap().get_note(&note_id).unwrap();
@@ -3152,6 +3158,34 @@ mod enhance_tests {
         assert_eq!(ai_ids(&done.note.blocks[0]), vec!["seg-02499"]);
         // Read whole: nothing to say about a partial read.
         assert_eq!(done.note.blocks[0].partial, None);
+        assert!(!done.report.output_cut);
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_at_its_length_limit_is_saved_marked_and_reads_back_marked() {
+        let (_dir, store, note_id, _) = store_with(40, &[]);
+        // Two finished blocks, then a third the token limit cut short.
+        let reply = r#"[
+          {"type":"user","markdown":"- glazing schedule","sources":[]},
+          {"type":"ai","markdown":"Glazing was discussed.","sources":[1]},
+          {"type":"ai","markdown":"The heater supp"#;
+        let mut model = Model::new("ollama", reply);
+        model.cut = true;
+        let done = enhance_with(&store, &model, &note_id, "tpl-general")
+            .await
+            .unwrap();
+        assert!(done.report.output_cut);
+        let read = fly_core::PartialRead {
+            shown: 40,
+            total: 40,
+            cut_off: true,
+        };
+        assert_eq!(done.note.blocks.len(), 2, "the finished blocks are kept");
+        assert_eq!(done.note.blocks[0].partial, None);
+        assert_eq!(done.note.blocks[1].partial, Some(read));
+        // Reopening the note later still says it stopped short.
+        let again = store.lock().unwrap().get_note(&note_id).unwrap();
+        assert_eq!(again.blocks[1].partial, Some(read));
     }
 
     #[tokio::test]

@@ -659,6 +659,10 @@ pub struct EnhanceReport {
     /// The model was run a second time with a smaller prompt because the
     /// first could not be read in full.
     pub retried_smaller: bool,
+    /// The reply stopped at the model's length limit, so the blocks saved
+    /// are the ones finished before the cut and later points may be
+    /// missing.
+    pub output_cut: bool,
 }
 
 /// Why no note came out of a run.
@@ -2337,6 +2341,14 @@ fn excerpt(md: &str) -> String {
 /// what was done to them. Errors when there is nothing to save, so the
 /// caller never replaces a note's enhanced document with nothing.
 pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
+    check_reply(output, p, false)
+}
+
+/// [`check`], told whether the model's reply stopped at its length limit
+/// (`Usage::output_cut`). The finished blocks are kept either way; when it
+/// did, every AI block and the report say so, so a note that stops short
+/// never looks complete.
+fn check_reply(output: &str, p: &Prepared, output_cut: bool) -> Result<Checked, EnhanceError> {
     let clean = text::strip_reasoning(output);
     let raw: Vec<RawEnhanceBlock> = match enhance::parse_enhance_output(&clean) {
         ParsedEnhance::Unusable => return Err(EnhanceError::Unusable),
@@ -2461,11 +2473,14 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
         });
     }
     report.blocks = blocks.len() as u32;
-    if !p.is_whole() {
-        // Saved with the note, so a partial read never looks complete.
+    report.output_cut = output_cut;
+    if output_cut || !p.is_whole() {
+        // Saved with the note, so a partial read, or a reply that stopped
+        // short, never looks complete. The counts are what was read.
         let read = PartialRead {
             shown: p.sent.len() as u32,
             total: p.segments_total as u32,
+            cut_off: output_cut,
         };
         for b in &mut blocks {
             if matches!(b.origin, fly_core::BlockOrigin::Ai { .. }) {
@@ -2557,7 +2572,12 @@ pub async fn enhance(
             retried = true;
             continue;
         }
-        let mut done = check(&output, &prepared)?;
+        if usage.output_cut {
+            // The reply ran into max_tokens. The complete blocks before the
+            // cut are kept, and marked as such.
+            tracing::warn!("enhance: the model's reply was cut off at its length limit");
+        }
+        let mut done = check_reply(&output, &prepared, usage.output_cut)?;
         done.report.retried_smaller = retried && size != req.prompt_chars;
         return Ok(done);
     }
