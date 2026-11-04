@@ -508,7 +508,7 @@ fn estimate_num_ctx_for(req: &ConverseRequest) -> u32 {
 /// `num_ctx` is always a multiple of this (see [`estimate_num_ctx_for`]).
 const NUM_CTX_STEP: u32 = 4096;
 // The cap is on the grid, so rounding up can't ask for more than the cap.
-const _: () = assert!(MAX_NUM_CTX % NUM_CTX_STEP == 0);
+const _: () = assert!(MAX_NUM_CTX.is_multiple_of(NUM_CTX_STEP));
 
 /// Request body for the OpenAI-compatible `/chat/completions` endpoint
 /// (OpenAI, NIM). `thinking` has no representation here and is ignored.
