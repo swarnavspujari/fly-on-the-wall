@@ -103,7 +103,7 @@ None.
 ## Changing it safely
 - Run `cargo test -p fly-core` (fast, all OSes). For aligner, cross-talk, repeat or VAD-adjacent changes, also run the ignored accuracy harness on a real two-channel recording (`docs/TESTING.md`), because the unit tests are synthetic.
 - **Serde shape is a cross-crate contract.** fly-storage rows and manifests (`recovery.rs`), fly-mcp output and `frontend/src/types.ts` all mirror these structs. New fields need `#[serde(default)]`, as `attendees_confirmed` and `playback_path` have.
-- **Prompt text:** follow the checklist in `prompt_profile.rs:11-42`. Benchmark with `llm_bench`, record the change in `docs/BENCHMARKS.md`, and update the `PROVIDERS` table in `llm_commands.rs` if a default model changes.
+- **Prompt text:** follow the checklist in `prompt_profile.rs:11-42`. Benchmark with `llm_bench`, record the change in `docs/BENCHMARKS.md`, and, if a default model changes, update `CANDIDATES` in `local_models.rs` (the default for Ollama follows installed memory: [LOCAL-MODEL-DEFAULT](../LOCAL-MODEL-DEFAULT.md)); the `PROVIDERS` row is only the legacy fallback.
 - **`FENCE_TAGS` (`enhance.rs:49-58`) must list every fence tag any prompt uses,** including the app-side Ask and extraction prompts (`llm_commands.rs` ~`620-640`, `extraction.rs:93-107`).
 - Polish: never loosen `MIN_RETAINED_FRACTION` and never let the cleaned variant change structure. `preserves_provenance` is checked when the result is saved.
 - Keep test fixtures synthetic (the repo is public).
