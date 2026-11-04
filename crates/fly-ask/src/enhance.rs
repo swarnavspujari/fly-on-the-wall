@@ -813,17 +813,19 @@ fn line_is_theirs(line: &str, notes: &[NoteLine]) -> bool {
     if words.is_empty() {
         return true;
     }
-    if notes
-        .iter()
-        .any(|n| words.len() * 10 >= n.words.len() * 7 && contains_run(&n.words, &words))
-    {
+    // (and it says what they said: a run that drops their "do not" doesn't)
+    let negated = has_negation(plain);
+    if notes.iter().any(|n| {
+        n.negated == negated
+            && words.len() * 10 >= n.words.len() * 7
+            && contains_run(&n.words, &words)
+    }) {
         return true;
     }
     let mine = content_words(plain);
     if mine.is_empty() || aim_of(plain) != Aim::People {
         return false;
     }
-    let negated = has_negation(plain);
     notes.iter().any(|n| {
         if n.content.is_empty() || n.negated != negated {
             return false;
@@ -1916,9 +1918,11 @@ pub fn check(output: &str, p: &Prepared) -> Result<Checked, EnhanceError> {
                         detail: None,
                     },
                 );
-            } else if !evidence.is_empty() && evidence.iter().all(|s| s.aim == Aim::Order) {
-                // Everything under it is phrased as an order: what colleagues
-                // say, and what an injected line can look like.
+            } else if evidence.iter().any(|s| s.aim == Aim::Order) {
+                // It rests on a line phrased as an order, alone or next to an
+                // ordinary one: what colleagues say to each other, and what an
+                // injected line can look like. Its numbers and names are
+                // read from that line, so it is for the reader to check.
                 flags.insert(
                     0,
                     BlockFlag {

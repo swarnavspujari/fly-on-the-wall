@@ -291,7 +291,9 @@ pub fn check(
             speaker: &s.speaker,
         })
         .collect();
-    let body_key = |s: &str| crate::text::strip_links(s).0;
+    // What an approved proposal writes into the user's notes: no links, and
+    // no addresses either (somewhere to send meeting content).
+    let body_key = |s: &str| crate::text::strip_links_and_emails(s).0;
     let (markdown, text, owner, body) = match t {
         ProposalTool::InsertIntoNote => {
             let md = args["markdown"]
@@ -1046,5 +1048,19 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(again.unwrap_err().reason, RefusalReason::Duplicate);
+    }
+
+    #[test]
+    fn an_address_is_not_written_into_the_users_notes() {
+        let p = run(
+            INSERT_INTO_NOTE,
+            json!({"markdown": "Maren will send the draft by Friday, cc maren@example.test.", "segment_ids": ["x11-15"]}),
+        )
+        .unwrap();
+        let md = p.markdown.as_deref().unwrap();
+        assert!(
+            !md.contains('@') && md.contains("Maren will send the draft"),
+            "{md}"
+        );
     }
 }

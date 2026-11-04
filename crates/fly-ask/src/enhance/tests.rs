@@ -1190,6 +1190,14 @@ fn a_cleaned_up_note_is_still_theirs_but_a_flipped_one_is_not() {
     assert!(theirs("- Do not delete the backups ever", &p));
     assert!(!theirs("- Delete the backups", &p));
     assert!(!theirs("- Delete the backups ever", &p));
+    // A long line cut down to most of itself still must not lose its "not".
+    let n = note("- do not delete the old backups before the audit");
+    let p = prep(&n, Some(&t), 1_000_000);
+    assert!(theirs(
+        "- Do not delete the old backups before the audit",
+        &p
+    ));
+    assert!(!theirs("- Delete the old backups before the audit", &p));
 }
 
 #[test]
@@ -1304,9 +1312,10 @@ fn an_order_to_the_room_is_flagged_but_kept_and_one_to_an_assistant_is_dropped()
     // The one to an assistant is dropped, and reported.
     assert_eq!(c.report.dropped, 1);
     assert!(c.report.dropped_text[0].contains("kiln invoice now"));
-    // Resting on an ordinary line too, it is plainly sourced.
-    assert!(c.blocks[1].flags.is_empty(), "{:?}", c.blocks[1].flags);
-    assert_eq!((c.report.flagged, c.report.sourced), (1, 1));
+    // Next to an ordinary line it is still flagged: its figures come from
+    // the order, and a cited ordinary line must not clear them.
+    assert_eq!(c.blocks[1].flags[0].kind, BlockFlagKind::Instruction);
+    assert_eq!((c.report.flagged, c.report.sourced), (2, 0));
 }
 
 #[test]
