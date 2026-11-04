@@ -63,7 +63,7 @@ hound = "3.5"
 # before the WAV it replaces is deleted. md-5 checks the STREAMINFO digest.
 flacenc = { version = "0.5", default-features = false }
 claxon = "0.4"
-md-5 = "0.10"
+md-5 = "0.11"
 # in-process archive extraction (src-tauri models.rs): Windows' bundled bsdtar
 # can't open .tar.bz2 without an external bzip2 on PATH, which clean machines
 # lack. zip 9 (RUSTSEC-2026-0367/0368/0369/0429 are fixed there).
