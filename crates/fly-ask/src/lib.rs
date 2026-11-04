@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod agent;
 pub mod claims;
+pub mod enhance;
 pub mod events;
 pub mod evidence;
 pub mod prefetch;

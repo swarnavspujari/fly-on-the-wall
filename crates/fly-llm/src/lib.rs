@@ -189,6 +189,16 @@ pub trait LLMProvider: Send + Sync {
     /// True when inference happens on this machine (Ollama).
     fn is_local(&self) -> bool;
     async fn chat(&self, req: ChatRequest) -> Result<String>;
+
+    /// [`LLMProvider::chat`] over the same transport, also reporting what the
+    /// server says it did with the prompt: `Usage::context_fallback` is set
+    /// when an Ollama runner failed with the sized `num_ctx` and the reply
+    /// came from the server's default context (the prompt's front may have
+    /// been cut). A provider that can't tell reports `Usage::default()`.
+    async fn chat_with_usage(&self, req: ChatRequest) -> Result<(String, Usage)> {
+        Ok((self.chat(req).await?, Usage::default()))
+    }
+
     /// Cheap round-trip used by the Settings "test connection" button.
     async fn test_connection(&self) -> Result<()>;
 

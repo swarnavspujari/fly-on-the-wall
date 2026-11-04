@@ -173,13 +173,38 @@ pub fn note(n: &NoteView) -> String {
         if blocks.is_empty() {
             out.push_str("(none yet)\n");
         }
+        if let Some(p) = blocks.iter().find_map(|b| b.partial) {
+            let _ = writeln!(
+                out,
+                "(written from part of the meeting: {} of {} transcript lines)",
+                p.shown, p.total
+            );
+        }
         for b in blocks {
-            let cites: String = b
-                .source_segment_ids
-                .iter()
-                .map(|id| format!(" [seg:{id}]"))
-                .collect();
-            let _ = writeln!(out, "{}{}", b.markdown.trim(), cites);
+            if b.flags.is_empty() {
+                let cites: String = b
+                    .source_segment_ids
+                    .iter()
+                    .map(|id| format!(" [seg:{id}]"))
+                    .collect();
+                let _ = writeln!(out, "{}{}", b.markdown.trim(), cites);
+            } else {
+                // Not backed by the lines it cites: no `[seg:…]`, which reads
+                // as a citation that supports it.
+                let kinds: Vec<&str> = b.flags.iter().map(|f| f.kind.as_str()).collect();
+                let lines = if b.source_segment_ids.is_empty() {
+                    String::new()
+                } else {
+                    format!("; lines to check: {}", b.source_segment_ids.join(", "))
+                };
+                let _ = writeln!(
+                    out,
+                    "{} [UNVERIFIED: not backed by its sources ({}){}]",
+                    b.markdown.trim(),
+                    kinds.join(", "),
+                    lines
+                );
+            }
         }
     }
     out

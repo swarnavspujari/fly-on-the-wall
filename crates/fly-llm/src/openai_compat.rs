@@ -127,6 +127,18 @@ impl LLMProvider for OpenAiCompatProvider {
         parse_chat_completion(&text)
     }
 
+    async fn chat_with_usage(&self, req: ChatRequest) -> Result<(String, Usage)> {
+        if !self.is_ollama() {
+            return Ok((self.chat(req).await?, Usage::default()));
+        }
+        let (text, fallback) = self.chat_ollama_native_checked(&req).await?;
+        let mut usage = parse_native_response(&text)
+            .map(|r| r.usage)
+            .unwrap_or_default();
+        usage.context_fallback = fallback;
+        Ok((parse_native_chat(&text)?, usage))
+    }
+
     async fn test_connection(&self) -> Result<()> {
         self.chat(ChatRequest {
             effort: None,
@@ -310,14 +322,21 @@ impl OpenAiCompatProvider {
 
     /// Ollama native `POST {root}/api/chat` for the legacy text path.
     async fn chat_ollama_native(&self, req: &ChatRequest) -> Result<String> {
-        let (resp, _) = self
+        let (text, _) = self.chat_ollama_native_checked(req).await?;
+        parse_native_chat(&text)
+    }
+
+    /// The raw reply body of [`Self::chat_ollama_native`], and whether the
+    /// request ran without its sized `num_ctx` (see `ollama_send`).
+    async fn chat_ollama_native_checked(&self, req: &ChatRequest) -> Result<(String, bool)> {
+        let (resp, fallback) = self
             .ollama_send(&reqwest::Client::new(), &ConverseRequest::from(req), false)
             .await?;
         let text = resp
             .text()
             .await
             .map_err(|e| LlmError::Network(e.to_string()))?;
-        parse_native_chat(&text)
+        Ok((text, fallback))
     }
 
     /// Send to `/api/chat`, returning the successful response. Retries once
@@ -430,6 +449,27 @@ pub(crate) fn estimate_num_ctx(req: &ChatRequest) -> u32 {
     estimate_num_ctx_for(&ConverseRequest::from(req))
 }
 
+/// The largest `num_ctx` Ollama is asked for (see `estimate_num_ctx_for`).
+pub const MAX_NUM_CTX: u32 = 32_768;
+/// Characters per token the context sizing assumes for a prompt.
+const PROMPT_CHARS_PER_TOKEN: usize = 3;
+
+/// The most prompt text (characters, all messages together) a context of
+/// `num_ctx` tokens holds beside a reply of `max_tokens`: the sizing below
+/// run backwards, so a caller that budgets with it is budgeting against the
+/// `num_ctx` actually sent.
+pub fn prompt_chars_for_ctx(num_ctx: u32, max_tokens: u32) -> usize {
+    let room = num_ctx.saturating_sub(max_tokens.saturating_add(512)) as usize;
+    room * PROMPT_CHARS_PER_TOKEN
+}
+
+/// [`prompt_chars_for_ctx`] at the largest context ever asked for. A longer
+/// prompt stays at [`MAX_NUM_CTX`] and Ollama trims it from the front,
+/// silently.
+pub fn max_prompt_chars(max_tokens: u32) -> usize {
+    prompt_chars_for_ctx(MAX_NUM_CTX, max_tokens)
+}
+
 /// [`estimate_num_ctx`] over blocks: text, tool calls/results and the tool
 /// schemas all occupy the prompt.
 fn estimate_num_ctx_for(req: &ConverseRequest) -> u32 {
@@ -450,9 +490,9 @@ fn estimate_num_ctx_for(req: &ConverseRequest) -> u32 {
         .iter()
         .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
         .sum::<usize>();
-    let prompt_tokens = (prompt_chars / 3) as u32;
+    let prompt_tokens = (prompt_chars / PROMPT_CHARS_PER_TOKEN) as u32;
     let response = req.max_tokens.unwrap_or(4096);
-    (prompt_tokens + response + 512).clamp(4096, 32768)
+    (prompt_tokens + response + 512).clamp(4096, MAX_NUM_CTX)
 }
 
 /// Request body for the OpenAI-compatible `/chat/completions` endpoint
@@ -1150,6 +1190,27 @@ mod tests {
         // Enormous prompt → cap.
         r.messages = vec![ChatMessage::system("x".repeat(400_000))];
         assert_eq!(estimate_num_ctx(&r), 32_768);
+    }
+
+    /// `max_prompt_chars` is the sizing arithmetic run backwards: a prompt of
+    /// exactly that size is sized to exactly the cap (it fits), and one
+    /// token's worth less is sized below it.
+    #[test]
+    fn max_prompt_chars_is_the_edge_of_the_sized_context() {
+        for max_tokens in [1_024u32, 4_096, 16_000] {
+            let chars = max_prompt_chars(max_tokens);
+            let sized = |n: usize| {
+                let mut r = req(ThinkingMode::Default);
+                r.max_tokens = Some(max_tokens);
+                r.messages = vec![ChatMessage::system("x".repeat(n))];
+                estimate_num_ctx(&r)
+            };
+            assert_eq!(sized(chars), MAX_NUM_CTX, "max_tokens {max_tokens}");
+            assert!(sized(chars - 3) < MAX_NUM_CTX, "max_tokens {max_tokens}");
+        }
+        assert_eq!(max_prompt_chars(4_096), 84_480);
+        // A reply budget bigger than the window leaves no room, never panics.
+        assert_eq!(max_prompt_chars(40_000), 0);
     }
 
     #[test]
