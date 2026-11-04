@@ -19,7 +19,7 @@ Three layers:
 | Layer | Where | Components |
 |---|---|---|
 | **Frontend features** | `frontend/src` (React in the webview; semi-trusted) | 11 `ui-*` docs |
-| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 138 Tauri commands) | 17 `app-*` docs |
+| **Backend features** | `src-tauri/src` (the `fly-app` crate: composition root, app state, all 140 Tauri commands) | 17 `app-*` docs |
 | **Crates** | `crates/fly-*` (domain, trait and impl crates; no Tauri) | 13 `fly-*` docs |
 
 ## Index
@@ -57,7 +57,7 @@ Three layers:
 | [app-calendar](app-calendar.md) | `calendar_commands.rs`, `calendar_defaults.rs` | Calendar connect/disconnect, upcoming meetings, starting a meeting from an event. |
 | [app-privacy](app-privacy.md) | `privacy.rs` | Keep local, participant notice, audio retention, "Delete all my data", disk-encryption check. |
 | [app-audio-store](app-audio-store.md) | `audio_store.rs`, `video_store.rs` | Recording storage v2: lossless FLAC compression job, format-blind readers, playback rebuild, Settings › Storage report; the opt-in video choices (imported videos → audio only, screen recordings → visually lossless). |
-| [app-models-gpu](app-models-gpu.md) | `models.rs`, `gpu.rs`, `hw.rs`, `download_model` | Pinned model and tool downloads, GPU verdict, hardware detection. |
+| [app-models-gpu](app-models-gpu.md) | `models.rs`, `model_cleanup.rs`, `gpu.rs`, `hw.rs`, `download_model` | Pinned model and tool downloads, model cleanup ("Free up space"), GPU verdict, hardware detection. |
 | [app-ollama](app-ollama.md) | `ollama.rs` | Managed `ollama serve` child, model pull and delete, status. |
 | [app-mcp-sidecar](app-mcp-sidecar.md) | `commands.rs` (`mcp_config`), `scripts/prepare-sidecars.mjs`, `externalBin` | Shipping and wiring the MCP binary. |
 | [app-screen-recording](app-screen-recording.md) | `screen_commands.rs` | Screen recording and video thumbnails. |
@@ -71,7 +71,7 @@ Three layers:
 | [ui-app-shell](ui-app-shell.md) | `main.tsx`, `LibraryGate.tsx`, `App.tsx`, `api.ts`, `devMock.ts`, `ui.tsx`, `types.ts` | Orchestration, the IPC wrapper, the fake backend, design primitives. |
 | [ui-home](ui-home.md) | `Home.tsx`, `NoteList.tsx`, `Sidebar.tsx`, `homeModel.ts`, `noteDeletion.ts` | Home, the notes list, folders, status chips, undoable delete. |
 | [ui-editor](ui-editor.md) | `Editor.tsx`, `NotesEditor.tsx`, `EnhancedDoc.tsx`, `TranscriptPanel.tsx`, `safeContent.ts` | A note: your notes, the Enhanced doc with sources, and the transcript. |
-| [ui-ask](ui-ask.md) | `AskPanel.tsx`, `askModel.ts` | The Ask sheet. |
+| [ui-ask](ui-ask.md) | `AskPanel.tsx`, `AskAnswer.tsx`, `AskConnectors.tsx`, `GlobalAsk.tsx`, `askModel.ts`, `askScope.ts`, `askCitations.ts` | Ask: the streaming answer sheet (checked sentences with citation chips, trace and runs-on pills, proposals, connector cards in the turn), scope chip and `@`, and Ask over every meeting on Home. |
 | [ui-settings](ui-settings.md) | `SettingsModal.tsx`, `settingsModel.ts`, `PrivacySection.tsx` | Full-window Settings. |
 | [ui-import](ui-import.md) | `ImportQueue.tsx`, `importProgress.ts` | The import panel. |
 | [ui-notices](ui-notices.md) | `AppNotices.tsx`, `notices.ts`, `pipelineNotice.ts`, `pipelineFailures.ts` | The single notice stack and its notice kinds. |
@@ -205,7 +205,7 @@ Back-edges inside `fly-app` that the map doesn't show, measured with `grep crate
 
 ## Command ownership
 
-Each of the 138 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
+Each of the 140 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) is documented in exactly one backend doc. It's the row whose first cell is the backticked command name.
 
 | Doc | Commands |
 |---|---|
@@ -218,7 +218,7 @@ Each of the 138 commands in `tauri::generate_handler!` (`src-tauri/src/lib.rs`) 
 | [app-import](app-import.md) | 3 |
 | [app-llm](app-llm.md) | 12 |
 | [app-ollama](app-ollama.md) | 3 |
-| [app-models-gpu](app-models-gpu.md) | 1 |
+| [app-models-gpu](app-models-gpu.md) | 3 |
 | [app-calendar](app-calendar.md) | 8 |
 | [app-screen-recording](app-screen-recording.md) | 5 |
 | [app-privacy](app-privacy.md) | 12 |

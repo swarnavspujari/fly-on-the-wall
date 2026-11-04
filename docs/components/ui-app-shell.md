@@ -71,7 +71,8 @@ The React entry point, the `App` orchestrator that owns almost all cross-feature
 | `note:attachments` | listens, `frontend/src/App.tsx` | `{note_id}` | `video_store.rs` (an imported video became its audio): the open note's attachments are refreshed, never its text |
 | `model:progress` | listens, `frontend/src/App.tsx:450` | `{id, downloaded, total, stage, error}` (`src-tauri/src/models.rs:389-395`) | `asr_commands.rs:118,412`, `scheduler.rs:162`, `ollama.rs:303`, `embeddings.rs:136`, `import_commands.rs:277`, `screen_commands.rs:95,182`, `live.rs:105` |
 | `fotw:llm-settings-changed` (window) | emits, `frontend/src/api.ts:9-11` | none | `CloudConsent.tsx:141` listens. **`App.tsx` does not**, so the sidebar privacy pill goes stale (see [ui-home](ui-home.md)). |
-| `keydown` Ctrl/Cmd+K (window) | listens, `App.tsx:325-334` | — | opens Settings |
+| `keydown` Ctrl/Cmd+K (window) | listens, `App.tsx` (the Ctrl/Cmd+K effect) | — | opens Settings |
+| `keydown` Ctrl/Cmd+J (window) | listens, same effect | — | `openAsk()`: the open note's Ask, or Ask over every meeting on Home ([ui-ask](ui-ask.md)) |
 | `resize` (window) | listens, `App.tsx:311-322` | — | narrow mode below 880 px (`App.tsx:50`) |
 | `change` on `prefers-color-scheme` | listens, `theme.ts:43-50` | — | re-resolves `system` theme |
 
@@ -105,7 +106,7 @@ None. API keys go one way through `set_llm_settings` / `set_asr_settings` and ne
 
 ## Dependencies
 - **Inbound:** `frontend/index.html` loads `main.tsx`. Every `ui-*` component imports `api`, `types` and `ui.tsx`.
-- **Outbound:** `@tauri-apps/api` (`core.invoke`, `event.listen`), `@tauri-apps/plugin-updater` and `@tauri-apps/plugin-process` (via `updater.ts`, see [app-updater](app-updater.md)), React 19, lucide-react. App mounts [ui-home](ui-home.md) (`Sidebar`, `NoteList`, `Home`, `UndoToast`, `FirstRunNotice`), [ui-notices](ui-notices.md) (`AppNotices`, `RestartRequired`), [ui-recording-bar](ui-recording-bar.md) (`RecordingBar`), [ui-editor](ui-editor.md) (`Editor`, which mounts [ui-import](ui-import.md) and `LivePane`), [ui-settings](ui-settings.md) (`SettingsModal`), [ui-confirm-consent](ui-confirm-consent.md) (`ConfirmProvider`, `CloudConsentOnLaunch`). Also `calendarMatch.ts`, `noteDeletion.ts`, `pipelineFailures.ts`, `homeModel.ts`.
+- **Outbound:** `@tauri-apps/api` (`core.invoke`, `event.listen`), `@tauri-apps/plugin-updater` and `@tauri-apps/plugin-process` (via `updater.ts`, see [app-updater](app-updater.md)), React 19, lucide-react. App mounts [ui-home](ui-home.md) (`Sidebar`, `NoteList`, `Home`, `UndoToast`, `FirstRunNotice`), [ui-notices](ui-notices.md) (`AppNotices`, `RestartRequired`), [ui-recording-bar](ui-recording-bar.md) (`RecordingBar`), [ui-editor](ui-editor.md) (`Editor`, which mounts [ui-import](ui-import.md) and `LivePane`), [ui-settings](ui-settings.md) (`SettingsModal`), [ui-confirm-consent](ui-confirm-consent.md) (`ConfirmProvider`, `CloudConsentOnLaunch`), [ui-ask](ui-ask.md) (`GlobalAsk` over `Home`, with its chat `useAskChat(null)`; `openSourceAt` opens another note at an Ask source and passes `pendingZoom` to `Editor`; `useInlineAskTurns` for the connector stack). Also `calendarMatch.ts`, `noteDeletion.ts`, `pipelineFailures.ts`, `homeModel.ts`.
 
 ### What `App.tsx` holds
 | Kind | Items |

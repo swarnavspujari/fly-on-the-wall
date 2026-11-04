@@ -19,7 +19,7 @@ Runs the local LLM runtime for the default "ollama" provider (Enhance, Ask, poli
 - `ensure_running(state)` (`ollama.rs:79-132`) — reuse a listening server; refuse to manage a custom URL; else spawn the managed child and wait up to 30 s for it to answer.
 - `shutdown(state)` (`ollama.rs:136-142`) — kill and wait the child this app spawned, if any.
 - `pull_model(root, model, progress)` (`ollama.rs:312-394`) — `POST /api/pull` streaming JSON lines mapped to `ModelProgress` (id `ollama:<model>`).
-- Types `OllamaModel { name, size }`, `OllamaStatus { installed, can_install, running, managed, base_url, models }` (`ollama.rs:148-169`); mirrored in `frontend/src/types.ts:281-299`.
+- Types `OllamaModel { name, size, used_for }` (`used_for`: "Used for Ask and Enhance." for the saved model when Ollama is the provider, "Used for search." for `embeddinggemma:300m`, else null), `OllamaStatus { installed, can_install, running, managed, base_url, models }` (`ollama.rs:148-169`); mirrored in `frontend/src/types.ts:281-299`.
 
 Callers of `ensure_running`: `llm_commands::ensure_provider_ready` when `llm.provider` is `ollama` (`llm_commands.rs:482-497`), and the semantic-search embedding worker **regardless of provider** whenever there is an embedding backlog (`embeddings.rs:126-140`, `embeddings.rs:187`). Query-time search only calls `server_alive` and never spawns (`embeddings.rs:78-88`).
 
@@ -28,7 +28,7 @@ Callers of `ensure_running`: `llm_commands::ensure_provider_ready` when `llm.pro
 |---|---|---|---|
 | `ollama_status` | none | `Result<OllamaStatus, String>` | `ui-settings` (`SettingsModal.tsx:366`, on open and after every Ollama action), via `api.ollamaStatus` (`api.ts:198`) |
 | `ollama_pull` | `model: String` | `Result<(), String>`; progress on `model:progress` with id `ollama:<model>` | `ui-settings` (`SettingsModal.tsx:624`, download / guided swap), via `api.ollamaPull` (`api.ts:201`) |
-| `ollama_delete` | `model: String` | `Result<(), String>`; refuses the model the app is configured to use | `ui-settings` (`SettingsModal.tsx:652`, after an in-app confirm), via `api.ollamaDelete` (`api.ts:204`) |
+| `ollama_delete` | `model: String` | `Result<(), String>`; refuses the model the app is configured to use, and the search embedding model (`embeddings::EMBED_MODEL`) | `ui-settings` (`SettingsModal.tsx:652`, after an in-app confirm), via `api.ollamaDelete` (`api.ts:204`) |
 
 How status is computed (`ollama.rs:171-188`): `running` = `/api/version` answered 2xx within 1.5 s; `models` = `/api/tags` (3 s timeout) only when running, else empty (errors become empty); `installed` = managed probe `bin/ollama/ollama[.exe]` exists or `ollama` is on PATH; `can_install` = this OS has an `ollama-bin` artifact (Windows, macOS); `managed` = the app holds a child handle (a child that already exited still counts until the next `ensure_running` reaps it); `base_url` = `root_url`.
 

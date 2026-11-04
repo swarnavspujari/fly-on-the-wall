@@ -10,8 +10,13 @@
 //!   English, not a claim.
 //! * **Dates** are month and weekday names.
 //! * **Names** are capitalized words outside a short list of common words;
-//!   a name matches the cited text or the cited segment's speaker label
-//!   (attribution: "Dana said …" needs a Dana).
+//!   a name matches the cited text, the cited segment's speaker label
+//!   (attribution: "Dana said …" needs a Dana) or the title of the meeting
+//!   the segment is from (the Sources panel shows it beside the line, and a
+//!   project the question named is usually in it). A title vouches for names
+//!   only, never for numbers, dates or quotes. "Speaker 2", the app's label
+//!   for an unnamed voice, is a name too, not the number 2: the same label
+//!   must be a cited line's speaker (or be in its text).
 //! * **Quotes** of three or more words inside quotation marks must appear in
 //!   one cited segment (case, spacing and punctuation ignored).
 //!
@@ -238,13 +243,33 @@ fn is_number_word(w: &str) -> bool {
         || ordinal(w).is_some()
 }
 
+/// Splits a token before a currency sign that starts an amount. ASR drops
+/// the space now and then ("now$52,000"), which would otherwise leave one
+/// word that no number reads out of.
+fn split_before_currency(raw: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let amount = chars.peek().is_some_and(|(_, d)| d.is_ascii_digit());
+        if i > start && amount && matches!(c, '$' | '€' | '£' | '¥') {
+            parts.push(&raw[start..i]);
+            start = i;
+        }
+    }
+    parts.push(&raw[start..]);
+    parts
+}
+
 /// Words with surrounding punctuation trimmed (hyphens, slashes and dashes
-/// split words; apostrophes, `$`, `%`, `.` and `,` inside a word stay),
-/// each with whether punctuation ended it.
+/// split words, and so does a currency sign glued to the word before it;
+/// apostrophes, `$`, `%`, `.` and `,` inside a word stay), each with
+/// whether punctuation ended it.
 fn clause_words(text: &str) -> Vec<(String, bool)> {
     // Keep these splitting rules in step with the eval scorer's: a looser
     // reading of the SOURCE side would accept numbers the scorer doesn't.
     text.split(|c: char| c.is_whitespace() || c == '-' || c == '/' || c == '—')
+        .flat_map(split_before_currency)
         .filter_map(|raw| {
             let tail = raw.trim_end_matches(['"', '\'', ')', ']', '*', '_']);
             let breaks = tail.ends_with(['.', ',', ':', ';', '!', '?']);
@@ -303,6 +328,11 @@ pub fn numbers(text: &str) -> BTreeSet<u64> {
     while i < ws.len() {
         let w = ws[i].as_str();
         if let Some(v) = digit_value(w) {
+            // "Speaker 2" is a label (checked by `speaker_labels`), not a count.
+            if i > 0 && ws[i - 1] == "speaker" && w.bytes().all(|b| b.is_ascii_digit()) {
+                i += 1;
+                continue;
+            }
             push(v);
             // "$4.6 million": the scale word belongs to the digits.
             match ws.get(i + 1).map(String::as_str) {
@@ -399,6 +429,19 @@ pub fn numbers(text: &str) -> BTreeSet<u64> {
     out
 }
 
+/// The app's labels for unnamed voices that a text mentions ("Speaker 2",
+/// lowercase). Like a name, a label must belong to a cited line.
+fn speaker_labels(text: &str) -> BTreeSet<String> {
+    words(text)
+        .windows(2)
+        .filter(|p| p[0].eq_ignore_ascii_case("speaker"))
+        .filter_map(|p| {
+            let n = p[1].strip_suffix("'s").unwrap_or(&p[1]);
+            (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then(|| format!("speaker {n}"))
+        })
+        .collect()
+}
+
 /// Month and weekday names (lowercase).
 pub fn dates(text: &str) -> BTreeSet<String> {
     words(text)
@@ -465,6 +508,9 @@ fn contains_run(hay: &[String], needle: &[String]) -> bool {
 pub struct Source<'a> {
     pub text: &'a str,
     pub speaker: &'a str,
+    /// Title of the meeting the segment is from. It vouches for names (a
+    /// project the question named), never for numbers, dates or quotes.
+    pub title: &'a str,
 }
 
 /// Why a claim failed.
@@ -489,11 +535,20 @@ pub struct ClaimFailure {
 pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<ClaimFailure> {
     let mut src_numbers = BTreeSet::new();
     let mut src_words: BTreeSet<String> = BTreeSet::new();
+    // Words of the cited meetings' titles: support for a name, and only a name.
+    let mut title_words: BTreeSet<String> = BTreeSet::new();
+    let mut src_labels = BTreeSet::new();
     for s in sources {
         src_numbers.extend(numbers(s.text));
+        src_labels.extend(speaker_labels(s.speaker));
+        src_labels.extend(speaker_labels(s.text));
         for w in words(s.text).into_iter().chain(words(s.speaker)) {
             let l = w.to_lowercase();
             src_words.insert(l.strip_suffix("'s").map(str::to_string).unwrap_or(l));
+        }
+        for w in words(s.title) {
+            let l = w.to_lowercase();
+            title_words.insert(l.strip_suffix("'s").map(str::to_string).unwrap_or(l));
         }
     }
     let mut missing = Vec::new();
@@ -519,10 +574,18 @@ pub fn unsupported(sentence: &str, sources: &[Source<'_>]) -> Vec<ClaimFailure> 
         }
     }
     for n in names(sentence) {
-        if !src_words.contains(&n) {
+        if !src_words.contains(&n) && !title_words.contains(&n) {
             missing.push(ClaimFailure {
                 kind: ClaimKind::Name,
                 value: n,
+            });
+        }
+    }
+    for l in speaker_labels(sentence) {
+        if !src_labels.contains(&l) {
+            missing.push(ClaimFailure {
+                kind: ClaimKind::Name,
+                value: l,
             });
         }
     }
@@ -604,6 +667,7 @@ mod tests {
         let src = [Source {
             text: "All told, I'd like sixty three hundred dollars for studio rental.",
             speaker: "Priya Anand",
+            title: "",
         }];
         assert!(unsupported("Priya asked for $6,300.", &src).is_empty());
         assert!(unsupported("Priya asked for sixty three hundred dollars.", &src).is_empty());
@@ -622,10 +686,129 @@ mod tests {
     }
 
     #[test]
+    fn a_currency_sign_glued_to_the_previous_word_still_reads() {
+        // ASR drops the space before the sign: "now$52,000", "approved$48,000".
+        let line = "It is now$52,000, because Northwind adds a support plan.";
+        assert_eq!(n(line), vec![52_000.0]);
+        assert_eq!(n("The board approved$48,000 for it."), vec![48_000.0]);
+        assert_eq!(n("about€40k"), vec![40_000.0]);
+        assert_eq!(n("it was set,$52,000 flat"), vec![52_000.0]);
+        assert_eq!(n("a cap ($52,000)"), vec![52_000.0]);
+        assert_eq!(n("$52,000"), vec![52_000.0]);
+
+        let src = [Source {
+            text: line,
+            speaker: "Dana Whitlock",
+            title: "",
+        }];
+        assert!(unsupported("The budget is now $52,000.", &src).is_empty());
+        // The glued word is no more a number than the spaced one: a different
+        // figure is still caught.
+        assert_eq!(
+            kinds(&unsupported("The budget is now $25,000.", &src)),
+            vec![(ClaimKind::Number, "25000")]
+        );
+    }
+
+    #[test]
+    fn a_speaker_label_is_a_name_not_a_number() {
+        let src = [Source {
+            text: "I can take the export this week.",
+            speaker: "Speaker 2",
+            title: "",
+        }];
+        assert!(unsupported("Speaker 2 will handle the export.", &src).is_empty());
+        assert!(unsupported("Speaker 2's export lands this week.", &src).is_empty());
+        assert!(numbers("Speaker 2 will handle the export.").is_empty());
+        assert!(!has_claims("Speaker 2 will handle the export."));
+        // The same digit as a quantity still counts.
+        assert_eq!(n("Speaker 2 listed 2 risks."), vec![2.0]);
+        // Attribution is kept: the label must belong to a cited line.
+        let other = [Source {
+            text: "I can take the export this week.",
+            speaker: "Speaker 1",
+            title: "",
+        }];
+        assert_eq!(
+            kinds(&unsupported("Speaker 2 will handle the export.", &other)),
+            vec![(ClaimKind::Name, "speaker 2")]
+        );
+        // A label spoken in the cited line supports it too.
+        let said = [Source {
+            text: "Speaker 2 should take the export.",
+            speaker: "Dana Whitlock",
+            title: "",
+        }];
+        assert!(unsupported("Speaker 2 will handle the export.", &said).is_empty());
+    }
+
+    #[test]
+    fn a_name_in_the_cited_meetings_title_is_supported() {
+        // A project name the model restates from the question is vouched
+        // for by the title of the meeting the cited line is from (the
+        // Sources panel shows it beside the line).
+        let line = "It is now$52,000, because Northwind adds a support plan.";
+        let src = [Source {
+            text: line,
+            speaker: "Dana Whitlock",
+            title: "Bluebird budget sync",
+        }];
+        assert!(unsupported("The Bluebird budget is now $52,000.", &src).is_empty());
+        assert!(unsupported("Bluebird's budget is now $52,000.", &src).is_empty());
+
+        // A name in neither the line, its speaker nor the title is still
+        // flagged: the title doesn't make every name safe.
+        assert_eq!(
+            kinds(&unsupported("The Marlow budget is now $52,000.", &src)),
+            vec![(ClaimKind::Name, "marlow")]
+        );
+        // The title of a meeting that isn't cited vouches for nothing: the
+        // wrong project's line, under its own title, is still caught.
+        let other = [Source {
+            text: line,
+            speaker: "Dana Whitlock",
+            title: "Harbor renewal call",
+        }];
+        assert_eq!(
+            kinds(&unsupported("The Bluebird budget is now $52,000.", &other)),
+            vec![(ClaimKind::Name, "bluebird")]
+        );
+    }
+
+    #[test]
+    fn a_title_vouches_for_names_only() {
+        let src = [Source {
+            text: "We said forty thousand, and Priya agreed.",
+            speaker: "Dana Whitlock",
+            title: "Friday 25 budget sync: \"cut the spend\"",
+        }];
+        // A weekday, a figure and a quote in the title are not support.
+        assert_eq!(
+            kinds(&unsupported("By Friday, $25.", &src)),
+            vec![(ClaimKind::Number, "25"), (ClaimKind::Date, "friday")]
+        );
+        assert_eq!(
+            kinds(&unsupported("Priya said \"cut the spend\".", &src)),
+            vec![(ClaimKind::Quote, "cut the spend")]
+        );
+        // No title, no vouching.
+        let bare = [Source {
+            text: "We said forty thousand, and Priya agreed.",
+            speaker: "Dana Whitlock",
+            title: "",
+        }];
+        assert_eq!(
+            kinds(&unsupported("The Bluebird plan is $40,000.", &bare)),
+            vec![(ClaimKind::Name, "bluebird")]
+        );
+    }
+
+    #[test]
     fn quotes_must_appear_word_for_word() {
         let src = [Source {
             text: "Honestly, we will ship the planner on the twenty-sixth.",
             speaker: "Ilka",
+            title: "",
         }];
         assert!(unsupported("Ilka said \"we will ship the planner\".", &src).is_empty());
         assert_eq!(

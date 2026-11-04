@@ -22,7 +22,7 @@ const TICK_MS: u64 = 5_000;
 const MIN_CHUNK_SECS: u64 = 8;
 /// …and never take more than this in one bite.
 const MAX_CHUNK_SECS: u64 = 30;
-const LIVE_MODEL: &str = "ggml-small-q5_1";
+pub(crate) const LIVE_MODEL: &str = "ggml-small-q5_1";
 /// Consecutive failed chunks before the live pane is told "unavailable".
 const FAILURES_BEFORE_UNAVAILABLE: u32 = 3;
 

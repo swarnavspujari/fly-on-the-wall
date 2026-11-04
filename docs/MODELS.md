@@ -121,6 +121,22 @@ back to CPU mid-run and pins the machine to CPU like Windows does. The live
 transcript loop always stays on CPU (`-ng` on macOS, the CPU build on
 Windows): it runs during capture, exactly when the GPU is busy with the call.
 
+## Freeing up space
+
+Settings › Transcripts › More options › **Models on this computer** shows each
+downloaded model and tool with its size on disk and what uses it ("Used for
+Balanced transcription", "Used for the live transcript while recording",
+"Used for telling speakers apart"). Anything the current settings don't use
+has a **Delete**; anything in use has its Delete turned off, with the reason.
+**Free up** removes every unused model plus leftovers (unfinished downloads,
+older versions, model files this version no longer uses) after a confirm that
+lists each item and its size. Files the app doesn't recognise are listed and
+left alone, and so is anything in a linked folder. Nothing is deleted while recording, transcribing or installing.
+Anything deleted downloads again (same pins) the next time it's needed, for
+example after switching Quality. Ollama models are managed under Ask and
+Enhance; the chat model in use and the search model (`embeddinggemma:300m`)
+can't be deleted there.
+
 ## Model registry
 
 Exact download URLs, SHA-256 checksums (pinned from upstream release digests / HF LFS metadata

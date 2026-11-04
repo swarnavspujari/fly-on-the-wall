@@ -168,6 +168,9 @@ impl GoldSet {
                 .map(|s| crate::claims::Source {
                     text: &s.text,
                     speaker: &s.speaker,
+                    // A gold answer must be backed by its cited lines
+                    // alone; a title doesn't vouch for a label here.
+                    title: "",
                 })
                 .collect();
             let missing = crate::claims::unsupported(&q.answer, &sources);
