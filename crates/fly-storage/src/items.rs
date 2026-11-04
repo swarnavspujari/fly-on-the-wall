@@ -36,33 +36,62 @@ impl Storage {
     /// Replace a meeting's extracted items wholesale (re-extraction is
     /// idempotent: each run rebuilds the meeting's rows from its transcript).
     /// Items the user added ([`USER_ITEM_PREFIX`]) are kept.
+    ///
+    /// All or nothing: a failure part-way leaves the old items, not a
+    /// half-written set. And only for a meeting that still exists:
+    /// `meeting_items` has no foreign key, so a background pass that outlived
+    /// a deleted note would otherwise write its text back into the database
+    /// ([`StorageError::NotFound`]).
     pub fn replace_meeting_items(&self, meeting_id: &str, items: &[MeetingItem]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        // the DELETE comes first so the transaction holds the write lock
+        // before it looks at the meeting: the check and the writes agree
         self.conn.execute(
             "DELETE FROM meeting_items WHERE meeting_id = ?1
                AND extracted_by NOT LIKE 'user:%'",
             [meeting_id],
         )?;
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO meeting_items
-             (id, meeting_id, kind, text, owner, status, speaker_key, segment_ids_json,
-              created_at, extracted_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        )?;
-        for item in items {
-            stmt.execute((
-                &item.id,
-                meeting_id,
-                item.kind.as_str(),
-                &item.text,
-                &item.owner,
-                &item.status,
-                &item.speaker_key,
-                serde_json::to_string(&item.segment_ids)?,
-                item.created_at.to_rfc3339(),
-                &item.extracted_by,
-            ))?;
+        self.require_meeting(meeting_id)?;
+        {
+            let mut stmt = self.conn.prepare(
+                "INSERT INTO meeting_items
+                 (id, meeting_id, kind, text, owner, status, speaker_key, segment_ids_json,
+                  created_at, extracted_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            for item in items {
+                stmt.execute((
+                    &item.id,
+                    meeting_id,
+                    item.kind.as_str(),
+                    &item.text,
+                    &item.owner,
+                    &item.status,
+                    &item.speaker_key,
+                    serde_json::to_string(&item.segment_ids)?,
+                    item.created_at.to_rfc3339(),
+                    &item.extracted_by,
+                ))?;
+            }
         }
+        tx.commit()?;
         self.sync_item_citations(meeting_id)?;
+        Ok(())
+    }
+
+    /// `NotFound` unless the meeting row exists (see
+    /// [`Storage::replace_meeting_items`]).
+    fn require_meeting(&self, meeting_id: &str) -> Result<()> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM meetings WHERE id = ?1",
+            [meeting_id],
+            |r| r.get(0),
+        )?;
+        if n == 0 {
+            return Err(crate::StorageError::NotFound(format!(
+                "meeting {meeting_id}"
+            )));
+        }
         Ok(())
     }
 
@@ -208,6 +237,7 @@ impl Storage {
     /// re-run it forever. The marker row (`kind = '_none'`) is filtered out
     /// of every read path.
     pub fn mark_extracted(&self, meeting_id: &str, extracted_by: &str) -> Result<()> {
+        self.require_meeting(meeting_id)?;
         self.conn.execute(
             "INSERT INTO meeting_items
              (id, meeting_id, kind, text, owner, status, speaker_key, segment_ids_json,
@@ -513,5 +543,75 @@ mod tests {
         assert_eq!(s.meetings_missing_items(10).unwrap(), vec![m1.clone()]);
         s.mark_extracted(&m1, "mock").unwrap();
         assert!(s.meetings_missing_items(10).unwrap().is_empty());
+    }
+
+    fn rows_for(s: &Storage, meeting_id: &str) -> i64 {
+        s.conn
+            .query_row(
+                "SELECT COUNT(*) FROM meeting_items WHERE meeting_id = ?1",
+                [meeting_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A pass that outlived its note must not write the meeting's text back:
+    /// `meeting_items` has no foreign key, so the check is the write's own.
+    #[test]
+    fn nothing_is_written_for_a_meeting_that_is_gone() {
+        let (_d, s) = test_storage();
+        let m = meeting(&s, "Deleted while the model worked");
+        s.purge_meeting(&m).unwrap();
+
+        let err = s
+            .replace_meeting_items(&m, &[item(&m, ItemKind::Decision, "Ship it", None)])
+            .unwrap_err();
+        assert!(matches!(err, crate::StorageError::NotFound(_)), "{err}");
+        assert!(s.mark_extracted(&m, "mock").is_err());
+        assert_eq!(rows_for(&s, &m), 0, "no orphan row");
+
+        // and one that is still there is written as before
+        let kept = meeting(&s, "Still here");
+        s.replace_meeting_items(&kept, &[item(&kept, ItemKind::Decision, "Ship it", None)])
+            .unwrap();
+        assert_eq!(rows_for(&s, &kept), 1);
+    }
+
+    /// Delete and insert are one transaction: an item that can't be written
+    /// leaves the earlier set as it was, not a meeting with none.
+    #[test]
+    fn a_failed_replace_keeps_the_old_items() {
+        let (_d, s) = test_storage();
+        let m = meeting(&s, "Weekly sync");
+        s.replace_meeting_items(
+            &m,
+            &[
+                item(&m, ItemKind::Decision, "ship v2", None),
+                item(&m, ItemKind::ActionItem, "send the SOW", Some("Dana")),
+            ],
+        )
+        .unwrap();
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER boom BEFORE INSERT ON meeting_items
+                 WHEN NEW.text = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+
+        let err = s.replace_meeting_items(
+            &m,
+            &[
+                item(&m, ItemKind::Decision, "a new decision", None),
+                item(&m, ItemKind::Decision, "boom", None),
+            ],
+        );
+        assert!(err.is_err());
+        let texts: Vec<String> = s
+            .get_meeting_items(&m)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.text)
+            .collect();
+        assert_eq!(texts, ["ship v2", "send the SOW"]);
     }
 }

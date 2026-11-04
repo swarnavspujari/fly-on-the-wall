@@ -23,6 +23,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager};
 
 use crate::ai_queue::{AiJob, AiJobKind};
+use crate::llm_commands::AiSkips;
 use crate::models;
 use crate::pipeline::{self, PipelineProgress, StageSink};
 use crate::state::AppState;
@@ -135,13 +136,12 @@ pub async fn tick(
     let meeting_id = job.meeting_id.clone();
 
     // A pass of this very meeting (transcribed a moment ago, now queued
-    // again) is still reading and rewriting its transcript: let it end first.
-    // Passes of other meetings never hold a transcription up. This one can
-    // hold it for as long as the pass takes (a long meeting's extraction is
-    // several model requests, each with its own limit); the case is a
-    // re-transcribe within minutes of the first run, and the alternative,
-    // two writers on one transcript, is worse.
-    if state.ai_queue.is_running(&meeting_id) {
+    // again) is working on the transcript this run is about to replace, so
+    // it is stopped, not waited out: a model can take minutes, and nothing
+    // it would write is worth having. It drops its request and winds down at
+    // once; the wait is for that, so nothing writes under the new run.
+    // Passes of other meetings never hold a transcription up.
+    if state.ai_queue.cancel_running(&meeting_id) {
         state
             .ai_queue
             .wait_for_pass_end(&meeting_id, IDLE_POLL)
@@ -262,22 +262,31 @@ async fn handle_tick(state: &AppState, on_stage: StageSink<'_>, tick: Tick) {
 /// Does nothing when the meeting is queued or running again (it was queued
 /// afresh in the meantime: that run brings its own pass).
 fn queue_ai_pass(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str, kind: AiJobKind) {
+    queue_ai_job(state, on_stage, AiJob::new(meeting_id, kind));
+}
+
+/// [`queue_ai_pass`] for an entry that already has a history (one recovered
+/// at startup keeps its attempts).
+fn queue_ai_job(state: &AppState, on_stage: StageSink<'_>, job: AiJob) {
+    // "Delete all my data" is under way: nothing new runs
+    if state.ai_queue.is_halted() {
+        return;
+    }
     if state
         .pipeline_stage
         .lock()
         .unwrap()
-        .contains_key(meeting_id)
+        .contains_key(&job.meeting_id)
     {
         return;
     }
-    state.ai_queue.push(AiJob {
-        meeting_id: meeting_id.to_string(),
-        kind,
-    });
+    let kind = job.kind;
+    let meeting_id = job.meeting_id.clone();
+    state.ai_queue.push(job);
     persist_ai_queue(state);
     if kind != AiJobKind::ExtractOnly {
         on_stage(PipelineProgress {
-            meeting_id: meeting_id.to_string(),
+            meeting_id,
             stage: "polishing".into(),
             detail: None,
             done: false,
@@ -294,40 +303,59 @@ pub fn queue_extraction(state: &AppState, meeting_id: &str) {
 }
 
 /// Backend-only settings row holding the AI passes not yet finished.
-const AI_QUEUE_KEY: &str = "ai.pending_passes";
+pub(crate) const AI_QUEUE_KEY: &str = "ai.pending_passes";
+
+/// Starts a pass may have had before `recover_ai_passes` stops requeuing it.
+/// The count is saved when a pass starts, so a pass that takes the app down
+/// each time (a crash in a decoder, a model server that kills the machine)
+/// runs this many times across launches, not forever.
+const MAX_PASS_ATTEMPTS: u32 = 2;
 
 /// Write the queue (running and waiting passes) to its settings row, so a
 /// quit or restart loses none: the app runs them again on the next launch.
+/// The snapshot is taken under the storage lock the write holds, so two
+/// callers can't land their rows out of order (an older queue over a newer).
 fn persist_ai_queue(state: &AppState) {
+    let storage = state.storage.lock().unwrap();
     let json = serde_json::to_string(&state.ai_queue.snapshot()).unwrap_or_else(|_| "[]".into());
-    if let Err(e) = state
-        .storage
-        .lock()
-        .unwrap()
-        .set_setting(AI_QUEUE_KEY, &json)
-    {
+    if let Err(e) = storage.set_setting(AI_QUEUE_KEY, &json) {
         tracing::warn!(error = %e, "saving the AI pass queue failed");
     }
 }
 
 /// Startup: queue again the passes a previous run left unfinished (a pass
 /// that was running starts over). A meeting that is gone or has no
-/// transcript is dropped. Only what was already queued comes back: meetings
-/// that never had a pass (history from before the pass existed, cleanup that
-/// was refused) stay Settings → "Extract from N meetings" and the consent
-/// notice, which are the user's to run.
+/// transcript is dropped, and so is a pass that has already started
+/// [`MAX_PASS_ATTEMPTS`] times. Only what was already queued comes back:
+/// meetings that never had a pass (history from before the pass existed,
+/// cleanup that was refused) stay Settings → "Extract from N meetings" and the
+/// consent notice, which are the user's to run.
 pub fn recover_ai_passes(state: &AppState, on_stage: StageSink<'_>) {
     let jobs: Vec<AiJob> = {
         let storage = state.storage.lock().unwrap();
-        let saved = storage
-            .get_setting(AI_QUEUE_KEY)
-            .ok()
-            .flatten()
-            .and_then(|json| serde_json::from_str::<Vec<AiJob>>(&json).ok())
-            .unwrap_or_default();
+        let saved = match storage.get_setting(AI_QUEUE_KEY) {
+            Ok(Some(json)) => serde_json::from_str::<Vec<AiJob>>(&json).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "the saved AI pass queue is unreadable; starting with none");
+                Vec::new()
+            }),
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "reading the saved AI pass queue failed; starting with none");
+                Vec::new()
+            }
+        };
         saved
             .into_iter()
             .filter(|job| {
+                if job.attempts >= MAX_PASS_ATTEMPTS {
+                    tracing::warn!(
+                        meeting_id = %job.meeting_id,
+                        attempts = job.attempts,
+                        "giving up on an AI pass that was interrupted every time it started \
+                         (Settings can extract this meeting's items on demand)"
+                    );
+                    return false;
+                }
                 storage.get_meeting(&job.meeting_id).is_ok()
                     && storage
                         .get_transcript(&job.meeting_id)
@@ -344,7 +372,7 @@ pub fn recover_ai_passes(state: &AppState, on_stage: StageSink<'_>) {
         );
     }
     for job in jobs {
-        queue_ai_pass(state, on_stage, &job.meeting_id, job.kind);
+        queue_ai_job(state, on_stage, job);
     }
     persist_ai_queue(state);
 }
@@ -354,9 +382,7 @@ fn spawn_ai_worker<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         let on_stage = stage_emitter(&app);
         let on_skips = {
             let app = app.clone();
-            move |skipped: Vec<String>| {
-                let _ = app.emit("llm:consent-skips", skipped);
-            }
+            move |skips: AiSkips| crate::llm_commands::emit_skips(&app, skips)
         };
         let on_transcript_final = {
             let app = app.clone();
@@ -374,17 +400,23 @@ fn spawn_ai_worker<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
 
 /// Run the oldest queued AI pass, if there is one, and say it's over. Returns
 /// whether one ran. `on_skips` gets the meetings still waiting on cloud
-/// consent; `on_transcript_final` is the one app-handle effect of a pass that
-/// follows a transcription.
+/// consent or cut short; `on_transcript_final` is the one app-handle effect of
+/// a pass that follows a transcription.
 ///
 /// Recording wins here too: passes can now queue up behind a slow one, and a
 /// model must not start eating CPU and GPU while a capture is running. They
 /// wait for it to end, like the transcription jobs do. (A pass already
 /// running carries on, as it always did.)
+///
+/// A pass can be cancelled while it runs (`AiQueue::cancel_running`: its
+/// meeting is transcribed again or deleted, or all data is being erased). The
+/// pass is then dropped where it stands, which closes its model request; it
+/// ends without a "done", the nudges or its meeting's final event, because
+/// what it was working on is gone or about to be replaced.
 async fn run_next_ai_job(
     state: &AppState,
     on_stage: StageSink<'_>,
-    on_skips: &(dyn Fn(Vec<String>) + Sync),
+    on_skips: &(dyn Fn(AiSkips) + Sync),
     on_transcript_final: &(dyn Fn() + Sync),
 ) -> bool {
     if recording_active(state) {
@@ -393,54 +425,126 @@ async fn run_next_ai_job(
     let Some((job, running)) = state.ai_queue.next() else {
         return false;
     };
+    // The attempt is on record before the pass starts: an app that dies inside
+    // it leaves the count behind (see `recover_ai_passes`).
+    persist_ai_queue(state);
     // cleanup first, except after a speaker change: the text didn't change
     let cleanup = job.kind != AiJobKind::ExtractOnly;
-    ai_pass(state, on_stage, &job.meeting_id, on_skips, cleanup).await;
-    if job.kind == AiJobKind::AfterTranscription {
-        // Fresh transcript → new chunks for the semantic index. After the
-        // pass: nudged before it, the worker would start a batch only to
-        // abandon it when the pass begins, and polish would re-chunk the
-        // meeting anyway.
-        state.embed_notify.notify_one();
-        // Transcript final → its recording can be compressed.
-        state.audio_store.nudge();
-        on_transcript_final();
-    }
-    // whoever asked for an extraction alone has already said "done"
-    if cleanup {
-        emit_final(on_stage, &job.meeting_id, None);
+    let finished = tokio::select! {
+        _ = running.cancelled() => false,
+        _ = ai_pass(state, on_stage, &job.meeting_id, on_skips, cleanup) => true,
+    };
+    // A note deleted while its pass worked leaves the meeting for the pass
+    // to purge (deleting skips a meeting that is busy), whether the pass
+    // was cancelled in time or ran to its end.
+    if finished && purge_if_orphaned(state, &job.meeting_id) {
+        tracing::info!(meeting_id = %job.meeting_id, "AI pass finished for a deleted note; meeting purged");
+        crate::llm_commands::clear_skips(state, &job.meeting_id);
+        on_skips(crate::llm_commands::current_skips(state));
+    } else if finished {
+        if job.kind == AiJobKind::AfterTranscription {
+            // Fresh transcript → new chunks for the semantic index. After the
+            // pass: nudged before it, the worker would start a batch only to
+            // abandon it when the pass begins, and polish would re-chunk the
+            // meeting anyway.
+            state.embed_notify.notify_one();
+            // Transcript final → its recording can be compressed.
+            state.audio_store.nudge();
+            on_transcript_final();
+        }
+        // whoever asked for an extraction alone has already said "done"
+        if cleanup {
+            emit_final(on_stage, &job.meeting_id, None);
+        }
+    } else {
+        tracing::info!(meeting_id = %job.meeting_id, "AI pass cancelled");
+        abandon_pass(state, &job.meeting_id);
+        on_skips(crate::llm_commands::current_skips(state));
     }
     drop(running);
     persist_ai_queue(state);
     true
 }
 
+/// Tidy what a cancelled pass left standing: its busy marker (only ours: a
+/// transcription run that has started since owns the entry), what it had
+/// recorded about the meeting, and, when the cancel came from deleting the
+/// note, the meeting itself, which deleting could not purge while the pass was
+/// working.
+fn abandon_pass(state: &AppState, meeting_id: &str) {
+    {
+        let mut stages = state.pipeline_stage.lock().unwrap();
+        if stages.get(meeting_id).map(String::as_str) == Some("polishing") {
+            stages.remove(meeting_id);
+        }
+    }
+    crate::llm_commands::clear_skips(state, meeting_id);
+    purge_if_orphaned(state, meeting_id);
+}
+
+/// Purge the meeting if its note is gone (a note deleted while the meeting was
+/// busy leaves it behind for whoever was busy with it): row, transcript, job,
+/// staged-import residue and the recordings folder. Whether it did.
+fn purge_if_orphaned(state: &AppState, meeting_id: &str) -> bool {
+    let orphaned = {
+        let storage = state.storage.lock().unwrap();
+        match storage.get_meeting(meeting_id) {
+            Ok(m) => storage.get_note(&m.note_id).is_err(),
+            Err(_) => false,
+        }
+    };
+    if orphaned {
+        crate::import_commands::purge_staged_import(state, meeting_id);
+        let storage = state.storage.lock().unwrap();
+        if let Err(e) = storage.purge_meeting(meeting_id) {
+            tracing::warn!(meeting_id, error = %e, "purging an orphaned meeting failed");
+        }
+    }
+    orphaned
+}
+
+/// Stop the AI worker for "Delete all my data": nothing waits, nothing new is
+/// accepted, the running pass is cancelled and given `timeout` to wind down,
+/// and the saved queue is emptied. False when the pass didn't end in time.
+/// Undone by [`resume_ai_passes`] if the wipe is refused or fails.
+pub fn halt_ai_passes(state: &AppState, timeout: Duration) -> bool {
+    state.ai_queue.halt();
+    let deadline = std::time::Instant::now() + timeout;
+    while state.ai_queue.is_busy() {
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    persist_ai_queue(state);
+    true
+}
+
+/// Undo [`halt_ai_passes`].
+pub fn resume_ai_passes(state: &AppState) {
+    state.ai_queue.resume();
+}
+
 /// The best-effort AI pass after a transcription: cleanup, then structured
 /// item extraction. Enrichment only, it never blocks or fails the job. A
 /// meeting either step skipped for missing cloud consent is remembered
-/// (`AppState::consent_skipped`); the current list goes out as
-/// `llm:consent-skips` so the app's notice can offer to run them.
+/// (`AppState::consent_skipped`), one the model stopped short of too
+/// (`AppState::ai_incomplete`); both lists go out (`llm:consent-skips`,
+/// `llm:ai-cut-off`) so the app's notice can offer to run them.
 async fn ai_pass(
     state: &AppState,
     on_stage: StageSink<'_>,
     meeting_id: &str,
-    on_skips: &(dyn Fn(Vec<String>) + Sync),
+    on_skips: &(dyn Fn(AiSkips) + Sync),
     cleanup: bool,
 ) {
-    // This run decides it afresh; a refusal below puts it back.
-    state.consent_skipped.lock().unwrap().remove(meeting_id);
+    // This run decides it afresh; a refusal or a cut-off below puts it back.
+    crate::llm_commands::clear_skips(state, meeting_id);
     if cleanup {
         polish_after_transcribe(state, on_stage, meeting_id).await;
     }
     crate::extraction::extract_after_transcribe(state, meeting_id).await;
-    let skipped: Vec<String> = state
-        .consent_skipped
-        .lock()
-        .unwrap()
-        .iter()
-        .cloned()
-        .collect();
-    on_skips(skipped);
+    on_skips(crate::llm_commands::current_skips(state));
 }
 
 /// Run the AI pass again for every meeting it skipped for missing consent
@@ -460,13 +564,17 @@ fn queue_consent_rerun(state: &AppState, on_stage: StageSink<'_>) -> usize {
     ids.len()
 }
 
-/// Empty the consent-skipped list and return the meetings the re-run should
-/// take. The rest are dropped, not kept for later. A meeting being
-/// transcribed again gets its own AI pass from that run. A meeting whose last
-/// transcription failed keeps its failure notice: the re-run would end in a
-/// "done" event, which clears that notice and the note's inline error.
+/// Empty the consent-skipped and cut-off lists and return the meetings the
+/// re-run should take (both lists run together: "Run them now"). The rest are
+/// dropped, not kept for later. A meeting being transcribed again gets its own
+/// AI pass from that run. A meeting whose last transcription failed keeps its
+/// failure notice: the re-run would end in a "done" event, which clears that
+/// notice and the note's inline error.
 fn take_consent_rerun(state: &AppState) -> Vec<String> {
-    let taken = std::mem::take(&mut *state.consent_skipped.lock().unwrap());
+    let mut taken = std::mem::take(&mut *state.consent_skipped.lock().unwrap());
+    taken.append(&mut std::mem::take(
+        &mut *state.ai_incomplete.lock().unwrap(),
+    ));
     taken
         .into_iter()
         .filter(|id| consent_rerun_allowed(state, id))
@@ -560,20 +668,7 @@ pub fn cancel(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> Re
 /// came from a note deletion) purge the orphaned meeting — row, transcript,
 /// job, staged-import residue, and the recordings folder — then tell the UI.
 pub fn finish_cancelled(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) {
-    let orphaned = {
-        let storage = state.storage.lock().unwrap();
-        match storage.get_meeting(meeting_id) {
-            Ok(m) => storage.get_note(&m.note_id).is_err(),
-            Err(_) => false,
-        }
-    };
-    if orphaned {
-        crate::import_commands::purge_staged_import(state, meeting_id);
-        let storage = state.storage.lock().unwrap();
-        if let Err(e) = storage.purge_meeting(meeting_id) {
-            tracing::warn!(meeting_id, error = %e, "purging cancelled meeting failed");
-        }
-    }
+    purge_if_orphaned(state, meeting_id);
     emit_cancelled(on_stage, meeting_id);
 }
 
@@ -913,6 +1008,55 @@ mod tests {
         (events, sink)
     }
 
+    /// A model server that takes every request and never answers, and says
+    /// when a request arrived and when its client hung up.
+    struct HungModel {
+        accepted: std::sync::mpsc::Receiver<()>,
+        hung_up: std::sync::mpsc::Receiver<()>,
+    }
+
+    /// An app whose AI provider is a [`HungModel`]: OpenAI-compatible, on this
+    /// machine (so a plain-HTTP address is allowed), with a key and consent,
+    /// so a pass runs for as long as it is allowed to.
+    fn state_with_hung_model(dir: &std::path::Path) -> (AppState, HungModel) {
+        use fly_secrets::SecretStore;
+        let secrets = std::sync::Arc::new(fly_secrets::MemorySecretStore::default());
+        secrets
+            .set(fly_secrets::keys::OPENAI_API_KEY, "sk-test")
+            .unwrap();
+        let state = AppState::init_with(dir.to_path_buf(), secrets).unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        {
+            let storage = state.storage.lock().unwrap();
+            storage.set_setting("llm.provider", "openai").unwrap();
+            storage
+                .set_setting(
+                    "llm.openai.base_url",
+                    &format!("http://127.0.0.1:{port}/v1"),
+                )
+                .unwrap();
+            storage
+                .set_setting("consent.cloud_llm.openai", "true")
+                .unwrap();
+        }
+        let (accepted_tx, accepted) = std::sync::mpsc::channel();
+        let (hung_up_tx, hung_up) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for conn in server.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let (accepted_tx, hung_up_tx) = (accepted_tx.clone(), hung_up_tx.clone());
+                std::thread::spawn(move || {
+                    let _ = accepted_tx.send(());
+                    let mut buf = [0u8; 4096];
+                    while matches!(std::io::Read::read(&mut conn, &mut buf), Ok(n) if n > 0) {}
+                    let _ = hung_up_tx.send(());
+                });
+            }
+        });
+        (state, HungModel { accepted, hung_up })
+    }
+
     fn stage_of(state: &AppState, meeting_id: &str) -> Option<String> {
         state
             .pipeline_stage
@@ -949,10 +1093,9 @@ mod tests {
         let state = test_state(dir.path());
         let (events, sink) = collecting();
         // an earlier meeting's pass is mid-flight (a slow model)
-        state.ai_queue.push(AiJob {
-            meeting_id: "earlier".into(),
-            kind: AiJobKind::AfterTranscription,
-        });
+        state
+            .ai_queue
+            .push(AiJob::new("earlier", AiJobKind::AfterTranscription));
         let _earlier_pass = state.ai_queue.next().unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1030,7 +1173,7 @@ mod tests {
         let ran = rt.block_on(run_next_ai_job(
             &state,
             &sink,
-            &|ids| skips.lock().unwrap().push(ids),
+            &|now| skips.lock().unwrap().push(now.consent),
             &|| {
                 finals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             },
@@ -1182,7 +1325,7 @@ mod tests {
         assert!(rt.block_on(run_next_ai_job(
             &state,
             &sink,
-            &|ids| skips.lock().unwrap().push(ids),
+            &|now| skips.lock().unwrap().push(now.consent),
             &|| {
                 finals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             },
@@ -1309,56 +1452,403 @@ mod tests {
         assert!(state.ai_queue.snapshot().is_empty());
     }
 
-    /// A pass reads and rewrites its meeting's transcript, so a transcription
-    /// of that same meeting starts after it; another meeting's pass is no
-    /// reason to wait.
+    /// A transcription of a meeting whose own pass is running does not wait
+    /// for that pass: the transcript the pass works on is about to be
+    /// replaced, so the pass is cancelled and the job starts as soon as it
+    /// has wound down. Another meeting's pass is none of its business.
     #[test]
-    fn a_transcription_waits_only_for_its_own_meetings_pass() {
+    fn a_re_transcribe_stops_its_meetings_pass_instead_of_waiting_for_it() {
         let dir = tempfile::tempdir().unwrap();
-        let state = std::sync::Arc::new(test_state(dir.path()));
-        let meeting_id = real_meeting(&state);
-        let quiet = |_: pipeline::PipelineProgress| {};
-        let model = |_: models::ModelProgress| {};
-        enqueue(&state, &quiet, &meeting_id).unwrap();
+        let (state, model) = state_with_hung_model(dir.path());
+        let state = std::sync::Arc::new(state);
+        let meeting_id = meeting_with_transcript(&state);
+        let (events, sink) = collecting();
+        queue_ai_pass(&state, &sink, &meeting_id, AiJobKind::AfterTranscription);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            // another meeting's pass is running: the job (which fails fast
-            // for want of a recording) is picked up all the same
-            state.ai_queue.push(AiJob {
-                meeting_id: "someone-else".into(),
-                kind: AiJobKind::AfterTranscription,
-            });
-            let other_pass = state.ai_queue.next().unwrap();
-            let t = tokio::time::timeout(Duration::from_secs(5), tick(&state, &quiet, &model))
-                .await
-                .expect("another meeting's pass must not hold the job back");
-            assert!(matches!(t, Tick::Retrying { .. }), "{t:?}");
-            drop(other_pass);
-
-            // its own meeting's pass is running: wait for it to end
-            state.ai_queue.push(AiJob {
-                meeting_id: meeting_id.clone(),
-                kind: AiJobKind::AfterTranscription,
-            });
-            let own_pass = state.ai_queue.next().unwrap();
-            let waiting = {
-                let state = state.clone();
-                tokio::spawn(async move {
-                    let quiet = |_: pipeline::PipelineProgress| {};
-                    let model = |_: models::ModelProgress| {};
-                    tick(&state, &quiet, &model).await
-                })
-            };
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            assert!(!waiting.is_finished(), "ran under its own meeting's pass");
-            drop(own_pass);
-            let t = tokio::time::timeout(Duration::from_secs(5), waiting)
-                .await
-                .expect("starts once the pass ends")
-                .unwrap();
-            assert!(matches!(t, Tick::Retrying { .. }), "{t:?}");
+        // the pass reaches the model, which never answers
+        let worker = rt.spawn({
+            let state = state.clone();
+            async move { run_next_ai_job(&state, &sink, &|_| {}, &|| {}).await }
         });
+        model
+            .accepted
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap();
+        assert!(state.ai_queue.is_running(&meeting_id));
+
+        // the meeting is transcribed again; its job (which fails fast, for
+        // want of a recording) must not wait for the model
+        let quiet = |_: pipeline::PipelineProgress| {};
+        let model_progress = |_: models::ModelProgress| {};
+        enqueue(&state, &quiet, &meeting_id).unwrap();
+        let t = rt.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                tick(&state, &quiet, &model_progress),
+            )
+            .await
+        });
+        let t = t.expect("the job must not wait for a model that never answers");
+        assert!(matches!(t, Tick::Retrying { .. }), "{t:?}");
+
+        // the pass ended without the effects of a finished one
+        let ran = rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), worker).await })
+            .expect("the pass was cancelled")
+            .unwrap();
+        assert!(ran);
+        assert!(!state.ai_queue.is_running(&meeting_id));
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, stage)| stage != "done"));
+        model
+            .hung_up
+            .recv_timeout(Duration::from_secs(5))
+            .expect("its request to the model was dropped");
+    }
+
+    /// Cancelling a running pass drops its model request, takes back the busy
+    /// marker the pass set, forgets what it recorded, and says nothing of
+    /// "done". The attempt is on record from the moment the pass starts.
+    #[test]
+    fn cancelling_a_running_pass_drops_its_request_and_leaves_nothing_standing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, model) = state_with_hung_model(dir.path());
+        let state = std::sync::Arc::new(state);
+        let id = meeting_with_transcript(&state);
+        let (events, sink) = collecting();
+        queue_ai_pass(&state, &sink, &id, AiJobKind::AfterTranscription);
+        let skips = std::sync::Arc::new(std::sync::Mutex::new(Vec::<AiSkips>::new()));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let worker = rt.spawn({
+            let (state, skips) = (state.clone(), skips.clone());
+            async move {
+                run_next_ai_job(
+                    &state,
+                    &sink,
+                    &move |now| skips.lock().unwrap().push(now),
+                    &|| {},
+                )
+                .await
+            }
+        });
+        model
+            .accepted
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap();
+        assert_eq!(stage_of(&state, &id).as_deref(), Some("polishing"));
+        // a skip recorded earlier would be stale after a cancel
+        state.ai_queue.cancel_running("someone else's meeting");
+        assert!(
+            state.ai_queue.is_running(&id),
+            "only its own meeting's cancel counts"
+        );
+        let saved = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_setting(AI_QUEUE_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(
+            saved.contains(&id) && saved.contains("\"attempts\":1"),
+            "the attempt is saved before the pass runs: {saved}"
+        );
+
+        crate::llm_commands::record_incomplete(&state, &id);
+        assert!(state.ai_queue.cancel_running(&id));
+        let ran = rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), worker).await })
+            .expect("a cancelled pass ends at once")
+            .unwrap();
+        assert!(ran);
+        model
+            .hung_up
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the request to the model was dropped, so the server stops generating");
+
+        assert_eq!(stage_of(&state, &id), None, "its busy marker is gone");
+        assert!(!state.background_should_yield());
+        assert!(!state.ai_queue.is_running(&id));
+        assert!(state.ai_queue.snapshot().is_empty());
+        assert!(state.ai_incomplete.lock().unwrap().is_empty());
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, stage)| stage != "done"));
+        // the notice is told the lists as they are now
+        assert_eq!(skips.lock().unwrap().last(), Some(&AiSkips::default()));
+        // the meeting itself is untouched: it has a note
+        assert!(state.storage.lock().unwrap().get_meeting(&id).is_ok());
+    }
+
+    /// The privacy case: the note is deleted while the model is working on
+    /// its meeting. Deleting can't purge a busy meeting, so the pass does it
+    /// on its way out: nothing of the meeting stays in the database, and the
+    /// notice stops counting it.
+    #[test]
+    fn deleting_a_note_whose_pass_is_running_purges_the_meeting_when_the_pass_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, model) = state_with_hung_model(dir.path());
+        let state = std::sync::Arc::new(state);
+        let id = meeting_with_transcript(&state);
+        let note_id = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_meeting(&id)
+            .unwrap()
+            .note_id;
+        let (_events, sink) = collecting();
+        queue_ai_pass(&state, &sink, &id, AiJobKind::AfterTranscription);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let worker = rt.spawn({
+            let state = state.clone();
+            async move { run_next_ai_job(&state, &|_| {}, &|_| {}, &|| {}).await }
+        });
+        model
+            .accepted
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap();
+        crate::llm_commands::record_incomplete(&state, &id);
+
+        crate::commands::delete_note_with(&state, &|_| {}, &note_id).unwrap();
+        rt.block_on(async { tokio::time::timeout(Duration::from_secs(10), worker).await })
+            .expect("the pass was told to stop")
+            .unwrap();
+
+        let storage = state.storage.lock().unwrap();
+        assert!(storage.get_meeting(&id).is_err(), "the meeting is purged");
+        assert!(storage.get_transcript(&id).unwrap().is_none());
+        assert!(storage.get_meeting_items(&id).unwrap().is_empty());
+        assert!(!storage.has_meeting_items(&id).unwrap());
+        drop(storage);
+        assert!(state.ai_incomplete.lock().unwrap().is_empty());
+        assert_eq!(stage_of(&state, &id), None);
+    }
+
+    /// A pass that runs to its end after its note was deleted (it was too late
+    /// to cancel, or was cancelled and finished in the same breath) purges
+    /// the meeting too, and none of the effects of a finished transcript.
+    #[test]
+    fn a_pass_that_ends_for_a_deleted_note_purges_the_meeting() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        refusing_provider(&state);
+        let id = meeting_with_transcript(&state);
+        let note_id = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_meeting(&id)
+            .unwrap()
+            .note_id;
+        let (events, sink) = collecting();
+        queue_ai_pass(&state, &sink, &id, AiJobKind::AfterTranscription);
+        // the note goes while the pass waits its turn; the meeting is left
+        // for whoever is busy with it
+        state.storage.lock().unwrap().delete_note(&note_id).unwrap();
+        assert!(state.storage.lock().unwrap().get_meeting(&id).is_ok());
+
+        let finals = std::sync::atomic::AtomicUsize::new(0);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(rt.block_on(run_next_ai_job(&state, &sink, &|_| {}, &|| {
+            finals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+        assert!(state.storage.lock().unwrap().get_meeting(&id).is_err());
+        assert!(state
+            .storage
+            .lock()
+            .unwrap()
+            .get_transcript(&id)
+            .unwrap()
+            .is_none());
+        assert_eq!(finals.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, stage)| stage != "done"));
+    }
+
+    // ------------------------------------------------ the saved queue
+
+    /// A pass that takes the app down each time it runs is given up on: the
+    /// count of starts is saved with the queue, and a pass that has started
+    /// twice is not requeued a third time. One that only waited is.
+    #[test]
+    fn a_pass_that_keeps_crashing_the_app_is_given_up_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_events, sink) = collecting();
+        let (crashy, bystander) = {
+            let state = test_state(dir.path());
+            let crashy = meeting_with_transcript(&state);
+            let bystander = meeting_with_transcript(&state);
+            queue_ai_pass(&state, &sink, &crashy, AiJobKind::AfterTranscription);
+            queue_ai_pass(&state, &sink, &bystander, AiJobKind::AfterTranscription);
+            (crashy, bystander)
+        };
+        // Each launch recovers the saved queue; the crashy pass then starts
+        // and the process dies inside it (run_next_ai_job saves the attempt
+        // before the pass runs, and nothing is written after that).
+        let launch = |expect_crashy: bool| -> Option<u32> {
+            let state = test_state(dir.path());
+            recover_ai_passes(&state, &sink);
+            let queued: Vec<String> = state
+                .ai_queue
+                .snapshot()
+                .into_iter()
+                .map(|j| j.meeting_id)
+                .collect();
+            assert_eq!(queued.contains(&crashy), expect_crashy, "{queued:?}");
+            assert!(queued.contains(&bystander), "{queued:?}");
+            let started = expect_crashy.then(|| {
+                let started = state.ai_queue.next().unwrap();
+                assert_eq!(started.0.meeting_id, crashy);
+                persist_ai_queue(&state);
+                started
+            });
+            let attempts = job_attempts(&state, &crashy);
+            drop(started);
+            attempts
+        };
+        assert_eq!(launch(true), Some(1), "launch 2: first start on record");
+        assert_eq!(launch(true), Some(2), "launch 3: second start on record");
+        assert_eq!(launch(false), None, "launch 4: given up on");
+    }
+
+    fn job_attempts(state: &AppState, meeting_id: &str) -> Option<u32> {
+        state
+            .ai_queue
+            .snapshot()
+            .into_iter()
+            .find(|j| j.meeting_id == meeting_id)
+            .map(|j| j.attempts)
+    }
+
+    /// An unreadable saved queue (damaged, or from a newer build) is a queue
+    /// of nothing, not a crash at startup, and it is overwritten.
+    #[test]
+    fn an_unreadable_saved_queue_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let (_events, sink) = collecting();
+        let id = meeting_with_transcript(&state);
+        for junk in ["{not json", "[{\"meeting_id\": 7}]", "\"[]\"", ""] {
+            state
+                .storage
+                .lock()
+                .unwrap()
+                .set_setting(AI_QUEUE_KEY, junk)
+                .unwrap();
+            recover_ai_passes(&state, &sink);
+            assert!(state.ai_queue.snapshot().is_empty(), "{junk:?}");
+            assert_eq!(
+                state
+                    .storage
+                    .lock()
+                    .unwrap()
+                    .get_setting(AI_QUEUE_KEY)
+                    .unwrap()
+                    .as_deref(),
+                Some("[]"),
+                "{junk:?} was replaced"
+            );
+        }
+        // and a good row after the junk still comes back
+        queue_ai_pass(&state, &sink, &id, AiJobKind::ConsentRerun);
+        let state2 = {
+            drop(state);
+            test_state(dir.path())
+        };
+        recover_ai_passes(&state2, &sink);
+        assert_eq!(state2.ai_queue.snapshot().len(), 1);
+    }
+
+    /// Writers that race leave the newest queue saved, never an older one
+    /// written last: the snapshot is taken inside the lock the write holds.
+    #[test]
+    fn racing_writers_leave_the_newest_queue_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        std::thread::scope(|scope| {
+            for t in 0..6 {
+                let state = &state;
+                scope.spawn(move || {
+                    for i in 0..40 {
+                        let id = format!("m-{t}-{i}");
+                        state
+                            .ai_queue
+                            .push(AiJob::new(&id, AiJobKind::AfterTranscription));
+                        persist_ai_queue(state);
+                        state.ai_queue.remove_pending(&id);
+                        persist_ai_queue(state);
+                    }
+                });
+            }
+        });
+        let saved = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_setting(AI_QUEUE_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved, "[]", "everything was removed again");
+    }
+
+    /// The notice must not keep counting a meeting once it is deleted.
+    #[test]
+    fn deleting_a_note_clears_what_the_notice_counted_for_its_meeting() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let id = real_meeting(&state);
+        let note_id = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_meeting(&id)
+            .unwrap()
+            .note_id;
+        state.consent_skipped.lock().unwrap().insert(id.clone());
+        state.ai_incomplete.lock().unwrap().insert(id.clone());
+        crate::commands::delete_note_with(&state, &|_| {}, &note_id).unwrap();
+        assert_eq!(
+            crate::llm_commands::current_skips(&state),
+            AiSkips::default()
+        );
+    }
+
+    /// "Run them now" runs both lists: the consent skips and the meetings the
+    /// model stopped short of, once each.
+    #[test]
+    fn the_rerun_takes_the_cut_off_meetings_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let (_events, sink) = collecting();
+        let refused = real_meeting(&state);
+        let cut_off = real_meeting(&state);
+        state
+            .consent_skipped
+            .lock()
+            .unwrap()
+            .insert(refused.clone());
+        state.ai_incomplete.lock().unwrap().insert(cut_off.clone());
+        // one meeting on both lists runs once
+        state.ai_incomplete.lock().unwrap().insert(refused.clone());
+
+        assert_eq!(queue_consent_rerun(&state, &sink), 2);
+        assert_eq!(
+            crate::llm_commands::current_skips(&state),
+            AiSkips::default()
+        );
+        assert!(state.ai_queue.is_pending(&refused) && state.ai_queue.is_pending(&cut_off));
     }
 
     /// A quota 429 is transient by definition (the window reopens) — it must

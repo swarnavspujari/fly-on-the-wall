@@ -24,7 +24,7 @@
 | `CONFIRM_CLICK_GUARD_MS = 400` | `confirm.tsx:59` | A mouse click on yes (`detail >= 1`) within 400 ms of opening is ignored, and so is the second click of a double click (`detail > 1`). Keyboard activation (`detail 0`) always counts (`:140-144`). |
 | `useCloudConsent()` | `CloudConsent.tsx:33-64` | Returns `askCloudConsent(providers, id, {atLaunch}) => Promise<boolean>` (`:33-59`). A local provider gives true with no question. An id not in `providers` gives false with no question. A provider with consent already recorded (read with `get_app_setting`) gives true. Otherwise it calls `request_cloud_consent(id, atLaunch)`, and the backend asks in its native dialog. On true it fires `fotw:llm-settings-changed`. A failed request returns false. It never writes the consent itself. |
 | `CloudConsentOnLaunch` | `CloudConsent.tsx:72-88` | Asks once per launch (a ref guard, StrictMode-safe) when the saved provider is cloud with no consent, with `{ atLaunch: true }`. The backend's dialog then starts with "Your AI provider is set to …" and declines with "Not now". Declining saves nothing. |
-| `useConsentSkips()` | `CloudConsent.tsx:106-185` | Backs the skipped-cleanup notice in `AppNotices` (`ui-notices`). Reads `consent_skipped_meetings`, follows `llm:consent-skips`, re-reads the vendor (and whether it has a key: `keyVendor`) on `fotw:llm-settings-changed`. `run()` asks for consent and then calls `retry_consent_skipped`; with `keyVendor` set the notice offers "Add a key" instead. |
+| `useConsentSkips()` | `CloudConsent.tsx:106-185` | Backs the skipped-cleanup notice in `AppNotices` (`ui-notices`). Reads `consent_skipped_meetings` and `ai_cut_off_meetings` (meetings the model stopped short of; `cutOff` in the result), follows `llm:consent-skips` and `llm:ai-cut-off`, re-reads the vendor (and whether it has a key: `keyVendor`) on `fotw:llm-settings-changed`. `run()` asks for consent and then calls `retry_consent_skipped`; with `keyVendor` set the notice offers "Add a key" instead. |
 | `cloudConsentKey(id)` | `CloudConsent.tsx:16` | `consent.cloud_llm.${id}`. |
 | `confirmDialog`, `confirmTitle`, `confirmChoice(answer)` | `confirmTesting.ts:5-23` | Test helpers. Cancel is the `[data-autofocus]` button in `.fly-modal-foot`; yes is the other one. |
 | `holdConsentRequests(record)`, `consentRequest()`, `answerConsent(yes)` | `cloudConsentTesting.ts:17-45` | Test helpers. Spy on `api.requestCloudConsent`; each request waits until a test answers it, like the dialog. A yes calls `record(provider)`, as the backend records consent. |
@@ -45,7 +45,8 @@ Behaviour details:
 | Event | Emits / listens | Payload | Counterpart |
 |---|---|---|---|
 | `fotw:llm-settings-changed` (window `Event`) | Emits: `askCloudConsent` after `request_cloud_consent` returns true (`CloudConsent.tsx:51`); `api.setLlmSettings` after any successful `set_llm_settings` (`api.ts:9-11`, `:174-175`). Listens: `useConsentSkips` (`CloudConsent.tsx:139-143`). | none | Settings and Ask's Runs on (writers); the skipped-cleanup notice (reader) |
-| `llm:consent-skips` (Tauri) | Listens: `useConsentSkips` (`CloudConsent.tsx:122`) | `string[]` meeting ids | Emitted by `src-tauri/src/scheduler.rs:229` |
+| `llm:consent-skips` (Tauri) | Listens: `useConsentSkips` (`CloudConsent.tsx`) | `string[]` meeting ids | Emitted by `llm_commands::emit_skips` |
+| `llm:ai-cut-off` (Tauri) | Listens: `useConsentSkips` | `string[]` meeting ids | Emitted by `llm_commands::emit_skips` |
 
 ### Settings keys
 | Key (or prefix) | Read / write | Webview-settable? (`is_webview_writable_setting_key`) | Meaning |

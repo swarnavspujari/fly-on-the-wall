@@ -121,32 +121,55 @@ export function appErrorCopy(error: string): NoticeCopy {
  *  `count` meetings because the cloud provider had no recorded consent
  *  (llm_commands.rs record_consent_skip). `vendor` is who needs the OK, or
  *  null when the saved provider no longer does (allowed meanwhile, or now
- *  local): then the fix is only to run them. */
+ *  local): then the fix is only to run them.
+ *
+ *  `cutOff` counts meetings the model was reached for and stopped short of
+ *  (it took too long, looped, or listed only part: record_incomplete). Their
+ *  transcript may well be cleaned and have some items, so they are not "kept
+ *  the raw transcript": on their own they get their own wording, and next to
+ *  a consent skip they are one more sentence. `needsKey` says the button
+ *  opens Settings instead of running them. */
 export function consentSkipsCopy(
   count: number,
   vendor: string | null,
   keyVendor: string | null = null,
-): { title: string; cause: string; action: string } {
-  const meetings = count === 1 ? "1 meeting" : `${count} meetings`;
-  const kept = `${meetings} kept the raw transcript and got no action items`;
+  cutOff = 0,
+): { title: string; cause: string; action: string; needsKey: boolean } {
+  const meetingsOf = (n: number) => (n === 1 ? "1 meeting" : `${n} meetings`);
+  if (count === 0 && cutOff > 0) {
+    return {
+      title: "Some action items couldn't be read",
+      cause: `The AI model didn't finish reading ${meetingsOf(cutOff)}, so some action items may be missing. You can run them again.`,
+      action: "Run them now",
+      needsKey: false,
+    };
+  }
+  const kept = `${meetingsOf(count)} kept the raw transcript and got no action items`;
+  const more =
+    cutOff > 0
+      ? ` ${cutOff === 1 ? "1 more meeting was" : `${cutOff} more meetings were`} only partly read.`
+      : "";
   // A missing key comes first: allowing the provider alone can't run them.
   if (keyVendor) {
     return {
       title: "Transcript cleanup and action items were skipped",
-      cause: `There's no API key for ${keyVendor} yet, so ${kept}. Add one in Settings › Ask and Enhance, then run them.`,
+      cause: `There's no API key for ${keyVendor} yet, so ${kept}. Add one in Settings › Ask and Enhance, then run them.${more}`,
       action: "Add a key",
+      needsKey: true,
     };
   }
   return vendor
     ? {
         title: "Transcript cleanup and action items were skipped",
-        cause: `${vendor} needs your OK before it gets meeting content, so ${kept}.`,
+        cause: `${vendor} needs your OK before it gets meeting content, so ${kept}.${more}`,
         action: "Review and allow",
+        needsKey: false,
       }
     : {
         title: "Transcript cleanup and action items were skipped",
-        cause: `${kept}. You can run them now.`,
+        cause: `${kept}. You can run them now.${more}`,
         action: "Run them now",
+        needsKey: false,
       };
 }
 
