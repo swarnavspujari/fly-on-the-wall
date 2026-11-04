@@ -22,14 +22,14 @@ jobs:
     permissions:
       contents: write # "Commit snapshot" pushes to the `stats` branch
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Credentials stay persisted in THIS checkout on purpose: the final
       # step's plain `git push` authenticates with the stored GITHUB_TOKEN. No
       # third-party dependencies run in this job (collect-stats.mjs uses only
       # node: built-ins) and nothing is uploaded as an artifact.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 # zizmor: ignore[artipacked]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.4.0 # zizmor: ignore[artipacked]
         with:
           ref: stats
           path: stats-data
