@@ -256,6 +256,8 @@ pub fn run() {
             // AppState exists (the open's transaction just rolls back).
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<state::AppState>() {
+                    // a quit mid-pass is not a crash of the pass
+                    scheduler::save_ai_queue_on_quit(&state);
                     ollama::shutdown(&state);
                 }
                 // Stdio connector programs stop with the app.

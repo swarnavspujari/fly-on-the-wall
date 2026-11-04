@@ -14,7 +14,9 @@
 //!
 //! A pass can be stopped from outside: the one running is cancelled when its
 //! meeting is transcribed again or deleted, and `halt` stops them all (and
-//! refuses new ones) for "Delete all my data".
+//! refuses new ones) for "Delete all my data". A halt only holds the passes
+//! it stopped: `resume` puts them back if the wipe didn't happen, and
+//! `discard_held` drops them once it has.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -80,6 +82,9 @@ struct Inner {
     running: Option<(AiJob, Arc<Notify>)>,
     /// No pass starts or is accepted while set ("Delete all my data").
     halted: bool,
+    /// What `halt` took out of the queue, running pass first: kept until the
+    /// wipe is known to have worked (`discard_held`) or not (`resume`).
+    held: Vec<AiJob>,
 }
 
 #[derive(Default)]
@@ -188,20 +193,46 @@ impl AiQueue {
     }
 
     /// Stop everything: nothing waiting, nothing new accepted or started, and
-    /// the running pass cancelled. Undone by [`AiQueue::resume`].
+    /// the running pass cancelled. The passes it stops are held, not lost: the
+    /// one that was running goes back with the attempt it was using given back
+    /// (we stopped it, it didn't fail). Undone by [`AiQueue::resume`], or made
+    /// final by [`AiQueue::discard_held`]. Halting twice holds what the first
+    /// halt held.
     pub fn halt(&self) {
         let mut inner = self.inner.lock().unwrap();
-        inner.halted = true;
-        inner.pending.clear();
+        if !inner.halted {
+            inner.halted = true;
+            if let Some((job, _)) = &inner.running {
+                let mut job = job.clone();
+                job.attempts = job.attempts.saturating_sub(1);
+                inner.held.push(job);
+            }
+            let waiting: Vec<AiJob> = inner.pending.drain(..).collect();
+            inner.held.extend(waiting);
+        }
         if let Some((_, cancel)) = &inner.running {
             cancel.notify_one();
         }
     }
 
-    /// Undo [`AiQueue::halt`] (the wipe was refused or failed).
+    /// Undo [`AiQueue::halt`] (the wipe was refused or failed): the held
+    /// passes are queued again, in their old order, ahead of anything newer.
     pub fn resume(&self) {
-        self.inner.lock().unwrap().halted = false;
+        let mut inner = self.inner.lock().unwrap();
+        inner.halted = false;
+        let held = std::mem::take(&mut inner.held);
+        for job in held.into_iter().rev() {
+            if !inner.pending.iter().any(|j| j.meeting_id == job.meeting_id) {
+                inner.pending.push_front(job);
+            }
+        }
+        drop(inner);
         self.wake.notify_one();
+    }
+
+    /// The wipe worked: what [`AiQueue::halt`] held belongs to data that is gone.
+    pub fn discard_held(&self) {
+        self.inner.lock().unwrap().held.clear();
     }
 
     pub fn is_halted(&self) -> bool {
@@ -227,16 +258,41 @@ impl AiQueue {
     }
 
     /// Every pass not yet finished, the running one first: what survives a
-    /// restart.
+    /// restart. Passes a halt is holding count too (a wipe that didn't happen
+    /// must not have lost them), once per meeting.
     pub fn snapshot(&self) -> Vec<AiJob> {
         let inner = self.inner.lock().unwrap();
+        let mut seen = std::collections::HashSet::new();
         inner
             .running
             .iter()
             .map(|(job, _)| job)
             .chain(inner.pending.iter())
+            .chain(inner.held.iter())
+            .filter(|job| seen.insert(job.meeting_id.clone()))
             .cloned()
             .collect()
+    }
+
+    /// [`AiQueue::snapshot`] for the app quitting: the pass in progress was
+    /// interrupted by the quit, which isn't a failure of the pass, so the start
+    /// it was counted under is given back. Only a pass that is still running
+    /// when the process dies unannounced (a crash) keeps its count.
+    pub fn snapshot_for_quit(&self) -> Vec<AiJob> {
+        let running = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .running
+                .as_ref()
+                .map(|(job, _)| job.meeting_id.clone())
+        };
+        let mut jobs = self.snapshot();
+        if let Some(running) = running {
+            if let Some(job) = jobs.iter_mut().find(|j| j.meeting_id == running) {
+                job.attempts = job.attempts.saturating_sub(1);
+            }
+        }
+        jobs
     }
 
     /// Wait until no pass is running for `meeting_id`. A pass reads and
@@ -417,29 +473,76 @@ mod tests {
     }
 
     /// "Delete all my data": nothing waits, nothing new is accepted, the
-    /// running pass is told to stop; resuming undoes it.
+    /// running pass is told to stop. What it stopped is held: a wipe that
+    /// didn't happen (`resume`) gets every pass back, in order, with the
+    /// running one's attempt given back; one that did (`discard_held`) lets
+    /// them go.
     #[tokio::test]
-    async fn halting_clears_the_queue_and_refuses_passes_until_resumed() {
+    async fn halting_holds_the_passes_and_refuses_new_ones_until_resumed() {
         let q = AiQueue::default();
         q.push(job("a", AiJobKind::AfterTranscription));
-        q.push(job("b", AiJobKind::AfterTranscription));
-        let (_, running) = q.next().unwrap();
+        q.push(job("b", AiJobKind::ConsentRerun));
+        q.push(job("c", AiJobKind::ExtractOnly));
+        let (_, running) = q.next().unwrap(); // a, attempt 1
         assert!(q.is_busy());
 
         q.halt();
         assert!(q.is_halted());
-        assert!(!q.is_pending("b"), "waiting passes are dropped");
+        assert!(!q.is_pending("b"), "waiting passes leave the queue");
         tokio::time::timeout(std::time::Duration::from_secs(2), running.cancelled())
             .await
             .expect("the running pass is told to stop");
         drop(running);
         assert!(!q.is_busy());
-        assert!(!q.push(job("c", AiJobKind::AfterTranscription)), "refused");
+        assert!(!q.push(job("d", AiJobKind::AfterTranscription)), "refused");
         assert!(q.next().is_none());
-        assert!(q.snapshot().is_empty());
+        // nothing is lost from what a restart would recover
+        let held: Vec<_> = q.snapshot().into_iter().map(|j| j.meeting_id).collect();
+        assert_eq!(held, ["a", "b", "c"]);
 
         q.resume();
+        assert!(!q.is_halted());
+        let (again, _running) = q.next().unwrap();
+        assert_eq!(again.meeting_id, "a", "the stopped pass is first again");
+        assert_eq!(again.attempts, 1, "its stopped attempt was given back");
+        let ids: Vec<_> = q.snapshot().into_iter().map(|j| j.meeting_id).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        assert!(q.push(job("d", AiJobKind::AfterTranscription)));
+    }
+
+    #[test]
+    fn a_wipe_that_happened_lets_the_held_passes_go() {
+        let q = AiQueue::default();
+        q.push(job("a", AiJobKind::AfterTranscription));
+        q.push(job("b", AiJobKind::AfterTranscription));
+        q.halt();
+        q.halt(); // a second halt holds nothing twice
+        assert_eq!(q.snapshot().len(), 2);
+        q.discard_held();
+        assert!(q.snapshot().is_empty());
+        q.resume();
+        assert!(q.next().is_none(), "nothing comes back");
         assert!(q.push(job("c", AiJobKind::AfterTranscription)));
-        assert!(q.next().is_some());
+    }
+
+    /// A quit is not a crash: the saved queue gives back the start of the pass
+    /// the quit interrupted, and only that one.
+    #[test]
+    fn a_quit_gives_back_the_running_passes_attempt_but_a_crash_does_not() {
+        let q = AiQueue::default();
+        q.push(AiJob {
+            attempts: 1,
+            ..job("waiting-after-a-crash", AiJobKind::AfterTranscription)
+        });
+        q.push(job("a", AiJobKind::AfterTranscription));
+        let (_, running) = q.next().unwrap(); // waiting-after-a-crash: attempt 2
+        assert_eq!(q.snapshot()[0].attempts, 2, "what a crash would leave");
+        let quit = q.snapshot_for_quit();
+        assert_eq!(quit[0].meeting_id, "waiting-after-a-crash");
+        assert_eq!(quit[0].attempts, 1, "the quit's start is given back");
+        assert_eq!(quit[1].attempts, 0, "a waiting pass is untouched");
+        drop(running);
+        // nothing running: nothing to give back
+        assert_eq!(q.snapshot_for_quit()[0].attempts, 0);
     }
 }

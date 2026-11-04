@@ -39,13 +39,13 @@ function render(ui: ReactNode) {
 
 // The consent-skips notice reads these; by default nothing was skipped.
 let skipped: string[];
-let cutOff: string[];
+let cutOff: { items: string[]; cleanup: string[] };
 let recovered: RecoveredMeeting[];
 let consents: Record<string, string>;
 let llm: LlmSettings;
 beforeEach(() => {
   skipped = [];
-  cutOff = [];
+  cutOff = { items: [], cleanup: [] };
   recovered = [];
   consents = {};
   llm = {
@@ -70,16 +70,16 @@ beforeEach(() => {
     ],
   };
   vi.spyOn(api, "consentSkippedMeetings").mockImplementation(async () => [...skipped]);
-  vi.spyOn(api, "aiCutOffMeetings").mockImplementation(async () => [...cutOff]);
+  vi.spyOn(api, "aiCutOffMeetings").mockImplementation(async () => structuredClone(cutOff));
   vi.spyOn(api, "recoveredKeptLocal").mockImplementation(async () => [...recovered]);
   vi.spyOn(api, "dismissRecoveredKeptLocal").mockImplementation(async (id) => {
     recovered = id ? recovered.filter((m) => m.meeting_id !== id) : [];
     return [...recovered];
   });
   vi.spyOn(api, "retryConsentSkipped").mockImplementation(async () => {
-    const n = skipped.length + cutOff.length;
+    const n = skipped.length + new Set([...cutOff.items, ...cutOff.cleanup]).size;
     skipped = [];
-    cutOff = [];
+    cutOff = { items: [], cleanup: [] };
     return n;
   });
   vi.spyOn(api, "getLlmSettings").mockImplementation(async () => structuredClone(llm));
@@ -481,7 +481,7 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
   });
 
   it("meetings the model stopped short of: their own wording, and Run them now runs them", async () => {
-    cutOff = ["m1", "m2"];
+    cutOff = { items: ["m1", "m2"], cleanup: [] };
     consents["consent.cloud_llm.anthropic"] = "true";
     const { host } = render(<AppNotices {...props()} />);
     await flush();
@@ -503,18 +503,41 @@ describe("AppNotices › skipped cleanup (missing cloud consent)", () => {
     const { host } = render(<AppNotices {...props()} />);
     await flush();
     expect(host.textContent).not.toContain("couldn't be read");
-    act(() => eventHandlers["llm:ai-cut-off"]({ payload: ["m4"] }));
+    act(() => eventHandlers["llm:ai-cut-off"]({ payload: { items: ["m4"], cleanup: [] } }));
     await flush();
     expect(host.textContent).toContain("Some action items couldn't be read");
     act(() => eventHandlers["llm:consent-skips"]({ payload: ["m3"] }));
     await flush();
     expect(host.textContent).toContain("Anthropic needs your OK");
-    expect(host.textContent).toContain("1 more meeting was only partly read.");
-    // a refresh that empties the cut-off list leaves the consent notice alone
-    act(() => eventHandlers["llm:ai-cut-off"]({ payload: [] }));
+    expect(host.textContent).toContain("1 more meeting was only partly processed.");
+    // a refresh that empties the cut-off lists leaves the consent notice alone
+    act(() => eventHandlers["llm:ai-cut-off"]({ payload: { items: [], cleanup: [] } }));
     await flush();
-    expect(host.textContent).not.toContain("only partly read");
+    expect(host.textContent).not.toContain("only partly processed");
     expect(host.textContent).toContain("Anthropic needs your OK");
+  });
+
+  it("a cleanup that didn't finish has its own notice, and Run them now runs it", async () => {
+    cutOff = { items: [], cleanup: ["m1"] };
+    consents["consent.cloud_llm.anthropic"] = "true";
+    const { host } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(host.textContent).toContain("A transcript cleanup didn't finish");
+    expect(host.textContent).toContain(
+      "The AI model didn't finish cleaning up 1 meeting, so its transcript is still the raw text.",
+    );
+    expect(host.textContent).not.toContain("action items");
+    click(button(host, "Run them now"));
+    await flush();
+    expect(api.retryConsentSkipped).toHaveBeenCalledTimes(1);
+    expect(host.textContent).not.toContain("A transcript cleanup didn't finish");
+
+    // a meeting on both lists is one meeting, with both said
+    act(() =>
+      eventHandlers["llm:ai-cut-off"]({ payload: { items: ["m2", "m3"], cleanup: ["m3"] } }),
+    );
+    await flush();
+    expect(host.textContent).toContain("Some AI work didn't finish");
   });
 
   it("follows the backend's list, waits out a recording, and Dismiss hides it", async () => {

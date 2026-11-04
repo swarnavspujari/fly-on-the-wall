@@ -461,6 +461,14 @@ export interface RecoveredMeeting {
   title: string;
 }
 
+/** The meetings the model was reached for and stopped short of (llm_commands.rs
+ *  CutOff): `items` for action items that took too long, looped or were listed
+ *  only in part, `cleanup` for a transcript cleanup that took too long. */
+export interface CutOffMeetings {
+  items: string[];
+  cleanup: string[];
+}
+
 export interface LlmProviderInfo {
   id: string;
   default_model: string;

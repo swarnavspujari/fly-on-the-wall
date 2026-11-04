@@ -503,10 +503,12 @@ fn purge_if_orphaned(state: &AppState, meeting_id: &str) -> bool {
     orphaned
 }
 
-/// Stop the AI worker for "Delete all my data": nothing waits, nothing new is
-/// accepted, the running pass is cancelled and given `timeout` to wind down,
-/// and the saved queue is emptied. False when the pass didn't end in time.
-/// Undone by [`resume_ai_passes`] if the wipe is refused or fails.
+/// Stop the AI worker for "Delete all my data": nothing new is accepted or
+/// started, the waiting passes are taken off the queue, and the running pass is
+/// cancelled and given `timeout` to wind down. False when it didn't end in
+/// time. The passes are held, and the saved queue keeps them, until the wipe
+/// is known to have worked ([`forget_halted_ai_passes`]) or not
+/// ([`resume_ai_passes`]).
 pub fn halt_ai_passes(state: &AppState, timeout: Duration) -> bool {
     state.ai_queue.halt();
     let deadline = std::time::Instant::now() + timeout;
@@ -516,13 +518,42 @@ pub fn halt_ai_passes(state: &AppState, timeout: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    persist_ai_queue(state);
     true
 }
 
-/// Undo [`halt_ai_passes`].
+/// Undo [`halt_ai_passes`]: the wipe was refused or failed, so the passes it
+/// held go back on the queue (and stay saved) and the worker carries on.
+/// Also how the worker starts again after a wipe that worked, once
+/// [`forget_halted_ai_passes`] has let the held passes go.
 pub fn resume_ai_passes(state: &AppState) {
     state.ai_queue.resume();
+    persist_ai_queue(state);
+}
+
+/// The wipe worked: the passes [`halt_ai_passes`] held belonged to data that
+/// is gone. (The erase emptied the saved queue with everything else.)
+pub fn forget_halted_ai_passes(state: &AppState) {
+    state.ai_queue.discard_held();
+}
+
+/// The app is quitting: save the queue once more, giving back the start of
+/// the pass this quit interrupts (a quit isn't a crash; see
+/// `recover_ai_passes`). Tries for a moment to get the storage lock and gives
+/// up quietly, since quitting must not hang on it; the row then keeps the
+/// count it has, which only errs towards giving up on a pass.
+pub fn save_ai_queue_on_quit(state: &AppState) {
+    for _ in 0..50 {
+        if let Ok(storage) = state.storage.try_lock() {
+            let json = serde_json::to_string(&state.ai_queue.snapshot_for_quit())
+                .unwrap_or_else(|_| "[]".into());
+            if let Err(e) = storage.set_setting(AI_QUEUE_KEY, &json) {
+                tracing::warn!(error = %e, "saving the AI pass queue at quit failed");
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    tracing::warn!("the database stayed busy at quit; the AI pass queue was not updated");
 }
 
 /// The best-effort AI pass after a transcription: cleanup, then structured
@@ -565,7 +596,7 @@ fn queue_consent_rerun(state: &AppState, on_stage: StageSink<'_>) -> usize {
 }
 
 /// Empty the consent-skipped and cut-off lists and return the meetings the
-/// re-run should take (both lists run together: "Run them now"). The rest are
+/// re-run should take (all of them run together: "Run them now"). The rest are
 /// dropped, not kept for later. A meeting being transcribed again gets its own
 /// AI pass from that run. A meeting whose last transcription failed keeps its
 /// failure notice: the re-run would end in a "done" event, which clears that
@@ -574,6 +605,9 @@ fn take_consent_rerun(state: &AppState) -> Vec<String> {
     let mut taken = std::mem::take(&mut *state.consent_skipped.lock().unwrap());
     taken.append(&mut std::mem::take(
         &mut *state.ai_incomplete.lock().unwrap(),
+    ));
+    taken.append(&mut std::mem::take(
+        &mut *state.cleanup_incomplete.lock().unwrap(),
     ));
     taken
         .into_iter()
@@ -697,12 +731,19 @@ const POLISH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// means the raw transcript stands (exactly the pre-polish behavior);
 /// re-running the transcription re-runs the cleanup too.
 async fn polish_after_transcribe(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) {
+    polish_within(state, on_stage, meeting_id, POLISH_TIMEOUT).await;
+}
+
+/// [`polish_after_transcribe`] with the limit as a parameter.
+async fn polish_within(
+    state: &AppState,
+    on_stage: StageSink<'_>,
+    meeting_id: &str,
+    limit: Duration,
+) {
     emit_stage_marker(state, on_stage, meeting_id, "polishing");
-    let outcome = tokio::time::timeout(
-        POLISH_TIMEOUT,
-        crate::llm_commands::run_polish(state, meeting_id),
-    )
-    .await;
+    let outcome =
+        tokio::time::timeout(limit, crate::llm_commands::run_polish(state, meeting_id)).await;
     match outcome {
         Ok(Ok(r)) => tracing::info!(
             meeting_id,
@@ -715,7 +756,9 @@ async fn polish_after_transcribe(state: &AppState, on_stage: StageSink<'_>, meet
             tracing::info!(meeting_id, error = %e, "transcript cleanup skipped (raw transcript stands)")
         }
         Err(_) => {
-            crate::llm_commands::record_incomplete(state, meeting_id);
+            // its own list: the notice words a cleanup that didn't finish
+            // differently from action items that couldn't be read
+            crate::llm_commands::record_cleanup_incomplete(state, meeting_id);
             tracing::warn!(
                 meeting_id,
                 "transcript cleanup timed out (raw transcript stands)"
@@ -1677,6 +1720,83 @@ mod tests {
             .all(|(_, stage)| stage != "done"));
     }
 
+    /// A cleanup that takes too long goes on its own list, apart from action
+    /// items that couldn't be read: the notice says so in other words. The
+    /// request is dropped, the busy marker taken back, and nothing is recorded
+    /// as an extraction problem.
+    #[test]
+    fn a_cleanup_that_times_out_is_recorded_as_a_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, model) = state_with_hung_model(dir.path());
+        let id = meeting_with_transcript(&state);
+        let (_events, sink) = collecting();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(polish_within(
+            &state,
+            &sink,
+            &id,
+            Duration::from_millis(1500),
+        ));
+
+        model
+            .accepted
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the cleanup reached the model");
+        model
+            .hung_up
+            .recv_timeout(Duration::from_secs(5))
+            .expect("and its request was dropped when time ran out");
+        let skips = crate::llm_commands::current_skips(&state);
+        assert_eq!(skips.cut_off.cleanup, std::slice::from_ref(&id));
+        assert!(skips.cut_off.items.is_empty() && skips.consent.is_empty());
+        assert_eq!(stage_of(&state, &id), None, "the marker is taken back");
+    }
+
+    /// A delete that fails leaves the note and its pass alone: the pass is
+    /// stopped only once the delete has worked.
+    #[test]
+    fn a_delete_that_fails_does_not_stop_the_running_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, model) = state_with_hung_model(dir.path());
+        let state = std::sync::Arc::new(state);
+        let id = meeting_with_transcript(&state);
+        let note_id = state
+            .storage
+            .lock()
+            .unwrap()
+            .get_meeting(&id)
+            .unwrap()
+            .note_id;
+        let (_events, sink) = collecting();
+        queue_ai_pass(&state, &sink, &id, AiJobKind::AfterTranscription);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let worker = rt.spawn({
+            let state = state.clone();
+            async move { run_next_ai_job(&state, &|_| {}, &|_| {}, &|| {}).await }
+        });
+        model
+            .accepted
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap();
+
+        // the note row is already gone (an earlier delete half-finished), so
+        // deleting it fails
+        state.storage.lock().unwrap().delete_note(&note_id).unwrap();
+        assert!(crate::commands::delete_note_with(&state, &|_| {}, &note_id).is_err());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            state.ai_queue.is_running(&id),
+            "the failed delete left it running"
+        );
+        assert!(!worker.is_finished());
+
+        // tidy up: stop it
+        assert!(state.ai_queue.cancel_running(&id));
+        rt.block_on(async { tokio::time::timeout(Duration::from_secs(10), worker).await })
+            .expect("stopped")
+            .unwrap();
+    }
+
     // ------------------------------------------------ the saved queue
 
     /// A pass that takes the app down each time it runs is given up on: the
@@ -1730,6 +1850,44 @@ mod tests {
             .into_iter()
             .find(|j| j.meeting_id == meeting_id)
             .map(|j| j.attempts)
+    }
+
+    /// A quit is not a crash. The attempt counted when a pass starts is given
+    /// back when the app quits normally, so a long local pass that is
+    /// interrupted by quits (and by restarts for an update) is never given up
+    /// on; only passes that were running when the process died are.
+    #[test]
+    fn quitting_during_a_pass_is_not_a_crash_of_the_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_events, sink) = collecting();
+        let id = {
+            let state = test_state(dir.path());
+            let id = meeting_with_transcript(&state);
+            queue_ai_pass(&state, &sink, &id, AiJobKind::AfterTranscription);
+            id
+        };
+        for launch in 1..=5 {
+            let state = test_state(dir.path());
+            recover_ai_passes(&state, &sink);
+            assert_eq!(
+                job_attempts(&state, &id),
+                Some(0),
+                "launch {launch}: still queued, no failed attempt on record"
+            );
+            let started = state.ai_queue.next().unwrap();
+            persist_ai_queue(&state); // as run_next_ai_job does before the pass
+            assert_eq!(job_attempts(&state, &id), Some(1));
+            save_ai_queue_on_quit(&state); // the app quits mid-pass
+            let row = state
+                .storage
+                .lock()
+                .unwrap()
+                .get_setting(AI_QUEUE_KEY)
+                .unwrap()
+                .unwrap();
+            assert!(row.contains("\"attempts\":0"), "{row}");
+            drop(started);
+        }
     }
 
     /// An unreadable saved queue (damaged, or from a newer build) is a queue
@@ -1818,6 +1976,7 @@ mod tests {
             .note_id;
         state.consent_skipped.lock().unwrap().insert(id.clone());
         state.ai_incomplete.lock().unwrap().insert(id.clone());
+        state.cleanup_incomplete.lock().unwrap().insert(id.clone());
         crate::commands::delete_note_with(&state, &|_| {}, &note_id).unwrap();
         assert_eq!(
             crate::llm_commands::current_skips(&state),
@@ -1834,21 +1993,33 @@ mod tests {
         let (_events, sink) = collecting();
         let refused = real_meeting(&state);
         let cut_off = real_meeting(&state);
+        let uncleaned = real_meeting(&state);
         state
             .consent_skipped
             .lock()
             .unwrap()
             .insert(refused.clone());
         state.ai_incomplete.lock().unwrap().insert(cut_off.clone());
-        // one meeting on both lists runs once
+        state
+            .cleanup_incomplete
+            .lock()
+            .unwrap()
+            .insert(uncleaned.clone());
+        // one meeting on several lists runs once
         state.ai_incomplete.lock().unwrap().insert(refused.clone());
+        state
+            .cleanup_incomplete
+            .lock()
+            .unwrap()
+            .insert(cut_off.clone());
 
-        assert_eq!(queue_consent_rerun(&state, &sink), 2);
+        assert_eq!(queue_consent_rerun(&state, &sink), 3);
         assert_eq!(
             crate::llm_commands::current_skips(&state),
             AiSkips::default()
         );
         assert!(state.ai_queue.is_pending(&refused) && state.ai_queue.is_pending(&cut_off));
+        assert!(state.ai_queue.is_pending(&uncleaned));
     }
 
     /// A quota 429 is transient by definition (the window reopens) — it must

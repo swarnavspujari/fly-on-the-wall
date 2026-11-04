@@ -926,10 +926,11 @@ fn perform_delete_all(
     let data_dir = state.data_dir.clone();
     tracing::warn!(include_models, "deleting all user data");
     // The AI worker stops before anything is erased: a pass waiting its turn
-    // is dropped, one running is cancelled, and nothing queues again, so no
-    // model output is written into a database that is being emptied (its
-    // saved queue is emptied here too). The caller starts it again if the
-    // wipe fails.
+    // comes off the queue, one running is cancelled, and nothing queues
+    // meanwhile, so no model output is written into a database that is being
+    // emptied. The passes are only held: they go back if the wipe is refused
+    // or fails (below, or in the caller), and are let go once the database is
+    // erased, which empties their saved queue with everything else.
     if !crate::scheduler::halt_ai_passes(state, Duration::from_secs(20)) {
         crate::scheduler::resume_ai_passes(state);
         return Err("an AI pass didn't stop in time — nothing was deleted; try again".into());
@@ -943,8 +944,13 @@ fn perform_delete_all(
         consumed: false,
     })
     .map_err(err_str)?;
-    std::fs::write(data_dir.join(WIPE_MARKER), marker)
-        .map_err(|e| format!("couldn't start deleting (data folder not writable): {e}"))?;
+    if let Err(e) = std::fs::write(data_dir.join(WIPE_MARKER), marker) {
+        // nothing was erased: the worker goes on with what it held
+        crate::scheduler::resume_ai_passes(state);
+        return Err(format!(
+            "couldn't start deleting (data folder not writable): {e}"
+        ));
+    }
 
     let mut report = WipeReport::default();
     // Connector keychain entries are named after connector ids, which live in
@@ -977,6 +983,13 @@ fn perform_delete_all(
         }
     }
     report.restart_required = true;
+    // The database is erased: the held passes belonged to it. Either way the
+    // worker carries on, so a recording made before the restart still gets
+    // its cleanup and items.
+    if report.db_erased {
+        crate::scheduler::forget_halted_ai_passes(state);
+    }
+    crate::scheduler::resume_ai_passes(state);
     Ok(report)
 }
 
@@ -1502,11 +1515,40 @@ mod tests {
             .is_empty());
     }
 
-    /// The AI worker is stopped before the erase: the pass that was running is
-    /// cancelled, the one waiting is dropped, nothing queues again, and the
-    /// saved queue holds no meeting ids afterwards.
+    /// A state with two AI passes, `m-running` started and `m-waiting` queued,
+    /// and the thread that is the AI worker: it ends the running pass when told
+    /// to stop.
+    fn state_with_two_passes<'scope, 'env>(
+        state: &'env AppState,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+    ) {
+        crate::scheduler::queue_extraction(state, "m-running");
+        crate::scheduler::queue_extraction(state, "m-waiting");
+        let (_job, running) = state.ai_queue.next().unwrap();
+        scope.spawn(move || {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(running.cancelled());
+            drop(running);
+        });
+    }
+
+    fn saved_ai_queue(state: &AppState) -> Option<String> {
+        state
+            .storage
+            .lock()
+            .unwrap()
+            .get_setting(crate::scheduler::AI_QUEUE_KEY)
+            .unwrap()
+    }
+
+    /// The AI worker is stopped before the erase (the running pass is
+    /// cancelled, nothing queues meanwhile). Once the wipe has worked the held
+    /// passes are let go (the erase emptied their saved queue too) and the
+    /// worker carries on: a recording made before the restart still gets its
+    /// cleanup and items.
     #[test]
-    fn delete_all_stops_the_ai_worker_and_empties_its_saved_queue() {
+    fn delete_all_lets_go_of_the_ai_passes_and_the_worker_carries_on() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::init_with(
             dir.path().to_path_buf(),
@@ -1514,42 +1556,56 @@ mod tests {
         )
         .unwrap();
         let legacy = MemorySecretStore::default();
-        crate::scheduler::queue_extraction(&state, "m-running");
-        crate::scheduler::queue_extraction(&state, "m-waiting");
-        let saved = |state: &AppState| {
-            state
-                .storage
-                .lock()
-                .unwrap()
-                .get_setting(crate::scheduler::AI_QUEUE_KEY)
-                .unwrap()
-        };
-        assert!(saved(&state).unwrap().contains("m-waiting"));
-
         std::thread::scope(|scope| {
-            let (_job, running) = state.ai_queue.next().unwrap();
-            // the AI worker: it ends the pass when it is told to stop
-            scope.spawn(move || {
-                tokio::runtime::Runtime::new()
-                    .unwrap()
-                    .block_on(running.cancelled());
-                drop(running);
-            });
+            state_with_two_passes(&state, scope);
+            assert!(saved_ai_queue(&state).unwrap().contains("m-waiting"));
             let report = perform_delete_all(&state, false, &legacy).unwrap();
             assert!(report.db_erased);
         });
 
-        assert!(state.ai_queue.is_halted());
-        assert!(state.ai_queue.snapshot().is_empty());
-        crate::scheduler::queue_extraction(&state, "m-late");
+        assert!(!state.ai_queue.is_halted(), "the worker is running again");
+        assert!(state.ai_queue.snapshot().is_empty(), "nothing left over");
         assert!(
-            !state.ai_queue.is_pending("m-late"),
-            "refused after the wipe"
-        );
-        assert!(
-            saved(&state).is_none_or(|row| !row.contains("m-")),
+            saved_ai_queue(&state).is_none_or(|row| !row.contains("m-")),
             "no meeting id left in the saved queue"
         );
+        crate::scheduler::queue_extraction(&state, "m-new");
+        assert!(state.ai_queue.is_pending("m-new"), "new work is accepted");
+        assert_eq!(state.ai_queue.next().unwrap().0.meeting_id, "m-new");
+    }
+
+    /// A wipe that is refused or fails erases nothing, so it must lose no
+    /// pass: the waiting one is back on the queue, the one it cancelled too
+    /// (with its attempt given back), and the saved queue still has both.
+    #[test]
+    fn a_wipe_that_fails_gives_the_ai_passes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::init_with(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(MemorySecretStore::default()),
+        )
+        .unwrap();
+        let legacy = MemorySecretStore::default();
+        // the marker can't be written: a folder is in its place
+        std::fs::create_dir(dir.path().join(WIPE_MARKER)).unwrap();
+        std::thread::scope(|scope| {
+            state_with_two_passes(&state, scope);
+            let err = perform_delete_all(&state, false, &legacy).unwrap_err();
+            assert!(err.contains("couldn't start deleting"), "{err}");
+        });
+
+        assert!(!state.ai_queue.is_halted());
+        let back = state.ai_queue.snapshot();
+        let ids: Vec<&str> = back.iter().map(|j| j.meeting_id.as_str()).collect();
+        assert_eq!(ids, ["m-running", "m-waiting"]);
+        assert_eq!(back[0].attempts, 0, "the stop was ours, not a failure");
+        let row = saved_ai_queue(&state).unwrap();
+        assert!(
+            row.contains("m-running") && row.contains("m-waiting"),
+            "{row}"
+        );
+        let (first, _running) = state.ai_queue.next().unwrap();
+        assert_eq!(first.meeting_id, "m-running", "in the old order");
     }
 
     /// A pass that won't stop in time refuses the wipe, and the worker picks
