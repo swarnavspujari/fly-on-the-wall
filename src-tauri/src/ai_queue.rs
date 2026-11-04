@@ -8,28 +8,46 @@
 //! time", and it means a slow or runaway model costs the AI pass its own time
 //! and nobody else's: the next meeting is transcribed meanwhile.
 //!
-//! In memory only. A pass lost to a restart is the same as one cut short
-//! before: the raw transcript stands, and the meeting shows up under
-//! Settings → "Extract from N meetings".
+//! The queue itself is in memory; the scheduler writes what is in it (waiting
+//! and running) to a settings row after every change and reads it back at
+//! startup (`scheduler::recover_ai_passes`), so a quit or restart loses no pass.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-/// Why a pass was queued; decides what happens when it ends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a pass was queued; decides what it does and what happens when it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AiJobKind {
-    /// Straight after a transcription: when it ends the transcript is final,
-    /// so the semantic index, recording compression and the import's video
-    /// copy are nudged too.
+    /// Straight after a transcription: cleanup, then extraction. When it ends
+    /// the transcript is final, so the semantic index, recording compression
+    /// and the import's video copy are nudged too.
     AfterTranscription,
     /// "Review and allow": the pass again for a meeting that was skipped for
     /// missing cloud consent. The transcript was already final.
     ConsentRerun,
+    /// Extraction alone, after the speakers changed (re-analyze, undo): the
+    /// transcript text is untouched, so no cleanup, and the caller has
+    /// already told the app it's done.
+    ExtractOnly,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl AiJobKind {
+    /// What a pass of this kind covers: a meeting queued twice keeps the
+    /// fuller one.
+    fn rank(self) -> u8 {
+        match self {
+            AiJobKind::ExtractOnly => 0,
+            AiJobKind::ConsentRerun => 1,
+            AiJobKind::AfterTranscription => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiJob {
     pub meeting_id: String,
     pub kind: AiJobKind,
@@ -38,17 +56,8 @@ pub struct AiJob {
 #[derive(Default)]
 struct Inner {
     pending: VecDeque<AiJob>,
-    /// The meeting whose pass the worker is running right now.
-    running: Option<String>,
-}
-
-/// The pass the worker is running; ends it when dropped.
-pub struct RunningPass<'a>(&'a AiQueue);
-
-impl Drop for RunningPass<'_> {
-    fn drop(&mut self) {
-        self.0.finish();
-    }
+    /// The pass the worker is running right now.
+    running: Option<AiJob>,
 }
 
 #[derive(Default)]
@@ -62,6 +71,15 @@ pub struct AiQueue {
     finished: Notify,
 }
 
+/// The pass the worker is running; ends it when dropped.
+pub struct RunningPass<'a>(&'a AiQueue);
+
+impl Drop for RunningPass<'_> {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
+}
+
 impl AiQueue {
     /// Queue a pass. One entry per meeting: a meeting already waiting keeps
     /// its place, upgraded to the fuller kind. Returns whether it was added.
@@ -72,8 +90,8 @@ impl AiQueue {
             .iter_mut()
             .find(|j| j.meeting_id == job.meeting_id)
         {
-            if job.kind == AiJobKind::AfterTranscription {
-                queued.kind = AiJobKind::AfterTranscription;
+            if job.kind.rank() > queued.kind.rank() {
+                queued.kind = job.kind;
             }
             return false;
         }
@@ -86,7 +104,7 @@ impl AiQueue {
     pub fn next(&self) -> Option<(AiJob, RunningPass<'_>)> {
         let mut inner = self.inner.lock().unwrap();
         let job = inner.pending.pop_front()?;
-        inner.running = Some(job.meeting_id.clone());
+        inner.running = Some(job.clone());
         Some((job, RunningPass(self)))
     }
 
@@ -110,7 +128,23 @@ impl AiQueue {
     }
 
     pub fn is_running(&self, meeting_id: &str) -> bool {
-        self.inner.lock().unwrap().running.as_deref() == Some(meeting_id)
+        let inner = self.inner.lock().unwrap();
+        inner
+            .running
+            .as_ref()
+            .is_some_and(|j| j.meeting_id == meeting_id)
+    }
+
+    /// Every pass not yet finished, the running one first: what survives a
+    /// restart.
+    pub fn snapshot(&self) -> Vec<AiJob> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .running
+            .iter()
+            .chain(inner.pending.iter())
+            .cloned()
+            .collect()
     }
 
     /// Wait until no pass is running for `meeting_id`. A pass reads and
@@ -155,8 +189,11 @@ mod tests {
     #[test]
     fn a_meeting_queues_once_and_keeps_the_fuller_kind() {
         let q = AiQueue::default();
-        assert!(q.push(job("a", AiJobKind::ConsentRerun)));
+        assert!(q.push(job("a", AiJobKind::ExtractOnly)));
+        assert!(!q.push(job("a", AiJobKind::ConsentRerun)));
         assert!(!q.push(job("a", AiJobKind::AfterTranscription)));
+        // never downgraded
+        assert!(!q.push(job("a", AiJobKind::ExtractOnly)));
         let (a, running) = q.next().unwrap();
         assert_eq!(a.kind, AiJobKind::AfterTranscription);
         drop(running);
@@ -176,6 +213,29 @@ mod tests {
         assert!(q.remove_pending("b"));
         assert!(!q.is_pending("b"));
         assert!(!q.remove_pending("b"));
+    }
+
+    /// What survives a restart is everything not finished: the pass that was
+    /// running (it is run again from the start) and the ones waiting.
+    #[test]
+    fn the_snapshot_is_the_running_pass_then_the_waiting_ones() {
+        let q = AiQueue::default();
+        assert!(q.snapshot().is_empty());
+        q.push(job("a", AiJobKind::AfterTranscription));
+        q.push(job("b", AiJobKind::ExtractOnly));
+        q.push(job("c", AiJobKind::ConsentRerun));
+        let (_, running) = q.next().unwrap();
+        let ids: Vec<_> = q.snapshot().into_iter().map(|j| j.meeting_id).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        drop(running);
+        let ids: Vec<_> = q.snapshot().into_iter().map(|j| j.meeting_id).collect();
+        assert_eq!(ids, ["b", "c"]);
+
+        // and it round-trips through the settings row
+        let json = serde_json::to_string(&q.snapshot()).unwrap();
+        assert!(json.contains("extract_only") && json.contains("consent_rerun"));
+        let back: Vec<AiJob> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, q.snapshot());
     }
 
     #[tokio::test]

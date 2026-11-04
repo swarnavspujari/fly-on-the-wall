@@ -42,11 +42,26 @@ pub fn is_stopped(error: &str) -> bool {
     error.contains(STOPPED_MARK)
 }
 
-/// How long one meeting's extraction may run before it is given up on and
-/// left for a retry (Settings → "Extract from N meetings"). A backstop for a
-/// server that hangs: it can't tell a slow CPU from a runaway, which is what
-/// [`RunawayGuard`] and [`local_output_budget`] are for.
-pub const EXTRACT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Time limits on ONE extraction batch (a long meeting is several), not on
+/// the meeting: a slow machine has to be able to finish all of them. A batch
+/// that breaks a limit is given up on, and the batches before it are kept.
+/// A backstop for a server that hangs or goes quiet: it can't tell a slow CPU
+/// from a runaway, which is what [`RunawayGuard`] and [`local_output_budget`]
+/// are for.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchLimits {
+    /// A local model's reply may go this long without a piece before the
+    /// model counts as stalled. The first piece waits out the model loading
+    /// and the prompt being read, so this is generous.
+    pub idle: Duration,
+    /// A cloud model's whole answer (it isn't streamed).
+    pub request: Duration,
+}
+
+pub const BATCH_LIMITS: BatchLimits = BatchLimits {
+    idle: Duration::from_secs(5 * 60),
+    request: Duration::from_secs(10 * 60),
+};
 
 pub struct ExtractionPrompt {
     pub system: String,
@@ -257,31 +272,43 @@ pub fn validate_items(
 /// before it counts as a loop. A repeat adds nothing: `validate_items` drops it.
 const MAX_REPEATED_ITEMS: usize = 2;
 /// A local model's output allowance for a batch: a base for the array and
-/// the first item, plus this much per transcript line. Measured on llama3.1:
-/// about 75 tokens an item, about one item a line for a dense meeting
-/// (9 lines → 676 tokens, against an allowance of 1,390).
+/// the first item, plus the larger of this much per transcript line and this
+/// much per word. Measured on llama3.1: about 75 tokens an item, about one item
+/// a line for a dense meeting (9 lines, 110 words → 676 tokens, against an
+/// allowance of 1,390). The per-word term is for a batch of few long speeches,
+/// where lines undercount what there is to say (10 lines, 3,000 words → 6,400).
 const LOCAL_BASE_TOKENS: u32 = 400;
 const LOCAL_TOKENS_PER_SEGMENT: u32 = 110;
+const LOCAL_TOKENS_PER_WORD: u32 = 2;
 const LOCAL_MIN_TOKENS: u32 = 1024;
+/// One item a speech this long is already a dense meeting.
+const WORDS_PER_ITEM: usize = 15;
 
-/// How many tokens a local model may write for a batch of `segments` lines
-/// before the server cuts it off: proportional to the batch, never above the
-/// profile's cap (the old flat 8,192, which let a nine-line meeting write
-/// for twenty minutes).
-pub fn local_output_budget(segments: usize, profile_cap: u32) -> u32 {
-    let wanted = LOCAL_BASE_TOKENS.saturating_add(
-        LOCAL_TOKENS_PER_SEGMENT.saturating_mul(segments.min(u32::MAX as usize) as u32),
-    );
-    wanted.max(LOCAL_MIN_TOKENS).min(profile_cap)
+fn clamp_u32(n: usize) -> u32 {
+    n.min(u32::MAX as usize) as u32
 }
 
-/// Most array elements a batch of `segments` lines can sensibly produce: two
-/// a line (a figure and an action item can share one), never more than the
-/// table keeps for a meeting.
-fn local_item_limit(segments: usize) -> usize {
-    segments
+/// How many tokens a local model may write for a batch of `lines` lines and
+/// `words` words before the server cuts it off: proportional to the batch,
+/// never above the profile's cap (the old flat 8,192, which let a nine-line
+/// meeting write for twenty minutes).
+pub fn local_output_budget(lines: usize, words: usize, profile_cap: u32) -> u32 {
+    let by_lines = LOCAL_TOKENS_PER_SEGMENT.saturating_mul(clamp_u32(lines));
+    let by_words = LOCAL_TOKENS_PER_WORD.saturating_mul(clamp_u32(words));
+    LOCAL_BASE_TOKENS
+        .saturating_add(by_lines.max(by_words))
+        .max(LOCAL_MIN_TOKENS)
+        .min(profile_cap)
+}
+
+/// Most array elements a batch can sensibly produce: two a line (a figure and
+/// an action item can share one), or one per [`WORDS_PER_ITEM`] words for long
+/// speeches; never more than the table keeps for a meeting.
+fn local_item_limit(lines: usize, words: usize) -> usize {
+    lines
         .saturating_mul(2)
         .saturating_add(5)
+        .max(words / WORDS_PER_ITEM)
         .min(EXTRACT_MAX_ITEMS)
 }
 
@@ -292,15 +319,6 @@ pub enum Runaway {
     Repeating,
     /// More elements than the transcript can hold.
     TooManyItems,
-}
-
-impl Runaway {
-    fn describe(self) -> &'static str {
-        match self {
-            Runaway::Repeating => "repeating the same items",
-            Runaway::TooManyItems => "writing more items than the transcript holds",
-        }
-    }
 }
 
 /// The complete array elements of a reply, read from byte `pos` (0 = before
@@ -393,70 +411,165 @@ impl RunawayGuard {
     }
 }
 
-/// How a local model's streamed reply ended.
-#[derive(Clone, Copy)]
-enum LocalEnd {
-    Finished,
-    /// Cut off by the guard.
+/// Why a batch ended before the model finished it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cut {
+    /// A local model's loop, stopped by the guard.
     Runaway(Runaway),
-    /// The server stopped it at the token cap.
+    /// The server stopped it at the output allowance.
     TokenLimit,
+    /// Nothing arrived for [`BatchLimits::idle`].
+    Stalled,
+    /// A cloud answer didn't arrive within [`BatchLimits::request`].
+    TimedOut,
+}
+
+impl Cut {
+    fn describe(self) -> &'static str {
+        match self {
+            Cut::Runaway(Runaway::Repeating) => "the model kept repeating itself",
+            Cut::Runaway(Runaway::TooManyItems) => {
+                "the model wrote more items than the transcript holds"
+            }
+            Cut::TokenLimit => "the model ran out of its output allowance",
+            Cut::Stalled => "the model went quiet",
+            Cut::TimedOut => "the model took too long to answer",
+        }
+    }
+
+    /// A server that stopped answering won't answer the next batch either.
+    fn ends_the_meeting(self) -> bool {
+        matches!(self, Cut::Stalled | Cut::TimedOut)
+    }
 }
 
 /// Stream a local model's reply into `guard`, and stop reading, closing the
-/// connection so the server stops generating, as soon as it says to.
+/// connection so the server stops generating, as soon as the guard says to or
+/// the model goes quiet. `None`: the reply ended on its own.
 async fn chat_local(
     provider: &dyn LLMProvider,
     request: ChatRequest,
     guard: &mut RunawayGuard,
-) -> Result<LocalEnd, String> {
-    let mut stream = provider
-        .chat_stream(ConverseRequest::from(request))
-        .await
-        .map_err(|e| e.to_string())?;
-    while let Some(event) = stream.next().await {
-        match event.map_err(|e| e.to_string())? {
+    idle: Duration,
+) -> Result<Option<Cut>, String> {
+    let opened = tokio::time::timeout(idle, provider.chat_stream(ConverseRequest::from(request)));
+    let mut stream = match opened.await {
+        Err(_) => return Ok(Some(Cut::Stalled)),
+        Ok(stream) => stream.map_err(|e| e.to_string())?,
+    };
+    loop {
+        let event = match tokio::time::timeout(idle, stream.next()).await {
+            Err(_) => return Ok(Some(Cut::Stalled)),
+            Ok(None) => return Ok(None),
+            Ok(Some(event)) => event.map_err(|e| e.to_string())?,
+        };
+        match event {
             StreamEvent::TextDelta { text } => {
                 if let Some(runaway) = guard.push(&text) {
-                    return Ok(LocalEnd::Runaway(runaway));
+                    return Ok(Some(Cut::Runaway(runaway)));
                 }
             }
             StreamEvent::Done { stop_reason, .. } => {
-                return Ok(if stop_reason == StopReason::MaxTokens {
-                    LocalEnd::TokenLimit
-                } else {
-                    LocalEnd::Finished
-                });
+                return Ok((stop_reason == StopReason::MaxTokens).then_some(Cut::TokenLimit));
             }
             _ => {}
         }
     }
-    Ok(LocalEnd::Finished)
+}
+
+/// What one batch gave: the elements it wrote, and why it ended early if it did.
+struct BatchRead {
+    raw: Vec<RawExtractedItem>,
+    cut: Option<Cut>,
+}
+
+/// Ask for one batch. A local model is streamed and watched; a cloud model
+/// gets the plain call under [`BatchLimits::request`] and the flat cap.
+async fn read_batch(
+    provider: &dyn LLMProvider,
+    request: &(dyn Fn(u32) -> ChatRequest + Sync),
+    lines: usize,
+    words: usize,
+    profile_cap: u32,
+    limits: BatchLimits,
+) -> Result<BatchRead, String> {
+    if !provider.is_local() {
+        let answer = tokio::time::timeout(limits.request, provider.chat(request(profile_cap)));
+        return match answer.await {
+            Err(_) => Ok(BatchRead {
+                raw: Vec::new(),
+                cut: Some(Cut::TimedOut),
+            }),
+            Ok(output) => Ok(BatchRead {
+                raw: parse_extraction_response(&output.map_err(|e| e.to_string())?)
+                    .unwrap_or_default(),
+                cut: None,
+            }),
+        };
+    }
+    let mut guard = RunawayGuard::new(local_item_limit(lines, words));
+    let budget = local_output_budget(lines, words, profile_cap);
+    let cut = chat_local(provider, request(budget), &mut guard, limits.idle).await?;
+    let raw = match cut {
+        None => parse_extraction_response(guard.text()).unwrap_or_default(),
+        Some(_) => salvage_items(guard.text()),
+    };
+    Ok(BatchRead { raw, cut })
+}
+
+/// What an extraction produced.
+pub struct Extraction {
+    pub items: Vec<MeetingItem>,
+    /// Why it stopped short, when it did: a batch was cut off (a loop, the
+    /// output allowance), the model went quiet or took too long, or a later
+    /// batch failed. `items` is then what the earlier batches and the part
+    /// of the cut one that was written gave; the meeting should stay
+    /// retryable.
+    pub incomplete: Option<String>,
+}
+
+/// [`extract_with_limits`] with the app's [`BATCH_LIMITS`], keeping only the items.
+pub async fn extract_items(
+    provider: &dyn LLMProvider,
+    meeting: &Meeting,
+    transcript: &Transcript,
+) -> Result<Vec<MeetingItem>, String> {
+    extract_with_limits(provider, meeting, transcript, BATCH_LIMITS)
+        .await
+        .map(|extraction| extraction.items)
 }
 
 /// Extract items for one transcript with the given provider. Pure with
 /// respect to storage — the caller persists.
 ///
 /// A local model is streamed and watched (see [`RunawayGuard`]): a loop is
-/// cut off early and the items written before it are kept. When a reply was
-/// cut off and nothing usable came out of it, this is an error, not "no
-/// items", so the meeting stays listed for a retry.
-pub async fn extract_items(
+/// cut off early and the items written before it are kept. Each batch has
+/// its own time limit ([`BatchLimits`]); a batch that breaks it, or fails
+/// after others succeeded, ends the extraction with what the earlier ones
+/// gave (`incomplete` says so). When nothing usable came out of a cut-off
+/// batch this is an error, not "no items", so the meeting stays listed for a
+/// retry.
+pub async fn extract_with_limits(
     provider: &dyn LLMProvider,
     meeting: &Meeting,
     transcript: &Transcript,
-) -> Result<Vec<MeetingItem>, String> {
+    limits: BatchLimits,
+) -> Result<Extraction, String> {
     let extracted_by = provider.id().to_string();
     let profile = profile_for(provider.model());
     let profile_cap = profile.max_tokens.extract.unwrap_or(8192);
     let mut raw_all = Vec::new();
-    let mut cut_off = 0usize;
+    let mut incomplete: Option<String> = None;
     for range in enhance::plan_cleanup_batches(
         &transcript.segments,
         EXTRACT_MAX_BATCH_WORDS,
         EXTRACT_MAX_BATCH_SEGMENTS,
     ) {
-        let segments = range.len();
+        let lines = range.len();
+        let words: usize = transcript.segments[range.clone()]
+            .iter()
+            .map(|s| s.text.split_whitespace().count())
+            .sum();
         let prompt = build_extraction_prompt(meeting, transcript, range, profile);
         let request = |max_tokens: u32| ChatRequest {
             messages: vec![
@@ -474,56 +587,52 @@ pub async fn extract_items(
             format: profile.constrained_json.then(extraction_items_schema),
             effort: profile.effort.extract.map(String::from),
         };
-        if !provider.is_local() {
-            let output = provider
-                .chat(request(profile_cap))
-                .await
-                .map_err(|e| e.to_string())?;
-            raw_all.extend(parse_extraction_response(&output).unwrap_or_default());
-            continue;
-        }
-
-        let mut guard = RunawayGuard::new(local_item_limit(segments));
-        let end = chat_local(
-            provider,
-            request(local_output_budget(segments, profile_cap)),
-            &mut guard,
-        )
-        .await?;
-        match end {
-            LocalEnd::Finished => {
-                raw_all.extend(parse_extraction_response(guard.text()).unwrap_or_default());
+        let read = match read_batch(provider, &request, lines, words, profile_cap, limits).await {
+            Ok(read) => read,
+            // a later batch failed: keep what the earlier ones gave
+            Err(e) if !raw_all.is_empty() => {
+                tracing::warn!(meeting_id = %meeting.id, error = %e, "extraction batch failed; keeping the earlier batches' items");
+                incomplete.get_or_insert(e);
+                break;
             }
-            LocalEnd::Runaway(_) | LocalEnd::TokenLimit => {
-                cut_off += 1;
-                let kept = salvage_items(guard.text());
-                tracing::warn!(
-                    meeting_id = %meeting.id,
-                    model = provider.model(),
-                    reason = match end {
-                        LocalEnd::Runaway(r) => r.describe(),
-                        _ => "ran out of its output allowance",
-                    },
-                    kept = kept.len(),
-                    "local model's extraction reply was cut off; keeping the items written before that"
-                );
-                raw_all.extend(kept);
+            Err(e) => return Err(e),
+        };
+        raw_all.extend(read.raw);
+        if let Some(cut) = read.cut {
+            tracing::warn!(
+                meeting_id = %meeting.id,
+                model = provider.model(),
+                reason = cut.describe(),
+                "extraction batch was cut off; keeping the items written before that"
+            );
+            incomplete.get_or_insert_with(|| cut.describe().to_string());
+            if cut.ends_the_meeting() {
+                break;
             }
         }
     }
     let items = validate_items(raw_all, transcript, &meeting.id, &extracted_by);
-    if items.is_empty() && cut_off > 0 {
-        return Err(format!(
-            "the local model got stuck before it listed any items, {STOPPED_MARK}"
-        ));
+    if items.is_empty() {
+        if let Some(reason) = incomplete {
+            return Err(format!(
+                "{reason} before it listed any items, {STOPPED_MARK}"
+            ));
+        }
     }
-    Ok(items)
+    Ok(Extraction { items, incomplete })
+}
+
+/// What [`run_extraction`] stored.
+pub struct ExtractionRun {
+    pub items: usize,
+    /// See [`Extraction::incomplete`].
+    pub incomplete: Option<String>,
 }
 
 /// Run extraction for one meeting and persist the result. Prefers the
 /// polished transcript (same segment ids, cleaner text for the model);
 /// falls back to the raw one. Re-runnable: replaces the meeting's items.
-pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<usize, String> {
+pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<ExtractionRun, String> {
     // The embedding backlog steps aside while the model works.
     let _model = state.foreground_ai();
     ensure_provider_ready(state).await?;
@@ -545,11 +654,13 @@ pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<usize,
         return Err("transcript has no segments".into());
     }
 
-    let items = extract_items(provider.as_ref(), &meeting, &transcript).await?;
+    let Extraction { items, incomplete } =
+        extract_with_limits(provider.as_ref(), &meeting, &transcript, BATCH_LIMITS).await?;
     tracing::info!(
         meeting_id,
         provider = provider.id(),
         items = items.len(),
+        incomplete = incomplete.is_some(),
         "meeting item extraction finished"
     );
     let storage = state.storage.lock().unwrap();
@@ -562,40 +673,48 @@ pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<usize,
             .replace_meeting_items(meeting_id, &items)
             .map_err(|e| e.to_string())?;
     }
-    Ok(items.len())
+    Ok(ExtractionRun {
+        items: items.len(),
+        incomplete,
+    })
 }
 
-/// [`run_extraction`] under [`EXTRACT_TIMEOUT`]. A meeting that times out
-/// stores nothing, so it stays in the list Settings → "Extract from N
-/// meetings" works through.
-pub async fn run_extraction_bounded(state: &AppState, meeting_id: &str) -> Result<usize, String> {
-    within(EXTRACT_TIMEOUT, run_extraction(state, meeting_id)).await
-}
-
-async fn within(
-    limit: Duration,
-    work: impl std::future::Future<Output = Result<usize, String>>,
-) -> Result<usize, String> {
-    match tokio::time::timeout(limit, work).await {
-        Ok(result) => result,
-        Err(_) => Err(format!("the model took too long to answer, {STOPPED_MARK}")),
+/// [`run_extraction`], remembering a meeting whose extraction stopped short
+/// (a model that went quiet or got stuck, a batch cut off) like a consent
+/// skip, so the app's notice offers to run it again. A provider that isn't
+/// set up stays quiet: the raw transcript simply stands.
+pub async fn extract_meeting(state: &AppState, meeting_id: &str) -> Result<ExtractionRun, String> {
+    let result = run_extraction(state, meeting_id).await;
+    let stopped_short = match &result {
+        Ok(run) => run.incomplete.is_some(),
+        Err(e) => is_stopped(e),
+    };
+    if stopped_short {
+        crate::llm_commands::record_incomplete(state, meeting_id);
     }
+    result
 }
 
 /// Best-effort extraction chained after a successful transcription — must
-/// never fail the job (mirrors the polish pass contract). A failure or
-/// timeout is logged, and the meeting stays in the Settings backfill list.
+/// never fail the job (mirrors the polish pass contract). A failure is
+/// logged, and a meeting with no items stays in the Settings backfill list.
 pub async fn extract_after_transcribe(state: &AppState, meeting_id: &str) {
-    match run_extraction_bounded(state, meeting_id).await {
-        Ok(n) => tracing::info!(meeting_id, items = n, "post-transcription extraction done"),
+    match extract_meeting(state, meeting_id).await {
+        Ok(run) => match run.incomplete {
+            None => tracing::info!(meeting_id, items = run.items, "post-transcription extraction done"),
+            Some(why) => tracing::warn!(
+                meeting_id,
+                items = run.items,
+                why,
+                "post-transcription extraction stopped short (kept the items it had; the notice offers to run it again)"
+            ),
+        },
         Err(e) => {
-            if !crate::llm_commands::record_consent_skip(state, meeting_id, &e) && is_stopped(&e) {
-                crate::llm_commands::record_incomplete(state, meeting_id);
-            }
+            crate::llm_commands::record_consent_skip(state, meeting_id, &e);
             tracing::warn!(
                 meeting_id,
                 error = %e,
-                "post-transcription extraction skipped (transcript stands without items;                  Settings › Search index can run it again)"
+                "post-transcription extraction skipped (transcript stands without items; Settings › Search index can run it again)"
             )
         }
     }
@@ -607,7 +726,9 @@ pub async fn extract_meeting_items(
     state: State<'_, AppState>,
     meeting_id: String,
 ) -> CmdResult<usize> {
-    run_extraction_bounded(&state, &meeting_id).await
+    extract_meeting(&state, &meeting_id)
+        .await
+        .map(|run| run.items)
 }
 
 #[derive(serde::Serialize)]
@@ -638,8 +759,8 @@ pub async fn backfill_meeting_items(state: State<'_, AppState>) -> CmdResult<Bac
     };
     for meeting_id in pending {
         result.processed += 1;
-        match run_extraction_bounded(&state, &meeting_id).await {
-            Ok(n) => result.extracted += n,
+        match extract_meeting(&state, &meeting_id).await {
+            Ok(run) => result.extracted += run.items,
             Err(e) => {
                 tracing::warn!(meeting_id, error = %e, "backfill extraction failed");
                 result.failed += 1;
@@ -900,41 +1021,52 @@ mod tests {
     fn a_local_models_allowance_scales_with_the_batch_and_never_passes_the_cap() {
         // the incident's nine-line meeting: it wrote 676 tokens when it
         // behaved, and 8,192 were allowed
-        assert_eq!(local_output_budget(9, 8192), 1390);
-        assert!(local_output_budget(9, 8192) > 2 * 676);
-        assert_eq!(local_output_budget(0, 8192), 1024);
-        assert_eq!(local_output_budget(150, 8192), 8192);
-        assert_eq!(local_output_budget(150, 4000), 4000);
-        assert_eq!(local_item_limit(9), 23);
-        assert_eq!(local_item_limit(150), EXTRACT_MAX_ITEMS);
+        assert_eq!(local_output_budget(9, 110, 8192), 1390);
+        assert!(local_output_budget(9, 110, 8192) > 2 * 676);
+        assert_eq!(local_output_budget(0, 0, 8192), 1024);
+        // few long speeches: the lines undercount what there is to say
+        assert_eq!(local_output_budget(10, 3000, 8192), 6400);
+        assert_eq!(local_output_budget(150, 3000, 8192), 8192);
+        assert_eq!(local_output_budget(150, 3000, 4000), 4000);
+        assert_eq!(local_item_limit(9, 110), 23);
+        assert_eq!(local_item_limit(10, 3000), EXTRACT_MAX_ITEMS);
+        assert_eq!(local_item_limit(150, 3000), EXTRACT_MAX_ITEMS);
     }
 
-    /// A model whose reply is scripted piece by piece; `local` picks which
-    /// path of `extract_items` serves it.
-    struct Scripted {
-        local: bool,
-        model: &'static str,
+    /// One call's worth of scripted model behaviour.
+    #[derive(Clone)]
+    struct Script {
         pieces: Vec<String>,
         /// Repeat the last piece for ever: a model that never stops.
         endless: bool,
         stop: StopReason,
-        /// Pieces handed out so far.
-        sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        /// `max_tokens` of every request.
-        max_tokens: std::sync::Mutex<Vec<Option<u32>>>,
+        /// After the pieces, go quiet: no more events, no answer.
+        stalls: bool,
+        /// Refuse the call outright.
+        fails: bool,
+        /// Take this long to start answering (a slow machine).
+        delay: Duration,
     }
 
-    impl Scripted {
-        fn local(pieces: Vec<String>) -> Self {
+    impl Script {
+        fn pieces(pieces: Vec<String>) -> Self {
             Self {
-                local: true,
-                model: "llama3.1",
                 pieces,
                 endless: false,
                 stop: StopReason::EndTurn,
-                sent: Default::default(),
-                max_tokens: Default::default(),
+                stalls: false,
+                fails: false,
+                delay: Duration::ZERO,
             }
+        }
+
+        /// A whole reply with these items (kind, text, segment id).
+        fn reply(items: &[(&str, &str, &str)]) -> Self {
+            let body: Vec<String> = items
+                .iter()
+                .map(|(kind, text, segment)| item_json(kind, text, segment))
+                .collect();
+            Self::pieces(vec![format!("[{}]", body.join(","))])
         }
 
         fn endless(mut self) -> Self {
@@ -947,8 +1079,82 @@ mod tests {
             self
         }
 
+        fn stalling(mut self) -> Self {
+            self.stalls = true;
+            self
+        }
+
+        fn slow(mut self, ms: u64) -> Self {
+            self.delay = Duration::from_millis(ms);
+            self
+        }
+
+        fn failing() -> Self {
+            Self {
+                fails: true,
+                ..Self::pieces(vec![])
+            }
+        }
+    }
+
+    /// A model whose replies are scripted, one script per call (the last one
+    /// repeats); `local` picks which path of `extract_items` serves it.
+    struct Scripted {
+        local: bool,
+        model: &'static str,
+        scripts: Vec<Script>,
+        calls: std::sync::atomic::AtomicUsize,
+        /// Pieces handed out so far.
+        sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// `max_tokens` of every request.
+        max_tokens: std::sync::Mutex<Vec<Option<u32>>>,
+    }
+
+    impl Scripted {
+        fn sequence(local: bool, scripts: Vec<Script>) -> Self {
+            Self {
+                local,
+                model: if local {
+                    "llama3.1"
+                } else {
+                    "claude-sonnet-5-5"
+                },
+                scripts,
+                calls: Default::default(),
+                sent: Default::default(),
+                max_tokens: Default::default(),
+            }
+        }
+
+        fn local(pieces: Vec<String>) -> Self {
+            Self::sequence(true, vec![Script::pieces(pieces)])
+        }
+
+        fn endless(mut self) -> Self {
+            let last = self.scripts.pop().unwrap();
+            self.scripts.push(last.endless());
+            self
+        }
+
+        fn ending(mut self, stop: StopReason) -> Self {
+            let last = self.scripts.pop().unwrap();
+            self.scripts.push(last.ending(stop));
+            self
+        }
+
         fn sent(&self) -> usize {
             self.sent.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// The script for this call, noting the request.
+        fn next_script(&self, max_tokens: Option<u32>) -> Script {
+            let i = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.max_tokens.lock().unwrap().push(max_tokens);
+            self.scripts[i.min(self.scripts.len() - 1)].clone()
         }
     }
 
@@ -965,30 +1171,44 @@ mod tests {
         }
         async fn chat(&self, req: ChatRequest) -> fly_llm::Result<String> {
             assert!(!self.local, "a local model's extraction must be streamed");
-            self.max_tokens.lock().unwrap().push(req.max_tokens);
-            Ok(self.pieces.concat())
+            let script = self.next_script(req.max_tokens);
+            tokio::time::sleep(script.delay).await;
+            if script.fails {
+                return Err(fly_llm::LlmError::Provider("503: overloaded".into()));
+            }
+            if script.stalls {
+                futures_util::future::pending::<()>().await;
+            }
+            Ok(script.pieces.concat())
         }
         async fn test_connection(&self) -> fly_llm::Result<()> {
             Ok(())
         }
         async fn chat_stream(&self, req: ConverseRequest) -> fly_llm::Result<fly_llm::ChatStream> {
-            self.max_tokens.lock().unwrap().push(req.max_tokens);
-            let pieces = self.pieces.clone();
-            let (endless, stop, sent) = (self.endless, self.stop, self.sent.clone());
+            let script = self.next_script(req.max_tokens);
+            tokio::time::sleep(script.delay).await;
+            if script.fails {
+                return Err(fly_llm::LlmError::Provider("503: overloaded".into()));
+            }
+            let sent = self.sent.clone();
             Ok(Box::pin(futures_util::stream::unfold(0usize, move |i| {
-                let (pieces, sent) = (pieces.clone(), sent.clone());
+                let (script, sent) = (script.clone(), sent.clone());
                 async move {
+                    let pieces = &script.pieces;
                     let event = if i < pieces.len() {
                         StreamEvent::TextDelta {
                             text: pieces[i].clone(),
                         }
-                    } else if endless {
+                    } else if script.endless {
                         StreamEvent::TextDelta {
                             text: pieces.last().cloned().unwrap_or_default(),
                         }
+                    } else if script.stalls {
+                        futures_util::future::pending::<()>().await;
+                        return None;
                     } else if i == pieces.len() {
                         StreamEvent::Done {
-                            stop_reason: stop,
+                            stop_reason: script.stop,
                             usage: Default::default(),
                         }
                     } else {
@@ -1023,21 +1243,32 @@ mod tests {
             ),
         ])
         .endless();
-        let items = tokio::time::timeout(
+        let t = transcript();
+        let extraction = tokio::time::timeout(
             Duration::from_secs(5),
-            extract_items(&provider, &meeting(), &transcript()),
+            extract_with_limits(&provider, &meeting(), &t, BATCH_LIMITS),
         )
         .await
         .expect("a loop must be cut off, not read for ever")
         .unwrap();
+        let items = extraction.items;
         assert_eq!(items.len(), 2, "the repeats are dropped");
         assert_eq!(items[0].kind, ItemKind::Decision);
         assert_eq!(items[1].segment_ids, vec!["s2"]);
+        assert!(
+            extraction.incomplete.is_some(),
+            "a cut-off reply keeps the meeting retryable"
+        );
         assert!(provider.sent() < 20, "read {} pieces", provider.sent());
         // and it was only ever allowed a share of the old flat cap
+        let words = t
+            .segments
+            .iter()
+            .map(|s| s.text.split_whitespace().count())
+            .sum();
         assert_eq!(
             *provider.max_tokens.lock().unwrap(),
-            vec![Some(local_output_budget(3, 8192))]
+            vec![Some(local_output_budget(t.segments.len(), words, 8192))]
         );
     }
 
@@ -1050,13 +1281,16 @@ mod tests {
         );
         let pieces = reply.chars().map(String::from).collect::<Vec<_>>();
         let provider = Scripted::local(pieces);
-        let items = extract_items(&provider, &meeting(), &transcript())
+        let extraction = extract_with_limits(&provider, &meeting(), &transcript(), BATCH_LIMITS)
             .await
             .unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[1].kind, ItemKind::Figure);
+        assert_eq!(extraction.items.len(), 2);
+        assert_eq!(extraction.items[1].kind, ItemKind::Figure);
+        assert!(extraction.incomplete.is_none());
     }
 
+    /// A reply cut at the token limit that kept some items still says so:
+    /// the meeting isn't done, and the app offers to run it again.
     #[tokio::test]
     async fn a_reply_cut_at_the_token_limit_keeps_the_items_before_the_cut() {
         let provider = Scripted::local(vec![
@@ -1068,10 +1302,11 @@ mod tests {
             r#"{"kind":"figure","te"#.into(),
         ])
         .ending(StopReason::MaxTokens);
-        let items = extract_items(&provider, &meeting(), &transcript())
+        let extraction = extract_with_limits(&provider, &meeting(), &transcript(), BATCH_LIMITS)
             .await
             .unwrap();
-        assert_eq!(items.len(), 1);
+        assert_eq!(extraction.items.len(), 1);
+        assert!(extraction.incomplete.is_some());
     }
 
     /// Nothing usable from a reply that was cut off is a failure the meeting
@@ -1084,43 +1319,220 @@ mod tests {
         let err = extract_items(&provider, &meeting(), &transcript())
             .await
             .unwrap_err();
-        assert!(err.contains("stuck") && is_stopped(&err), "{err}");
+        assert!(
+            err.contains("listed any items") && is_stopped(&err),
+            "{err}"
+        );
 
         // a model that finished and found nothing is still an empty result
         let provider = Scripted::local(vec!["[]".into()]);
-        let items = extract_items(&provider, &meeting(), &transcript())
+        let extraction = extract_with_limits(&provider, &meeting(), &transcript(), BATCH_LIMITS)
             .await
             .unwrap();
-        assert!(items.is_empty());
+        assert!(extraction.items.is_empty() && extraction.incomplete.is_none());
     }
 
     /// Cloud providers keep the call and the flat cap they had: no streaming,
     /// no guard.
     #[tokio::test]
     async fn a_cloud_provider_keeps_the_flat_cap_and_the_plain_call() {
-        let reply = format!(
-            "[{}]",
-            item_json("decision", "go with the annual plan", "s1")
-        );
-        let mut provider = Scripted::local(vec![reply]);
-        provider.local = false;
-        provider.model = "claude-sonnet-5-5";
-        let items = extract_items(&provider, &meeting(), &transcript())
+        let reply = Script::reply(&[("decision", "go with the annual plan", "s1")]);
+        let provider = Scripted::sequence(false, vec![reply]);
+        let extraction = extract_with_limits(&provider, &meeting(), &transcript(), BATCH_LIMITS)
             .await
             .unwrap();
-        assert_eq!(items.len(), 1);
+        assert_eq!(extraction.items.len(), 1);
+        assert!(extraction.incomplete.is_none());
         assert_eq!(*provider.max_tokens.lock().unwrap(), vec![Some(16_000)]);
     }
 
-    #[tokio::test]
-    async fn a_model_that_never_answers_is_given_up_on_and_says_so() {
-        let err = within(Duration::from_millis(50), std::future::pending())
-            .await
-            .unwrap_err();
-        assert!(err.contains("too long") && is_stopped(&err), "{err}");
+    #[test]
+    fn only_a_stopped_model_reads_as_stopped() {
         // a provider that simply isn't set up is not a stopped model
         assert!(!is_stopped("No API key for Anthropic yet."));
         assert!(!is_stopped("Ollama isn't running"));
-        assert_eq!(within(Duration::from_secs(5), async { Ok(3) }).await, Ok(3));
+        assert!(is_stopped(
+            "the model went quiet before it listed any items, so it was stopped"
+        ));
+    }
+
+    // ------------------------------------------------ several batches, slow models
+
+    /// A meeting long enough for four batches (150 lines each at most).
+    fn long_transcript() -> Transcript {
+        let mut t = transcript();
+        t.segments = (0..500)
+            .map(|i| fly_core::TranscriptSegment {
+                id: format!("s{i}"),
+                speaker_key: "spk_0".into(),
+                start_ms: i as u64 * 1000,
+                end_ms: i as u64 * 1000 + 900,
+                text: format!("point number {i} about the plan"),
+                words: vec![],
+            })
+            .collect();
+        t
+    }
+
+    fn quick(limits_ms: u64) -> BatchLimits {
+        BatchLimits {
+            idle: Duration::from_millis(limits_ms),
+            request: Duration::from_millis(limits_ms),
+        }
+    }
+
+    /// The review's case: a slow model over a long meeting. The old limit
+    /// covered the whole meeting and threw everything away when it ran out,
+    /// so a long meeting failed the same way on every retry. Now each batch
+    /// has its own limit, a batch that breaks it ends the meeting there, and
+    /// the batches before it are kept.
+    #[tokio::test]
+    async fn a_local_model_that_goes_quiet_in_a_late_batch_keeps_the_earlier_batches() {
+        let provider = Scripted::sequence(
+            true,
+            vec![
+                Script::reply(&[("decision", "ship on Friday", "s10")]),
+                Script::reply(&[("figure", "the budget is 5k", "s200")]),
+                Script::pieces(vec!["[".into()]).stalling(),
+            ],
+        );
+        let extraction = tokio::time::timeout(
+            Duration::from_secs(10),
+            extract_with_limits(&provider, &meeting(), &long_transcript(), quick(100)),
+        )
+        .await
+        .expect("a stalled batch must be given up on")
+        .unwrap();
+        assert_eq!(extraction.items.len(), 2);
+        assert_eq!(extraction.items[0].segment_ids, vec!["s10"]);
+        assert_eq!(extraction.items[1].segment_ids, vec!["s200"]);
+        assert!(extraction
+            .incomplete
+            .as_deref()
+            .is_some_and(|why| why.contains("quiet")));
+        assert_eq!(provider.calls(), 3, "the fourth batch isn't asked");
+    }
+
+    #[tokio::test]
+    async fn a_cloud_model_that_takes_too_long_in_a_late_batch_keeps_the_earlier_batches() {
+        let provider = Scripted::sequence(
+            false,
+            vec![
+                Script::reply(&[("decision", "ship on Friday", "s10")]),
+                Script::reply(&[("figure", "the budget is 5k", "s200")]),
+                Script::pieces(vec![]).stalling(),
+            ],
+        );
+        let extraction = tokio::time::timeout(
+            Duration::from_secs(10),
+            extract_with_limits(&provider, &meeting(), &long_transcript(), quick(100)),
+        )
+        .await
+        .expect("a hung request must be given up on")
+        .unwrap();
+        assert_eq!(extraction.items.len(), 2);
+        assert!(extraction
+            .incomplete
+            .as_deref()
+            .is_some_and(|why| why.contains("too long")));
+        assert_eq!(provider.calls(), 3);
+    }
+
+    /// A model that answers every batch in time is never timed out, however
+    /// long the meeting takes in all (here 240 ms against a 100 ms limit): the
+    /// limit is per batch, so a long meeting on a slow machine finishes.
+    #[tokio::test]
+    async fn a_slow_model_that_answers_every_batch_finishes_a_long_meeting() {
+        let provider = Scripted::sequence(
+            true,
+            (0..4)
+                .map(|i| {
+                    Script::reply(&[(
+                        "decision",
+                        &format!("decision {i}"),
+                        &format!("s{}", i * 100),
+                    )])
+                    .slow(60)
+                })
+                .collect(),
+        );
+        let extraction = extract_with_limits(&provider, &meeting(), &long_transcript(), quick(100))
+            .await
+            .unwrap();
+        assert_eq!(extraction.items.len(), 4);
+        assert!(extraction.incomplete.is_none());
+        assert_eq!(provider.calls(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_quiet_first_batch_with_nothing_before_it_is_an_error() {
+        let provider = Scripted::sequence(true, vec![Script::pieces(vec!["[".into()]).stalling()]);
+        let err = extract_with_limits(&provider, &meeting(), &long_transcript(), quick(100))
+            .await
+            .err()
+            .expect("nothing was read");
+        assert!(is_stopped(&err) && err.contains("quiet"), "{err}");
+    }
+
+    /// A loop in one batch ends that batch, not the meeting: the batches after
+    /// it are still read, and the meeting is flagged for a retry.
+    #[tokio::test]
+    async fn a_loop_in_a_middle_batch_does_not_end_the_meeting() {
+        let b = item_json("action_item", "send the SOW", "s200");
+        let provider = Scripted::sequence(
+            true,
+            vec![
+                Script::reply(&[("decision", "ship on Friday", "s10")]),
+                Script::pieces(vec!["[".into(), format!("{b},")]).endless(),
+                Script::reply(&[("figure", "the budget is 5k", "s300")]),
+            ],
+        );
+        let extraction = tokio::time::timeout(
+            Duration::from_secs(10),
+            extract_with_limits(&provider, &meeting(), &long_transcript(), BATCH_LIMITS),
+        )
+        .await
+        .expect("the loop is cut off")
+        .unwrap();
+        let texts: Vec<_> = extraction.items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["ship on Friday", "send the SOW", "the budget is 5k"]
+        );
+        assert!(extraction
+            .incomplete
+            .as_deref()
+            .is_some_and(|why| why.contains("repeating")));
+        assert_eq!(provider.calls(), 4, "every batch was asked");
+    }
+
+    /// A failure in a late batch (the server went away) keeps what the earlier
+    /// batches gave; in the first batch it is the plain error it was.
+    #[tokio::test]
+    async fn a_later_batch_that_fails_keeps_the_earlier_items() {
+        let provider = Scripted::sequence(
+            true,
+            vec![
+                Script::reply(&[("decision", "ship on Friday", "s10")]),
+                Script::failing(),
+            ],
+        );
+        let extraction =
+            extract_with_limits(&provider, &meeting(), &long_transcript(), BATCH_LIMITS)
+                .await
+                .unwrap();
+        assert_eq!(extraction.items.len(), 1);
+        assert!(extraction
+            .incomplete
+            .as_deref()
+            .is_some_and(|why| why.contains("overloaded")));
+        assert_eq!(provider.calls(), 2);
+
+        let provider = Scripted::sequence(true, vec![Script::failing()]);
+        let err = extract_with_limits(&provider, &meeting(), &long_transcript(), BATCH_LIMITS)
+            .await
+            .err()
+            .expect("nothing was read");
+        assert!(err.contains("overloaded") && !is_stopped(&err), "{err}");
     }
 }

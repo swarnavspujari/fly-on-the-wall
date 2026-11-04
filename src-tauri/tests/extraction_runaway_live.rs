@@ -99,7 +99,14 @@ async fn extraction_of_the_transcript_that_looped_finishes_with_items() {
         "{} items in {:.0}s (allowance {} tokens):",
         items.len(),
         took.as_secs_f64(),
-        local_output_budget(t.segments.len(), 8192)
+        local_output_budget(
+            t.segments.len(),
+            t.segments
+                .iter()
+                .map(|s| s.text.split_whitespace().count())
+                .sum(),
+            8192
+        )
     );
     for i in &items {
         eprintln!("  {}: {}", i.kind.as_str(), i.text);
