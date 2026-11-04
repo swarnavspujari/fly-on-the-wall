@@ -134,6 +134,27 @@ describe("LibraryGate", () => {
     expect(appShown()).toBe(true);
   });
 
+  it("a long backup says how much is being copied and for how long", async () => {
+    libraryStatus.mockResolvedValue({
+      phase: "upgrading",
+      step: "backup",
+      done: 0,
+      total: 1_500_000_000,
+    });
+    await render();
+    // a quick one stays quiet
+    expect(host!.textContent).not.toContain("so far");
+    await settle(4000);
+    expect(host!.textContent).toContain("Copying 1.4 GB. 4 s so far.");
+    expect(host!.textContent).not.toContain("%");
+    expect(percent()).toBeNull();
+
+    // the upgrade step has its own bar and no hint
+    await emit({ phase: "upgrading", step: "upgrade", done: 3, total: 9 });
+    expect(host!.textContent).not.toContain("so far");
+    expect(percent()).toBe("33");
+  });
+
   it("a late answer from the backup step doesn't take the screen back to it", async () => {
     libraryStatus.mockResolvedValueOnce({ phase: "upgrading", step: "backup", done: 0, total: 0 });
     libraryStatus.mockResolvedValue({ phase: "upgrading", step: "backup", done: 0, total: 0 });

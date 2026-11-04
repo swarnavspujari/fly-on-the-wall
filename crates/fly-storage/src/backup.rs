@@ -16,13 +16,20 @@
 //!   (`secure_delete` is on for the live file, and a vacuumed copy has no
 //!   free pages at all). The temp file is synced, checked with
 //!   `PRAGMA quick_check` and its `user_version`, then renamed into place.
-//! * Only the newest [`KEEP_BACKUPS`] are kept, and only files whose names
-//!   match the exact pattern are ever listed or deleted.
+//! * Retention ([`apply_retention`]) keeps the newest [`KEEP_BACKUPS`] and,
+//!   beyond them, the newest copy of each of the [`KEEP_SCHEMAS`] latest
+//!   schema versions: the last copy from before a schema change, which
+//!   routine version bumps would otherwise push out. Only files whose names
+//!   match the exact pattern are ever listed or deleted, and only ones that
+//!   still look like a complete database ([`complete_schema`]) are counted: a
+//!   truncated or damaged file never takes a slot, and is left alone for the
+//!   user to look at.
 //! * Recordings and attachments are NOT backed up: audio compression is
 //!   lossless and verified sample for sample, and a copy would be tens of GB.
 //! * Too little free disk space ([`needed_free_bytes`]) or any failure skips
-//!   the backup and tells the user once ([`NoticeKind`]); it never stops the
-//!   library from opening.
+//!   the backup and tells the user once per app version ([`NoticeKind`]; a
+//!   dismissed notice stays dismissed, whichever step fails again); it never
+//!   stops the library from opening.
 //!
 //! Nothing in here is on the hot path of a normal launch: [`before_open`]
 //! reads two values through a read-only connection and returns.
@@ -34,19 +41,26 @@
 //! the app or by the MCP server: both open `flyonthewall.db` in a data dir,
 //! and refuse a dir that holds backup files ([`refuse_backup_dir`]).
 
+use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::{migrations, rename_with_retry, Result, Storage, StorageError};
 
 /// Folder under the data dir.
 pub const BACKUP_DIR: &str = "backups";
-/// How many backups are kept; older ones are deleted after a new one lands.
+/// How many of the newest backups are kept; older ones are deleted after a
+/// new one lands (unless [`KEEP_SCHEMAS`] keeps them).
 pub const KEEP_BACKUPS: usize = 3;
+/// How many schema versions (the latest ones) also keep their newest backup,
+/// however old: the copy from just before a schema change is what a bad
+/// migration needs, and it is the first thing a run of version bumps evicts.
+pub const KEEP_SCHEMAS: usize = 3;
 /// Floor of the free-space rule: `max(2 × database size, this)`.
 pub const MIN_FREE_BYTES: u64 = 200 * 1024 * 1024;
 
@@ -57,8 +71,11 @@ pub const LAST_RUN_VERSION_KEY: &str = "app.last_run_version";
 /// `done` once a verified backup exists from before compression could have
 /// touched the library (the startup backup counts).
 pub const BEFORE_COMPRESSION_KEY: &str = "backup.before_compression";
-/// `space` / `failed` while the one-time notice is due (see [`NoticeKind`]).
+/// A [`NoticeKind`] while the one-time notice is due.
 pub const NOTICE_KEY: &str = "backup.notice";
+/// The app version the notice was last raised for. It outlives the notice
+/// itself, so dismissing it keeps it dismissed for that version.
+pub const NOTICE_VERSION_KEY: &str = "backup.notice_version";
 
 const NAME_PREFIX: &str = "flyonthewall-";
 const NAME_SUFFIX: &str = ".db";
@@ -96,13 +113,19 @@ pub enum Outcome {
     Unchecked(String),
 }
 
-/// Why the one-time notice shows.
+/// Why the one-time notice shows, and which step it is about: the copy before
+/// an upgrade ("your library was upgraded without a copy") or the one before
+/// the compression job's first pass (nothing was upgraded).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
-    /// Not enough free disk space for a backup.
+    /// Not enough free disk space for the pre-upgrade backup.
     NoSpace,
-    /// The backup failed for another reason.
+    /// The pre-upgrade backup failed for another reason.
     Failed,
+    /// Not enough free disk space for the backup before compression.
+    CompressionNoSpace,
+    /// The backup before compression failed for another reason.
+    CompressionFailed,
 }
 
 impl NoticeKind {
@@ -110,6 +133,8 @@ impl NoticeKind {
         match self {
             Self::NoSpace => "space",
             Self::Failed => "failed",
+            Self::CompressionNoSpace => "compression_space",
+            Self::CompressionFailed => "compression_failed",
         }
     }
 
@@ -117,6 +142,8 @@ impl NoticeKind {
         match s {
             "space" => Some(Self::NoSpace),
             "failed" => Some(Self::Failed),
+            "compression_space" => Some(Self::CompressionNoSpace),
+            "compression_failed" => Some(Self::CompressionFailed),
             _ => None,
         }
     }
@@ -364,13 +391,15 @@ pub fn is_due(data_dir: &Path, running: &str) -> bool {
 
 /// The backup step of a launch. Call it BEFORE `Storage::open*`, which is
 /// what runs the schema steps. `on_backup` is called once, just before the
-/// copy starts. Never fails: every problem is an [`Outcome`] for
-/// [`after_open`] to record.
+/// copy starts, with the size in bytes of what will be copied (the database
+/// and its write-ahead log), so the startup screen can say how big the wait
+/// is. Never fails: every problem is an [`Outcome`] for [`after_open`] to
+/// record.
 pub fn before_open(
     data_dir: &Path,
     running: &str,
     free_space: &dyn Fn(&Path) -> Option<u64>,
-    on_backup: &mut dyn FnMut(),
+    on_backup: &mut dyn FnMut(u64),
 ) -> Outcome {
     before_open_with(data_dir, running, free_space, on_backup, &Patience::STARTUP)
 }
@@ -379,7 +408,7 @@ pub fn before_open_with(
     data_dir: &Path,
     running: &str,
     free_space: &dyn Fn(&Path) -> Option<u64>,
-    on_backup: &mut dyn FnMut(),
+    on_backup: &mut dyn FnMut(u64),
     patience: &Patience,
 ) -> Outcome {
     let _guard = lock();
@@ -395,7 +424,7 @@ pub fn before_open_with(
     let Some(db) = migrations::db_file_to_open(data_dir) else {
         return Outcome::NewLibrary;
     };
-    on_backup();
+    on_backup(library_bytes(&db));
     let outcome = take(&db, data_dir, &label, Utc::now(), free_space, patience.busy);
     log_outcome("before the upgrade", &outcome);
     outcome
@@ -447,6 +476,15 @@ fn log_outcome(when: &str, outcome: &Outcome) {
 // Taking one
 // ---------------------------------------------------------------------------
 
+/// What a backup of `db` has to read: the main file plus its write-ahead log
+/// (whose committed pages are part of the library until they are folded in).
+fn library_bytes(db: &Path) -> u64 {
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    len(db) + len(Path::new(&wal))
+}
+
 /// Copy `db` into `<data_dir>/backups/` (see the module docs). Always
 /// returns an [`Outcome`]; on anything but `Saved` no file is left behind.
 fn take(
@@ -461,13 +499,7 @@ fn take(
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return Outcome::Failed(format!("couldn't create the backups folder: {e}"));
     }
-    // The WAL's committed pages are part of the library until they are
-    // folded in, so they count toward its size.
-    let mut db_bytes = std::fs::metadata(db).map(|m| m.len()).unwrap_or(0);
-    let mut wal = db.as_os_str().to_owned();
-    wal.push("-wal");
-    db_bytes += std::fs::metadata(wal).map(|m| m.len()).unwrap_or(0);
-    let needed = needed_free_bytes(db_bytes);
+    let needed = needed_free_bytes(library_bytes(db));
     if let Some(free) = free_space(&dir) {
         if free < needed {
             return Outcome::NoSpace { free, needed };
@@ -498,11 +530,23 @@ fn take(
     }
 }
 
-/// A name no file in `dir` has yet: the stamp moves on by a second per clash
-/// (two backups inside one second only happen in tests, but the rename must
-/// never replace a backup).
+/// The time in a backup stamp.
+fn stamp_time(stamp: &str) -> Option<DateTime<Utc>> {
+    NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ")
+        .ok()
+        .map(|t| t.and_utc())
+}
+
+/// A name no file in `dir` has yet, stamped later than every backup already
+/// there. The listing and retention order backups by stamp, so a clock that
+/// stands still (two backups inside one second happen in tests) or was set
+/// back must not file the newest backup as an old one; and the rename must
+/// never replace a backup.
 fn unique_name(dir: &Path, label: &str, now: DateTime<Utc>) -> String {
-    let mut at = now;
+    let mut at = match list_in(dir).first().and_then(|f| stamp_time(&f.taken_at)) {
+        Some(newest) if newest >= now => newest + ChronoDuration::seconds(1),
+        _ => now,
+    };
     for _ in 0..120 {
         let name = backup_name(label, at);
         if !dir.join(&name).exists() && !dir.join(format!("{name}{PARTIAL_SUFFIX}")).exists() {
@@ -586,20 +630,86 @@ fn sweep_partials(dir: &Path) {
     }
 }
 
-/// Keep `keep_name` plus the newest others, [`KEEP_BACKUPS`] in all; delete
-/// the rest. Only exact-pattern files are listed, so nothing else the user
-/// put in the folder is touched.
+/// The schema version (`user_version`) of a backup that still looks like a
+/// complete database, else `None`. Reads the 100-byte SQLite header only: the
+/// magic text, a page size the file's length divides by, and (when the header
+/// is current) a page count that matches the length. That is what catches the
+/// files that go wrong in a folder over months (truncated by a full disk or a
+/// virus scanner, replaced by a stub, appended to) without a `quick_check` of
+/// a gigabyte per old copy on every upgrade; the copy was fully checked when
+/// it was written.
+fn complete_schema(path: &Path) -> Option<i64> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut h = [0u8; 100];
+    file.read_exact(&mut h).ok()?;
+    if &h[..16] != b"SQLite format 3\0" {
+        return None;
+    }
+    let be32 = |at: usize| u32::from_be_bytes([h[at], h[at + 1], h[at + 2], h[at + 3]]);
+    let page_size: u64 = match u16::from_be_bytes([h[16], h[17]]) {
+        1 => 65_536,
+        n if n >= 512 && n.is_power_of_two() => u64::from(n),
+        _ => return None,
+    };
+    if len == 0 || len % page_size != 0 {
+        return None;
+    }
+    // The in-header page count counts only while the header was last written
+    // by the same change as the file's contents (SQLite's own rule).
+    let pages = u64::from(be32(28));
+    if pages != 0 && be32(92) == be32(24) && pages * page_size != len {
+        return None;
+    }
+    Some(i64::from(be32(60) as i32))
+}
+
+/// The backups to delete, given the complete ones newest first as `(name,
+/// schema)`: everything but `keep_name` (the one just written), the newest
+/// [`KEEP_BACKUPS`] in all, and the newest backup of each of the latest
+/// [`KEEP_SCHEMAS`] schema versions.
+fn expired(sound: &[(String, i64)], keep_name: &str) -> Vec<String> {
+    let mut keep: HashSet<&str> = HashSet::from([keep_name]);
+    keep.extend(
+        sound
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| *name != keep_name)
+            .take(KEEP_BACKUPS.saturating_sub(1)),
+    );
+    let mut schemas: Vec<i64> = sound.iter().map(|(_, schema)| *schema).collect();
+    schemas.sort_unstable_by(|a, b| b.cmp(a));
+    schemas.dedup();
+    for schema in schemas.into_iter().take(KEEP_SCHEMAS) {
+        if let Some((name, _)) = sound.iter().find(|(_, s)| *s == schema) {
+            keep.insert(name);
+        }
+    }
+    sound
+        .iter()
+        .filter(|(name, _)| !keep.contains(name.as_str()))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Delete the backups [`expired`] names. Only exact-pattern files are listed,
+/// so nothing else the user put in the folder is touched, and a file that no
+/// longer looks like a database is neither counted nor deleted.
 fn apply_retention(dir: &Path, keep_name: &str) {
-    let others = list_in(dir)
-        .into_iter()
-        .filter(|f| f.name != keep_name)
-        .skip(KEEP_BACKUPS.saturating_sub(1));
-    for old in others {
-        match std::fs::remove_file(&old.path) {
-            Ok(()) => tracing::info!(name = %old.name, "removed an old library backup"),
-            Err(e) => {
-                tracing::warn!(name = %old.name, error = %e, "couldn't remove an old library backup")
+    let mut sound = Vec::new();
+    for f in list_in(dir) {
+        match complete_schema(&f.path) {
+            Some(schema) => sound.push((f.name, schema)),
+            None if f.name != keep_name => {
+                tracing::warn!(name = %f.name, "a library backup looks damaged; leaving it alone")
             }
+            None => {}
+        }
+    }
+    for name in expired(&sound, keep_name) {
+        match std::fs::remove_file(dir.join(&name)) {
+            Ok(()) => tracing::info!(%name, "removed an old library backup"),
+            Err(e) => tracing::warn!(%name, error = %e, "couldn't remove an old library backup"),
         }
     }
 }
@@ -619,12 +729,12 @@ pub fn after_open(storage: &Storage, running: &str, outcome: &Outcome) {
         // under this feature needs no "before" copy.
         Outcome::NewLibrary => set(storage, BEFORE_COMPRESSION_KEY, "done"),
         Outcome::Saved(_) => set(storage, BEFORE_COMPRESSION_KEY, "done"),
-        Outcome::NoSpace { .. } => raise_notice(storage, NoticeKind::NoSpace),
-        Outcome::Failed(_) => raise_notice(storage, NoticeKind::Failed),
+        Outcome::NoSpace { .. } => raise_notice(storage, NoticeKind::NoSpace, running),
+        Outcome::Failed(_) => raise_notice(storage, NoticeKind::Failed, running),
         // Only an upgrade is worth a notice, and a read that failed can't say
         // whether this was one: the version row can, now the library is open.
         Outcome::Unchecked(_) if stored.as_deref() != Some(running) => {
-            raise_notice(storage, NoticeKind::Failed)
+            raise_notice(storage, NoticeKind::Failed, running)
         }
         Outcome::Unchecked(_) | Outcome::NotNeeded => {}
     }
@@ -643,18 +753,15 @@ pub fn compression_backup_due(storage: &Storage) -> bool {
         != Some("done")
 }
 
-/// Record the compression job's backup. A failure raises the notice unless
-/// one is already waiting (the startup step may just have raised it).
-pub fn after_compression_backup(storage: &Storage, outcome: &Outcome) {
+/// Record the compression job's backup. A failure raises the notice, unless
+/// this app version has told the user already (the startup step may have, and
+/// a backup skipped for space is owed again every launch).
+pub fn after_compression_backup(storage: &Storage, running: &str, outcome: &Outcome) {
     match outcome {
         Outcome::Saved(_) | Outcome::NewLibrary => set(storage, BEFORE_COMPRESSION_KEY, "done"),
-        Outcome::NoSpace { .. } if pending_notice(storage).is_none() => {
-            raise_notice(storage, NoticeKind::NoSpace)
-        }
-        Outcome::Failed(_) if pending_notice(storage).is_none() => {
-            raise_notice(storage, NoticeKind::Failed)
-        }
-        _ => {}
+        Outcome::NoSpace { .. } => raise_notice(storage, NoticeKind::CompressionNoSpace, running),
+        Outcome::Failed(_) => raise_notice(storage, NoticeKind::CompressionFailed, running),
+        Outcome::NotNeeded | Outcome::Unchecked(_) => {}
     }
 }
 
@@ -664,8 +771,16 @@ fn set(storage: &Storage, key: &str, value: &str) {
     }
 }
 
-fn raise_notice(storage: &Storage, kind: NoticeKind) {
+/// Tell the user, once per app version: whichever step fails first raises the
+/// notice, and it stays quiet for the rest of that version even after the
+/// user dismisses it. A new version is a new upgrade and tells again.
+fn raise_notice(storage: &Storage, kind: NoticeKind, running: &str) {
+    let told = storage.get_setting(NOTICE_VERSION_KEY).ok().flatten();
+    if told.as_deref() == Some(running) {
+        return;
+    }
     set(storage, NOTICE_KEY, kind.as_str());
+    set(storage, NOTICE_VERSION_KEY, running);
 }
 
 /// The notice that is due, if any.
@@ -747,10 +862,109 @@ mod tests {
 
     #[test]
     fn notice_kinds_round_trip() {
-        for k in [NoticeKind::NoSpace, NoticeKind::Failed] {
+        for k in [
+            NoticeKind::NoSpace,
+            NoticeKind::Failed,
+            NoticeKind::CompressionNoSpace,
+            NoticeKind::CompressionFailed,
+        ] {
             assert_eq!(NoticeKind::parse(k.as_str()), Some(k));
         }
         assert_eq!(NoticeKind::parse(""), None);
         assert_eq!(NoticeKind::parse("pending"), None);
+    }
+
+    /// A real SQLite file of several pages with the given `user_version`.
+    fn sqlite_file(path: &Path, user_version: i64) {
+        let c = Connection::open(path).unwrap();
+        c.execute_batch(&format!(
+            "CREATE TABLE t (x BLOB); INSERT INTO t VALUES (zeroblob(20000));
+             PRAGMA user_version = {user_version};"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn a_complete_database_reports_its_schema_and_a_damaged_one_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.db");
+        sqlite_file(&good, 7);
+        assert_eq!(complete_schema(&good), Some(7));
+
+        let bytes = std::fs::read(&good).unwrap();
+        let page = 4096;
+        assert!(bytes.len() >= 3 * page && bytes.len().is_multiple_of(page));
+        let mut longer = bytes.clone();
+        longer.extend(vec![0u8; page]);
+        let mut wrong_magic = bytes.clone();
+        wrong_magic[0] = b'X';
+        for (what, data) in [
+            ("cut mid-page", bytes[..bytes.len() - 1].to_vec()),
+            ("a page short", bytes[..bytes.len() - page].to_vec()),
+            ("a page long", longer),
+            ("header only", bytes[..100].to_vec()),
+            ("half a header", bytes[..50].to_vec()),
+            ("empty", Vec::new()),
+            ("a stub", b"not a database".to_vec()),
+            ("another magic", wrong_magic),
+        ] {
+            let path = dir.path().join("damaged.db");
+            std::fs::write(&path, data).unwrap();
+            assert_eq!(complete_schema(&path), None, "{what}");
+        }
+        assert_eq!(complete_schema(&dir.path().join("missing.db")), None);
+    }
+
+    /// `(name, schema)` rows, newest first.
+    fn sound(rows: &[(&str, i64)]) -> Vec<(String, i64)> {
+        rows.iter().map(|(n, s)| (n.to_string(), *s)).collect()
+    }
+
+    #[test]
+    fn retention_keeps_the_newest_and_the_last_copy_of_each_recent_schema() {
+        // Routine bumps on schema 3 after one schema change: the copy from
+        // before the change (the only schema 2) outlives them.
+        let files = sound(&[("e", 3), ("d", 3), ("c", 3), ("b", 3), ("a", 2)]);
+        assert_eq!(expired(&files, "e"), ["b"]);
+
+        // Several schemas: the last copy of each of the latest three, the
+        // newest three overall, and nothing older than that.
+        let files = sound(&[("g", 5), ("f", 4), ("e", 3), ("d", 2), ("c", 2), ("b", 1)]);
+        assert_eq!(expired(&files, "g"), ["d", "c", "b"]);
+        let files = sound(&[
+            ("h", 4),
+            ("g", 3),
+            ("f", 3),
+            ("e", 3),
+            ("d", 3),
+            ("c", 2),
+            ("b", 2),
+        ]);
+        assert_eq!(expired(&files, "h"), ["e", "d", "b"]);
+    }
+
+    #[test]
+    fn retention_always_keeps_the_new_file_even_when_it_is_not_the_newest() {
+        let files = sound(&[("x", 3), ("n", 3), ("o", 3), ("p", 3)]);
+        assert_eq!(expired(&files, "p"), ["o"]);
+        // and with nothing complete to list, it deletes nothing
+        assert!(expired(&[], "p").is_empty());
+        assert!(expired(&sound(&[("p", 3)]), "p").is_empty());
+    }
+
+    #[test]
+    fn a_new_backup_is_stamped_after_every_one_already_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut last = String::new();
+        // a clock that stands still, then one set back an hour
+        for (i, now) in [at(0), at(0), at(0), at(-3600)].into_iter().enumerate() {
+            let name = unique_name(dir.path(), &format!("2.5.{i}"), now);
+            let stamp = parse_name(&name).unwrap().1.to_owned();
+            assert!(stamp > last, "{stamp} should come after {last}");
+            std::fs::write(dir.path().join(&name), b"x").unwrap();
+            last = stamp;
+        }
+        let listed: Vec<_> = list_in(dir.path()).into_iter().map(|f| f.label).collect();
+        assert_eq!(listed, ["2.5.3", "2.5.2", "2.5.1", "2.5.0"]);
     }
 }

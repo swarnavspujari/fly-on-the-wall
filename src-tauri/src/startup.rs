@@ -50,9 +50,11 @@ pub enum LibraryStep {
     Upgrade,
 }
 
-/// `done` / `total` are progress units (a fraction for a determinate bar,
-/// not meetings); both are 0 until the upgrade step's first report (and stay
-/// 0 during the backup, which has no measure of its own).
+/// In the upgrade step `done` / `total` are progress units (a fraction for a
+/// determinate bar, not meetings); both are 0 until its first report. In the
+/// backup step, which has no progress of its own, `done` stays 0 and `total`
+/// is the number of bytes being copied (so the screen can say how big the wait
+/// is).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LibraryStatus {
     pub phase: LibraryPhase,
@@ -155,8 +157,14 @@ pub fn open_in_background(app: AppHandle, first: LibraryStep) {
                     )
                 },
                 // The backup comes before the upgrade; the first upgrade
-                // report moves the screen on.
-                &mut || gate.set(&app, LibraryStatus::upgrading(LibraryStep::Backup, 0, 0)),
+                // report moves the screen on. `total` is the size being
+                // copied, so the screen can say how big the wait is.
+                &mut |bytes| {
+                    gate.set(
+                        &app,
+                        LibraryStatus::upgrading(LibraryStep::Backup, 0, bytes),
+                    )
+                },
             )?;
             finish(&app, app_state);
             Ok(())
@@ -347,8 +355,10 @@ mod tests {
             serde_json::json!({ "phase": "upgrading", "step": "upgrade", "done": 3, "total": 9 })
         );
         assert_eq!(
-            serde_json::to_value(LibraryStatus::upgrading(LibraryStep::Backup, 0, 0)).unwrap(),
-            serde_json::json!({ "phase": "upgrading", "step": "backup", "done": 0, "total": 0 })
+            serde_json::to_value(LibraryStatus::upgrading(LibraryStep::Backup, 0, 1_500_000))
+                .unwrap(),
+            // the backup's `total` is the size being copied, in bytes
+            serde_json::json!({ "phase": "upgrading", "step": "backup", "done": 0, "total": 1_500_000 })
         );
         assert_eq!(
             serde_json::to_value(LibraryStatus::READY).unwrap()["phase"],

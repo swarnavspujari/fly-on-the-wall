@@ -105,7 +105,8 @@ The app-wide registry. All rows live in the SQLite `settings` table (`crates/fly
 | `storage.compress.notice` | app-audio-store | `audio_store.rs` (`run_pass`) | `audio_store.rs` (`run_pass` → `pending`, `dismiss_compress_notice` → `shown`) | no |
 | `app.last_run_version` | app-backups | `fly_storage::backup` (`check`, read-only before the open) | `fly_storage::backup::after_open` (every launch whose version differs) | no |
 | `backup.before_compression` | app-backups | `fly_storage::backup` (`compression_backup_due`) | `after_open`, `after_compression_backup` (`done`) | no |
-| `backup.notice` | app-backups | `fly_storage::backup::pending_notice` (`backup_status`) | `after_open`, `after_compression_backup` (`space` | `failed`); deleted by `dismiss_backup_notice` | no |
+| `backup.notice` | app-backups | `fly_storage::backup::pending_notice` (`backup_status`) | `after_open`, `after_compression_backup` (`space` | `failed` | `compression_space` | `compression_failed`); deleted by `dismiss_backup_notice` | no |
+| `backup.notice_version` | app-backups | `fly_storage::backup::raise_notice` (so a dismissed notice stays dismissed for that app version) | `raise_notice` | no |
 | `connectors.registry` | app-connectors | `connectors.rs` (`SettingsStore::load`) | `connectors.rs` (`SettingsStore::save`), only from connector commands; trust grants only after a native-dialog yes | **no: not readable either.** Outside the read allowlist and listed in `BACKEND_ONLY` (`commands.rs`; test `webview_cannot_touch_connector_state`) |
 | `connectors.call_log` | app-connectors | `connectors.rs` (`connector_call_log`) | `connectors.rs` (calls, `clear_connector_call_log`) | no |
 | `ui.beta.connectors` | ui-connectors | `connectors.rs` (`beta_enabled`: shows the feature, lets `turn_for_ask` offer tools; grants nothing); `ConnectorsSection.tsx` | `ConnectorsSection.tsx` | yes |

@@ -112,11 +112,12 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `fly_storage::backup`), then the open that runs any schema step, then the
 /// record of what the backup step did. The backup can't stop the open: every
 /// problem in it is an outcome for the notice, never an error here.
-/// `on_backup` is called once if a backup is about to be taken.
+/// `on_backup` is called once if a backup is about to be taken, with the
+/// number of bytes it will copy.
 pub fn open_library(
     data_dir: &Path,
     progress: &mut dyn FnMut(UpgradeProgress),
-    on_backup: &mut dyn FnMut(),
+    on_backup: &mut dyn FnMut(u64),
 ) -> anyhow::Result<Storage> {
     open_library_with(
         data_dir,
@@ -134,7 +135,7 @@ fn open_library_with(
     free_space: &dyn Fn(&Path) -> Option<u64>,
     retry: OpenRetry,
     progress: &mut dyn FnMut(UpgradeProgress),
-    on_backup: &mut dyn FnMut(),
+    on_backup: &mut dyn FnMut(u64),
 ) -> anyhow::Result<Storage> {
     let outcome = fly_storage::backup::before_open(data_dir, version, free_space, on_backup);
     // Retries a transient open failure before it is treated as fatal: twice
@@ -150,7 +151,7 @@ fn open_library_with(
 impl AppState {
     pub fn init() -> anyhow::Result<Self> {
         let (data_dir, secrets) = Self::prepare()?;
-        let storage = open_library(&data_dir, &mut |_| {}, &mut || {})?;
+        let storage = open_library(&data_dir, &mut |_| {}, &mut |_| {})?;
         tracing::info!(dir = %data_dir.display(), "storage ready");
         Ok(Self::with_storage(storage, data_dir, secrets))
     }
@@ -160,7 +161,7 @@ impl AppState {
     /// step's progress.
     pub fn init_with_progress(
         progress: &mut dyn FnMut(UpgradeProgress),
-        on_backup: &mut dyn FnMut(),
+        on_backup: &mut dyn FnMut(u64),
     ) -> anyhow::Result<Self> {
         let (data_dir, secrets) = Self::prepare()?;
         let storage = open_library(&data_dir, progress, on_backup)?;
@@ -379,7 +380,7 @@ mod tests {
             free_space,
             QUICK_RETRY,
             &mut |_| steps.borrow_mut().push("upgrade"),
-            &mut || steps.borrow_mut().push("backup"),
+            &mut |_| steps.borrow_mut().push("backup"),
         );
         (opened, steps.into_inner())
     }

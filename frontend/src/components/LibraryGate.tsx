@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
+import { backupStepHint } from "../backupModel";
 import type { LibraryStatus } from "../types";
 import { ProgressBar } from "./ui";
 
@@ -96,10 +97,25 @@ export default function LibraryGate({ children }: { children: ReactNode }) {
   return <UpgradeScreen status={status} />;
 }
 
+/** Whole seconds since `active` last turned on (0 while it is off). */
+function useElapsedSeconds(active: boolean): number {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    setSeconds(0);
+    const started = Date.now();
+    const t = window.setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(t);
+  }, [active]);
+  return seconds;
+}
+
 function UpgradeScreen({ status }: { status: LibraryStatus }) {
   const failed = status.phase === "failed";
   const backingUp = !failed && status.step === "backup";
   const pct = upgradePercent(status);
+  // The backup step reports no percentage; `total` is the bytes being copied.
+  const backupHint = backupStepHint(status.total, useElapsedSeconds(backingUp));
   return (
     <main className="grid min-h-screen place-items-center bg-bg p-6">
       <div className="w-full max-w-[420px]">
@@ -127,7 +143,22 @@ function UpgradeScreen({ status }: { status: LibraryStatus }) {
         </div>
         {/* The backup has no measure of its own: an indeterminate bar. */}
         {backingUp && (
-          <ProgressBar value={null} size="md" aria-labelledby="library-upgrade-title" />
+          <>
+            <ProgressBar value={null} size="md" aria-labelledby="library-upgrade-title" />
+            {backupHint && (
+              <p
+                className="text-text-3"
+                style={{
+                  margin: "8px 0 0",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {backupHint}
+              </p>
+            )}
+          </>
         )}
         {!failed && !backingUp && (
           <>
