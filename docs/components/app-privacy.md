@@ -81,7 +81,7 @@ Through [fly-storage](fly-storage.md) only:
 | `<data_dir>/.instance.lock` | Created and OS-locked for the process lifetime by `startup` (`privacy.rs:633-665`) |
 | `<data_dir>/.delete-all-pending.json` | Written first by `delete_all_data` (`privacy.rs:824-832`): `keep_models`, `created_at`, `pid`, `consumed` |
 | `<data_dir>/.delete-all-wiping.json` | The marker renamed at startup while the wipe runs; rewritten as `consumed` if it can't be removed (`privacy.rs:702-757`) |
-| `<data_dir>/recordings`, `notes`, `attachments`, `transcripts` | Deleted immediately by `delete_all_data` (`privacy.rs:782`, `843`) |
+| `<data_dir>/recordings`, `notes`, `attachments`, `transcripts`, `backups` | Deleted immediately by `delete_all_data` (`CONTENT_DIRS`). `backups` holds copies of the whole database ([app-backups](app-backups.md)); the wipe holds the backup lock, so one in flight can't outlive the folder. |
 | everything else in `<data_dir>` (DB files, `logs/`, and `models/` + `bin/` unless kept) | Deleted by the restart wipe, with 5 retries 800 ms apart (`privacy.rs:586-630`, `731`) |
 | `<scratch_root>` | Removed inside `erase_all_content` (fly-storage `privacy.rs:414`) — only if the DB erase got that far |
 | media files in `<data_dir>/recordings/<folder>/` and that meeting's `<scratch_root>/<id>/` | Retention sweep, via fly-storage `delete_meeting_audio` |

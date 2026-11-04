@@ -565,3 +565,45 @@ describe("AppNotices › recovered meetings set to Keep local", () => {
     expect(api.dismissRecoveredKeptLocal).toHaveBeenLastCalledWith(null);
   });
 });
+
+describe("AppNotices › no backup of the library was saved", () => {
+  const notice = (host: HTMLElement) =>
+    [...host.querySelectorAll<HTMLElement>(".fly-notice")].find((n) =>
+      n.textContent?.includes("No backup of your library was saved"),
+    );
+
+  it("says so when disk space was the reason, and Dismiss tells the backend once", async () => {
+    vi.spyOn(api, "backupStatus").mockResolvedValue({ count: 0, notice: "space" });
+    const dismiss = vi.spyOn(api, "dismissBackupNotice").mockResolvedValue();
+    const { host } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(notice(host)!.textContent).toContain(
+      "couldn’t save a backup of your library before upgrading: not enough disk space",
+    );
+    click(host.querySelector('[aria-label="Dismiss"]'));
+    await flush();
+    expect(notice(host)).toBeUndefined();
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("names no cause it doesn't know for another failure, waits out a recording, and follows the event", async () => {
+    vi.spyOn(api, "backupStatus").mockResolvedValue({ count: 3, notice: null });
+    const { host, rerender } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(notice(host)).toBeUndefined();
+    // the compression job's own backup failed, mid-session
+    act(() => eventHandlers["backup:status"]({ payload: { count: 3, notice: "failed" } }));
+    await flush();
+    expect(notice(host)!.textContent).toContain("couldn’t save a backup of your library");
+    expect(notice(host)!.textContent).not.toContain("not enough disk space");
+    rerender(<AppNotices {...props({ recordingActive: true })} />);
+    expect(notice(host)).toBeUndefined();
+  });
+
+  it("is not shown when the backup was saved", async () => {
+    vi.spyOn(api, "backupStatus").mockResolvedValue({ count: 1, notice: null });
+    const { host } = render(<AppNotices {...props()} />);
+    await flush();
+    expect(notice(host)).toBeUndefined();
+  });
+});

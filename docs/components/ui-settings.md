@@ -52,6 +52,7 @@ The full-window Settings overlay: eight sections (Recording, Transcripts, Ask an
 | Files and privacy | Disk-encryption Dismiss | `set_app_setting("ui.privacy.disk_encryption_banner_dismissed")` | none | `PrivacySection.tsx:160-172` |
 | Files and privacy | Show folder | `reveal_data_dir` | none | `SettingsModal.tsx:2093` |
 | Files and privacy | Recordings row (read only) | `storage_report`; listens to `storage:compress` | none | `StorageRows.tsx` |
+| Files and privacy | Backups: count + Open folder | `backup_status`; Open folder → `reveal_backups_dir`; listens to `backup:status` | none (no restore button; [app-backups](app-backups.md) has the steps) | `BackupRow.tsx` |
 | Files and privacy | Imported videos: Keep video / Audio only | `set_import_video_policy` (Audio only also starts the job); Stop → `cancel_video_job` | in-app confirm, danger tone, for Audio only | `StorageRows.tsx` |
 | Files and privacy | Screen recordings: Shrink… | `estimate_screen_shrink`, then `start_video_job("shrink_screen")`; Stop → `cancel_video_job` | in-app confirm with the estimate | `StorageRows.tsx` |
 | Files and privacy | Search index (Extract from N meetings) | consent → `backfill_meeting_items`; all failed → "Couldn't extract from …" with the backend's first error under it | `useCloudConsent` | `:555-589`, `:2107` |

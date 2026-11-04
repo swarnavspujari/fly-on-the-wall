@@ -37,6 +37,7 @@ import { useConfirm } from "./confirm";
 import ConnectorsSection from "./ConnectorsSection";
 import ModelsOnComputer from "./ModelsOnComputer";
 import PrivacySection from "./PrivacySection";
+import BackupRow from "./BackupRow";
 import StorageRows from "./StorageRows";
 import RemindNoticeRow from "./RemindNoticeRow";
 import type { Updater } from "../updater";
@@ -2058,9 +2059,10 @@ export default function SettingsModal({
                       }
                     />
                     <StorageRows />
+                    <BackupRow />
                     <SettingsRow
                       title="Search index"
-                      helper="Pulls decisions and action items out of meetings recorded before this existed, so Ask and other AI apps can find them. Uses your Ask and Enhance provider."
+                      helper="Pulls decisions and action items out of meetings that have none yet, so Ask and other AI apps can find them: ones recorded before this existed, and ones the AI model took too long over. Uses your Ask and Enhance provider."
                       control={
                         <Button
                           variant="outline"
