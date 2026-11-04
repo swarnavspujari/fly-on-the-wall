@@ -37,13 +37,13 @@
     "@types/react-dom": "^19.2.3",
     "@types/turndown": "^5.0.6",
     "@vitejs/plugin-react": "^6.0.3",
-    "eslint": "^9.39.0",
+    "eslint": "^10.13.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "jsdom": "^29.1.1",
     "prettier": "^3.9.4",
     "tailwindcss": "^4.3.2",
     "typescript": "~5.9.0",
-    "typescript-eslint": "^8.62.1",
+    "typescript-eslint": "^8.72.1",
     "vite": "^8.1.2",
     "vitest": "^4.1.10"
   }
