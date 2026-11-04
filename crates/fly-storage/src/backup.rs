@@ -499,13 +499,15 @@ fn take(
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return Outcome::Failed(format!("couldn't create the backups folder: {e}"));
     }
+    // First: a crashed run's half-written copy can be what fills the disk, so
+    // the space is measured after it is gone.
+    sweep_partials(&dir);
     let needed = needed_free_bytes(library_bytes(db));
     if let Some(free) = free_space(&dir) {
         if free < needed {
             return Outcome::NoSpace { free, needed };
         }
     }
-    sweep_partials(&dir);
     let name = unique_name(&dir, label, now);
     let (final_path, partial) = (dir.join(&name), dir.join(format!("{name}{PARTIAL_SUFFIX}")));
     match copy_verified(db, &partial, &final_path, busy) {
@@ -547,7 +549,13 @@ fn unique_name(dir: &Path, label: &str, now: DateTime<Utc>) -> String {
     // hundred milliseconds into the newest stamp's second must move on to the
     // next one, not reuse it.
     let now = DateTime::from_timestamp(now.timestamp(), 0).unwrap_or(now);
-    let mut at = match list_in(dir).first().and_then(|f| stamp_time(&f.taken_at)) {
+    // The newest stamp that is a real date: a name can have the shape of a
+    // stamp without being one (`99999999T999999Z`), and it sorts first as text.
+    let newest = list_in(dir)
+        .iter()
+        .filter_map(|f| stamp_time(&f.taken_at))
+        .max();
+    let mut at = match newest {
         Some(newest) if newest >= now => newest + ChronoDuration::seconds(1),
         _ => now,
     };
@@ -988,5 +996,22 @@ mod tests {
         }
         let listed: Vec<_> = list_in(dir.path()).into_iter().map(|f| f.label).collect();
         assert_eq!(listed, ["2.5.4", "2.5.3", "2.5.2", "2.5.1", "2.5.0"]);
+    }
+
+    #[test]
+    fn a_name_with_no_real_date_does_not_hide_the_newest_real_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        // Has the shape of a stamp, so it is listed, and sorts above every
+        // real one as text; but it is not a date.
+        std::fs::write(
+            dir.path().join("flyonthewall-odd-99999999T999999Z.db"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(backup_name("2.5.0", at(60))), b"x").unwrap();
+        assert_eq!(list_in(dir.path())[0].label, "odd", "it is listed first");
+
+        let name = unique_name(dir.path(), "2.5.1", at(0));
+        assert_eq!(name, backup_name("2.5.1", at(61)));
     }
 }

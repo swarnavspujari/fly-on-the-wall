@@ -453,6 +453,37 @@ fn too_little_disk_space_skips_the_backup_with_a_notice_and_the_open_still_runs(
 }
 
 #[test]
+fn a_copy_left_half_written_by_a_crash_is_cleared_before_the_space_check() {
+    // The crashed run's `.partial` can be the very thing that fills the disk,
+    // so the free space the folder reports depends on whether it is still
+    // there. Checking first would skip this backup too, and every one after.
+    let dir = tempfile::tempdir().unwrap();
+    let live = v2_library(dir.path());
+    let folder = dir.path().join(BACKUP_DIR);
+    std::fs::create_dir_all(&folder).unwrap();
+    let partial = folder.join("flyonthewall-2.4.0-20260101T000000Z.db.partial");
+    std::fs::write(&partial, b"half a copy").unwrap();
+    let free = |backups: &Path| {
+        let has_partial = std::fs::read_dir(backups)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".partial"));
+        Some(if has_partial { 0 } else { u64::MAX })
+    };
+
+    let file = saved(backup::before_open_with(
+        dir.path(),
+        "2.5.0",
+        &free,
+        &mut |_| {},
+        &QUICK,
+    ));
+    assert!(!partial.exists(), "the leftover is swept");
+    assert_eq!(backup_files(dir.path()), [file.name]);
+    drop(live);
+}
+
+#[test]
 fn a_backup_that_cannot_be_written_raises_the_notice_and_the_open_still_runs() {
     let dir = tempfile::tempdir().unwrap();
     drop(v2_library(dir.path()));
