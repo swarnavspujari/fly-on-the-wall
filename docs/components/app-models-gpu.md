@@ -75,7 +75,7 @@ All downloads are HTTPS GET, 8 s connect / 30 s read timeouts, no overall timeou
 | `github.com/swarnavspujari/fly-on-the-wall` (`tools-whisper-v1.9.5`, `tools-whisper-vulkan-v1.9.5`) | macOS whisper engine; Windows Vulkan build on the first post-meeting transcription with `asr.use_gpu` on (default) | `asr.use_gpu` (Windows Vulkan); none for the macOS engine |
 | `github.com/k2-fsa/sherpa-onnx` | sherpa CLI (all OS) and the pyannote / CAM++ models, first diarization | Transcription |
 | `github.com/BtbN/FFmpeg-Builds` | ffmpeg (Windows, Linux), first screen recording or media import | User action |
-| `github.com/ollama/ollama` | Ollama runtime (Windows 1.5 GB, macOS 129 MB) | User clicks Install in Settings (`download_model("ollama-bin")`) |
+| `github.com/ollama/ollama` | Ollama runtime (Windows 1.6 GB v0.40.13, macOS 129 MB v0.31.2) | User clicks Install in Settings (`download_model("ollama-bin")`) |
 | `huggingface.co/ggerganov/whisper.cpp` | Whisper weights (small, medium, large-v3-turbo, large-v3) | Transcription, or Settings download |
 | `hf-mirror.com` (community proxy, not affiliated) | Only after both huggingface.co attempts fail (`models.rs:482-494`; docs/MODELS.md "Download sources") | Opt-out via `FLYONTHEWALL_NO_HF_MIRROR` |
 
