@@ -48,11 +48,13 @@ import type {
   Folder,
   LlmSettings,
   LlmSettingsUpdate,
+  CutOffMeetings,
   RecoveredMeeting,
   Meeting,
   MeetingPrivacy,
   Note,
   NoteSummary,
+  LocalModelAdvice,
   OllamaStatus,
   ModelStorageReport,
   DeleteOutcome,
@@ -256,10 +258,11 @@ export const api = {
   // consent this session (updates arrive as "llm:consent-skips"), and the
   // re-run once the provider is allowed (background; returns how many).
   consentSkippedMeetings: () => invoke<string[]>("consent_skipped_meetings"),
-  // Meetings whose cleanup / action items the model stopped short of this
-  // session (took too long, looped, listed only part; updates arrive as
-  // "llm:ai-cut-off"). The same re-run covers them.
-  aiCutOffMeetings: () => invoke<string[]>("ai_cut_off_meetings"),
+  // Meetings the model was reached for and stopped short of this session
+  // (updates arrive as "llm:ai-cut-off"): `items` took too long, looped or
+  // were listed only in part; `cleanup` took too long. The same re-run covers
+  // them.
+  aiCutOffMeetings: () => invoke<CutOffMeetings>("ai_cut_off_meetings"),
   retryConsentSkipped: () => invoke<number>("retry_consent_skipped"),
   // Meetings self-heal restored this launch with Keep local set because their
   // privacy setting couldn't be confirmed (updates: "privacy:recovered-kept-local").
@@ -290,6 +293,13 @@ export const api = {
   // Deletes a local model; the backend refuses to delete the model the app
   // is currently configured to use.
   ollamaDelete: (model: string) => invoke<void>("ollama_delete", { model }),
+
+  // The default local model for this computer, the offer for an existing
+  // install, and what was measured (local_models.rs). Never switches a model
+  // by itself: `useLocalModel` is the user's click, after the download.
+  localModelAdvice: () => invoke<LocalModelAdvice>("local_model_advice"),
+  dismissLocalModelOffer: (model: string) => invoke<void>("dismiss_local_model_offer", { model }),
+  useLocalModel: (model: string) => invoke<void>("use_local_model", { model }),
 
   // calendars
   getCalendarSettings: () => invoke<CalendarStatus>("get_calendar_settings"),

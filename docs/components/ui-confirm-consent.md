@@ -46,7 +46,7 @@ Behaviour details:
 |---|---|---|---|
 | `fotw:llm-settings-changed` (window `Event`) | Emits: `askCloudConsent` after `request_cloud_consent` returns true (`CloudConsent.tsx:51`); `api.setLlmSettings` after any successful `set_llm_settings` (`api.ts:9-11`, `:174-175`). Listens: `useConsentSkips` (`CloudConsent.tsx:139-143`). | none | Settings and Ask's Runs on (writers); the skipped-cleanup notice (reader) |
 | `llm:consent-skips` (Tauri) | Listens: `useConsentSkips` (`CloudConsent.tsx`) | `string[]` meeting ids | Emitted by `llm_commands::emit_skips` |
-| `llm:ai-cut-off` (Tauri) | Listens: `useConsentSkips` | `string[]` meeting ids | Emitted by `llm_commands::emit_skips` |
+| `llm:ai-cut-off` (Tauri) | Listens: `useConsentSkips` | `{items: string[], cleanup: string[]}` meeting ids | Emitted by `llm_commands::emit_skips` |
 
 ### Settings keys
 | Key (or prefix) | Read / write | Webview-settable? (`is_webview_writable_setting_key`) | Meaning |

@@ -117,37 +117,68 @@ export function appErrorCopy(error: string): NoticeCopy {
   };
 }
 
+/** What the model stopped short of (see `consentSkipsCopy`). */
+export interface CutOffCounts {
+  items: number;
+  cleanup: number;
+  /** Different meetings in all: some are on both lists. */
+  meetings: number;
+}
+
+const NO_CUT_OFF: CutOffCounts = { items: 0, cleanup: 0, meetings: 0 };
+
 /** Background transcript cleanup and action items were refused for
  *  `count` meetings because the cloud provider had no recorded consent
  *  (llm_commands.rs record_consent_skip). `vendor` is who needs the OK, or
  *  null when the saved provider no longer does (allowed meanwhile, or now
  *  local): then the fix is only to run them.
  *
- *  `cutOff` counts meetings the model was reached for and stopped short of
- *  (it took too long, looped, or listed only part: record_incomplete). Their
- *  transcript may well be cleaned and have some items, so they are not "kept
- *  the raw transcript": on their own they get their own wording, and next to
- *  a consent skip they are one more sentence. `needsKey` says the button
- *  opens Settings instead of running them. */
+ *  `cutOff` counts meetings the model was reached for and stopped short of:
+ *  `items` it took too long over, looped on or listed only part of
+ *  (record_incomplete), `cleanup` whose transcript cleanup took too long
+ *  (record_cleanup_incomplete), and `meetings`, how many different ones
+ *  (some are on both). Their transcript may well be cleaned and have some
+ *  items, so they are not "kept the raw transcript": on their own they get
+ *  their own wording, and next to a consent skip they are one more sentence.
+ *  `needsKey` says the button opens Settings instead of running them. */
 export function consentSkipsCopy(
   count: number,
   vendor: string | null,
   keyVendor: string | null = null,
-  cutOff = 0,
+  cutOff: CutOffCounts = NO_CUT_OFF,
 ): { title: string; cause: string; action: string; needsKey: boolean } {
   const meetingsOf = (n: number) => (n === 1 ? "1 meeting" : `${n} meetings`);
-  if (count === 0 && cutOff > 0) {
+  if (count === 0 && cutOff.meetings > 0) {
+    const { items, cleanup } = cutOff;
+    const cleaned = `cleaning up ${meetingsOf(cleanup)}`;
+    const read = `reading ${meetingsOf(items)} for action items`;
+    if (items === 0) {
+      return {
+        title: "A transcript cleanup didn't finish",
+        cause: `The AI model didn't finish ${cleaned}, so ${cleanup === 1 ? "its transcript is" : "their transcripts are"} still the raw text. You can run ${cleanup === 1 ? "it" : "them"} again.`,
+        action: "Run them now",
+        needsKey: false,
+      };
+    }
+    if (cleanup === 0) {
+      return {
+        title: "Some action items couldn't be read",
+        cause: `The AI model didn't finish reading ${meetingsOf(items)}, so some action items may be missing. You can run them again.`,
+        action: "Run them now",
+        needsKey: false,
+      };
+    }
     return {
-      title: "Some action items couldn't be read",
-      cause: `The AI model didn't finish reading ${meetingsOf(cutOff)}, so some action items may be missing. You can run them again.`,
+      title: "Some AI work didn't finish",
+      cause: `The AI model didn't finish ${cleaned} or ${read}, so some transcripts are still raw and some action items may be missing. You can run them again.`,
       action: "Run them now",
       needsKey: false,
     };
   }
   const kept = `${meetingsOf(count)} kept the raw transcript and got no action items`;
   const more =
-    cutOff > 0
-      ? ` ${cutOff === 1 ? "1 more meeting was" : `${cutOff} more meetings were`} only partly read.`
+    cutOff.meetings > 0
+      ? ` ${cutOff.meetings === 1 ? "1 more meeting was" : `${cutOff.meetings} more meetings were`} only partly processed.`
       : "";
   // A missing key comes first: allowing the provider alone can't run them.
   if (keyVendor) {

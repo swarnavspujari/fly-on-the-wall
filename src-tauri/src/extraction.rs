@@ -696,12 +696,14 @@ pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<Extrac
         incomplete = incomplete.is_some(),
         "meeting item extraction finished"
     );
+    let live: HashSet<&str> = transcript.segments.iter().map(|s| s.id.as_str()).collect();
     let storage = state.storage.lock().unwrap();
     store_extraction(
         &storage,
         meeting_id,
         provider.id(),
         Extraction { items, incomplete },
+        &live,
     )
 }
 
@@ -714,31 +716,47 @@ pub async fn run_extraction(state: &AppState, meeting_id: &str) -> Result<Extrac
 /// that looped in its second batch has only the first batch's items): its
 /// thinner set doesn't replace the fuller one that is stored. The meeting is
 /// still reported incomplete, so it stays retryable.
+///
+/// Only a stored set that still describes the transcript is worth keeping:
+/// `live` holds the segment ids of the transcript this run read, and a set with
+/// an item citing a segment that isn't there (the meeting was transcribed
+/// again, which makes new segment ids) is stale, so the run replaces it
+/// however thin it is.
 fn store_extraction(
     storage: &fly_storage::Storage,
     meeting_id: &str,
     extracted_by: &str,
     extraction: Extraction,
+    live: &HashSet<&str>,
 ) -> Result<ExtractionRun, String> {
     let Extraction { items, incomplete } = extraction;
-    let extracted_before = storage
+    let stored: Vec<MeetingItem> = storage
         .get_meeting_items(meeting_id)
         .map_err(|e| e.to_string())?
-        .iter()
+        .into_iter()
         .filter(|i| !i.extracted_by.starts_with(fly_storage::USER_ITEM_PREFIX))
-        .count();
-    if incomplete.is_some() && extracted_before > items.len() {
+        .collect();
+    let stale = stored
+        .iter()
+        .any(|i| i.segment_ids.iter().any(|id| !live.contains(id.as_str())));
+    if incomplete.is_some() && !stale && stored.len() > items.len() {
         tracing::warn!(
             meeting_id,
-            earlier = extracted_before,
+            earlier = stored.len(),
             this_run = items.len(),
             "extraction was cut off with fewer items than before; keeping the earlier set"
         );
         return Ok(ExtractionRun {
-            items: extracted_before,
+            items: stored.len(),
             incomplete,
             kept_earlier: true,
         });
+    }
+    if stale && !stored.is_empty() {
+        tracing::info!(
+            meeting_id,
+            "the earlier items cite segments that are gone (transcribed again); replacing them"
+        );
     }
     if items.is_empty() {
         storage
@@ -1672,6 +1690,10 @@ mod tests {
         (dir, storage, id)
     }
 
+    fn ids_of(t: &Transcript) -> HashSet<&str> {
+        t.segments.iter().map(|s| s.id.as_str()).collect()
+    }
+
     fn texts(storage: &fly_storage::Storage, meeting_id: &str) -> Vec<String> {
         storage
             .get_meeting_items(meeting_id)
@@ -1709,7 +1731,8 @@ mod tests {
         assert_eq!(extraction.items.len(), 1);
         assert!(extraction.incomplete.is_some());
 
-        let run = store_extraction(&storage, &m, "ollama", extraction).unwrap();
+        let t = long_transcript();
+        let run = store_extraction(&storage, &m, "ollama", extraction, &ids_of(&t)).unwrap();
         assert!(run.kept_earlier && run.incomplete.is_some());
         assert_eq!(run.items, 30, "reports what the meeting has");
         let now = texts(&storage, &m);
@@ -1740,22 +1763,76 @@ mod tests {
 
         seed(5);
         // as many: replaced, still incomplete
-        let run = store_extraction(&storage, &m, "ollama", run_of(5, Some("looped"))).unwrap();
+        let t = transcript();
+        let live = ids_of(&t);
+        let run =
+            store_extraction(&storage, &m, "ollama", run_of(5, Some("looped")), &live).unwrap();
         assert!(!run.kept_earlier && run.incomplete.is_some());
         assert_eq!(texts(&storage, &m)[0], "new 0");
         // more: replaced
-        let run = store_extraction(&storage, &m, "ollama", run_of(8, Some("looped"))).unwrap();
+        let run =
+            store_extraction(&storage, &m, "ollama", run_of(8, Some("looped")), &live).unwrap();
         assert!(!run.kept_earlier);
         assert_eq!(texts(&storage, &m).len(), 8);
         // fewer, but finished: replaced
-        let run = store_extraction(&storage, &m, "ollama", run_of(2, None)).unwrap();
+        let run = store_extraction(&storage, &m, "ollama", run_of(2, None), &live).unwrap();
         assert!(!run.kept_earlier && run.items == 2);
         assert_eq!(texts(&storage, &m), ["new 0", "new 1"]);
         // a first run that was cut off has nothing to protect
         let (_d2, other, m2) = storage_with_meeting();
-        let run = store_extraction(&other, &m2, "ollama", run_of(3, Some("looped"))).unwrap();
+        let run =
+            store_extraction(&other, &m2, "ollama", run_of(3, Some("looped")), &live).unwrap();
         assert!(!run.kept_earlier);
         assert_eq!(texts(&other, &m2).len(), 3);
+    }
+
+    /// A re-transcribe gives the meeting new segment ids but leaves its items.
+    /// A cut-off run afterwards must not keep those: they cite segments that
+    /// are gone, so the thin new set replaces them. (The probe: 5 old items
+    /// citing a dead id and a cut-off run with 1 valid item.)
+    #[test]
+    fn a_cut_off_run_after_a_re_transcribe_replaces_items_citing_dead_segments() {
+        let (_dir, storage, m) = storage_with_meeting();
+        let old: Vec<MeetingItem> = (0..5)
+            .map(|i| {
+                let mut item = stored_item(&m, &format!("old {i}"), "ollama");
+                item.segment_ids = vec!["gone-after-retranscribe".into()];
+                item
+            })
+            .collect();
+        storage.replace_meeting_items(&m, &old).unwrap();
+        let t = transcript();
+        let live = ids_of(&t);
+        let extraction = Extraction {
+            items: vec![stored_item(&m, "new", "ollama")],
+            incomplete: Some("looped".into()),
+        };
+
+        let run = store_extraction(&storage, &m, "ollama", extraction, &live).unwrap();
+        assert!(!run.kept_earlier, "the stale set is not worth keeping");
+        assert!(run.incomplete.is_some(), "and the meeting stays retryable");
+        assert_eq!(texts(&storage, &m), ["new"]);
+
+        // one dead id among live ones is enough to call the set stale
+        let mixed: Vec<MeetingItem> = (0..3)
+            .map(|i| {
+                let mut item = stored_item(&m, &format!("mixed {i}"), "ollama");
+                item.segment_ids = if i == 2 {
+                    vec!["s1".into(), "gone-after-retranscribe".into()]
+                } else {
+                    vec!["s1".into()]
+                };
+                item
+            })
+            .collect();
+        storage.replace_meeting_items(&m, &mixed).unwrap();
+        let extraction = Extraction {
+            items: vec![stored_item(&m, "newer", "ollama")],
+            incomplete: Some("looped".into()),
+        };
+        let run = store_extraction(&storage, &m, "ollama", extraction, &live).unwrap();
+        assert!(!run.kept_earlier);
+        assert_eq!(texts(&storage, &m), ["newer"]);
     }
 
     /// The privacy case: the note was deleted while the model worked, so its
@@ -1770,13 +1847,14 @@ mod tests {
             items: vec![stored_item(&m, "the budget is 5k", "ollama")],
             incomplete: None,
         };
-        let err = store_extraction(&storage, &m, "ollama", extraction).unwrap_err();
+        let t = transcript();
+        let err = store_extraction(&storage, &m, "ollama", extraction, &ids_of(&t)).unwrap_err();
         assert!(err.contains("not found"), "{err}");
         let nothing = Extraction {
             items: vec![],
             incomplete: None,
         };
-        assert!(store_extraction(&storage, &m, "ollama", nothing).is_err());
+        assert!(store_extraction(&storage, &m, "ollama", nothing, &ids_of(&t)).is_err());
         assert!(storage.get_meeting_items(&m).unwrap().is_empty());
         assert!(
             !storage.has_meeting_items(&m).unwrap(),

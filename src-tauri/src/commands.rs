@@ -310,10 +310,6 @@ pub(crate) fn delete_note_with(
         .map_err(err_str)?;
     for m in &meetings {
         crate::scheduler::cancel(state, on_stage, &m.id).map_err(err_str)?;
-        // An AI pass still working on the meeting is stopped too. It winds
-        // down on its own: while its busy marker stands the purge below is
-        // skipped, and the pass purges the meeting itself on its way out.
-        state.ai_queue.cancel_running(&m.id);
     }
     // The opt-in video job may have one of this note's files open in
     // ffmpeg: stop it BEFORE the files go (Windows refuses to delete an open
@@ -326,6 +322,13 @@ pub(crate) fn delete_note_with(
         .unwrap()
         .delete_note(id)
         .map_err(err_str)?;
+    // An AI pass still working on a meeting is stopped now that the delete
+    // has worked (a delete that failed leaves the note, and its pass, alone).
+    // It winds down on its own: while its busy marker stands the purge below
+    // is skipped, and the pass purges the meeting itself on its way out.
+    for m in &meetings {
+        state.ai_queue.cancel_running(&m.id);
+    }
     for m in &meetings {
         let running = {
             let stages = state.pipeline_stage.lock().unwrap();

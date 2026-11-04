@@ -49,13 +49,17 @@ pub struct AppState {
     /// In memory only: the app's notice offers to run them once the user
     /// allows the provider or adds the key (`llm_commands::retry_consent_skipped`).
     pub consent_skipped: Mutex<std::collections::BTreeSet<String>>,
-    /// Meetings whose cleanup / item extraction reached the model and was
-    /// stopped short: it took too long, got stuck in a loop, or listed only
-    /// part of the meeting (`llm_commands::record_incomplete`). Kept apart
-    /// from `consent_skipped` because the notice says something else about
-    /// them (some items couldn't be read; the transcript may well be cleaned),
-    /// but "Run them now" runs both lists.
+    /// Meetings whose item extraction reached the model and was stopped
+    /// short: it took too long, got stuck in a loop, or listed only part of
+    /// the meeting (`llm_commands::record_incomplete`). Kept apart from
+    /// `consent_skipped` because the notice says something else about them
+    /// (some items couldn't be read; the transcript may well be cleaned),
+    /// but "Run them now" runs all the lists.
     pub ai_incomplete: Mutex<std::collections::BTreeSet<String>>,
+    /// Meetings whose transcript cleanup reached the model and took too long
+    /// (`llm_commands::record_cleanup_incomplete`): the transcript stays raw.
+    /// A list of its own, since the notice says so in other words.
+    pub cleanup_incomplete: Mutex<std::collections::BTreeSet<String>>,
     /// Passes (transcript cleanup + item extraction) waiting to run after a
     /// transcription, and the one running. Drained by its own worker so a
     /// slow model never holds up the transcription queue (ai_queue.rs).
@@ -212,6 +216,7 @@ impl AppState {
             live_status: Mutex::new(None),
             consent_skipped: Mutex::new(std::collections::BTreeSet::new()),
             ai_incomplete: Mutex::new(std::collections::BTreeSet::new()),
+            cleanup_incomplete: Mutex::new(std::collections::BTreeSet::new()),
             ai_queue: Default::default(),
             recovered_kept_local: Mutex::new(Vec::new()),
             consent_prompt: tokio::sync::Mutex::new(Default::default()),

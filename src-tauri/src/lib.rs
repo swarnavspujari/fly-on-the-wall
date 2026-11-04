@@ -17,6 +17,7 @@ pub mod hw;
 mod import_commands;
 pub mod live;
 pub mod llm_commands;
+pub mod local_models;
 pub mod logging;
 pub mod model_cleanup;
 pub mod models;
@@ -191,6 +192,9 @@ pub fn run() {
             extraction::extract_meeting_items,
             extraction::backfill_meeting_items,
             extraction::pending_backfill_count,
+            local_models::local_model_advice,
+            local_models::dismiss_local_model_offer,
+            local_models::use_local_model,
             ollama::ollama_status,
             ollama::ollama_pull,
             ollama::ollama_delete,
@@ -252,6 +256,8 @@ pub fn run() {
             // AppState exists (the open's transaction just rolls back).
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<state::AppState>() {
+                    // a quit mid-pass is not a crash of the pass
+                    scheduler::save_ai_queue_on_quit(&state);
                     ollama::shutdown(&state);
                 }
                 // Stdio connector programs stop with the app.
