@@ -1156,7 +1156,7 @@ mod tests {
         let mut r = req(ThinkingMode::Default);
         r.messages = vec![ChatMessage::system("x".repeat(30_000))];
         let est = estimate_num_ctx(&r);
-        assert!(est >= 14_000 && est <= 16_384, "est was {est}");
+        assert!((14_000..=16_384).contains(&est), "est was {est}");
         // Enormous prompt → cap.
         r.messages = vec![ChatMessage::system("x".repeat(400_000))];
         assert_eq!(estimate_num_ctx(&r), 32_768);
