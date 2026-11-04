@@ -118,7 +118,7 @@ None.
 - Editing a line while "AI-cleaned" is shown writes the polished text into the **raw** transcript too (`TranscriptPanel.tsx:691-695` → `fly-storage` `transcripts.rs:181-203`). That raw text is what Enhance sources quote. Untested.
 - `NotesEditor` (autoformat, task checkboxes, highlight, link insert) and `DateTimePicker` (local→UTC, 12 AM/PM, DST) have no tests.
 - Editor's Keep-local chip, autosave debounce, copy/export feedback and attachment removal (no confirm) have no tests.
-- `window.prompt` is still used twice: "Add link" (`NotesEditor.tsx:205`) and "Region…" screen capture (`Editor.tsx:481`). tauri-plugin-dialog overrides only `alert` and `confirm` (checked in its init script, v2.8.3), so these fall to WebView2's own prompt. Whether that shows in the app is unverified. Lint doesn't ban `prompt`, and no test stubs it.
+- `window.prompt` is still used twice: "Add link" (`NotesEditor.tsx:205`) and "Region…" screen capture (`Editor.tsx:481`). tauri-plugin-dialog overrides only `alert` and `confirm` (checked in its init script, v2.8.4), so these fall to WebView2's own prompt. Whether that shows in the app is unverified. Lint doesn't ban `prompt`, and no test stubs it.
 
 ## Changing it safely
 - Run `npm --prefix frontend test`, `npm --prefix frontend run lint`, and `tsc` (part of `npm --prefix frontend run build`).

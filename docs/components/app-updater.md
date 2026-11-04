@@ -11,7 +11,7 @@ Keeps installed apps current from GitHub Releases. tauri-plugin-updater fetches 
 - `src-tauri/tauri.updater.conf.json` — `bundle.createUpdaterArtifacts: true`, layered in by release legs only.
 - `src-tauri/src/lib.rs:69-76` — registers `tauri_plugin_updater` and `tauri_plugin_process` in `setup` (desktop only).
 - `src-tauri/capabilities/default.json:6` — `updater:default`, `process:allow-restart`.
-- `src-tauri/Cargo.toml:53` (`tauri-plugin-updater = "2"`, locked 2.14.0) and tauri-plugin-process (locked 2.4.0); `frontend/package.json:20-21` (`@tauri-apps/plugin-updater ~2.14.0`, `@tauri-apps/plugin-process ~2.4.0`).
+- `src-tauri/Cargo.toml:53` (`tauri-plugin-updater = "2"`, locked 2.14.1) and tauri-plugin-process (locked 2.4.0); `frontend/package.json:20-21` (`@tauri-apps/plugin-updater ~2.14.0`, `@tauri-apps/plugin-process ~2.4.0`).
 - `frontend/src/updater.ts` — `useUpdater` hook and the `Updater` / `UpdatePhase` types.
 - `frontend/src/components/UpdateBanner.tsx` — the notice (Update now / Restart now / Try again / Later).
 - `frontend/src/notices.ts:111-153` — `updateNoticeVisible`, `updateCopy`; `NOTICE_PRIORITY.update = 1` (`notices.ts:12-18`).
@@ -57,7 +57,7 @@ By the plugin (inferred from its implementation, not app code): the downloaded b
 No meeting data is sent. GitHub sees the IP address and request on each launch.
 
 ### External processes
-- Windows: the NSIS installer launched by the plugin with `ShellExecuteW`, passive mode; the plugin then calls `std::process::exit(0)` (`tauri-plugin-updater-2.14.0/src/updater.rs:1009-1050`).
+- Windows: the NSIS installer launched by the plugin with `ShellExecuteW`, passive mode; the plugin then calls `std::process::exit(0)` (`tauri-plugin-updater-2.14.1/src/updater.rs:1009-1050`).
 - macOS / Linux: the app restarts itself through tauri-plugin-process (`request_restart`).
 
 ### Secrets and keychain entries
