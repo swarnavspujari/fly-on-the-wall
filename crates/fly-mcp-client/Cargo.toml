@@ -33,7 +33,7 @@ uuid.workspace = true
 url = "2"
 http = "1"
 # General category (Cf, Zl, Zp) for the hidden-character check.
-unicode-properties = { version = "=0.1.4", default-features = false, features = ["general-category"] }
+unicode-properties = { version = "=0.1.5", default-features = false, features = ["general-category"] }
 rmcp = { version = "=3.8.0", default-features = false, features = [
     "client",
     "transport-async-rw",
