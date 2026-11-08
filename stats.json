@@ -1,13 +1,13 @@
 {
-  "updated": "2026-11-07T13:15:26.052Z",
-  "totalDownloads": 621,
+  "updated": "2026-11-08T13:36:32.945Z",
+  "totalDownloads": 624,
   "estimatedInstalls": 149,
   "perPlatform": {
     "windows": 205,
     "macos": 149,
-    "linux": 267
+    "linux": 270
   },
-  "updateChecks": 496,
+  "updateChecks": 503,
   "latestRelease": {
     "tag": "v2.5.1",
     "downloads": 8
