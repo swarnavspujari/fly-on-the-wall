@@ -1,11 +1,11 @@
 {
-  "updated": "2026-11-13T14:41:56.063Z",
-  "totalDownloads": 639,
+  "updated": "2026-11-14T13:39:08.020Z",
+  "totalDownloads": 640,
   "estimatedInstalls": 150,
   "perPlatform": {
     "windows": 209,
     "macos": 149,
-    "linux": 281
+    "linux": 282
   },
   "updateChecks": 526,
   "latestRelease": {
