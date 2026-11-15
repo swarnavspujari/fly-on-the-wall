@@ -1242,6 +1242,9 @@ impl GuardedAsr {
         cancel: fly_asr::CancelFn<'_>,
     ) -> Result<RawTranscript, String> {
         let mut fell_over_this_call = false;
+        // Every failed tier's error, in order — the last tier's error alone
+        // hid the cloud failure whenever cloud fell back to local.
+        let mut failed_tiers: Vec<String> = Vec::new();
         loop {
             let idx = *self.active.lock().unwrap();
             let tier = &self.tiers[idx];
@@ -1271,7 +1274,13 @@ impl GuardedAsr {
             if let Some(model_id) = &tier.gpu_model_id {
                 *self.gpu_failure.lock().unwrap() = Some((model_id.clone(), msg.clone()));
             }
+            failed_tiers.push(format!("{}: {msg}", tier.label.unwrap_or(tier.engine.id())));
             if idx + 1 >= self.tiers.len() {
+                if failed_tiers.len() > 1 {
+                    let all = failed_tiers.join(" | ");
+                    tracing::error!(errors = %all, "every transcription tier failed");
+                    return Err(format!("{msg} (all tiers failed — {all})"));
+                }
                 return Err(msg);
             }
             let next = &self.tiers[idx + 1];
@@ -2294,6 +2303,48 @@ mod tests {
             notes.lock().unwrap().is_empty(),
             "no failover notice for a cancel"
         );
+    }
+
+    /// When cloud falls back to local and local fails too, the final error
+    /// must carry every tier's message — the cloud error (a bad key, say)
+    /// used to be hidden behind the local tier's.
+    #[tokio::test]
+    async fn final_error_includes_every_tiers_message() {
+        let asr = GuardedAsr::chain(vec![
+            tier(Box::new(CloudFails), None, None),
+            tier(Box::new(FailingLocalGpu), None, None),
+        ]);
+        let err = asr
+            .transcribe(
+                Path::new("unused.wav"),
+                &TranscribeOptions::default(),
+                &|_| {},
+                &|_, _| {},
+                &|| false,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("groq upstream timeout"), "{err}");
+        assert!(err.contains("vulkan init failed"), "{err}");
+    }
+
+    /// Cloud engine failing with a retryable (non-rejected) error.
+    struct CloudFails;
+    #[async_trait::async_trait]
+    impl TranscriptionEngine for CloudFails {
+        fn id(&self) -> &'static str {
+            "groq"
+        }
+        fn is_local(&self) -> bool {
+            false
+        }
+        async fn transcribe(
+            &self,
+            _wav: &Path,
+            _opts: &TranscribeOptions,
+        ) -> fly_asr::Result<RawTranscript> {
+            Err(fly_asr::AsrError::Engine("groq upstream timeout".into()))
+        }
     }
 
     #[tokio::test]

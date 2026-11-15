@@ -1326,6 +1326,7 @@ dependencies = [
  "fly-llm",
  "fly-mcp-client",
  "fly-secrets",
+ "fly-sidecar",
  "fly-storage",
  "futures-util",
  "hex",
@@ -1382,6 +1383,7 @@ dependencies = [
  "async-trait",
  "fly-audio",
  "fly-core",
+ "fly-sidecar",
  "hound",
  "reqwest",
  "serde",
@@ -1487,6 +1489,7 @@ version = "2.5.1"
 dependencies = [
  "async-trait",
  "fly-core",
+ "fly-sidecar",
  "hound",
  "ort",
  "rustfft",
@@ -1583,6 +1586,13 @@ dependencies = [
  "keyring",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "fly-sidecar"
+version = "2.5.1"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]

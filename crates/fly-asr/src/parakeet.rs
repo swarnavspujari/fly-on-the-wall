@@ -155,11 +155,20 @@ impl ParakeetEngine {
         fly_audio::mix::write_wav_mono_16(&wav_path, samples, rate)
             .map_err(|e| AsrError::Engine(format!("write chunk wav: {e}")))?;
 
+        // parakeet-cli reads argv through the ANSI code page on Windows: a
+        // non-ASCII profile folder must reach it as short/relative ASCII.
+        let sp = match fly_sidecar::prepare(&[&self.model, &wav_path]) {
+            Ok(sp) => sp,
+            Err(e) => {
+                let _ = std::fs::remove_file(&wav_path);
+                return Err(AsrError::Engine(e));
+            }
+        };
         let mut cmd = tokio::process::Command::new(&self.exe);
         cmd.arg("-m")
-            .arg(&self.model)
+            .arg(&sp.args[0])
             .arg("-f")
-            .arg(&wav_path)
+            .arg(&sp.args[1])
             .arg("-t")
             .arg(self.threads.max(1).to_string())
             // token dump with word_start flags + timestamps (stderr)
@@ -170,7 +179,10 @@ impl ParakeetEngine {
         // ggml loads its backend DLLs (ggml-cpu-*, ggml-vulkan) from the
         // current directory as well as the exe's: run in the exe's own
         // folder so only the pinned build's backends can ever be picked up.
-        if let Some(dir) = self.exe.parent().filter(|d| d.is_dir()) {
+        // (When the arguments need relative paths, their directory wins.)
+        if let Some(dir) = &sp.current_dir {
+            cmd.current_dir(dir);
+        } else if let Some(dir) = self.exe.parent().filter(|d| d.is_dir()) {
             cmd.current_dir(dir);
         }
         #[cfg(windows)]

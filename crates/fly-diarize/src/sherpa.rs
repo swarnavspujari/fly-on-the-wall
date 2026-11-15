@@ -62,9 +62,20 @@ impl DiarizationEngine for SherpaDiarizeEngine {
         if self.refine.is_some() && opts.num_speakers.is_none() {
             init_opts.cluster_threshold = Some(VBX_INIT_THRESHOLD);
         }
+        // The sidecar reads argv through the ANSI code page on Windows: a
+        // non-ASCII profile folder must reach it as short/relative ASCII.
+        let sp = fly_sidecar::prepare(&[
+            self.segmentation_model.as_path(),
+            self.embedding_model.as_path(),
+            wav_path,
+        ])
+        .map_err(DiarizeError::Engine)?;
         let mut cmd = tokio::process::Command::new(&self.exe);
-        cmd.args(self.cli_args(&init_opts));
-        cmd.arg(wav_path);
+        cmd.args(self.cli_args_with(&init_opts, &sp.args[0], &sp.args[1]));
+        cmd.arg(&sp.args[2]);
+        if let Some(dir) = &sp.current_dir {
+            cmd.current_dir(dir);
+        }
         #[cfg(windows)]
         {
             // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS: diarization is
@@ -133,13 +144,17 @@ impl SherpaDiarizeEngine {
     /// All CLI arguments except the trailing wav path. A user-provided
     /// speaker count wins over the clustering threshold (sherpa ignores the
     /// threshold when num-clusters is set; we don't pass both).
+    #[cfg(test)]
     fn cli_args(&self, opts: &DiarizeOptions) -> Vec<String> {
+        self.cli_args_with(opts, &self.segmentation_model, &self.embedding_model)
+    }
+
+    /// `cli_args` with the model paths as they must appear on the command
+    /// line (see `fly_sidecar::prepare`).
+    fn cli_args_with(&self, opts: &DiarizeOptions, seg: &Path, emb: &Path) -> Vec<String> {
         let mut args = vec![
-            format!(
-                "--segmentation.pyannote-model={}",
-                self.segmentation_model.display()
-            ),
-            format!("--embedding.model={}", self.embedding_model.display()),
+            format!("--segmentation.pyannote-model={}", seg.display()),
+            format!("--embedding.model={}", emb.display()),
             format!("--segmentation.num-threads={}", self.threads.max(1)),
             format!("--embedding.num-threads={}", self.threads.max(1)),
         ];

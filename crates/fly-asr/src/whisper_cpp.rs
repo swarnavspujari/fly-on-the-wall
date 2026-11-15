@@ -88,14 +88,26 @@ impl WhisperCppEngine {
         fly_audio::mix::write_wav_mono_16(&wav_path, samples, rate)
             .map_err(|e| AsrError::Engine(format!("write chunk wav: {e}")))?;
 
+        // whisper-cli reads argv through the ANSI code page on Windows: a
+        // non-ASCII profile folder must reach it as short/relative ASCII.
+        let sp = match fly_sidecar::prepare(&[&self.model, &wav_path, &out_base]) {
+            Ok(sp) => sp,
+            Err(e) => {
+                let _ = std::fs::remove_file(&wav_path);
+                return Err(AsrError::Engine(e));
+            }
+        };
         let mut cmd = tokio::process::Command::new(&self.exe);
+        if let Some(dir) = &sp.current_dir {
+            cmd.current_dir(dir);
+        }
         cmd.arg("-m")
-            .arg(&self.model)
+            .arg(&sp.args[0])
             .arg("-f")
-            .arg(&wav_path)
+            .arg(&sp.args[1])
             .arg("-oj")
             .arg("-of")
-            .arg(&out_base)
+            .arg(&sp.args[2])
             // one word per JSON entry — the aligner needs word timestamps
             .arg("-ml")
             .arg("1")

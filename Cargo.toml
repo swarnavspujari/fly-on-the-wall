@@ -5,6 +5,7 @@ members = [
     "crates/fly-audio",
     "crates/fly-asr",
     "crates/fly-diarize",
+    "crates/fly-sidecar",
     "crates/fly-llm",
     "crates/fly-calendar",
     "crates/fly-capture-screen",
@@ -31,6 +32,7 @@ fly-core = { path = "crates/fly-core" }
 fly-audio = { path = "crates/fly-audio" }
 fly-asr = { path = "crates/fly-asr" }
 fly-diarize = { path = "crates/fly-diarize" }
+fly-sidecar = { path = "crates/fly-sidecar" }
 fly-llm = { path = "crates/fly-llm" }
 fly-calendar = { path = "crates/fly-calendar" }
 fly-capture-screen = { path = "crates/fly-capture-screen" }

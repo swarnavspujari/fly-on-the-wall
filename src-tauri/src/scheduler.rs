@@ -97,6 +97,7 @@ fn permanent_failure(error: &str) -> bool {
         || error.contains(fly_asr::REJECTED_MARKER)
         || error.contains(models::ENGINE_MISSING_MARKER)
         || error.contains(models::DOWNLOAD_FAILED_MARKER)
+        || error.contains(fly_sidecar::NON_ASCII_PATH_MARKER)
 }
 
 /// True when the pipeline stopped because the user asked it to (note
