@@ -64,6 +64,18 @@ impl From<AuthError> for OAuthError {
     fn from(e: AuthError) -> Self {
         match e {
             AuthError::AuthorizationRequired => OAuthError::SignInRequired,
+            // rmcp 3.9 keeps the cause (a blocked redirect, a refused
+            // connection) in `source()` instead of the message; put it back
+            // so the user still sees why discovery failed.
+            AuthError::DiscoveryRequestFailed { .. } => {
+                let mut msg = e.to_string();
+                let mut source = std::error::Error::source(&e);
+                while let Some(cause) = source {
+                    msg.push_str(&format!("\n  Caused by: {cause}"));
+                    source = cause.source();
+                }
+                OAuthError::Auth(msg)
+            }
             other => OAuthError::Auth(other.to_string()),
         }
     }

@@ -4,7 +4,7 @@
 > In flight: the Ask harness wires `ExternalTools` per turn (PR 3.3). Until then, connector calls run only from Settings › Connectors › Try.
 
 ## Purpose
-Lets FOTW's own Ask agent call tools on MCP servers the user connects: hosted servers (Notion, Linear, HubSpot, GitHub…), custom web servers and local programs. Built on the official `rmcp` SDK, pinned to exactly `3.8.0`, with only its client features compiled. FOTW holds private meeting data, reads input anyone in a meeting can shape, and with connectors gains an outbound channel, so every rule below is enforced here, not in the UI.
+Lets FOTW's own Ask agent call tools on MCP servers the user connects: hosted servers (Notion, Linear, HubSpot, GitHub…), custom web servers and local programs. Built on the official `rmcp` SDK, pinned to exactly `3.9.0`, with only its client features compiled. FOTW holds private meeting data, reads input anyone in a meeting can shape, and with connectors gains an outbound channel, so every rule below is enforced here, not in the UI.
 
 The MCP **server** FOTW ships to other AI apps is a different crate ([fly-mcp](fly-mcp.md)); neither depends on the other.
 
@@ -79,7 +79,7 @@ Values longer than 1,000 characters are split across numbered entries (Windows C
 
 ## Dependencies
 - **Inbound:** `src-tauri` ([app-connectors](app-connectors.md), [app-privacy](app-privacy.md)).
-- **Outbound:** [fly-llm](fly-llm.md) (`ToolSpec`, `ExternalTools`), [fly-secrets](fly-secrets.md), `rmcp =3.8.0` (client, async-rw, Streamable HTTP client over reqwest, auth), `unicode-properties =0.1.4` (general category only), `reqwest`, `tokio`, `url`, `http`, `sha2`; `windows-sys` (Job Objects, suspended start) and `libc` (process groups).
+- **Outbound:** [fly-llm](fly-llm.md) (`ToolSpec`, `ExternalTools`), [fly-secrets](fly-secrets.md), `rmcp =3.9.0` (client, async-rw, Streamable HTTP client over reqwest, auth), `unicode-properties =0.1.4` (general category only), `reqwest`, `tokio`, `url`, `http`, `sha2`; `windows-sys` (Job Objects, suspended start) and `libc` (process groups).
 
 ## Invariants
 Spec §4.3's day-one rules, with the permission model the user chose (per tool: Always allow / Needs approval / Blocked):
