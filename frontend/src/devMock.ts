@@ -3595,6 +3595,14 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return mockFlag("fotwMockUpdate") === "fail"
         ? Promise.reject(new Error("download failed: connection reset by peer"))
         : new Promise(() => {});
+    // Windows installs through the app's own commands (windows_update.rs); the
+    // dev mock reports os "windows", so mirror the plugin mocks above.
+    case "windows_update_download":
+      return mockFlag("fotwMockUpdate") === "fail"
+        ? Promise.reject(new Error("download failed: connection reset by peer"))
+        : new Promise(() => {});
+    case "windows_update_install":
+      return null;
     case "pause_recording":
       mockRecPaused = true;
       return recordingStatus();
