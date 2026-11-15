@@ -44,11 +44,44 @@ fn find_file(root: &Path, name: &str) -> PathBuf {
     walk(root, name, 6).unwrap_or_else(|| panic!("{name} not found under {}", root.display()))
 }
 
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if src.is_dir() {
+            copy_dir(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+/// Copy a sidecar's whole folder (exe + DLLs + ggml backends) under `dir`,
+/// as it sits on a real affected user's machine, and return the new exe.
+fn copy_sidecar(exe: &Path, dir: &Path) -> PathBuf {
+    let src_dir = exe.parent().unwrap();
+    let dst_dir = dir.join("bin");
+    copy_dir(src_dir, &dst_dir);
+    dst_dir.join(exe.file_name().unwrap())
+}
+
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/meeting-fixture.wav")
 }
 
 fn non_ascii_dir() -> tempfile::TempDir {
+    // Earlier tests point TMP/TEMP into their (since deleted) folder: always
+    // start from the real temp dir.
+    static ORIG: std::sync::OnceLock<(std::ffi::OsString, std::ffi::OsString)> =
+        std::sync::OnceLock::new();
+    let (tmp, temp) = ORIG.get_or_init(|| {
+        (
+            std::env::var_os("TMP").unwrap_or_default(),
+            std::env::var_os("TEMP").unwrap_or_default(),
+        )
+    });
+    std::env::set_var("TMP", tmp);
+    std::env::set_var("TEMP", temp);
     let base = tempfile::Builder::new().prefix("fly-").tempdir().unwrap();
     let dir = base.path().join(NON_ASCII_DIR);
     std::fs::create_dir_all(&dir).unwrap();
@@ -79,6 +112,8 @@ async fn sherpa_diarizes_when_every_input_sits_in_a_non_ascii_folder() {
     std::fs::copy(seg_src, &seg).unwrap();
     std::fs::copy(emb_src, &emb).unwrap();
 
+    // exe + DLLs live under the non-ASCII folder too, like a real install
+    let exe = copy_sidecar(&exe, &dir);
     let engine = SherpaDiarizeEngine {
         exe,
         segmentation_model: seg,
@@ -118,6 +153,7 @@ async fn whisper_transcribes_when_model_and_temp_dir_are_non_ascii() {
     std::env::set_var("TMP", &dir);
     std::env::set_var("TEMP", &dir);
 
+    let exe = copy_sidecar(&exe, &dir);
     let engine = WhisperCppEngine {
         exe,
         model,
@@ -136,4 +172,87 @@ async fn whisper_transcribes_when_model_and_temp_dir_are_non_ascii() {
         .await
         .expect("whisper must work with non-ASCII model/temp paths");
     assert!(!out.words.is_empty(), "expected transcribed words");
+}
+
+#[tokio::test]
+#[ignore = "needs the installed whisper-cli (parakeet-cli) + a parakeet model"]
+async fn parakeet_transcribes_when_exe_model_and_temp_dir_are_non_ascii() {
+    use fly_asr::parakeet::ParakeetEngine;
+    let data = app_data();
+    let exe = find_file(&data.join("bin/whisper"), "parakeet-cli.exe");
+    let model_src = find_file(
+        &data.join("models/asr"),
+        "ggml-parakeet-tdt-0.6b-v3-q8_0.bin",
+    );
+
+    let base = non_ascii_dir();
+    let dir = base.path().join(NON_ASCII_DIR);
+    let model = dir.join("parakeet.bin");
+    let wav = dir.join("meeting.wav");
+    std::fs::copy(model_src, &model).unwrap();
+    std::fs::copy(fixture(), &wav).unwrap();
+    std::env::set_var("TMP", &dir);
+    std::env::set_var("TEMP", &dir);
+    let exe = copy_sidecar(&exe, &dir);
+
+    let engine = ParakeetEngine {
+        exe,
+        model,
+        threads: 4,
+        force_cpu: true,
+        resume: false,
+    };
+    let out = engine
+        .transcribe(&wav, &TranscribeOptions::default())
+        .await
+        .expect("parakeet must work with non-ASCII exe/model/temp paths");
+    assert!(!out.words.is_empty());
+}
+
+/// The common-ancestor fallback (short names disabled) against the real
+/// sidecar: ASCII relative arguments, cwd = the non-ASCII folder.
+#[test]
+#[ignore = "needs the installed sherpa sidecar + diarization models"]
+fn sherpa_runs_through_the_relative_path_fallback() {
+    let data = app_data();
+    let exe = find_file(
+        &data.join("bin/sherpa"),
+        "sherpa-onnx-offline-speaker-diarization.exe",
+    );
+    let seg_src = find_file(&data.join("models/diarize"), "model.onnx");
+    let emb_src = find_file(&data.join("models/diarize"), "campplus.onnx");
+
+    let base = non_ascii_dir();
+    let dir = base.path().join(NON_ASCII_DIR);
+    let (wav, seg, emb) = (
+        dir.join("meeting.wav"),
+        dir.join("segmentation.onnx"),
+        dir.join("embedding.onnx"),
+    );
+    std::fs::copy(fixture(), &wav).unwrap();
+    std::fs::copy(seg_src, &seg).unwrap();
+    std::fs::copy(emb_src, &emb).unwrap();
+    let exe = copy_sidecar(&exe, &dir);
+
+    let sp = fly_sidecar::prepare_relative_only(&[&seg, &emb, &wav]).unwrap();
+    assert_eq!(sp.current_dir.as_deref(), Some(dir.as_path()));
+    assert!(sp.args.iter().all(|a| a.to_str().unwrap().is_ascii()));
+    let out = std::process::Command::new(&exe)
+        .current_dir(sp.current_dir.unwrap())
+        .arg(format!(
+            "--segmentation.pyannote-model={}",
+            sp.args[0].display()
+        ))
+        .arg(format!("--embedding.model={}", sp.args[1].display()))
+        .arg("--clustering.cluster-threshold=0.9")
+        .arg(&sp.args[2])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "sherpa via relative paths: {} {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("speaker_"));
 }

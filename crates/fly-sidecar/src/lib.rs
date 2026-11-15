@@ -50,6 +50,14 @@ pub fn prepare(paths: &[&Path]) -> Result<SidecarPaths, String> {
     }
 }
 
+/// The "short names are disabled" strategy on its own — lets tests drive a
+/// real sidecar through the relative-path fallback on a machine where 8.3
+/// names work. Not for product code.
+#[doc(hidden)]
+pub fn prepare_relative_only(paths: &[&Path]) -> Result<SidecarPaths, String> {
+    resolve(paths, &|_| None)
+}
+
 fn is_ascii_path(p: &Path) -> bool {
     p.as_os_str().to_str().is_some_and(str::is_ascii)
 }
