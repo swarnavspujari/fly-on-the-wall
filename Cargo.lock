@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "fly-app"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "fly-ask"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1413,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "fly-asr"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "async-trait",
  "fly-audio",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "fly-audio"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "block2",
  "claxon",
@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "fly-calendar"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "fly-capture-screen"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "fly-core",
  "parking_lot",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "fly-context"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "chrono",
  "fly-core",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "fly-core"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "chrono",
  "serde",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "fly-diarize"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "async-trait",
  "fly-core",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "fly-evals"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "fly-llm"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "async-trait",
  "fly-core",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "fly-mcp"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "fly-mcp-client"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "fly-secrets"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "keyring",
  "thiserror 2.0.21",
@@ -1625,14 +1625,14 @@ dependencies = [
 
 [[package]]
 name = "fly-sidecar"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "fly-storage"
-version = "2.5.1"
+version = "2.5.2"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
