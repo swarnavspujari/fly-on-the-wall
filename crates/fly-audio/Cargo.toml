@@ -16,7 +16,7 @@ tracing.workspace = true
 cpal.workspace = true
 hound.workspace = true
 # lock-free SPSC ring between the capture callbacks and the WAV writer
-rtrb = "0.3"
+rtrb = "0.4"
 flacenc.workspace = true
 claxon.workspace = true
 md-5.workspace = true
