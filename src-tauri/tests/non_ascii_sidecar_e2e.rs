@@ -85,7 +85,7 @@ fn non_ascii_dir() -> tempfile::TempDir {
     let base = tempfile::Builder::new().prefix("fly-").tempdir().unwrap();
     let dir = base.path().join(NON_ASCII_DIR);
     std::fs::create_dir_all(&dir).unwrap();
-    // Re-root the TempDir guard on the parent so cleanup removes everything.
+    // The guard owns the ASCII parent, so dropping it removes the non-ASCII child too.
     assert!(!dir.to_str().unwrap().is_ascii());
     base
 }
