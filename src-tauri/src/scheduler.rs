@@ -92,11 +92,12 @@ pub fn enqueue(state: &AppState, on_stage: StageSink<'_>, meeting_id: &str) -> R
 /// person (install / go online / pick another model) — those already ran
 /// their own multi-source retries inside `models::ensure`, so the job fails
 /// once with its actionable notice instead of re-downloading three times.
-fn permanent_failure(error: &str) -> bool {
+pub(crate) fn permanent_failure(error: &str) -> bool {
     error.contains(pipeline::ERR_NO_RECORDING_FILES)
         || error.contains(fly_asr::REJECTED_MARKER)
         || error.contains(models::ENGINE_MISSING_MARKER)
         || error.contains(models::DOWNLOAD_FAILED_MARKER)
+        || error.contains(fly_sidecar::NON_ASCII_PATH_MARKER)
 }
 
 /// True when the pipeline stopped because the user asked it to (note
