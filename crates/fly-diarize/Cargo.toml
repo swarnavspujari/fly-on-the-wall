@@ -26,8 +26,24 @@ hound.workspace = true
 # (sherpa.rs::ensure_ort_dylib); Intel macOS never constructs the in-process
 # refiner in the first place (pipeline keeps the measured agglomerative
 # operating point there — docs/BENCHMARKS.md Phase 2a).
+#
+# ort's defaults minus `copy-dylibs`. That feature makes ort-sys's build
+# script copy the prebuilt's DirectML.dll to `OUT_DIR/../../..` plus its
+# `examples/` and `deps/` subdirectories, a guess at the old target layout.
+# Since Cargo 1.100 (build-dir new layout) that resolves to
+# `target/<profile>/build/`, whose `examples/` doesn't exist, and the build
+# script panics wherever symlinks work (CI's Windows runners). The copy never
+# fed the app: the bundle doesn't ship DirectML.dll, and Windows loads it
+# from System32.
 [target.'cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "x86_64"))))'.dependencies]
-ort = "2.0.0-rc.13"
+ort = { version = "2.0.0-rc.13", default-features = false, features = [
+  "std",
+  "ndarray",
+  "tracing",
+  "download-binaries",
+  "tls-native",
+  "api-27",
+] }
 
 [target.'cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
 ort = { version = "2.0.0-rc.13", features = ["load-dynamic"] }

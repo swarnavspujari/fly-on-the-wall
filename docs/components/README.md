@@ -40,7 +40,7 @@ Three layers:
 | [fly-storage](fly-storage.md) | SQLite index (FTS5, vectors, migrations) plus the user-owned files on disk: atomic mirrors, manifests, self-heal, path containment, scratch, erase. |
 | [fly-secrets](fly-secrets.md) | `SecretStore` over the OS keychain. Every API key and OAuth token lives here. |
 | [fly-mcp](fly-mcp.md) | The `flyonthewall-mcp` stdio MCP server: read-only tools over fly-storage, plus one label write. |
-| [fly-mcp-client](fly-mcp-client.md) | Connectors (beta): FOTW's Ask agent calling tools on MCP servers the user connects, on `rmcp` 3.8.0, with the spec §4.3 safety rules (approval bound to a config hash, pinned tool definitions, per-tool permissions, fenced results, https-only network guard, OAuth, keychain secrets). |
+| [fly-mcp-client](fly-mcp-client.md) | Connectors (beta): FOTW's Ask agent calling tools on MCP servers the user connects, on `rmcp` 3.9.0, with the spec §4.3 safety rules (approval bound to a config hash, pinned tool definitions, per-tool permissions, fenced results, https-only network guard, OAuth, keychain secrets). |
 
 ### Backend features (`src-tauri/src`)
 
