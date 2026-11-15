@@ -43,7 +43,7 @@ bzip2.workspace = true
 flate2.workspace = true
 xz2.workspace = true
 hex = "0.4"
-sysinfo = "0.39"
+sysinfo = "0.40"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
