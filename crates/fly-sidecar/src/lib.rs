@@ -187,13 +187,6 @@ fn platform_short_path(p: &Path) -> Option<PathBuf> {
     None
 }
 
-#[cfg(not(windows))]
-fn platform_short_path(p: &Path) -> Option<PathBuf> {
-    // Never reached for a path the OS needs help with: other platforms pass
-    // UTF-8 argv through, so `prepare` is the identity there.
-    Some(p.to_path_buf())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
