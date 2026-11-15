@@ -125,7 +125,7 @@ None. The `settings` table is documented as non-secret (`settings.rs:1`); keys l
 
 ## Dependencies
 - **Inbound:** the app crate `fly-app` (every command module plus `state.rs`, `scheduler.rs`, `pipeline.rs`, `embeddings.rs`, `privacy.rs`, `lib.rs:156` self-heal); `fly-mcp` (opens with `open_existing`, `crates/fly-mcp/src/lib.rs:227`; reads, plus `relabel_speaker` for `set_speaker_label`, `lib.rs:889`, which writes transcript mirrors from a second process); `fly-context` (reads only; used by fly-mcp and the Ask harness); `fly-ask` (scope resolution reads: meetings, folders, keep-local sets, transcripts).
-- **Outbound:** `fly-core` (Note, Meeting, Transcript, RecordingRef, Attendee, MeetingItem), `rusqlite` 0.40 with `bundled` (SQLite with FTS5), `serde`/`serde_json`, `chrono`, `dirs` (scratch root), `tracing`, `thiserror`. Dev: `tempfile`.
+- **Outbound:** `fly-core` (Note, Meeting, Transcript, RecordingRef, Attendee, MeetingItem), `rusqlite` 0.41 with `bundled` (SQLite 3.54 with FTS5), `serde`/`serde_json`, `chrono`, `dirs` (scratch root), `tracing`, `thiserror`. Dev: `tempfile`.
 
 ## Invariants
 - Recursive deletes of meeting folders stay inside `recordings/<folder>`: `contained_recordings_dir` on `purge_meeting` (`meetings.rs:124`), `delete_meeting_audio` (`privacy.rs:538`), retention age check (`privacy.rs:505`), scratch sweep (`scratch.rs:305`). THREAT_MODEL T3/T7.

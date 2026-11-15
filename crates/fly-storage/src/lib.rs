@@ -259,7 +259,7 @@ impl Storage {
             std::fs::create_dir_all(data_dir.join(sub))?;
         }
         migrations::rename_legacy_db(data_dir)?;
-        let conn = Connection::open(data_dir.join(Self::DB_FILE))?;
+        let mut conn = Connection::open(data_dir.join(Self::DB_FILE))?;
         Self::persist_wal(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -267,7 +267,7 @@ impl Storage {
         // lingering in free pages until reused (confidential-data disposal).
         conn.pragma_update(None, "secure_delete", "ON")?;
         let storage = Self {
-            read_cache: cache::ReadCache::watching(&conn)?,
+            read_cache: cache::ReadCache::watching(&mut conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
             folder_leases: Default::default(),
@@ -351,7 +351,7 @@ impl Storage {
                 "no Fly on the Wall database yet — open the app once to create it".into(),
             ));
         }
-        let conn = Connection::open_with_flags(
+        let mut conn = Connection::open_with_flags(
             &db,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
@@ -366,7 +366,7 @@ impl Storage {
         conn.pragma_update(None, "secure_delete", "ON")?;
         Self::check_schema(&conn)?;
         Ok(Self {
-            read_cache: cache::ReadCache::watching(&conn)?,
+            read_cache: cache::ReadCache::watching(&mut conn)?,
             conn,
             data_dir: data_dir.to_path_buf(),
             folder_leases: Default::default(),
