@@ -57,6 +57,10 @@ const $$ = (sel: string) => [...host!.querySelectorAll<HTMLElement>(sel)];
 const byText = (text: string) =>
   $$("button, label, span, [role]").find((el) => el.textContent?.trim() === text) ?? null;
 const text = () => host!.textContent ?? "";
+const chipEl = (label: string) =>
+  $$("span[title]").find((el) => el.textContent?.trim().startsWith(label)) ?? null;
+const title = (label: string) => chipEl(label)?.getAttribute("title");
+const dot = (label: string) => chipEl(label)?.querySelector<HTMLElement>("span")?.style.background;
 const chipButton = (label: string) => host!.querySelector(`button[aria-label="${label}"]`);
 
 async function click(el: Element | null) {
@@ -129,12 +133,28 @@ describe("RecordingBar", () => {
     expect(h.onOpenPrivacySettings).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the chips with no warnings, without claiming the mic is fine", async () => {
+  it("shows the chips with no activity data exactly as before", async () => {
     await mount(status());
-    const chip = (label: string) =>
-      $$("span[title]").find((el) => el.textContent?.trim() === label) ?? null;
-    expect(chip("You")?.getAttribute("title")).toBe("Your microphone: not monitored yet");
-    expect(chip("Others")?.getAttribute("title")).toContain("no problems detected");
+    expect(dot("You")).toBe("var(--text-3)");
+    expect(title("You")).toBe("Your microphone: not monitored yet");
+    expect(title("Others")).toContain("no problems detected");
+  });
+
+  it("turns the You dot green when the mic is heard, with a text state", async () => {
+    await mount(status({ mic_active: true, system_active: false }));
+    expect(dot("You")).toBe("var(--success)");
+    expect(title("You")).toBe("Your microphone: picking up sound");
+    // the state is in text, not only colour
+    expect(chipEl("You")?.querySelector(".sr-only")?.textContent).toContain("picking up sound");
+    expect(dot("Others")).toBe("var(--text-3)");
+    expect(title("Others")).toBe("The other participants' audio: quiet right now");
+    expect(chipEl("Others")?.querySelector(".sr-only")?.textContent).toContain("quiet");
+  });
+
+  it("a warning still takes over a chip that is hearing sound", async () => {
+    await mount(status({ warnings: [MUTED], mic_active: true, system_active: true }));
+    expect(chipButton("Others · Output muted")).not.toBeNull();
+    expect(dot("You")).toBe("var(--success)");
   });
 
   it("gives focus back when a warning clears with its details open", async () => {

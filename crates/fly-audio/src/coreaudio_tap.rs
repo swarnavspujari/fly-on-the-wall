@@ -422,6 +422,7 @@ impl TapRecorder {
                         );
                         w.silence(pad, false, now_ms);
                         let mut had_signal = 0u64;
+                        let mut peak: i16 = 0;
                         for frame in 0..frames {
                             let mut sum = 0f32;
                             let mut n = 0u32;
@@ -440,8 +441,10 @@ impl TapRecorder {
                             if value != 0 {
                                 had_signal += 1;
                             }
+                            peak = peak.max(value.saturating_abs());
                             w.push(value);
                         }
+                        w.note_peak(peak, now_ms);
                         w.end_packet();
                         w.note_time(now_ms);
                         written.store(w.timeline(), Ordering::Relaxed);

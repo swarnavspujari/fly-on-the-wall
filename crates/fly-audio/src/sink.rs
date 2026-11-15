@@ -88,9 +88,44 @@ pub(crate) struct ChannelStats {
     /// Silence still owed to the timeline when the producer closed; the
     /// writer appends it at finalize.
     pub unflushed: AtomicU64,
+    /// Recording time (ms) of the most recent packet whose peak reached
+    /// [`AUDIBLE_PEAK`], + 1 (0 = never). Read by the live status poll.
+    last_audible_at_ms: AtomicU64,
 }
 
+/// A packet counts as sound when its peak reaches this: -42 dBFS. Above a
+/// quiet room's noise floor (about -55 dBFS), below ordinary speech
+/// (about -30 dBFS and up) even at a distance from the mic.
+pub(crate) const AUDIBLE_PEAK: i16 = 260;
+
+/// How long a channel stays "active" after the last audible packet (ms):
+/// long enough to bridge the pauses between words, short enough that the
+/// meter reads silence within a beat of someone stopping.
+pub(crate) const ACTIVE_HOLD_MS: u64 = 1_500;
+
 impl ChannelStats {
+    /// Note a packet's peak (mono i16, absolute). Wait-free: safe in the
+    /// capture callback.
+    #[inline]
+    pub(crate) fn note_peak(&self, peak: i16, at_ms: u64) {
+        if peak >= AUDIBLE_PEAK {
+            self.last_audible_at_ms
+                .fetch_max(at_ms.saturating_add(1), Ordering::Relaxed);
+        }
+    }
+
+    /// Was sound heard in the `hold_ms` up to `now_ms` (recording time)?
+    pub(crate) fn heard_within(&self, now_ms: u64, hold_ms: u64) -> bool {
+        match self
+            .last_audible_at_ms
+            .load(Ordering::Relaxed)
+            .checked_sub(1)
+        {
+            Some(at) => now_ms.saturating_sub(at) <= hold_ms,
+            None => false,
+        }
+    }
+
     pub(crate) fn lost_frames(&self) -> u64 {
         self.lost.load(Ordering::Relaxed) + self.overflow.load(Ordering::Relaxed)
     }
@@ -212,6 +247,12 @@ impl Drop for ChannelProducer {
 impl ChannelProducer {
     pub(crate) fn stats(&self) -> &ChannelStats {
         &self.stats
+    }
+
+    /// Record a packet's peak for the live "heard recently" status.
+    #[inline]
+    pub(crate) fn note_peak(&self, peak: i16, at_ms: u64) {
+        self.stats.note_peak(peak, at_ms);
     }
 
     /// Frames on this channel's timeline (what the file will hold once the
@@ -595,6 +636,53 @@ mod tests {
             .samples::<i16>()
             .map(|s| s.unwrap())
             .collect()
+    }
+
+    fn peak_of(amplitude: f32) -> i16 {
+        (amplitude * i16::MAX as f32) as i16
+    }
+
+    #[test]
+    fn speech_level_marks_the_channel_active_then_it_lapses() {
+        let stats = ChannelStats::default();
+        // never heard: not active, whatever the clock says
+        assert!(!stats.heard_within(0, ACTIVE_HOLD_MS));
+        assert!(!stats.heard_within(10_000, ACTIVE_HOLD_MS));
+        stats.note_peak(peak_of(0.1), 5_000);
+        assert!(stats.heard_within(5_000, ACTIVE_HOLD_MS));
+        assert!(stats.heard_within(5_000 + ACTIVE_HOLD_MS, ACTIVE_HOLD_MS));
+        // a silent window longer than the hold: inactive again
+        assert!(!stats.heard_within(5_000 + ACTIVE_HOLD_MS + 1, ACTIVE_HOLD_MS));
+        // quiet packets after it don't extend it
+        stats.note_peak(0, 6_000);
+        assert!(!stats.heard_within(7_000, ACTIVE_HOLD_MS));
+    }
+
+    #[test]
+    fn a_recording_starting_at_zero_ms_still_counts_as_heard() {
+        let stats = ChannelStats::default();
+        stats.note_peak(peak_of(0.1), 0);
+        assert!(stats.heard_within(100, ACTIVE_HOLD_MS));
+    }
+
+    #[test]
+    fn room_noise_below_the_threshold_never_marks_it_active() {
+        let stats = ChannelStats::default();
+        // -50 dBFS (a quiet room) and one step under the threshold
+        stats.note_peak(peak_of(0.003), 1_000);
+        stats.note_peak(AUDIBLE_PEAK - 1, 1_100);
+        assert!(!stats.heard_within(1_100, ACTIVE_HOLD_MS));
+        stats.note_peak(AUDIBLE_PEAK, 1_200);
+        assert!(stats.heard_within(1_200, ACTIVE_HOLD_MS));
+    }
+
+    #[test]
+    fn audibility_reaches_the_session_side_through_the_producer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, sink) = channel(dir.path().join("a.wav"), 8_000).unwrap();
+        let stats = sink.stats();
+        tx.note_peak(peak_of(0.1), 2_000);
+        assert!(stats.heard_within(2_500, ACTIVE_HOLD_MS));
     }
 
     #[test]

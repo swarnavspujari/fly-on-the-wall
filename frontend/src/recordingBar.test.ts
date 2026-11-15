@@ -98,12 +98,38 @@ describe("classifyWarning", () => {
 });
 
 describe("healthChips", () => {
-  it("never claims the mic is fine: nothing monitors it yet", () => {
-    const chips = healthChips([], false);
-    expect(chips.map((c) => [c.side, c.tone, c.label])).toEqual([
-      ["you", "unmonitored", "You"],
-      ["others", "ok", "Others"],
+  it("keeps today's chips when nothing is measured (unknown)", () => {
+    for (const activity of [undefined, {}, { you: null, others: null }]) {
+      const chips = healthChips([], false, activity);
+      expect(chips.map((c) => [c.side, c.tone, c.label])).toEqual([
+        ["you", "unmonitored", "You"],
+        ["others", "ok", "Others"],
+      ]);
+    }
+  });
+
+  it("one rule for both sides: heard recently is ok, known silent is quiet", () => {
+    const heard = healthChips([], false, { you: true, others: true });
+    expect(heard.map((c) => c.tone)).toEqual(["ok", "ok"]);
+    const silent = healthChips([], false, { you: false, others: false });
+    expect(silent.map((c) => [c.tone, c.label])).toEqual([
+      ["quiet", "You"],
+      ["quiet", "Others"],
     ]);
+    const mixed = healthChips([], false, { you: true, others: false });
+    expect(mixed.map((c) => c.tone)).toEqual(["ok", "quiet"]);
+  });
+
+  it("a warning wins over activity on its own side only", () => {
+    const [you, others] = healthChips([MUTED], false, { you: false, others: true });
+    expect(you.tone).toBe("quiet");
+    expect(others.tone).toBe("warn");
+    expect(others.warnings.map((w) => w.text)).toEqual([MUTED]);
+  });
+
+  it("paused beats activity", () => {
+    const chips = healthChips([], true, { you: true, others: false });
+    expect(chips.map((c) => c.tone)).toEqual(["paused", "paused"]);
   });
 
   it("flags only the side a warning belongs to", () => {

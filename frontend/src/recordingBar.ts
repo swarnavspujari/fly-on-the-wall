@@ -2,8 +2,10 @@
 // onto the You / Others health chips, and the "Remind me to tell people"
 // setting. Kept free of React and IPC so vitest covers it directly.
 //
-// There are no live level meters yet (spec §3.3.1): the chips only reflect
-// `RecordingStatus.warnings`, so "ok" means "no problems detected".
+// The chips reflect `RecordingStatus.warnings` and, when the backend reports
+// it, whether each side was heard in the last ~1.5 s (`mic_active` /
+// `system_active`). Without that reading a chip falls back to "no problems
+// detected" (Others) or "not monitored" (You).
 
 /** Settings key for "Remind me to tell people" (webview-settable `ui.` prefix). */
 export const REMIND_NOTICE_KEY = "ui.recording.remind_notice";
@@ -62,28 +64,59 @@ export function classifyWarning(text: string): CaptureWarning {
 
 export interface HealthChip {
   side: CaptureSide;
-  /** "ok": checked, no problems detected (the other participants' audio:
-   *  mute, volume, loopback start, macOS silence) · "unmonitored": nothing
-   *  checks it yet (your mic, until level meters land) · "warn": a warning
-   *  applies · "paused". */
-  tone: "ok" | "unmonitored" | "warn" | "paused";
+  /** "ok": that side was heard in the last ~1.5 s (or, with no reading, the
+   *  other participants' audio with no problems detected) · "quiet": it was
+   *  not · "unmonitored": no reading and nothing else checks it (your mic) ·
+   *  "warn": a warning applies · "paused". */
+  tone: "ok" | "quiet" | "unmonitored" | "warn" | "paused";
   label: string;
   warnings: CaptureWarning[];
+  /** The tone comes from a level reading, not from the absence of warnings. */
+  measured: boolean;
 }
 
-/** The two chips in the bar, You first. A side with warnings stays flagged
- *  while paused; the rest go neutral because nothing is being captured. */
-export function healthChips(warnings: readonly string[], paused: boolean): HealthChip[] {
+/** Was each side heard in the last ~1.5 s (`RecordingStatus.mic_active` /
+ *  `system_active`)? `null` / absent: not measured. */
+export interface SideActivity {
+  you?: boolean | null;
+  others?: boolean | null;
+}
+
+/** The two chips in the bar, You first, one rule for both: a warning wins;
+ *  otherwise heard recently is "ok" (green), known silent is "quiet" (grey),
+ *  and with no reading the chip is what it was before levels existed. A side
+ *  with warnings stays flagged while paused; the rest go neutral because
+ *  nothing is being captured. */
+export function healthChips(
+  warnings: readonly string[],
+  paused: boolean,
+  activity: SideActivity = {},
+): HealthChip[] {
   const all = warnings.map(classifyWarning);
   return (["you", "others"] as const).map((side) => {
     const mine = all.filter((w) => w.side === side);
     const name = side === "you" ? "You" : "Others";
     if (mine.length === 0) {
-      const quiet = side === "you" ? "unmonitored" : "ok";
-      return { side, tone: paused ? "paused" : quiet, label: name, warnings: [] };
+      const heard = activity[side];
+      const tone: HealthChip["tone"] = paused
+        ? "paused"
+        : heard === true
+          ? "ok"
+          : heard === false
+            ? "quiet"
+            : side === "you"
+              ? "unmonitored"
+              : "ok";
+      return { side, tone, label: name, warnings: [], measured: typeof heard === "boolean" };
     }
     const more = mine.length > 1 ? ` +${mine.length - 1}` : "";
-    return { side, tone: "warn", label: `${name} · ${mine[0].label}${more}`, warnings: mine };
+    return {
+      side,
+      tone: "warn",
+      label: `${name} · ${mine[0].label}${more}`,
+      warnings: mine,
+      measured: typeof activity[side] === "boolean",
+    };
   });
 }
 

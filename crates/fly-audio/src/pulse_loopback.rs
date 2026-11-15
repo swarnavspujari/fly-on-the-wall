@@ -88,9 +88,13 @@ impl PulseRecorder {
                     );
                     producer.silence(pad, false, now_ms);
                     let (pairs, _tail) = buf.as_chunks::<2>();
+                    let mut peak: i16 = 0;
                     for pair in pairs {
-                        producer.push(i16::from_le_bytes(*pair));
+                        let sample = i16::from_le_bytes(*pair);
+                        peak = peak.max(sample.saturating_abs());
+                        producer.push(sample);
                     }
+                    producer.note_peak(peak, now_ms);
                     producer.end_packet();
                     producer.note_time(now_ms);
                 }
