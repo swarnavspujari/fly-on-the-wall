@@ -193,6 +193,17 @@ impl CaptureHealth {
         out
     }
 
+    fn activity(&self, now_ms: u64) -> crate::CaptureActivity {
+        let heard = |c: &Option<(Arc<ChannelStats>, u32)>| {
+            c.as_ref()
+                .map(|(s, _)| s.heard_within(now_ms, sink::ACTIVE_HOLD_MS))
+        };
+        crate::CaptureActivity {
+            mic: heard(&self.mic),
+            system: heard(&self.system),
+        }
+    }
+
     fn report(&self) -> CaptureHealthReport {
         CaptureHealthReport {
             mic: self.mic.as_ref().map(|(s, r)| s.report(*r)),
@@ -300,6 +311,12 @@ impl CaptureSession for CpalSession {
 
     fn health(&self) -> CaptureHealthReport {
         self.health.report()
+    }
+
+    fn activity(&self) -> Option<crate::CaptureActivity> {
+        // paused: the clock is frozen, so "recently" means nothing
+        (self.state == CaptureState::Recording)
+            .then(|| self.health.activity(self.clock.elapsed_ms()))
     }
 }
 
@@ -875,6 +892,7 @@ fn build_stream(
                         producer.push(sample);
                     }
                     gaps.end_packet(peak);
+                    producer.note_peak(peak, at_ms);
                     producer.end_packet();
                     producer.note_time(at_ms);
                 },
@@ -968,6 +986,21 @@ mod tests {
         let r = h.report();
         assert!(r.system.unwrap().device_lost);
         assert_eq!(r.mic.unwrap().write_failed_ms, 10);
+    }
+
+    #[test]
+    #[allow(clippy::needless_update)]
+    fn activity_is_per_channel_and_unknown_without_a_channel() {
+        let mic = Arc::new(ChannelStats::default());
+        let h = CaptureHealth {
+            mic: Some((mic.clone(), 48_000)),
+            ..Default::default()
+        };
+        mic.note_peak(3_000, 10_000);
+        let a = h.activity(10_500);
+        assert_eq!((a.mic, a.system), (Some(true), None));
+        let a = h.activity(10_000 + sink::ACTIVE_HOLD_MS + 1);
+        assert_eq!(a.mic, Some(false));
     }
 
     #[test]

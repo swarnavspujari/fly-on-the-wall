@@ -134,9 +134,9 @@ function useTranscribesOnStop(meetingId: string | null) {
 }
 
 /** One side of the call (You = your mic, Others = system audio). With no
- *  warning it's a quiet status chip; with one it turns ink and opens the
- *  full cause and fix. There are no live meters yet (spec §3.3.1): nothing
- *  checks the mic, so "You" never shows a green "fine". */
+ *  warning it's a quiet status chip, green while that side was heard in the
+ *  last ~1.5 s and grey when it wasn't; with a warning it turns ink and opens
+ *  the full cause and fix. */
 function HealthChipView({
   chip,
   onOpenPrivacySettings,
@@ -162,23 +162,34 @@ function HealthChipView({
 
   const name = chip.side === "you" ? "You" : "Others";
   if (!warn) {
+    const who = chip.side === "you" ? "Your microphone" : "The other participants' audio";
+    // the state in words: [tooltip, short form for screen readers]
+    const [state, short] =
+      chip.tone === "paused"
+        ? ["Paused", "paused"]
+        : chip.tone === "quiet"
+          ? [`${who}: quiet right now`, "quiet"]
+          : chip.tone === "unmonitored"
+            ? [`${who}: not monitored yet`, "not monitored"]
+            : chip.measured
+              ? [
+                  `${who}: ${chip.side === "you" ? "picking up sound" : "playing"}`,
+                  chip.side === "you" ? "picking up sound" : "playing",
+                ]
+              : [`${who}: no problems detected`, "no problems detected"];
     return (
       <span ref={wrapRef} tabIndex={-1} className="inline-flex flex-none outline-none">
         <span
           className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-[3px] text-[12px] font-semibold text-text-2"
-          title={
-            chip.tone === "paused"
-              ? "Paused"
-              : chip.tone === "unmonitored"
-                ? "Your microphone: not monitored yet"
-                : "The other participants' audio: no problems detected"
-          }
+          title={state}
         >
           <span
             className="h-[7px] w-[7px] flex-none rounded-full"
             style={{ background: chip.tone === "ok" ? "var(--success)" : "var(--text-3)" }}
           />
           {chip.label}
+          {/* the state in words too: the dot's colour alone isn't enough */}
+          <span className="sr-only">{`: ${short}`}</span>
         </span>
       </span>
     );
@@ -347,7 +358,10 @@ export default function RecordingBar({
     notice.closeReminder();
   };
   const paused = status.state === "paused";
-  const chips = healthChips(status.warnings, paused);
+  const chips = healthChips(status.warnings, paused, {
+    you: status.mic_active,
+    others: status.system_active,
+  });
   const warned = chips.filter((c) => c.tone === "warn");
   const copyLabel =
     notice.copied === "copied"

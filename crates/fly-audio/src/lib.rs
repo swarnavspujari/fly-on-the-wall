@@ -132,6 +132,20 @@ pub trait CaptureSession: Send {
     fn health(&self) -> CaptureHealthReport {
         CaptureHealthReport::default()
     }
+    /// Whether each channel was heard in the last ~1.5 s, for the live
+    /// You / Others chips. `None` where the session doesn't measure it.
+    fn activity(&self) -> Option<CaptureActivity> {
+        None
+    }
+}
+
+/// Which channels carried sound just now. `None` for a channel that isn't
+/// being recorded (or can't be measured), so the UI shows "unknown", not
+/// "quiet".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureActivity {
+    pub mic: Option<bool>,
+    pub system: Option<bool>,
 }
 
 /// Outcome of the macOS system-audio consent probe: a short throwaway tap

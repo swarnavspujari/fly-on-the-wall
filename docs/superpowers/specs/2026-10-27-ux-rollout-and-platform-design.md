@@ -97,7 +97,7 @@ Format per screen: **Agree**, **Push back**, then build notes. Sizes: S < ½ day
 **Agree.** One fixed-height row, warnings become a chip, "Copy recording notice" in the bar, **"Stop and transcribe"**.
 
 **Push back**
-1. **Live health meters need peak metering in three capture backends (L).** v1 drives You/Others chips from the existing `status.warnings` (muted output, loopback never started, macOS silence). Real meters come in Phase 4 with the sound-check API.
+1. **Live health meters need peak metering in three capture backends (L).** v1 drives You/Others chips from the existing `status.warnings` (muted output, loopback never started, macOS silence). ~~Real meters come in Phase 4 with the sound-check API.~~ **Shipped (a lighter form):** every backend records whether its channel was audible (peak ≥ -42 dBFS) in the last ~1.5 s, `RecordingStatus.mic_active` / `system_active` carry it, and both chips use one rule: warnings win, heard → green, silent → grey "quiet". Not a level meter; the sound-check API is still Phase 4.
 2. **The speaker card must not auto-confirm calendar attendees.** Wrong counts merge real voices; that's why rosters stay unconfirmed. The card offers "Looks right" (confirms) and edits. "Just a count" has no data field (`Meeting.attendees` only); defer it.
 3. **"Diarization runs async and doesn't block the transcript" isn't a UX change.** The transcript is saved only after alignment; decoupling needs a two-phase save (L). Deferred.
 4. Keep the "participants notified" state. "Remind me" defaults on.

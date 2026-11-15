@@ -1159,6 +1159,11 @@ function upcoming() {
   };
 }
 
+function heardFlag(): boolean | null {
+  const v = typeof localStorage === "undefined" ? null : localStorage.getItem("fotwMockHeard");
+  return v === "1" ? true : v === "0" ? false : null;
+}
+
 function recordingStatus() {
   const qa = mockRecordingQa();
   if (qa) return qa;
@@ -1169,6 +1174,9 @@ function recordingStatus() {
       elapsed_ms: 154_000,
       meeting_id: "m1",
       note_id: "n1",
+      // + fotwMockHeard = "1" (heard) / "0" (quiet): the You / Others level chips
+      mic_active: heardFlag(),
+      system_active: heardFlag(),
       warnings:
         // + fotwMockTapDenied → the macOS tap-silence warning, which carries
         // the RecordingBar's inline "Open Settings" action.

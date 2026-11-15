@@ -30,6 +30,11 @@ pub struct RecordingStatus {
     /// silent loopback). Re-checked on every status poll so mid-meeting mutes
     /// surface while there is still time to fix them.
     pub warnings: Vec<String>,
+    /// Your microphone carried sound in the last ~1.5 s. `None`: not
+    /// measured (paused, or no such channel) — the chip shows "unknown".
+    pub mic_active: Option<bool>,
+    /// The same for the system audio (the other participants).
+    pub system_active: Option<bool>,
 }
 
 impl RecordingStatus {
@@ -41,6 +46,8 @@ impl RecordingStatus {
             meeting_id: None,
             note_id: None,
             warnings: Vec::new(),
+            mic_active: None,
+            system_active: None,
         }
     }
 
@@ -49,7 +56,10 @@ impl RecordingStatus {
         // "system volume is low" when both apply
         let mut all = rec.session.warnings();
         all.extend(warnings);
+        let activity = rec.session.activity().unwrap_or_default();
         Self {
+            mic_active: activity.mic,
+            system_active: activity.system,
             active: true,
             state: Some(rec.session.state()),
             elapsed_ms: rec.session.elapsed_ms(),

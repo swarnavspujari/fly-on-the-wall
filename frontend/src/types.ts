@@ -253,6 +253,10 @@ export interface RecordingStatus {
   meeting_id: string | null;
   note_id: string | null;
   warnings: string[];
+  /** Sound was heard on the mic / system audio in the last ~1.5 s. null or
+   *  absent: not measured (paused, no such channel). */
+  mic_active?: boolean | null;
+  system_active?: boolean | null;
 }
 
 /** macOS system-audio consent probe (`preflight_system_audio`). The verdict
