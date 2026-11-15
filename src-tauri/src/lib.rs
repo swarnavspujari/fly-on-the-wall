@@ -31,6 +31,8 @@ mod screen_commands;
 mod startup;
 pub mod state;
 pub mod video_store;
+#[cfg(desktop)]
+mod windows_update;
 
 use tauri::Manager;
 
@@ -81,6 +83,7 @@ pub fn run() {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app.handle().plugin(tauri_plugin_process::init())?;
+                app.manage(windows_update::PendingUpdate::default());
             }
             let handle = app.handle().clone();
             // A first launch after an update can take tens of seconds on a
@@ -101,6 +104,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             startup::library_status,
+            #[cfg(desktop)]
+            windows_update::windows_update_download,
+            #[cfg(desktop)]
+            windows_update::windows_update_install,
             commands::ping,
             commands::app_info,
             commands::list_folders,
