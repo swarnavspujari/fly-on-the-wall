@@ -36,7 +36,18 @@ pub struct SidecarPaths {
 /// from the paths' common ancestor with ASCII relative paths; if even that
 /// is impossible, an actionable error containing [`NON_ASCII_PATH_MARKER`].
 pub fn prepare(paths: &[&Path]) -> Result<SidecarPaths, String> {
-    resolve(paths, &platform_short_path)
+    // macOS/Linux sidecars take UTF-8 argv: nothing to work around.
+    #[cfg(not(windows))]
+    {
+        Ok(SidecarPaths {
+            args: paths.iter().map(|p| p.to_path_buf()).collect(),
+            current_dir: None,
+        })
+    }
+    #[cfg(windows)]
+    {
+        resolve(paths, &platform_short_path)
+    }
 }
 
 fn is_ascii_path(p: &Path) -> bool {
@@ -130,11 +141,11 @@ fn unsupported_path_error(paths: &[&Path]) -> String {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     format!(
-        "The audio engine cannot open a {NON_ASCII_PATH_MARKER} ({offending}) and Windows short \
-         (8.3) names are turned off for that drive, so Fly on the Wall cannot work around it. \
-         Either enable short names (an administrator can run `fsutil 8dot3name set <drive>: 0`, \
-         then re-create the folder) or point the app's data folder at a path with only plain \
-         English letters."
+        "The audio engine cannot open a {NON_ASCII_PATH_MARKER} ({offending}): it contains \
+         letters outside plain English and Windows has no short (8.3) name for the folder. \
+         To fix it, give that folder a short name (an administrator can run \
+         `fsutil file setshortname <folder> <SHORTNAME>`), or use a Windows account whose \
+         profile folder name is plain English letters and digits."
     )
 }
 
@@ -189,6 +200,16 @@ mod tests {
     fn ascii_paths_pass_through_unchanged() {
         let a = Path::new("C:/Users/plain/AppData/model.bin");
         let b = Path::new("C:/Users/plain/AppData/out");
+        let r = prepare(&[a, b]).unwrap();
+        assert_eq!(r.args, vec![a.to_path_buf(), b.to_path_buf()]);
+        assert_eq!(r.current_dir, None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_is_the_identity_even_for_non_ascii_paths() {
+        let a = Path::new("/home/josé/.local/share/model.bin");
+        let b = Path::new("/tmp/ñ/chunk.wav");
         let r = prepare(&[a, b]).unwrap();
         assert_eq!(r.args, vec![a.to_path_buf(), b.to_path_buf()]);
         assert_eq!(r.current_dir, None);
@@ -252,7 +273,7 @@ mod tests {
         let e = resolve(&[p, q], &no_short).unwrap_err();
         assert!(e.contains(NON_ASCII_PATH_MARKER));
         assert!(e.contains("Núñez"));
-        assert!(e.contains("8dot3name"));
+        assert!(e.contains("setshortname"));
     }
 
     #[cfg(windows)]

@@ -1169,6 +1169,30 @@ struct GuardedAsr {
     active: std::sync::Mutex<usize>,
     /// (model_id, error) recorded when a GPU tier failed during this run.
     gpu_failure: std::sync::Mutex<Option<(String, String)>>,
+    /// Failed tiers' errors across every `transcribe` call of this run
+    /// (marker-neutralised, see `without_markers`) so the system-channel
+    /// call still reports the cloud error from the mic-channel call.
+    earlier_failures: std::sync::Mutex<Vec<String>>,
+}
+
+/// Every marker string the job scheduler matches to decide a failure is
+/// permanent (or a cancel). Text from an EARLIER tier must never carry one:
+/// permanence is decided by the last tier alone.
+fn without_markers(text: &str) -> String {
+    let markers = [
+        fly_asr::REJECTED_MARKER,
+        fly_asr::CANCELLED_MARKER,
+        crate::models::ENGINE_MISSING_MARKER,
+        crate::models::DOWNLOAD_FAILED_MARKER,
+        ERR_NO_RECORDING_FILES,
+        fly_sidecar::NON_ASCII_PATH_MARKER,
+    ];
+    let mut out = text.to_string();
+    for m in markers {
+        // same words, non-breaking spaces: reads identically, never matches
+        out = out.replace(m, &m.replace(' ', "\u{a0}"));
+    }
+    out
 }
 
 impl GuardedAsr {
@@ -1208,6 +1232,7 @@ impl GuardedAsr {
             tiers,
             active: std::sync::Mutex::new(0),
             gpu_failure: std::sync::Mutex::new(None),
+            earlier_failures: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1242,9 +1267,6 @@ impl GuardedAsr {
         cancel: fly_asr::CancelFn<'_>,
     ) -> Result<RawTranscript, String> {
         let mut fell_over_this_call = false;
-        // Every failed tier's error, in order — the last tier's error alone
-        // hid the cloud failure whenever cloud fell back to local.
-        let mut failed_tiers: Vec<String> = Vec::new();
         loop {
             let idx = *self.active.lock().unwrap();
             let tier = &self.tiers[idx];
@@ -1271,18 +1293,30 @@ impl GuardedAsr {
             if matches!(err, fly_asr::AsrError::Cancelled) {
                 return Err(msg);
             }
+            // A path the sidecar could not read says nothing about the GPU:
+            // it must not pin this model to CPU for future meetings.
             if let Some(model_id) = &tier.gpu_model_id {
-                *self.gpu_failure.lock().unwrap() = Some((model_id.clone(), msg.clone()));
-            }
-            failed_tiers.push(format!("{}: {msg}", tier.label.unwrap_or(tier.engine.id())));
-            if idx + 1 >= self.tiers.len() {
-                if failed_tiers.len() > 1 {
-                    let all = failed_tiers.join(" | ");
-                    tracing::error!(errors = %all, "every transcription tier failed");
-                    return Err(format!("{msg} (all tiers failed — {all})"));
+                if !msg.contains(fly_sidecar::NON_ASCII_PATH_MARKER) {
+                    *self.gpu_failure.lock().unwrap() = Some((model_id.clone(), msg.clone()));
                 }
-                return Err(msg);
             }
+            if idx + 1 >= self.tiers.len() {
+                // The LAST tier's error leads (and alone decides whether the
+                // scheduler retries); earlier tiers' errors follow, so a
+                // cloud failure is not hidden behind the local one.
+                let earlier = self.earlier_failures.lock().unwrap().clone();
+                if earlier.is_empty() {
+                    return Err(msg);
+                }
+                let earlier = earlier.join(" | ");
+                tracing::error!(last = %msg, earlier = %earlier, "every transcription tier failed");
+                return Err(format!("{msg} (earlier tier failures: {earlier})"));
+            }
+            self.earlier_failures.lock().unwrap().push(format!(
+                "{}: {}",
+                tier.label.unwrap_or(tier.engine.id()),
+                without_markers(&msg)
+            ));
             let next = &self.tiers[idx + 1];
             let ui = if tier.engine.id() == "parakeet" && next.engine.id() != "parakeet" {
                 "Parakeet transcription failed — continuing with Whisper"
@@ -2326,6 +2360,73 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("groq upstream timeout"), "{err}");
         assert!(err.contains("vulkan init failed"), "{err}");
+    }
+
+    /// Retry decisions come from the LAST tier only: a permanent cloud error
+    /// followed by a transient local failure is still retryable; a permanent
+    /// last-tier error is permanent.
+    #[tokio::test]
+    async fn permanence_is_decided_by_the_last_tier() {
+        let run = |first: Box<dyn TranscriptionEngine>, last: Box<dyn TranscriptionEngine>| async {
+            GuardedAsr::chain(vec![tier(first, None, None), tier(last, None, None)])
+                .transcribe(
+                    Path::new("unused.wav"),
+                    &TranscribeOptions::default(),
+                    &|_| {},
+                    &|_, _| {},
+                    &|| false,
+                )
+                .await
+                .unwrap_err()
+        };
+        let err = run(Box::new(RejectingCloud), Box::new(FailingLocalGpu)).await;
+        assert!(err.contains("413"), "cloud error kept for humans: {err}");
+        assert!(err.contains("vulkan init failed"), "{err}");
+        assert!(
+            !crate::scheduler::permanent_failure(&err),
+            "transient last tier must stay retryable: {err}"
+        );
+        let err = run(Box::new(FailingLocalGpu), Box::new(RejectingCloud)).await;
+        assert!(crate::scheduler::permanent_failure(&err), "{err}");
+    }
+
+    /// A path error on the GPU tier is not a GPU verdict.
+    #[tokio::test]
+    async fn sidecar_path_errors_never_pin_the_gpu_model() {
+        struct BadPath;
+        #[async_trait::async_trait]
+        impl TranscriptionEngine for BadPath {
+            fn id(&self) -> &'static str {
+                "whisper.cpp"
+            }
+            fn is_local(&self) -> bool {
+                true
+            }
+            async fn transcribe(
+                &self,
+                _: &Path,
+                _: &TranscribeOptions,
+            ) -> fly_asr::Result<RawTranscript> {
+                Err(fly_asr::AsrError::Engine(format!(
+                    "a {} here",
+                    fly_sidecar::NON_ASCII_PATH_MARKER
+                )))
+            }
+        }
+        let asr = GuardedAsr::chain(vec![
+            tier(Box::new(BadPath), None, Some("small-q5")),
+            tier(Box::new(FixedLocal), None, None),
+        ]);
+        asr.transcribe(
+            Path::new("unused.wav"),
+            &TranscribeOptions::default(),
+            &|_| {},
+            &|_, _| {},
+            &|| false,
+        )
+        .await
+        .unwrap();
+        assert!(asr.runtime_failure().is_none());
     }
 
     /// Cloud engine failing with a retryable (non-rejected) error.
