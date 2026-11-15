@@ -47,7 +47,7 @@ impl ReadCache {
     /// A cache for `conn`, counting its writes to `embedding_chunks`. (No
     /// `Default`: a cache without the hook would miss this connection's
     /// own vector writes.)
-    pub(crate) fn watching(conn: &Connection) -> Result<Self> {
+    pub(crate) fn watching(conn: &mut Connection) -> Result<Self> {
         let chunk_writes = Arc::new(AtomicU64::new(0));
         let counter = chunk_writes.clone();
         conn.update_hook(Some(
