@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { check as pluginCheck, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 /* Auto-update lifecycle. latest.json on GitHub Releases carries entries for
    windows-x86_64, darwin-aarch64, darwin-x86_64 and linux-x86_64. The one
@@ -43,6 +44,13 @@ export interface Updater {
   dismiss: () => void;
 }
 
+/** Download progress from the Windows download command; same shape as the
+ *  plugin's own channel events so one handler serves both paths. */
+type DownloadEvent =
+  | { event: "Started"; data: { contentLength?: number } }
+  | { event: "Progress"; data: { chunkLength: number } }
+  | { event: "Finished" };
+
 /** Startup check waits for first-run IO (models, DB migrations) to settle. */
 const AUTO_CHECK_DELAY_MS = 5_000;
 
@@ -61,6 +69,14 @@ export function useUpdater(
   const [dismissed, setDismissed] = useState(false);
 
   const updateRef = useRef<Update | null>(null);
+  // Set when an install failed: the Update we hold may be stale (its backend
+  // resource can be gone), so the next attempt checks again first.
+  const needsRecheck = useRef(false);
+  // Windows installs through the app's own commands (see windows_update.rs):
+  // the plugin's JS install hides the window and drops the single-instance
+  // lock before it launches the installer, so a launch blocked by antivirus
+  // would leave a hidden second-copy-able app.
+  const viaApp = os === "windows";
   const autoChecked = useRef(false);
 
   // Callbacks consult recording state at completion time, not click time.
@@ -110,27 +126,45 @@ export function useUpdater(
     try {
       // On Windows the installer kills the app and relaunches it; on macOS
       // (.app swap) and Linux (AppImage swap) relaunch() does the restart.
-      await update.install();
+      if (viaApp) {
+        await invoke("windows_update_install");
+      } else {
+        await update.install();
+      }
       await relaunch();
     } catch (e) {
+      needsRecheck.current = true;
       setError(String(e));
       setErrorSource("install");
       setPhase("error");
     }
-  }, []);
+  }, [viaApp]);
 
   const downloadAndInstall = useCallback(() => {
-    const update = updateRef.current;
-    if (!update) return;
-    setPhase("downloading");
-    setProgress(null);
-    setError(null);
-    setErrorSource(null);
-    let total = 0;
-    let received = 0;
-    let lastPct = -1;
-    void update
-      .download((event) => {
+    const run = async () => {
+      if (needsRecheck.current) {
+        // "Try again" after a failed install: look for the update afresh.
+        needsRecheck.current = false;
+        setPhase("checking");
+        const fresh = await pluginCheck({ timeout: 30_000 });
+        if (!fresh) {
+          updateRef.current = null;
+          setPhase("upToDate");
+          return;
+        }
+        updateRef.current = fresh;
+        setVersion(fresh.version);
+      }
+      const update = updateRef.current;
+      if (!update) return;
+      setPhase("downloading");
+      setProgress(null);
+      setError(null);
+      setErrorSource(null);
+      let total = 0;
+      let received = 0;
+      let lastPct = -1;
+      const onEvent = (event: DownloadEvent) => {
         if (event.event === "Started") {
           total = event.data.contentLength ?? 0;
         } else if (event.event === "Progress") {
@@ -143,21 +177,28 @@ export function useUpdater(
             }
           }
         }
-      })
-      .then(() => {
-        // A recording may have started while we downloaded — park the update.
-        if (recordingRef.current) {
-          setPhase("ready");
-        } else {
-          return install();
-        }
-      })
-      .catch((e: unknown) => {
-        setError(String(e));
-        setErrorSource("install");
-        setPhase("error");
-      });
-  }, [install]);
+      };
+      if (viaApp) {
+        const channel = new Channel<DownloadEvent>();
+        channel.onmessage = onEvent;
+        await invoke("windows_update_download", { onEvent: channel });
+      } else {
+        await update.download(onEvent);
+      }
+      // A recording may have started while we downloaded — park the update.
+      if (recordingRef.current) {
+        setPhase("ready");
+      } else {
+        await install();
+      }
+    };
+    void run().catch((e: unknown) => {
+      needsRecheck.current = true;
+      setError(String(e));
+      setErrorSource("install");
+      setPhase("error");
+    });
+  }, [install, viaApp]);
 
   const restart = useCallback(() => {
     if (recordingRef.current) return; // buttons are disabled, but be safe
