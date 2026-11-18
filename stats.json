@@ -1,16 +1,16 @@
 {
-  "updated": "2026-11-17T16:12:41.900Z",
-  "totalDownloads": 656,
+  "updated": "2026-11-18T15:47:40.629Z",
+  "totalDownloads": 657,
   "estimatedInstalls": 150,
   "perPlatform": {
     "windows": 215,
     "macos": 152,
-    "linux": 289
+    "linux": 290
   },
-  "updateChecks": 548,
+  "updateChecks": 552,
   "latestRelease": {
     "tag": "v2.5.2",
-    "downloads": 12
+    "downloads": 13
   },
   "note": "totalDownloads = installer downloads across all releases (includes auto-updater re-downloads); estimatedInstalls = per-flavor max across releases, a conservative unique-install floor."
 }
